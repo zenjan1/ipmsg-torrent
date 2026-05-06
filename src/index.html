@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#667eea">
+  <title>IPMsg Torrent - 去中心化聊天</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="manifest" href="manifest.json">
+</head>
+<body>
+  <div id="app" class="app-container">
+    <header class="header">
+      <div class="logo">
+        <h1>IPMsg Torrent</h1>
+        <span class="status" id="connection-status">离线</span>
+      </div>
+      <div class="user-info">
+        <input type="text" id="username" placeholder="输入昵称" value="用户">
+      </div>
+    </header>
+
+    <div class="main-content">
+      <aside id="sidebar" class="sidebar">
+        <button id="chat-sidebar-toggle" class="mobile-menu-btn" style="display: none;">☰ 在线用户</button>
+        <div class="peer-list">
+          <h3>在线用户 <span id="peer-count" class="badge">0</span></h3>
+          <div id="peers" class="peers-container">
+            <div class="empty-peers">
+              <div class="icon">👥</div>
+              <p>暂无在线用户</p>
+              <p style="font-size: 12px; margin-top: 8px;">与他人打开此页面即可连接</p>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="chat-area">
+        <div id="chat-header" class="chat-header" style="display: none;">
+          <h2 id="chat-title">选择用户开始聊天</h2>
+          <div id="chat-peer-info" class="peer-info"></div>
+        </div>
+
+        <div class="no-chat-selected" id="no-chat">
+          <div class="icon">💬</div>
+          <h3>开始聊天</h3>
+          <p>从左侧选择一个在线用户</p>
+        </div>
+
+        <div id="messages" class="messages-container"></div>
+
+        <div id="typing-indicator" class="typing-indicator" style="display: none;"></div>
+
+        <div class="input-area">
+          <div id="file-preview-container" class="file-preview-container">
+            <button id="attach-file" class="btn btn-secondary">📎 附件</button>
+            <input type="file" id="file-input" style="display: none;" multiple>
+            <div id="file-preview" class="file-preview"></div>
+          </div>
+          <div class="message-input-wrapper">
+            <input type="text" id="message-input" placeholder="输入消息..." disabled>
+            <button id="send-btn" class="btn btn-primary" disabled>发送</button>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <footer class="footer">
+      <div class="info">
+        <span id="my-id">ID: 加载中...</span>
+        <span id="peer-count-footer">用户数: 0</span>
+        <span id="platform-info"></span>
+        <span id="connection-type"></span>
+      </div>
+    </footer>
+
+    <div id="file-offer-modal" class="modal">
+      <div class="modal-content">
+        <h3>收到文件传输</h3>
+        <div class="file-offer-info">
+          <p><strong>文件名:</strong> <span id="offer-file-name"></span></p>
+          <p><strong>大小:</strong> <span id="offer-file-size"></span></p>
+          <p><strong>来自:</strong> <span id="offer-file-from"></span></p>
+        </div>
+        <div class="modal-actions">
+          <button id="accept-file-btn" class="btn btn-primary">接受</button>
+          <button id="reject-file-btn" class="btn btn-secondary">拒绝</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="notification" class="notification" style="display: none;">
+      <div class="notification-content">
+        <h4 id="notification-title"></h4>
+        <p id="notification-text"></p>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
