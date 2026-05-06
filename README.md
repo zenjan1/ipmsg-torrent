@@ -62,94 +62,198 @@ npm run dev
 npm run electron:dev
 ```
 
-### 构建应用
+## 📦 完整构建指南
 
-**构建所有平台:**
+### 前置准备
+
+在开始构建之前，请确保：
+
+1. **安装必要工具**
+   ```bash
+   # Node.js (>= 16.0.0)
+   # npm (>= 8.0.0)
+   npm install -g npm@latest
+   ```
+
+2. **对于 Android 构建**
+   - Java JDK >= 11
+   - Android SDK
+   - 安装 Android Studio (推荐)
+
+3. **对于 Electron 构建**
+   - 无需额外工具，npm 会自动安装依赖
+
+### 构建命令速查
+
+| 平台 | 命令 | 输出位置 |
+|------|------|----------|
+| **Web 版本** | `npm run build:web` | `dist/` |
+| **Windows** | `npm run build:win` | `release/*.exe` |
+| **Linux** | `npm run build:linux` | `release/*.AppImage, *.deb` |
+| **macOS** | `npm run build:mac` | `release/*.dmg` |
+| **Android (Debug)** | `npm run android:debug` | `android/app/build/outputs/apk/debug/` |
+| **Android (Release)** | `npm run android:apk` | `android/app/build/outputs/apk/release/` |
+| **所有平台** | `npm run build:all` | 各对应目录 |
+
+### 🖥️ 各平台详细构建步骤
+
+#### 1️⃣ Web 版本构建
+
+Web 版本是最基础的，适用于浏览器直接访问：
+
 ```bash
-npm run build:all
+# 1. 安装依赖
+npm install
+
+# 2. 开发模式（预览）
+npm run dev
+
+# 3. 生产构建
+npm run build:web
 ```
 
-**分别构建:**
+**输出内容：**
+- `dist/index.html` - 主 HTML 文件
+- `dist/assets/` - 编译后的 JS/CSS 资源
+- `dist/manifest.json` - PWA 配置
+
+**部署方式：**
 ```bash
-# Web版
+# 直接部署到任何静态服务器
+# 或使用本地预览
+npm run preview
+```
+
+#### 2️⃣ Windows 安装包构建
+
+```bash
+# 1. 确保安装了所有依赖
+npm install
+
+# 2. 构建 Web 应用（会自动运行）
+npm run build:win
+```
+
+**生成文件：**
+- `release/IPMsg-Torrent-Setup-1.0.0.exe` - 完整安装包（推荐）
+- `release/IPMsg-Torrent-1.0.0-portable.exe` - 便携版，无需安装
+
+**安装包特性：**
+- 支持 x64 和 ia32 架构
+- 自动添加开始菜单和桌面快捷方式
+- 支持自定义安装目录
+- 提供卸载程序
+
+#### 3️⃣ Linux 安装包构建
+
+```bash
+# 1. 安装依赖
+npm install
+
+# 2. 构建
+npm run build:linux
+```
+
+**生成文件：**
+- `release/IPMsg-Torrent-1.0.0-amd64.AppImage` - AppImage（推荐，通用格式）
+- `release/IPMsg-Torrent-1.0.0-amd64.deb` - Debian/Ubuntu 专用包
+- `release/IPMsg-Torrent-1.0.0.tar.gz` - 通用压缩包
+
+**Linux 使用说明：**
+```bash
+# AppImage（无需安装，直接运行）
+chmod +x IPMsg-Torrent-1.0.0-amd64.AppImage
+./IPMsg-Torrent-1.0.0-amd64.AppImage
+
+# DEB 包（Debian/Ubuntu）
+sudo dpkg -i IPMsg-Torrent-1.0.0-amd64.deb
+sudo apt-get install -f  # 如有依赖缺失
+```
+
+#### 4️⃣ macOS 构建
+
+```bash
+# 1. 安装依赖
+npm install
+
+# 2. 构建
+npm run build:mac
+```
+
+**生成文件：**
+- `release/IPMsg-Torrent-1.0.0.dmg` - DMG 安装包
+- `release/IPMsg-Torrent-1.0.0-mac.zip` - 压缩版
+
+---
+
+### 📱 Android / 鸿蒙 构建详细步骤
+
+#### 5️⃣ Android Debug 版本构建（最简单）
+
+无需签名，快速构建测试：
+
+```bash
+# 1. 初始化 Capacitor（首次构建需要）
+npm run android:init
+
+# 2. 构建 Web 应用
 npm run build:web
 
-# Windows
-npm run build:win
+# 3. 复制到 Android 项目
+npx cap copy android
+npx cap sync android
 
-# Linux
-npm run build:linux
-
-# macOS
-npm run build:mac
-
-# Android
-npm run android:build
+# 4. 构建 Debug APK
+npm run android:debug
 ```
 
-### 使用构建脚本
+**输出位置：**
+`android/app/build/outputs/apk/debug/app-debug.apk
 
-```bash
-# 赋予执行权限
-chmod +x build.sh build-*.sh
+**特性：**
+- 可以直接安装到 Android 设备
+- 兼容鸿蒙系统
+- 无需签名配置
 
-# 构建所有平台
-./build.sh all
+---
 
-# 仅构建Windows
-./build.sh --electron win
+#### 6️⃣ Android Release 签名版本构建
 
-# 仅构建Android
-./build.sh --android
-```
-
-## 📱 Android / 鸿蒙 构建详细步骤
-
-### 1. 初始化Capacitor
+#### 6.1 初始化 Capacitor
 
 ```bash
 npm run android:init
 ```
 
-### 2. 构建Web应用
+#### 6.2 构建 Web 应用
 
 ```bash
 npm run build:web
 ```
 
-### 3. 复制到Android
+#### 6.3 复制代码到 Android 项目
 
 ```bash
 npx cap copy android
 npx cap sync android
 ```
 
-### 4. 打开Android Studio
-
-```bash
-npx cap open android
-```
-
-或在 Android Studio 中打开 `android` 目录
-
-### 5. 生成签名APK
-
-#### 5.1 生成签名密钥
+#### 6.4 生成签名密钥
 
 ```bash
 cd android
 ./generate-keystore.sh
 ```
 
-或手动生成:
+或手动生成：
 
 ```bash
 keytool -genkey -v -keystore release.keystore -alias ipmsg-release -keyalg RSA -keysize 2048 -validity 10000
 ```
 
-#### 5.2 配置签名信息
+#### 6.5 配置签名信息
 
-在 `android/gradle.properties` 中添加:
+编辑 `android/gradle.properties`，添加：
 
 ```properties
 RELEASE_STORE_FILE=./build/release.keystore
@@ -158,50 +262,146 @@ RELEASE_KEY_ALIAS=ipmsg-release
 RELEASE_KEY_PASSWORD=你的密码
 ```
 
-#### 5.3 构建Release APK
+#### 6.6 构建 Release APK
 
 ```bash
 cd android
 ./gradlew assembleRelease
 ```
 
-APK位置: `android/app/build/outputs/apk/release/`
+**输出位置：**
+`android/app/build/outputs/apk/release/app-release.apk`
 
-### 调试APK
+---
 
+### 🤖 鸿蒙系统兼容性说明
+
+应用通过 Android APK 可以在鸿蒙系统上直接安装运行，因为鸿蒙系统兼容 Android 应用。
+
+**推荐配置优化（可选）：**
 ```bash
-npm run android:debug
+# 在鸿蒙系统可通过鸿蒙 DevEco Studio 中导入项目
+# 在 Android 或直接使用生成的 APK
 ```
 
-APK位置: `android/app/build/outputs/apk/debug/`
+---
 
-## 💻 Windows 构建
+## 🚀 自动化构建脚本
 
-### 构建安装包
+为了简化构建流程，项目提供了自动化构建脚本。
 
-```bash
-npm run build:win
-```
+### 使用统一构建脚本
 
-生成文件:
-- `IPMsg-Torrent-Setup-1.0.0.exe` - NSIS安装包
-- `IPMsg-Torrent-1.0.0-portable.exe` - 便携版
-
-安装包位置: `release/`
-
-## 🐧 Linux 构建
-
-### 构建AppImage和deb包
+#### 方式一：使用交互式菜单
 
 ```bash
-npm run build:linux
+# 1. 赋予执行权限
+chmod +x build-all.sh
+
+# 2. 运行菜单选择要构建的平台
+./build-all.sh
 ```
 
-生成文件:
-- `IPMsg-Torrent-1.0.0-amd64.AppImage` - AppImage包
-- `IPMsg-Torrent-1.0.0-amd64.deb` - Debian包
+#### 方式二：直接选择平台构建
 
-安装包位置: `release/`
+```bash
+# Web 版本
+./build.sh web
+
+# Windows
+./build-win.sh
+
+# Linux
+./build-linux.sh
+
+# Android
+./build-android.sh
+```
+
+#### 构建脚本说明
+
+| 脚本 | 功能 |
+|------|------|
+| `build-all.sh` | 交互式菜单，选择构建平台 |
+| `build-win.sh` | 仅构建 Windows |
+| `build-linux.sh` | 仅构建 Linux |
+| `build-android.sh` | 仅构建 Android |
+| `build.sh` | 完整构建脚本（原版本） |
+
+---
+
+## 📦 完整构建流程图
+
+```
+┌─────────────────┐
+│ npm install   │
+└───────┬─────────┘
+        │
+        ▼
+┌───────────────────────────────┐
+│ 选择目标平台         │
+└──┬───────────────────────┘
+   │
+   ├─→ Web → npm run build:web → dist/
+   │
+   ├─→ Windows → npm run build:win → release/*.exe
+   │
+   ├─→ Linux → npm run build:linux → release/*.AppImage/*.deb
+   │
+   ├─→ Android (Debug) → npm run android:debug → android/app/build/outputs/apk/debug/app-debug.apk
+   │
+   └─→ Android (Release) → 配置签名 → npm run android:apk → android/app/build/outputs/apk/release/app-release.apk
+```
+
+---
+
+## 🔧 高级构建配置
+
+### 修改应用信息
+
+编辑 `package.json`：
+
+```json
+{
+  "name": "ipmsg-torrent",
+  "version": "1.0.0",
+  "productName": "IPMsg Torrent",
+  "description": "去中心化聊天软件"
+}
+```
+
+### 修改版本号
+
+修改 `package.json` 中的 `version` 字段：
+
+```json
+"version": "1.0.0"
+```
+
+构建时版本号会自动应用到所有平台的安装包中。
+
+### 修改应用名称和图标
+
+参考 [自定义](#🎨-自定义) 部分的详细说明。
+
+---
+
+## 📋 构建清单
+
+构建前检查：
+
+- [ ] 已安装 Node.js >= 16.0.0
+- [ ] 已运行 npm install
+- [ ] Android 构建已安装 Java JDK >= 11
+- [ ] Android 构建已配置 Android SDK
+- [ ] Release 版本已配置签名密钥
+- [ ] 修改了应用版本号（如需）
+
+构建完成后检查：
+
+- [ ] Web 版本在 dist/ 目录
+- [ ] 安装包在 release/ 目录
+- [ ] Android APK 在 android/app/build/outputs/apk/ 目录
 
 ## 📦 项目结构
 
