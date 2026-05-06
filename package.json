@@ -1,0 +1,32 @@
+{
+  "name": "ipmsg-torrent",
+  "version": "1.0.0",
+  "description": "Decentralized chat software based on torrent/DHT, no server required",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder"
+  },
+  "keywords": ["ipmsg", "torrent", "dht", "p2p", "chat", "decentralized"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "webtorrent": "^2.1.38",
+    "simple-peer": "^9.11.1",
+    "bencode": "^4.0.0",
+    "crypto-js": "^4.2.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "electron": "^28.3.3",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.ipmsgtorrent.app",
+    "productName": "IPMsg Torrent",
+    "directories": {
+      "output": "dist"
+    }
+  }
+}

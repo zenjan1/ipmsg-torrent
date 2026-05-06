@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IPMsg Torrent - 去中心化聊天</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <header class="header">
+      <div class="logo">
+        <h1>IPMsg Torrent</h1>
+        <span class="status" id="connection-status">离线</span>
+      </div>
+      <div class="user-info">
+        <input type="text" id="username" placeholder="输入昵称" value="用户">
+      </div>
+    </header>
+
+    <div class="main-content">
+      <aside class="sidebar">
+        <div class="peer-list">
+          <h3>在线用户</h3>
+          <div id="peers" class="peers-container"></div>
+        </div>
+      </aside>
+
+      <main class="chat-area">
+        <div class="chat-header">
+          <h2 id="chat-title">选择用户开始聊天</h2>
+        </div>
+        <div id="messages" class="messages-container"></div>
+        <div class="input-area">
+          <div class="file-actions">
+            <button id="attach-file" class="btn btn-secondary">📎 附件</button>
+            <div id="file-preview" class="file-preview"></div>
+          </div>
+          <div class="message-input-wrapper">
+            <input type="text" id="message-input" placeholder="输入消息..." disabled>
+            <button id="send-btn" class="btn btn-primary" disabled>发送</button>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <footer class="footer">
+      <div class="info">
+        <span id="my-id">ID: 加载中...</span>
+        <span id="peer-count">用户数: 0</span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
