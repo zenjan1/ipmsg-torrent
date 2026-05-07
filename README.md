@@ -105,6 +105,52 @@ chmod +x build.sh build-*.sh
 
 ## 📱 Android / 鸿蒙 构建详细步骤
 
+### 国内源配置（可选，推荐）
+
+如果网络较慢，可配置使用国内镜像源加速下载：
+
+修改 `android/build.gradle` 中的 repositories：
+
+```gradle
+buildscript {
+    repositories {
+        maven { url 'http://maven.aliyun.com/repository/google'; allowInsecureProtocol = true }
+        maven { url 'http://maven.aliyun.com/repository/central'; allowInsecureProtocol = true }
+        maven { url 'http://maven.aliyun.com/repository/public'; allowInsecureProtocol = true }
+        maven { url 'http://maven.aliyun.com/repository/gradle-plugin'; allowInsecureProtocol = true }
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+allprojects {
+    repositories {
+        maven { url 'http://maven.aliyun.com/repository/google'; allowInsecureProtocol = true }
+        maven { url 'http://maven.aliyun.com/repository/central'; allowInsecureProtocol = true }
+        maven { url 'http://maven.aliyun.com/repository/public'; allowInsecureProtocol = true }
+        google()
+        mavenCentral()
+    }
+}
+```
+
+修改 `android/settings.gradle` 中的 pluginManagement：
+
+```gradle
+pluginManagement {
+    repositories {
+        maven { url 'http://maven.aliyun.com/repository/google'; allowInsecureProtocol = true }
+        maven { url 'http://maven.aliyun.com/repository/central'; allowInsecureProtocol = true }
+        maven { url 'http://maven.aliyun.com/repository/public'; allowInsecureProtocol = true }
+        maven { url 'http://maven.aliyun.com/repository/gradle-plugin'; allowInsecureProtocol = true }
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+```
+
 ### 1. 初始化Capacitor
 
 ```bash
@@ -124,13 +170,14 @@ npx cap copy android
 npx cap sync android
 ```
 
-### 4. 打开Android Studio
+### 4. 命令行构建APK
 
 ```bash
-npx cap open android
+cd android
+./gradlew assembleDebug
 ```
 
-或在 Android Studio 中打开 `android` 目录
+或在 Android Studio 中打开 `android` 目录进行构建
 
 ### 5. 生成签名APK
 
@@ -285,6 +332,15 @@ this.peerTimeout = 10000;                           // 节点超时(ms)
 ```css
 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 ```
+
+## 📥 下载安装
+
+直接从 GitHub Releases 下载对应平台的安装包：
+
+- **Windows**: `IPMsg-Torrent-1.0.0-portable.exe` (便携版，双击即用)
+- **Linux**: `IPMsg-Torrent-1.0.0-amd64.AppImage` 或 `.tar.gz`
+- **Web**: 直接打开 `web-dist/index.html` 或部署到任意静态服务器
+- **Android**: 从 Releases 下载 APK（需自行构建或从其他渠道获取）
 
 ## 🐛 常见问题
 
