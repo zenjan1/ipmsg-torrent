@@ -5,96 +5,218 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="theme-color" content="#667eea">
-  <title>IPMsg Torrent - 去中心化聊天</title>
+  <meta name="theme-color" content="#07C160">
+  <title>PPX - 去中心化聊天</title>
   <link rel="stylesheet" href="style.css">
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
-  <div id="app" class="app-container">
-    <header class="header">
-      <div class="logo">
-        <h1>IPMsg Torrent</h1>
-        <span class="status" id="connection-status">离线</span>
-      </div>
-      <div class="user-info">
-        <input type="text" id="username" placeholder="输入昵称" value="用户">
-      </div>
-    </header>
+  <div id="app" class="app">
+    <div class="main-wrapper">
+      <nav class="tab-bar">
+        <div class="tab-item active" data-tab="chats">
+          <span class="tab-icon">💬</span>
+          <span class="tab-text">聊天</span>
+          <span class="badge" id="unread-badge" style="display:none">0</span>
+        </div>
+        <div class="tab-item" data-tab="files">
+          <span class="tab-icon">📁</span>
+          <span class="tab-text">文件</span>
+        </div>
+        <div class="tab-item" data-tab="downloads">
+          <span class="tab-icon">⬇️</span>
+          <span class="tab-text">下载</span>
+          <span class="badge" id="download-badge" style="display:none">0</span>
+        </div>
+        <div class="tab-item" data-tab="me">
+          <span class="tab-icon">👤</span>
+          <span class="tab-text">我的</span>
+        </div>
+      </nav>
 
-    <div class="main-content">
-      <aside id="sidebar" class="sidebar">
-        <button id="chat-sidebar-toggle" class="mobile-menu-btn" style="display: none;">☰ 在线用户</button>
-        <div class="peer-list">
-          <h3>在线用户 <span id="peer-count" class="badge">0</span></h3>
-          <div id="peers" class="peers-container">
-            <div class="empty-peers">
-              <div class="icon">👥</div>
-              <p>暂无在线用户</p>
-              <p style="font-size: 12px; margin-top: 8px;">与他人打开此页面即可连接</p>
+      <div class="content-area">
+        <section id="chats-tab" class="tab-content active">
+          <header class="content-header">
+            <h1>聊天</h1>
+            <div class="header-actions">
+              <button class="icon-btn" id="btn-search" title="搜索">🔍</button>
+              <button class="icon-btn" id="btn-add-chat" title="发起聊天">➕</button>
+            </div>
+          </header>
+          <div id="chats-list" class="list-container"></div>
+        </section>
+
+        <section id="files-tab" class="tab-content">
+          <header class="content-header">
+            <h1>文件</h1>
+            <div class="header-actions">
+              <button class="icon-btn" id="btn-upload" title="上传文件">📤</button>
+            </div>
+          </header>
+          <div class="file-tabs">
+            <button class="file-tab active" data-type="all">全部</button>
+            <button class="file-tab" data-type="image">图片</button>
+            <button class="file-tab" data-type="video">视频</button>
+            <button class="file-tab" data-type="audio">音频</button>
+            <button class="file-tab" data-type="doc">文档</button>
+          </div>
+          <div id="files-list" class="list-container"></div>
+        </section>
+
+        <section id="downloads-tab" class="tab-content">
+          <header class="content-header">
+            <h1>下载管理</h1>
+            <div class="header-actions">
+              <button class="icon-btn" id="btn-downloads-clear" title="清空已完成">🗑️</button>
+            </div>
+          </header>
+          <div class="download-stats">
+            <div class="stat-item">
+              <span class="stat-num" id="downloading-count">0</span>
+              <span class="stat-label">下载中</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-num" id="completed-count">0</span>
+              <span class="stat-label">已完成</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-num" id="total-speed">0 KB/s</span>
+              <span class="stat-label">当前速度</span>
             </div>
           </div>
-        </div>
-      </aside>
+          <div id="downloads-list" class="list-container"></div>
+        </section>
 
-      <main class="chat-area">
-        <div id="chat-header" class="chat-header" style="display: none;">
-          <h2 id="chat-title">选择用户开始聊天</h2>
-          <div id="chat-peer-info" class="peer-info"></div>
-        </div>
-
-        <div class="no-chat-selected" id="no-chat">
-          <div class="icon">💬</div>
-          <h3>开始聊天</h3>
-          <p>从左侧选择一个在线用户</p>
-        </div>
-
-        <div id="messages" class="messages-container"></div>
-
-        <div id="typing-indicator" class="typing-indicator" style="display: none;"></div>
-
-        <div class="input-area">
-          <div id="file-preview-container" class="file-preview-container">
-            <button id="attach-file" class="btn btn-secondary">📎 附件</button>
-            <input type="file" id="file-input" style="display: none;" multiple>
-            <div id="file-preview" class="file-preview"></div>
+        <section id="me-tab" class="tab-content">
+          <header class="content-header">
+            <h1>我的</h1>
+          </header>
+          <div class="profile-section">
+            <div class="avatar" id="my-avatar">我</div>
+            <div class="profile-info">
+              <div class="profile-name" id="my-name">加载中...</div>
+              <div class="profile-id">ID: <span id="my-id">-</span></div>
+            </div>
           </div>
-          <div class="message-input-wrapper">
-            <input type="text" id="message-input" placeholder="输入消息..." disabled>
-            <button id="send-btn" class="btn btn-primary" disabled>发送</button>
+          <div class="menu-list">
+            <div class="menu-item" id="menu-edit-name">
+              <span class="menu-icon">✏️</span>
+              <span class="menu-text">修改昵称</span>
+              <span class="menu-arrow">›</span>
+            </div>
+            <div class="menu-item" id="menu-save-history">
+              <span class="menu-icon">💾</span>
+              <span class="menu-text">保存聊天记录</span>
+              <span class="menu-arrow">›</span>
+            </div>
+            <div class="menu-item" id="menu-share-app">
+              <span class="menu-icon">🔗</span>
+              <span class="menu-text">分享应用</span>
+              <span class="menu-arrow">›</span>
+            </div>
+            <div class="menu-item" id="menu-about">
+              <span class="menu-icon">ℹ️</span>
+              <span class="menu-text">关于</span>
+              <span class="menu-arrow">›</span>
+            </div>
           </div>
-        </div>
-      </main>
+          <div class="connection-info">
+            <div class="info-row">
+              <span>状态</span>
+              <span class="status-dot" id="status-indicator"></span>
+              <span id="status-text">连接中</span>
+            </div>
+            <div class="info-row">
+              <span>在线人数</span>
+              <span id="online-count">0</span>
+            </div>
+            <div class="info-row">
+              <span>连接方式</span>
+              <span id="conn-type">BroadcastChannel</span>
+            </div>
+          </div>
+        </section>
+      </div>
     </div>
 
-    <footer class="footer">
-      <div class="info">
-        <span id="my-id">ID: 加载中...</span>
-        <span id="peer-count-footer">用户数: 0</span>
-        <span id="platform-info"></span>
-        <span id="connection-type"></span>
+    <div id="chat-page" class="chat-page">
+      <header class="chat-header">
+        <button class="back-btn" id="btn-back">‹</button>
+        <div class="chat-title-wrap">
+          <h2 id="chat-peer-name">聊天</h2>
+          <span id="chat-peer-status"></span>
+        </div>
+        <button class="icon-btn" id="btn-chat-menu">⋮</button>
+      </header>
+      <div id="chat-messages" class="chat-messages"></div>
+      <div id="typing-hint" class="typing-hint" style="display:none">对方正在输入...</div>
+      <div class="chat-input-area">
+        <button class="icon-btn" id="btn-attach">📎</button>
+        <input type="text" id="chat-input" placeholder="输入消息" autocomplete="off">
+        <button class="icon-btn send-btn" id="btn-send" disabled>➤</button>
       </div>
-    </footer>
+      <input type="file" id="file-input" style="display:none" multiple>
+    </div>
 
-    <div id="file-offer-modal" class="modal">
+    <div id="media-viewer" class="media-viewer" style="display:none">
+      <button class="close-btn" id="btn-close-media">✕</button>
+      <div id="media-content" class="media-content"></div>
+      <div class="media-toolbar">
+        <button class="toolbar-btn" id="btn-media-save">保存</button>
+        <button class="toolbar-btn" id="btn-media-share">分享</button>
+      </div>
+    </div>
+
+    <div id="download-modal" class="modal" style="display:none">
       <div class="modal-content">
-        <h3>收到文件传输</h3>
-        <div class="file-offer-info">
-          <p><strong>文件名:</strong> <span id="offer-file-name"></span></p>
-          <p><strong>大小:</strong> <span id="offer-file-size"></span></p>
-          <p><strong>来自:</strong> <span id="offer-file-from"></span></p>
+        <div class="modal-header">
+          <h3>文件传输</h3>
+          <button class="close-btn" id="btn-close-modal">✕</button>
         </div>
-        <div class="modal-actions">
-          <button id="accept-file-btn" class="btn btn-primary">接受</button>
-          <button id="reject-file-btn" class="btn btn-secondary">拒绝</button>
+        <div class="modal-body">
+          <div class="file-icon-large">📁</div>
+          <div class="file-details">
+            <div class="file-name" id="modal-file-name">-</div>
+            <div class="file-size" id="modal-file-size">-</div>
+            <div class="file-from">来自: <span id="modal-file-from">-</span></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="btn-reject">拒绝</button>
+          <button class="btn btn-primary" id="btn-accept">接受</button>
         </div>
       </div>
     </div>
 
-    <div id="notification" class="notification" style="display: none;">
-      <div class="notification-content">
-        <h4 id="notification-title"></h4>
-        <p id="notification-text"></p>
+    <div id="toast" class="toast" style="display:none">
+      <span id="toast-text"></span>
+    </div>
+
+    <div id="confirm-modal" class="modal" style="display:none">
+      <div class="modal-content confirm-dialog">
+        <div class="modal-body">
+          <p id="confirm-text"></p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="btn-cancel">取消</button>
+          <button class="btn btn-primary" id="btn-confirm">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="input-modal" class="modal" style="display:none">
+      <div class="modal-content input-dialog">
+        <div class="modal-header">
+          <h3 id="input-title">输入</h3>
+          <button class="close-btn btn-close-input">✕</button>
+        </div>
+        <div class="modal-body">
+          <input type="text" id="input-field" class="input-field">
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary btn-close-input">取消</button>
+          <button class="btn btn-primary" id="btn-input-confirm">确定</button>
+        </div>
       </div>
     </div>
   </div>
