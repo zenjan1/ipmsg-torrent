@@ -11,11 +11,11 @@ const isDev = process.env.NODE_ENV === 'development' || process.argv.includes('-
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    minWidth: 800,
+    width: 420,
+    height: 750,
+    minWidth: 360,
     minHeight: 600,
-    title: 'IPMsg Torrent',
+    title: 'PPX',
     icon: path.join(__dirname, '../build/icon.png'),
     webPreferences: {
       nodeIntegration: false,
@@ -26,7 +26,7 @@ function createWindow() {
       allowRunningInsecureContent: false
     },
     show: false,
-    backgroundColor: '#667eea'
+    backgroundColor: '#F5F5F5'
   });
 
   mainWindow.once('ready-to-show', () => {
@@ -120,16 +120,16 @@ function createMenu() {
           click: () => {
             dialog.showMessageBox(mainWindow, {
               type: 'info',
-              title: '关于 IPMsg Torrent',
-              message: 'IPMsg Torrent v1.0.0',
-              detail: '去中心化 P2P 聊天应用\n支持多平台，无需服务器'
+              title: '关于 PPX',
+              message: 'PPX v1.0.0',
+              detail: '去中心化 P2P 聊天应用\n支持多平台，无需服务器\n文件传输 | 下载管理 | 媒体播放'
             });
           }
         },
         {
           label: '文档',
           click: () => {
-            shell.openExternal('https://github.com/ipmsg-torrent');
+            shell.openExternal('https://github.com/zenjan1/ppx-chat');
           }
         }
       ]
@@ -187,7 +187,7 @@ function createTray() {
       }
     ]);
 
-    tray.setToolTip('IPMsg Torrent - P2P 聊天');
+    tray.setToolTip('PPX - P2P 聊天');
     tray.setContextMenu(contextMenu);
 
     tray.on('click', () => {

@@ -5,784 +5,223 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="theme-color" content="#667eea">
-  <meta name="description" content="去中心化P2P聊天应用，无需服务器，支持多平台">
-  <title>IPMsg Torrent - 去中心化聊天</title>
-  <link rel="manifest" href="./manifest.json">
-  <link rel="icon" type="image/png" href="/icon.png">
-  <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-      background: #f0f2f5;
-      height: 100vh;
-      overflow: hidden;
-      display: flex;
-      flex-direction: column;
-    }
-
-    .app-container {
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
-      max-width: 1400px;
-      margin: 0 auto;
-      width: 100%;
-    }
-
-    .header {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      padding: 16px 24px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-      flex-shrink: 0;
-    }
-
-    .logo {
-      display: flex;
-      align-items: center;
-      gap: 16px;
-    }
-
-    .logo h1 {
-      font-size: 24px;
-      font-weight: 600;
-      margin: 0;
-    }
-
-    .status {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 6px 14px;
-      background: rgba(255,255,255,0.2);
-      border-radius: 20px;
-      font-size: 13px;
-      font-weight: 500;
-    }
-
-    .status::before {
-      content: '';
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #ff4757;
-    }
-
-    .status.online::before {
-      background: #2ed573;
-      animation: pulse 2s infinite;
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.5; }
-    }
-
-    .user-info {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .user-info input {
-      padding: 10px 18px;
-      border: none;
-      border-radius: 22px;
-      font-size: 14px;
-      background: rgba(255,255,255,0.95);
-      color: #333;
-      width: 220px;
-      transition: all 0.2s;
-    }
-
-    .user-info input:focus {
-      outline: none;
-      box-shadow: 0 0 0 3px rgba(255,255,255,0.3);
-    }
-
-    .main-content {
-      display: flex;
-      flex: 1;
-      overflow: hidden;
-    }
-
-    .sidebar {
-      width: 300px;
-      background: white;
-      border-right: 1px solid #e0e0e0;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-
-    .peer-list {
-      flex: 1;
-      padding: 16px;
-      overflow-y: auto;
-    }
-
-    .peer-list h3 {
-      font-size: 13px;
-      color: #888;
-      margin-bottom: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      font-weight: 600;
-    }
-
-    .peers-container {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .peer-item {
-      padding: 14px;
-      background: #f5f7fa;
-      border-radius: 10px;
-      cursor: pointer;
-      transition: all 0.2s;
-      border: 2px solid transparent;
-    }
-
-    .peer-item:hover {
-      background: #e8ecf1;
-      transform: translateX(4px);
-    }
-
-    .peer-item.active {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      border-color: #5a67d8;
-    }
-
-    .peer-item .peer-name {
-      font-weight: 600;
-      font-size: 15px;
-      margin-bottom: 4px;
-    }
-
-    .peer-item .peer-hostname {
-      font-size: 12px;
-      opacity: 0.7;
-    }
-
-    .peer-item.active .peer-hostname {
-      color: rgba(255,255,255,0.8);
-    }
-
-    .empty-peers {
-      text-align: center;
-      padding: 40px 20px;
-      color: #999;
-      font-size: 14px;
-    }
-
-    .empty-peers .icon {
-      font-size: 48px;
-      margin-bottom: 12px;
-      opacity: 0.5;
-    }
-
-    .chat-area {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      background: #f0f2f5;
-      overflow: hidden;
-    }
-
-    .chat-header {
-      padding: 18px 24px;
-      background: white;
-      border-bottom: 1px solid #e0e0e0;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-shrink: 0;
-    }
-
-    .chat-header h2 {
-      font-size: 18px;
-      color: #333;
-      font-weight: 600;
-    }
-
-    .chat-header .peer-info {
-      font-size: 13px;
-      color: #888;
-    }
-
-    .messages-container {
-      flex: 1;
-      padding: 24px;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-    }
-
-    .message {
-      max-width: 70%;
-      display: flex;
-      flex-direction: column;
-      animation: messageIn 0.3s ease;
-    }
-
-    @keyframes messageIn {
-      from {
-        opacity: 0;
-        transform: translateY(10px);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
-    }
-
-    .message.sent {
-      align-self: flex-end;
-      align-items: flex-end;
-    }
-
-    .message.received {
-      align-self: flex-start;
-      align-items: flex-start;
-    }
-
-    .message-bubble {
-      padding: 12px 18px;
-      border-radius: 18px;
-      background: white;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-      line-height: 1.5;
-      word-wrap: break-word;
-    }
-
-    .message.sent .message-bubble {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      border-bottom-right-radius: 6px;
-    }
-
-    .message.received .message-bubble {
-      border-bottom-left-radius: 6px;
-    }
-
-    .message-time {
-      font-size: 11px;
-      color: #aaa;
-      margin-top: 6px;
-      padding: 0 4px;
-    }
-
-    .message-sender {
-      font-size: 12px;
-      color: #888;
-      margin-bottom: 4px;
-      padding: 0 4px;
-    }
-
-    .file-message {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 12px;
-      background: rgba(0,0,0,0.05);
-      border-radius: 10px;
-      min-width: 240px;
-    }
-
-    .message.sent .file-message {
-      background: rgba(255,255,255,0.2);
-    }
-
-    .file-icon {
-      font-size: 36px;
-      flex-shrink: 0;
-    }
-
-    .file-info {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .file-name {
-      font-weight: 600;
-      font-size: 14px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .file-size {
-      font-size: 12px;
-      opacity: 0.7;
-      margin-top: 2px;
-    }
-
-    .file-actions {
-      display: flex;
-      gap: 8px;
-      margin-top: 8px;
-    }
-
-    .input-area {
-      padding: 16px 24px;
-      background: white;
-      border-top: 1px solid #e0e0e0;
-      flex-shrink: 0;
-    }
-
-    .file-preview-container {
-      margin-bottom: 12px;
-      padding: 12px;
-      background: #f5f7fa;
-      border-radius: 10px;
-      display: none;
-    }
-
-    .file-preview-container.active {
-      display: block;
-    }
-
-    .file-preview {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .file-preview .file-info {
-      flex: 1;
-    }
-
-    .file-preview .remove-btn {
-      padding: 6px 12px;
-      background: #ff4757;
-      color: white;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 13px;
-    }
-
-    .message-input-wrapper {
-      display: flex;
-      gap: 12px;
-      align-items: center;
-    }
-
-    .attach-btn {
-      width: 48px;
-      height: 48px;
-      border: none;
-      background: #f0f2f5;
-      border-radius: 50%;
-      cursor: pointer;
-      font-size: 20px;
-      transition: all 0.2s;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .attach-btn:hover {
-      background: #e8ecf1;
-      transform: scale(1.05);
-    }
-
-    #message-input {
-      flex: 1;
-      padding: 14px 20px;
-      border: 2px solid #e0e0e0;
-      border-radius: 24px;
-      font-size: 15px;
-      outline: none;
-      transition: all 0.2s;
-    }
-
-    #message-input:focus {
-      border-color: #667eea;
-    }
-
-    #message-input:disabled {
-      background: #f5f7fa;
-      cursor: not-allowed;
-    }
-
-    .btn {
-      padding: 14px 28px;
-      border: none;
-      border-radius: 24px;
-      font-size: 15px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-
-    .btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    .btn-primary {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-    }
-
-    .btn-primary:hover:not(:disabled) {
-      transform: translateY(-2px);
-      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-    }
-
-    .btn-secondary {
-      background: #f0f2f5;
-      color: #333;
-    }
-
-    .btn-secondary:hover:not(:disabled) {
-      background: #e8ecf1;
-    }
-
-    .btn-small {
-      padding: 8px 16px;
-      font-size: 13px;
-    }
-
-    .footer {
-      padding: 12px 24px;
-      background: white;
-      border-top: 1px solid #e0e0e0;
-      flex-shrink: 0;
-    }
-
-    .footer .info {
-      display: flex;
-      gap: 24px;
-      font-size: 12px;
-      color: #666;
-      flex-wrap: wrap;
-    }
-
-    .footer .info span {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .notification {
-      position: fixed;
-      top: 20px;
-      right: 20px;
-      background: white;
-      padding: 16px 24px;
-      border-radius: 10px;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
-      z-index: 1000;
-      transform: translateX(400px);
-      transition: transform 0.3s ease;
-      max-width: 350px;
-    }
-
-    .notification.show {
-      transform: translateX(0);
-    }
-
-    .notification .title {
-      font-weight: 600;
-      font-size: 14px;
-      margin-bottom: 4px;
-    }
-
-    .notification .message {
-      font-size: 13px;
-      color: #666;
-    }
-
-    .no-chat-selected {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      color: #999;
-      padding: 40px;
-    }
-
-    .no-chat-selected .icon {
-      font-size: 80px;
-      margin-bottom: 20px;
-      opacity: 0.3;
-    }
-
-    .no-chat-selected h3 {
-      font-size: 20px;
-      color: #666;
-      margin-bottom: 8px;
-    }
-
-    .no-chat-selected p {
-      font-size: 14px;
-    }
-
-    .typing-indicator {
-      font-size: 12px;
-      color: #888;
-      padding: 8px 16px;
-      font-style: italic;
-    }
-
-    .modal-overlay {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: rgba(0,0,0,0.5);
-      display: none;
-      align-items: center;
-      justify-content: center;
-      z-index: 2000;
-    }
-
-    .modal-overlay.show {
-      display: flex;
-    }
-
-    .modal {
-      background: white;
-      border-radius: 12px;
-      padding: 24px;
-      max-width: 500px;
-      width: 90%;
-      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-    }
-
-    .modal h3 {
-      font-size: 18px;
-      margin-bottom: 12px;
-    }
-
-    .modal p {
-      font-size: 14px;
-      color: #666;
-      margin-bottom: 16px;
-    }
-
-    .modal .file-info {
-      background: #f5f7fa;
-      padding: 16px;
-      border-radius: 8px;
-      margin-bottom: 16px;
-    }
-
-    .modal .actions {
-      display: flex;
-      gap: 12px;
-      justify-content: flex-end;
-    }
-
-    .mobile-menu-btn {
-      display: none;
-      padding: 8px;
-      background: none;
-      border: none;
-      font-size: 24px;
-      cursor: pointer;
-      color: white;
-    }
-
-    @media (max-width: 768px) {
-      .app-container {
-        max-width: 100%;
-      }
-
-      .header {
-        padding: 12px 16px;
-      }
-
-      .logo h1 {
-        font-size: 18px;
-      }
-
-      .status {
-        display: none;
-      }
-
-      .user-info input {
-        width: 140px;
-        padding: 8px 14px;
-      }
-
-      .sidebar {
-        position: fixed;
-        left: -100%;
-        top: 60px;
-        bottom: 0;
-        width: 85%;
-        z-index: 100;
-        transition: left 0.3s ease;
-        box-shadow: 2px 0 10px rgba(0,0,0,0.1);
-      }
-
-      .sidebar.show {
-        left: 0;
-      }
-
-      .mobile-menu-btn {
-        display: block;
-      }
-
-      .chat-area {
-        width: 100%;
-      }
-
-      .messages-container {
-        padding: 16px;
-      }
-
-      .message {
-        max-width: 85%;
-      }
-
-      .input-area {
-        padding: 12px 16px;
-      }
-
-      .footer .info {
-        font-size: 11px;
-        gap: 12px;
-      }
-
-      .footer .info span:nth-child(2) {
-        display: none;
-      }
-    }
-
-    .chat-sidebar-toggle {
-      display: none;
-      position: fixed;
-      bottom: 80px;
-      right: 20px;
-      width: 56px;
-      height: 56px;
-      border-radius: 50%;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      border: none;
-      font-size: 24px;
-      cursor: pointer;
-      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-      z-index: 99;
-    }
-
-    @media (max-width: 768px) {
-      .chat-sidebar-toggle {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-    }
-  </style>
-  <script type="module" crossorigin src="./assets/main-DAEhjpwD.js"></script>
+  <meta name="theme-color" content="#07C160">
+  <title>PPX - 去中心化聊天</title>
+  <link rel="manifest" href="./assets/manifest-DPX6-_dG.json">
+  <script type="module" crossorigin src="./assets/main-BWmon091.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/main-B2u1Q1a0.css">
 </head>
 <body>
-  <div id="app" class="app-container">
-    <header class="header">
-      <div class="logo">
-        <button class="mobile-menu-btn" id="mobile-menu-btn">☰</button>
-        <h1>IPMsg Torrent</h1>
-        <span class="status" id="connection-status">初始化中</span>
-      </div>
-      <div class="user-info">
-        <input type="text" id="username" placeholder="输入昵称" value="">
-      </div>
-    </header>
+  <div id="app" class="app">
+    <div class="main-wrapper">
+      <nav class="tab-bar">
+        <div class="tab-item active" data-tab="chats">
+          <span class="tab-icon">💬</span>
+          <span class="tab-text">聊天</span>
+          <span class="badge" id="unread-badge" style="display:none">0</span>
+        </div>
+        <div class="tab-item" data-tab="files">
+          <span class="tab-icon">📁</span>
+          <span class="tab-text">文件</span>
+        </div>
+        <div class="tab-item" data-tab="downloads">
+          <span class="tab-icon">⬇️</span>
+          <span class="tab-text">下载</span>
+          <span class="badge" id="download-badge" style="display:none">0</span>
+        </div>
+        <div class="tab-item" data-tab="me">
+          <span class="tab-icon">👤</span>
+          <span class="tab-text">我的</span>
+        </div>
+      </nav>
 
-    <div class="main-content">
-      <aside class="sidebar" id="sidebar">
-        <div class="peer-list">
-          <h3>在线用户 (<span id="peer-count">0</span>)</h3>
-          <div id="peers" class="peers-container">
-            <div class="empty-peers">
-              <div class="icon">👥</div>
-              <p>暂无在线用户</p>
-              <p style="font-size: 12px; margin-top: 8px;">与他人打开此页面即可连接</p>
+      <div class="content-area">
+        <section id="chats-tab" class="tab-content active">
+          <header class="content-header">
+            <h1>聊天</h1>
+            <div class="header-actions">
+              <button class="icon-btn" id="btn-search" title="搜索">🔍</button>
+              <button class="icon-btn" id="btn-add-chat" title="发起聊天">➕</button>
+            </div>
+          </header>
+          <div id="chats-list" class="list-container"></div>
+        </section>
+
+        <section id="files-tab" class="tab-content">
+          <header class="content-header">
+            <h1>文件</h1>
+            <div class="header-actions">
+              <button class="icon-btn" id="btn-upload" title="上传文件">📤</button>
+            </div>
+          </header>
+          <div class="file-tabs">
+            <button class="file-tab active" data-type="all">全部</button>
+            <button class="file-tab" data-type="image">图片</button>
+            <button class="file-tab" data-type="video">视频</button>
+            <button class="file-tab" data-type="audio">音频</button>
+            <button class="file-tab" data-type="doc">文档</button>
+          </div>
+          <div id="files-list" class="list-container"></div>
+        </section>
+
+        <section id="downloads-tab" class="tab-content">
+          <header class="content-header">
+            <h1>下载管理</h1>
+            <div class="header-actions">
+              <button class="icon-btn" id="btn-downloads-clear" title="清空已完成">🗑️</button>
+            </div>
+          </header>
+          <div class="download-stats">
+            <div class="stat-item">
+              <span class="stat-num" id="downloading-count">0</span>
+              <span class="stat-label">下载中</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-num" id="completed-count">0</span>
+              <span class="stat-label">已完成</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-num" id="total-speed">0 KB/s</span>
+              <span class="stat-label">当前速度</span>
             </div>
           </div>
-        </div>
-      </aside>
+          <div id="downloads-list" class="list-container"></div>
+        </section>
 
-      <main class="chat-area">
-        <div class="chat-header" id="chat-header" style="display: none;">
-          <div>
-            <h2 id="chat-title">选择用户开始聊天</h2>
-            <div class="peer-info" id="chat-peer-info"></div>
+        <section id="me-tab" class="tab-content">
+          <header class="content-header">
+            <h1>我的</h1>
+          </header>
+          <div class="profile-section">
+            <div class="avatar" id="my-avatar">我</div>
+            <div class="profile-info">
+              <div class="profile-name" id="my-name">加载中...</div>
+              <div class="profile-id">ID: <span id="my-id">-</span></div>
+            </div>
           </div>
-        </div>
-
-        <div id="messages" class="messages-container">
-          <div class="no-chat-selected" id="no-chat">
-            <div class="icon">💬</div>
-            <h3>开始聊天</h3>
-            <p>从左侧选择一个在线用户</p>
+          <div class="menu-list">
+            <div class="menu-item" id="menu-edit-name">
+              <span class="menu-icon">✏️</span>
+              <span class="menu-text">修改昵称</span>
+              <span class="menu-arrow">›</span>
+            </div>
+            <div class="menu-item" id="menu-save-history">
+              <span class="menu-icon">💾</span>
+              <span class="menu-text">保存聊天记录</span>
+              <span class="menu-arrow">›</span>
+            </div>
+            <div class="menu-item" id="menu-share-app">
+              <span class="menu-icon">🔗</span>
+              <span class="menu-text">分享应用</span>
+              <span class="menu-arrow">›</span>
+            </div>
+            <div class="menu-item" id="menu-about">
+              <span class="menu-icon">ℹ️</span>
+              <span class="menu-text">关于</span>
+              <span class="menu-arrow">›</span>
+            </div>
           </div>
-        </div>
-
-        <div id="typing-indicator" class="typing-indicator" style="display: none;"></div>
-
-        <div class="input-area">
-          <div class="file-preview-container" id="file-preview-container">
-            <div class="file-preview" id="file-preview"></div>
+          <div class="connection-info">
+            <div class="info-row">
+              <span>状态</span>
+              <span class="status-dot" id="status-indicator"></span>
+              <span id="status-text">连接中</span>
+            </div>
+            <div class="info-row">
+              <span>在线人数</span>
+              <span id="online-count">0</span>
+            </div>
+            <div class="info-row">
+              <span>连接方式</span>
+              <span id="conn-type">BroadcastChannel</span>
+            </div>
           </div>
-          <div class="message-input-wrapper">
-            <button class="attach-btn" id="attach-file" title="发送文件">📎</button>
-            <input type="file" id="file-input" style="display: none;" multiple>
-            <input type="text" id="message-input" placeholder="输入消息..." disabled>
-            <button id="send-btn" class="btn btn-primary" disabled>发送</button>
-          </div>
-        </div>
-      </main>
+        </section>
+      </div>
     </div>
 
-    <footer class="footer">
-      <div class="info">
-        <span>ID: <strong id="my-id">加载中...</strong></span>
-        <span>用户数: <strong id="peer-count-footer">0</strong></span>
-        <span id="platform-info"></span>
-        <span id="connection-type"></span>
+    <div id="chat-page" class="chat-page">
+      <header class="chat-header">
+        <button class="back-btn" id="btn-back">‹</button>
+        <div class="chat-title-wrap">
+          <h2 id="chat-peer-name">聊天</h2>
+          <span id="chat-peer-status"></span>
+        </div>
+        <button class="icon-btn" id="btn-chat-menu">⋮</button>
+      </header>
+      <div id="chat-messages" class="chat-messages"></div>
+      <div id="typing-hint" class="typing-hint" style="display:none">对方正在输入...</div>
+      <div class="chat-input-area">
+        <button class="icon-btn" id="btn-attach">📎</button>
+        <input type="text" id="chat-input" placeholder="输入消息" autocomplete="off">
+        <button class="icon-btn send-btn" id="btn-send" disabled>➤</button>
       </div>
-    </footer>
-
-    <button class="chat-sidebar-toggle" id="chat-sidebar-toggle">👥</button>
-  </div>
-
-  <div class="notification" id="notification">
-    <div class="title" id="notification-title">通知</div>
-    <div class="message" id="notification-text"></div>
-  </div>
-
-  <div class="modal-overlay" id="file-offer-modal">
-    <div class="modal">
-      <h3>📁 收到文件传输请求</h3>
-      <div class="file-info">
-        <div><strong>文件名:</strong> <span id="offer-file-name"></span></div>
-        <div><strong>大小:</strong> <span id="offer-file-size"></span></div>
-        <div><strong>来自:</strong> <span id="offer-file-from"></span></div>
+      <input type="file" id="file-input" style="display:none" multiple>
+      <div class="chat-page-menu">
+        <div class="menu-item" id="menu-clear-chat">清空聊天</div>
+        <div class="menu-item" id="menu-chat-info">聊天信息</div>
       </div>
-      <p>是否接受此文件传输?</p>
-      <div class="actions">
-        <button class="btn btn-secondary" id="reject-file-btn">拒绝</button>
-        <button class="btn btn-primary" id="accept-file-btn">接受</button>
+    </div>
+
+    <div id="media-viewer" class="media-viewer" style="display:none">
+      <button class="close-btn" id="btn-close-media">✕</button>
+      <div id="media-content" class="media-content"></div>
+      <div class="media-toolbar">
+        <button class="toolbar-btn" id="btn-media-save">保存</button>
+        <button class="toolbar-btn" id="btn-media-share">分享</button>
+      </div>
+    </div>
+
+    <div id="download-modal" class="modal" style="display:none">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>文件传输</h3>
+          <button class="close-btn" id="btn-close-modal">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="file-icon-large">📁</div>
+          <div class="file-details">
+            <div class="file-name" id="modal-file-name">-</div>
+            <div class="file-size" id="modal-file-size">-</div>
+            <div class="file-from">来自: <span id="modal-file-from">-</span></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="btn-reject">拒绝</button>
+          <button class="btn btn-primary" id="btn-accept">接受</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" style="display:none">
+      <span id="toast-text"></span>
+    </div>
+
+    <div id="confirm-modal" class="modal" style="display:none">
+      <div class="modal-content confirm-dialog">
+        <div class="modal-body">
+          <p id="confirm-text"></p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="btn-cancel">取消</button>
+          <button class="btn btn-primary" id="btn-confirm">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="input-modal" class="modal" style="display:none">
+      <div class="modal-content input-dialog">
+        <div class="modal-header">
+          <h3 id="input-title">输入</h3>
+          <button class="close-btn btn-close-input">✕</button>
+        </div>
+        <div class="modal-body">
+          <input type="text" id="input-field" class="input-field">
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary btn-close-input">取消</button>
+          <button class="btn btn-primary" id="btn-input-confirm">确定</button>
+        </div>
       </div>
     </div>
   </div>

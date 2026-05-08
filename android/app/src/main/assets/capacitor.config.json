@@ -1,43 +1,23 @@
 {
-	"appId": "com.ipmsg.torrent",
-	"appName": "IPMsg Torrent",
+	"appId": "com.ppx.chat",
+	"appName": "PPX",
 	"webDir": "dist",
-	"bundledWebRuntime": false,
 	"server": {
-		"androidScheme": "https",
-		"cleartext": true
+		"androidScheme": "https"
 	},
 	"plugins": {
 		"SplashScreen": {
 			"launchShowDuration": 2000,
-			"launchAutoHide": true,
-			"backgroundColor": "#667eea",
-			"androidSplashResourceName": "splash",
-			"androidScaleType": "CENTER_CROP",
-			"showSpinner": false,
-			"splashFullScreen": true,
-			"splashImmersive": true
+			"backgroundColor": "#F5F5F5",
+			"showSpinner": false
 		},
 		"StatusBar": {
 			"style": "LIGHT",
-			"backgroundColor": "#667eea"
+			"backgroundColor": "#07C160"
 		}
 	},
 	"android": {
-		"backgroundColor": "#667eea",
 		"allowMixedContent": true,
-		"captureInput": true,
-		"webContentsDebuggingEnabled": false,
-		"minSdkVersion": 22,
-		"maxSdkVersion": 33,
-		"targetSdkVersion": 33,
-		"compileSdkVersion": 34
-	},
-	"cordova": {
-		"preferences": {
-			"android-minSdkVersion": "22",
-			"android-targetSdkVersion": "33",
-			"android-compileSdkVersion": "34"
-		}
+		"backgroundColor": "#F5F5F5"
 	}
 }
