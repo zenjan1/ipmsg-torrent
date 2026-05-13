@@ -1,6 +1,6 @@
 {
   "name": "ppx-chat",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "PPX - 去中心化P2P聊天应用，集成文件传输、下载管理、媒体播放功能",
   "main": "dist-electron/main.js",
   "type": "module",

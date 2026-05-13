@@ -1,47 +1,16 @@
 buildscript {
     repositories {
-        maven {
-            url 'http://maven.aliyun.com/repository/google'
-            allowInsecureProtocol = true
-        }
-        maven {
-            url 'http://maven.aliyun.com/repository/central'
-            allowInsecureProtocol = true
-        }
-        maven {
-            url 'http://maven.aliyun.com/repository/public'
-            allowInsecureProtocol = true
-        }
-        maven {
-            url 'http://maven.aliyun.com/repository/gradle-plugin'
-            allowInsecureProtocol = true
-        }
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
+        maven { url 'https://maven.aliyun.com/repository/public' }
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
         google()
         mavenCentral()
         gradlePluginPortal()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:8.2.0'
+        classpath 'com.android.tools.build:gradle:8.2.2'
         classpath 'com.google.gms:google-services:4.4.0'
-    }
-}
-
-allprojects {
-    repositories {
-        maven {
-            url 'http://maven.aliyun.com/repository/google'
-            allowInsecureProtocol = true
-        }
-        maven {
-            url 'http://maven.aliyun.com/repository/central'
-            allowInsecureProtocol = true
-        }
-        maven {
-            url 'http://maven.aliyun.com/repository/public'
-            allowInsecureProtocol = true
-        }
-        google()
-        mavenCentral()
     }
 }
 
