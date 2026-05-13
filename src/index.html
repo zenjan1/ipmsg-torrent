@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
@@ -43,6 +43,9 @@
               <button class="icon-btn" id="btn-add-chat" title="发起聊天">➕</button>
             </div>
           </header>
+          <div class="search-bar">
+            <input type="text" id="chat-search-input" placeholder="搜索聊天记录..." autocomplete="off">
+          </div>
           <div id="chats-list" class="list-container"></div>
         </section>
 
@@ -114,6 +117,14 @@
               <span class="menu-text">分享应用</span>
               <span class="menu-arrow">›</span>
             </div>
+            <div class="menu-item" id="menu-dark-mode">
+              <span class="menu-icon" id="dark-mode-icon">🌙</span>
+              <span class="menu-text">暗色模式</span>
+              <span class="menu-toggle">
+                <input type="checkbox" id="dark-mode-toggle" class="toggle-input">
+                <label for="dark-mode-toggle" class="toggle-label"></label>
+              </span>
+            </div>
             <div class="menu-item" id="menu-about">
               <span class="menu-icon">ℹ️</span>
               <span class="menu-text">关于</span>
@@ -127,6 +138,10 @@
               <span id="status-text">连接中</span>
             </div>
             <div class="info-row">
+              <span>连接质量</span>
+              <span id="conn-quality">良好</span>
+            </div>
+            <div class="info-row">
               <span>在线人数</span>
               <span id="online-count">0</span>
             </div>
@@ -134,6 +149,9 @@
               <span>连接方式</span>
               <span id="conn-type">BroadcastChannel</span>
             </div>
+          </div>
+          <div class="version-info">
+            <span>版本 1.0.0</span>
           </div>
         </section>
       </div>
