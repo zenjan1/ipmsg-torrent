@@ -3,7 +3,6 @@ use libp2p::kad::store::MemoryStore;
 use libp2p::kad::{Behaviour as Kademlia, Config as KademliaConfig};
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{identify, PeerId, StreamProtocol};
-use std::collections::HashMap;
 use std::time::Duration;
 
 /// Gossipsub topic for presence announcements
@@ -118,7 +117,7 @@ pub fn parse_agent_version(agent_version: &str) -> Option<(String, Vec<String>)>
     // Format: "ipmsg/2.0.0 (username, platform1, platform2)"
     let content = agent_version.strip_prefix("ipmsg/2.0.0 (")?;
     let content = content.strip_suffix(')')?;
-    let mut parts: Vec<&str> = content.splitn(2, ", ").collect();
+    let parts: Vec<&str> = content.splitn(2, ", ").collect();
     if parts.len() == 2 {
         let username = parts[0].to_string();
         let platforms: Vec<String> = parts[1].split(", ").map(|s| s.to_string()).collect();

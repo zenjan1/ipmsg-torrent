@@ -9,7 +9,6 @@ pub use store::{MessageStore, PeerInfo};
 
 use futures::StreamExt;
 use ipmsg_protocol::message::{ChatMessage, ChannelId};
-use libp2p::PeerId;
 use std::path::PathBuf;
 use thiserror::Error;
 

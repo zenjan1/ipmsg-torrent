@@ -1,7 +1,6 @@
 use chrono::DateTime;
-use ipmsg_protocol::codec::decode_message;
 use ipmsg_protocol::message::ChatMessage;
-use rusqlite::{params, Connection, OptionalExtension, Result};
+use rusqlite::{params, Connection, Result};
 use std::path::Path;
 
 /// Peer info stored locally

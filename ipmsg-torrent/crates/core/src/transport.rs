@@ -4,7 +4,7 @@ use crate::{ConnectedPeer, P2PError, P2PEvent};
 use futures::stream::StreamExt;
 use ipmsg_protocol::codec::encode_message;
 use ipmsg_protocol::message::ChatMessage;
-use libp2p::gossipsub::{IdentTopic, MessageId};
+use libp2p::gossipsub::IdentTopic;
 use libp2p::swarm::SwarmEvent;
 use libp2p::Swarm;
 use std::collections::HashMap;
@@ -16,8 +16,11 @@ use tokio::sync::mpsc::UnboundedSender;
 pub struct P2PSwarm {
     swarm: Swarm<IpMsgBehaviour>,
     peers: HashMap<String, ConnectedPeer>,
+    #[allow(dead_code)] // Reserved for async message routing
     event_tx: UnboundedSender<P2PEvent>,
+    #[allow(dead_code)] // Reserved for message queue
     message_tx: tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
+    #[allow(dead_code)] // Reserved for message queue
     message_rx: tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>,
     subscribed_topics: Vec<String>,
 }
@@ -178,7 +181,7 @@ fn handle_swarm_event(
 // Use type alias for the combined behaviour event type
 type BehaviourEvent = <IpMsgBehaviour as libp2p::swarm::NetworkBehaviour>::ToSwarm;
 
-fn handle_behaviour_event(event: &BehaviourEvent) -> Option<P2PEvent> {
+fn handle_behaviour_event(_event: &BehaviourEvent) -> Option<P2PEvent> {
     // The ToSwarm type is a NetworkBehaviourAction which wraps the actual event.
     // For derived behaviours, we need to access the inner event via the OutEvent type.
     // Since we can't easily pattern match on the internal type, let's use a different approach:

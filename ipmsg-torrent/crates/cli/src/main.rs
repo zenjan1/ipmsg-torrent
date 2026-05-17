@@ -2,7 +2,6 @@ use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ipmsg_core::{P2PEvent, P2PEngine};
 use ipmsg_protocol::message::{ChannelId, ChatMessage};
-use ipmsg_protocol::geohash;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -43,6 +42,7 @@ enum Command {
     GeoJoin(String),
     Who,
     Ping,
+    #[allow(dead_code)] // Planned: file transfer support
     File { target: String, path: String },
     Clear,
     Quit,
@@ -145,10 +145,6 @@ impl SharedState {
 
     fn active_tab(&self) -> &TabView {
         &self.tabs[self.active_tab]
-    }
-
-    fn active_tab_mut(&mut self) -> &mut TabView {
-        &mut self.tabs[self.active_tab]
     }
 
     fn find_or_create_tab(&mut self, name: &str, channel: Option<ChannelId>) -> usize {
@@ -289,7 +285,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         {
-            let mut s = state.lock().await;
+            let s = state.lock().await;
             draw(&mut terminal, &s)?;
             if !s.running { break; }
             drop(s);
@@ -359,15 +355,14 @@ impl SharedState {
 async fn handle_command(state: &Arc<Mutex<SharedState>>, input: &str) {
     if !input.starts_with('/') {
         // Regular message - send to active tab's channel or broadcast
-        let mut s = state.lock().await;
+        let s = state.lock().await;
         let content = input.to_string();
         let active = s.active_tab;
         let tab_name = s.tabs[active].name.clone();
         let channel = s.tabs[active].channel.clone();
-        let peer_id = s.my_peer_id.clone();
         drop(s);
 
-        if let Some(ch) = channel {
+        if let Some(_ch) = channel {
             // Send to channel
             // TODO: engine.send_to_channel
         } else if tab_name.starts_with("dm:") {
@@ -375,6 +370,7 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, input: &str) {
             // TODO: engine.send_text
         } else {
             // Broadcast to main
+            let _ = content; // Reserved for broadcast
         }
         return;
     }
