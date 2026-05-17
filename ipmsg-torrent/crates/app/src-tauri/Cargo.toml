@@ -11,11 +11,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [dependencies]
 ipmsg-core = { path = "../../core" }
 ipmsg-protocol = { path = "../../protocol" }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["wry"] }
 serde = { workspace = true }
 serde_json = "1"
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mobile)'] }

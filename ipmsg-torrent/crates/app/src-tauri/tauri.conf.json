@@ -1,0 +1,30 @@
+{
+  "productName": "ipmsg-torrent",
+  "version": "2.0.0",
+  "identifier": "com.ipmsg.torrent",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "IPMsg Torrent",
+        "width": 1024,
+        "height": 768,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon@2x.png"
+    ]
+  }
+}

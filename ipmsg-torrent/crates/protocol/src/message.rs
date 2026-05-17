@@ -169,6 +169,14 @@ impl ChatMessage {
         hasher.finalize().to_vec()
     }
 
+    /// Extract text content if this is a Text message
+    pub fn text_content(&self) -> Option<&str> {
+        match &self.kind {
+            MessageType::Text { content } => Some(content),
+            _ => None,
+        }
+    }
+
     /// Check if this message has expired
     pub fn is_expired(&self) -> bool {
         if self.ttl == 0 {

@@ -47,7 +47,7 @@ pub enum P2PEvent {
 }
 
 /// Peer info returned by list_peers
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConnectedPeer {
     pub peer_id: String,
     pub username: String,
