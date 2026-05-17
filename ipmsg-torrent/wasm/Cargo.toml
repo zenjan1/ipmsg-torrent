@@ -1,0 +1,20 @@
+[package]
+name = "ipmsg-wasm"
+version.workspace = true
+edition.workspace = true
+description = "WASM bindings for IPMsg-Torrent web client"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ipmsg-core = { path = "../crates/core" }
+ipmsg-protocol = { path = "../crates/protocol" }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+serde-wasm-bindgen = { workspace = true }
+web-sys = { workspace = true }
+js-sys = { workspace = true }
+console_error_panic_hook = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
