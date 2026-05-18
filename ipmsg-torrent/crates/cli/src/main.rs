@@ -29,6 +29,9 @@ struct Cli {
     /// Join a channel on startup (e.g., "general", "geo:u4pruy")
     #[arg(long)]
     join: Option<Vec<String>>,
+    /// Run in headless mode (no TUI, log to stdout)
+    #[arg(long, default_value = "false")]
+    headless: bool,
 }
 
 /// IRC-style command parser
@@ -202,6 +205,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         engine.run_event_loop().await;
     });
+
+    // Headless mode: just log events to stdout
+    if cli.headless {
+        println!("P2P engine running in headless mode. Press Ctrl+C to exit.");
+        loop {
+            tokio::select! {
+                Ok(()) = tokio::signal::ctrl_c() => {
+                    break;
+                }
+                result = event_rx.recv() => {
+                    match result {
+                        Some(evt) => {
+                            match evt {
+                                P2PEvent::MessageReceived(msg) => {
+                                    let content = match &msg.kind {
+                                        ipmsg_protocol::message::MessageType::Text { content } => content.clone(),
+                                        _ => msg.kind.label().to_string(),
+                                    };
+                                    println!("[{}] {}: {}", msg.timestamp.format("%H:%M"), msg.from, content);
+                                }
+                                P2PEvent::MessageSent(msg) => {
+                                    println!("[you] {}", msg.timestamp.format("%H:%M"));
+                                }
+                                P2PEvent::PeerJoined { peer_id: pid, username: uname, .. } => {
+                                    println!("Peer joined: {} ({})", uname, &pid[..8.min(pid.len())]);
+                                }
+                                P2PEvent::PeerLeft { peer_id: pid } => {
+                                    println!("Peer left: {}", &pid[..8.min(pid.len())]);
+                                }
+                                P2PEvent::Status(st) => { println!("Status: {}", st); }
+                                _ => {}
+                            }
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+        println!("Goodbye!");
+        return Ok(());
+    }
 
     let mut terminal = setup_terminal()?;
     let state = Arc::new(Mutex::new(SharedState::new(peer_id, username.clone())));

@@ -53,13 +53,10 @@ impl IpMsgBehaviour {
         let mut kademlia = Kademlia::new(local_peer_id, kademlia_store);
         kademlia.set_mode(Some(libp2p::kad::Mode::Client));
 
-        // Gossipsub setup (BitChat-inspired: permissive for mesh-like propagation)
+        // Gossipsub setup
         let gossipsub_config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(Duration::from_secs(10))
             .validation_mode(gossipsub::ValidationMode::Permissive)
-            .mesh_n_low(1)
-            .mesh_n_high(10)
-            .gossip_lazy(6)
             .build()
             .expect("valid gossipsub config");
         let gossipsub = gossipsub::Behaviour::new(

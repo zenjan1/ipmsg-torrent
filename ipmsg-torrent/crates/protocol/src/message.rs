@@ -331,7 +331,7 @@ pub enum FileTransferMsg {
 
 /// Geohash utility functions (inspired by BitChat location channels)
 pub mod geohash {
-    const BASE32: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
+    pub const BASE32: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
 
     /// Encode lat/lon to geohash string (precision = chars)
     pub fn encode(lat: f64, lon: f64, precision: usize) -> String {
@@ -419,7 +419,7 @@ mod tests {
     fn test_geohash_encode() {
         let hash = geohash::encode(51.5074, -0.1278, 6);
         assert_eq!(hash.len(), 6);
-        assert!(hash.chars().all(|c| BASE32.contains(&(c as u8))));
+        assert!(hash.chars().all(|c| geohash::BASE32.contains(&(c as u8))));
     }
 
     #[test]

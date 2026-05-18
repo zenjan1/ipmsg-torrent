@@ -110,7 +110,12 @@ impl Identity {
 
     /// Convert to libp2p Keypair for use in Swarm
     pub fn to_keypair(&self) -> libp2p::identity::Keypair {
-        let mut bytes = self.signing_key.to_bytes();
+        // libp2p expects 64 bytes: 32 secret + 32 public
+        let mut bytes = [0u8; 64];
+        let secret = self.signing_key.to_bytes();
+        let public = self.signing_key.verifying_key().to_bytes();
+        bytes[..32].copy_from_slice(&secret);
+        bytes[32..].copy_from_slice(&public);
         let keypair = libp2p::identity::ed25519::Keypair::try_from_bytes(&mut bytes)
             .expect("valid keypair");
         keypair.into()
