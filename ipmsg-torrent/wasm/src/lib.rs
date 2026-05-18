@@ -67,6 +67,7 @@ fn to_js_event(evt: &P2PEvent) -> JsEvent {
             "file offer from {} -> {}",
             from, file_ref.name
         )),
+        P2PEvent::MessageDelivered(msg_id) => JsEvent::Status(format!("Message delivered: {}", msg_id)),
     }
 }
 

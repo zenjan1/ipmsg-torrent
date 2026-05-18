@@ -121,6 +121,7 @@ fn to_frontend_event(evt: &P2PEvent) -> FrontendEvent {
             "file offer from {} -> {}",
             from, file_ref.name
         )),
+        P2PEvent::MessageDelivered(msg_id) => FrontendEvent::Status(format!("Message delivered: {}", msg_id)),
     }
 }
 

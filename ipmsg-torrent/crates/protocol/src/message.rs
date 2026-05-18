@@ -138,6 +138,38 @@ impl ChatMessage {
         }
     }
 
+    pub fn new_ack(from: PeerIdStr, to: PeerIdStr, message_ids: Vec<String>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            from,
+            to: Some(to),
+            channel: None,
+            seq: 0,
+            timestamp: Utc::now(),
+            ttl: 0,
+            kind: MessageType::Ack { message_ids },
+            encrypted_payload: None,
+            signature: Vec::new(),
+            reply_to: None,
+        }
+    }
+
+    pub fn new_profile(from: PeerIdStr, username: String, bio: Option<String>, avatar_hash: Option<String>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            from,
+            to: None,
+            channel: None,
+            seq: 0,
+            timestamp: Utc::now(),
+            ttl: 0,
+            kind: MessageType::Profile { username, bio, avatar_hash },
+            encrypted_payload: None,
+            signature: Vec::new(),
+            reply_to: None,
+        }
+    }
+
     pub fn with_sequence(mut self, seq: u64) -> Self {
         self.seq = seq;
         self

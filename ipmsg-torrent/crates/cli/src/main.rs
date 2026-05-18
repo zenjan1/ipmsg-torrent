@@ -1,6 +1,6 @@
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ipmsg_core::{P2PEvent, P2PEngine};
+use ipmsg_core::{P2PEvent, P2PEngine, SendCommand};
 use ipmsg_protocol::message::{ChannelId, ChatMessage};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -200,6 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let peer_id = engine.start(cli.username.clone(), bootstrap).await?;
 
     let mut event_rx = engine.take_receiver().expect("receiver already taken");
+    let cmd_tx = engine.take_command_sender().expect("command sender already taken");
 
     // Spawn swarm loop
     tokio::spawn(async move {
@@ -343,7 +344,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let input = s.input.clone();
                             s.input.clear();
                             drop(s);
-                            handle_command(&state, &input).await;
+                            handle_command(&state, &cmd_tx, &input).await;
                         }
                         KeyCode::Char(c) => { state.lock().await.input.push(c); }
                         KeyCode::Backspace => { state.lock().await.input.pop(); }
@@ -396,7 +397,7 @@ impl SharedState {
     }
 }
 
-async fn handle_command(state: &Arc<Mutex<SharedState>>, input: &str) {
+async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::mpsc::UnboundedSender<SendCommand>, input: &str) {
     if !input.starts_with('/') {
         // Regular message - send to active tab's channel or broadcast
         let s = state.lock().await;
@@ -406,15 +407,20 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, input: &str) {
         let channel = s.tabs[active].channel.clone();
         drop(s);
 
-        if let Some(_ch) = channel {
-            // Send to channel
-            // TODO: engine.send_to_channel
-        } else if tab_name.starts_with("dm:") {
-            // DM to specific peer
-            // TODO: engine.send_text
+        if let Some(ch) = channel {
+            let _ = cmd_tx.send(SendCommand::SendToChannel { channel: ch, content });
+        } else if let Some(peer) = tab_name.strip_prefix("dm:") {
+            // DM: peer is the short identifier, we need the full peer ID
+            let full_peer = {
+                let s = state.lock().await;
+                s.peers.iter().find(|p| p.starts_with(peer)).cloned()
+            };
+            if let Some(peer_id) = full_peer {
+                let _ = cmd_tx.send(SendCommand::SendText { to: peer_id, content });
+            }
         } else {
             // Broadcast to main
-            let _ = content; // Reserved for broadcast
+            let _ = cmd_tx.send(SendCommand::Broadcast { content });
         }
         return;
     }
@@ -432,9 +438,18 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, input: &str) {
             s.add_system_message("main", format!("{} is now known as {}", old, name));
         }
         Command::Msg { target, content } => {
-            // TODO: send DM
-            let mut s = state.lock().await;
-            s.add_system_message("main", format!("TODO: DM to {} -> {}", target, content));
+            let full_peer = {
+                let s = state.lock().await;
+                s.peers.iter().find(|p| p.starts_with(&target)).cloned()
+            };
+            if let Some(peer_id) = full_peer {
+                let _ = cmd_tx.send(SendCommand::SendText { to: peer_id, content: content.clone() });
+                let mut s = state.lock().await;
+                s.add_system_message("main", format!("Sent DM to {}", target));
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message("main", format!("Peer not found: {}", target));
+            }
         }
         Command::Peers => {
             let s = state.lock().await;
@@ -456,6 +471,7 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, input: &str) {
             let channel = ChannelId::Group(name.clone());
             let tab_name = format!("#{}", name);
             let msg_text = format!("Joined channel #{}", name);
+            let _ = cmd_tx.send(SendCommand::AddChannel { channel: channel.clone() });
             let mut s = state.lock().await;
             let idx = s.find_or_create_tab(&tab_name, Some(channel));
             s.active_tab = idx;
@@ -465,6 +481,7 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, input: &str) {
             let channel = ChannelId::Geohash(hash.clone());
             let tab_name = format!("@{}", hash);
             let msg_text = format!("Joined geohash channel @{}", hash);
+            let _ = cmd_tx.send(SendCommand::AddChannel { channel: channel.clone() });
             let mut s = state.lock().await;
             let idx = s.find_or_create_tab(&tab_name, Some(channel));
             s.active_tab = idx;
@@ -473,11 +490,16 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, input: &str) {
         Command::Leave(name) => {
             let mut s = state.lock().await;
             if let Some(idx) = s.tabs.iter().position(|t| t.name == format!("#{}", name) || t.name == format!("@{}", name)) {
-                let removed = s.tabs.remove(idx).name;
+                let removed_name = s.tabs[idx].name.clone();
+                let removed_channel = s.tabs[idx].channel.clone();
+                s.tabs.remove(idx);
+                if let Some(channel) = removed_channel {
+                    let _ = cmd_tx.send(SendCommand::RemoveChannel { channel });
+                }
                 if s.active_tab >= s.tabs.len() {
                     s.active_tab = s.tabs.len().saturating_sub(1);
                 }
-                s.add_system_message("main", format!("Left {}", removed));
+                s.add_system_message("main", format!("Left {}", removed_name));
             }
         }
         Command::Who => {
@@ -510,7 +532,7 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, input: &str) {
         }
         Command::File { .. } => {
             let mut s = state.lock().await;
-            s.add_system_message("main", "TODO: File transfer not yet implemented".to_string());
+            s.add_system_message("main", "File transfer not yet implemented".to_string());
         }
     }
 }

@@ -2,9 +2,13 @@ use libp2p::PeerId;
 
 /// Default bootstrap nodes for the IPMsg-Torrent network
 /// These are well-known peers that new nodes connect to initially
+///
+/// On a LAN, mDNS discovery (see `MDNS_SERVICE_NAME`) handles peer discovery automatically.
+/// For WAN/remote peers, supply your own relay node via `--bootstrap` flag, e.g.:
+///   ipmsg --bootstrap "/ip4/1.2.3.4/udp/4001/quic-v1/p2p/12D3KooW..."
 pub const DEFAULT_BOOTSTRAP_NODES: &[&str] = &[
     // Format: /ip4/{addr}/udp/{port}/quic-v1/p2p/{peer_id}
-    // TODO: Replace with actual bootstrap node addresses
+    // TODO: Deploy a public bootstrap relay node and add its address here
     // /ip4/1.2.3.4/udp/4001/quic-v1/p2p/12D3KooW...,
     // /ip4/5.6.7.8/udp/4001/quic-v1/p2p/12D3KooW...,
 ];
