@@ -23,6 +23,14 @@ bs58 = "0.5"
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
 
+# Cryptography
+snow = { version = "0.9", default-features = false, features = ["default-resolver"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+x25519-dalek = "2"
+
+# Performance
+lz4_flex = { version = "0.11", default-features = false, features = ["std"] }
+
 # Core
 libp2p = { version = "0.55", features = [
     "tokio", "macros", "tcp", "quic", "dns", "noise", "yamux",
@@ -31,8 +39,7 @@ libp2p = { version = "0.55", features = [
 ] }
 tokio = { version = "1", features = ["full"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-x25519-dalek = "2"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "series"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"

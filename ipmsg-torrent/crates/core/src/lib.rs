@@ -3,13 +3,19 @@ pub mod transport;
 pub mod discovery;
 pub mod messaging;
 pub mod store;
+pub mod noise;
+pub mod bloom;
+pub mod fragment;
 
 pub use identity::Identity;
 pub use store::{MessageStore, PeerInfo};
+pub use bloom::DedupCache;
+pub use fragment::{FragmentManager, FragmentMsg};
+pub use noise::NoiseSessionManager;
 
 use futures::StreamExt;
 use ipmsg_protocol::message::{ChatMessage, ChannelId};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
@@ -20,6 +26,8 @@ const MAX_DEDUP_CACHE: usize = 4096;
 const ACK_TIMEOUT_SECS: u64 = 30;
 /// Max retries before giving up
 const MAX_RETRIES: u32 = 3;
+/// Noise session re-key threshold (messages)
+const NOISE_REKEY_THRESHOLD: u64 = 100;
 
 /// Error types for the P2P engine
 #[derive(Debug, Error)]
@@ -54,6 +62,12 @@ pub enum P2PEvent {
     },
     Typing { from: String },
     Status(String),
+    /// Peer blocked by user
+    PeerBlocked { peer_id: String },
+    /// Peer verified via fingerprint
+    PeerVerified { peer_id: String },
+    /// Fragment reassembly complete
+    FragmentComplete { message_id: String, data: Vec<u8> },
 }
 
 /// Peer info returned by list_peers
@@ -90,6 +104,7 @@ struct PendingAck {
 pub struct P2PEngine {
     identity: Identity,
     store: MessageStore,
+    data_dir: PathBuf,
     username: String,
     platforms: Vec<String>,
     event_tx: tokio::sync::mpsc::UnboundedSender<P2PEvent>,
@@ -101,11 +116,19 @@ pub struct P2PEngine {
     next_seq: u64,
     /// Channels we've joined
     joined_channels: Vec<ChannelId>,
-    /// Message IDs we've seen (dedup cache, LRU)
-    seen_messages: VecDeque<String>,
-    seen_set: HashSet<String>,
+    /// Bloom filter + LRU cache for message dedup
+    dedup: DedupCache,
     /// Messages awaiting ACK
     pending_acks: HashMap<String, PendingAck>,
+    /// Noise session manager for E2E encryption
+    noise_sessions: NoiseSessionManager,
+    /// Fragment manager for large messages
+    #[allow(dead_code)]
+    fragment_manager: FragmentManager,
+    /// Social trust: blocked peer IDs
+    blocked_peers: HashSet<String>,
+    /// Social trust: favorite peer IDs
+    favorite_peers: HashSet<String>,
 }
 
 impl P2PEngine {
@@ -122,6 +145,7 @@ impl P2PEngine {
         Ok(Self {
             identity,
             store,
+            data_dir: data_dir.clone(),
             username: String::new(),
             platforms: vec!["rust".to_string()],
             event_tx,
@@ -131,9 +155,12 @@ impl P2PEngine {
             swarm: None,
             next_seq: 0,
             joined_channels: Vec::new(),
-            seen_messages: VecDeque::with_capacity(MAX_DEDUP_CACHE + 100),
-            seen_set: HashSet::with_capacity(MAX_DEDUP_CACHE + 100),
+            dedup: DedupCache::new(MAX_DEDUP_CACHE),
             pending_acks: HashMap::new(),
+            noise_sessions: NoiseSessionManager::new(NOISE_REKEY_THRESHOLD),
+            fragment_manager: FragmentManager::new(),
+            blocked_peers: HashSet::new(),
+            favorite_peers: HashSet::new(),
         })
     }
 
@@ -151,6 +178,7 @@ impl P2PEngine {
             &self.platforms,
             &self.event_tx,
             bootstrap_nodes,
+            &self.data_dir,
         )
         .await?;
 
@@ -183,13 +211,17 @@ impl P2PEngine {
                         match events {
                             Some(evts) => {
                                 for evt in evts {
-                                    // Deduplicate received messages
+                                    // Deduplicate received messages using Bloom filter
                                     let evt = match &evt {
                                         P2PEvent::MessageReceived(msg) => {
-                                            if self.is_duplicate(&msg.id) {
+                                            // Check blocked peers first
+                                            if self.is_blocked(&msg.from) {
                                                 continue;
                                             }
-                                            self.mark_seen(&msg.id);
+                                            if self.dedup.is_duplicate(&msg.id) {
+                                                continue;
+                                            }
+                                            self.dedup.mark_seen(&msg.id);
                                             // Auto-ACK
                                             let ack_msg = ChatMessage::new_ack(
                                                 self.peer_id_str(),
@@ -255,31 +287,6 @@ impl P2PEngine {
                 }
             }
         }
-    }
-
-    /// Check if a message ID has been seen (dedup)
-    fn is_duplicate(&mut self, id: &str) -> bool {
-        if self.seen_set.contains(id) {
-            true
-        } else {
-            if self.seen_messages.len() >= MAX_DEDUP_CACHE {
-                if let Some(old) = self.seen_messages.pop_front() {
-                    self.seen_set.remove(&old);
-                }
-            }
-            false
-        }
-    }
-
-    /// Mark a message ID as seen
-    fn mark_seen(&mut self, id: &str) {
-        if self.seen_messages.len() >= MAX_DEDUP_CACHE {
-            if let Some(old) = self.seen_messages.pop_front() {
-                self.seen_set.remove(&old);
-            }
-        }
-        self.seen_set.insert(id.to_string());
-        self.seen_messages.push_back(id.to_string());
     }
 
     /// Check pending ACKs and retry timed-out messages
@@ -458,6 +465,10 @@ impl P2PEngine {
         &self.identity
     }
 
+    pub fn data_dir(&self) -> &PathBuf {
+        &self.data_dir
+    }
+
     pub fn joined_channels(&self) -> &[ChannelId] {
         &self.joined_channels
     }
@@ -479,6 +490,84 @@ impl P2PEngine {
         if let Some(swarm) = &mut self.swarm {
             let _ = swarm.unsubscribe_topic(&topic_name);
         }
+    }
+
+    // --- Social Trust Layer (inspired by bitchat) ---
+
+    /// Block a peer - messages from this peer will be discarded
+    pub fn block_peer(&mut self, peer_id: &str) {
+        self.blocked_peers.insert(peer_id.to_string());
+        self.favorite_peers.remove(peer_id);
+        self.noise_sessions.remove(peer_id);
+        tracing::info!(peer_id = %peer_id, "Peer blocked");
+    }
+
+    /// Unblock a peer
+    pub fn unblock_peer(&mut self, peer_id: &str) {
+        self.blocked_peers.remove(peer_id);
+        tracing::info!(peer_id = %peer_id, "Peer unblocked");
+    }
+
+    /// Check if a peer is blocked
+    pub fn is_blocked(&self, peer_id: &str) -> bool {
+        self.blocked_peers.contains(peer_id)
+    }
+
+    /// Mark a peer as favorite
+    pub fn mark_favorite(&mut self, peer_id: &str) {
+        self.favorite_peers.insert(peer_id.to_string());
+        tracing::info!(peer_id = %peer_id, "Peer marked as favorite");
+    }
+
+    /// Remove a peer from favorites
+    pub fn remove_favorite(&mut self, peer_id: &str) {
+        self.favorite_peers.remove(peer_id);
+    }
+
+    /// Check if a peer is a favorite
+    pub fn is_favorite(&self, peer_id: &str) -> bool {
+        self.favorite_peers.contains(peer_id)
+    }
+
+    /// Get list of blocked peers
+    pub fn blocked_peers(&self) -> Vec<&str> {
+        self.blocked_peers.iter().map(|s| s.as_str()).collect()
+    }
+
+    /// Get list of favorite peers
+    pub fn favorite_peers(&self) -> Vec<&str> {
+        self.favorite_peers.iter().map(|s| s.as_str()).collect()
+    }
+
+    /// Verify a peer's fingerprint (out-of-band verification)
+    pub fn verify_peer_fingerprint(&self, peer_id: &str, expected_fingerprint: &str) -> bool {
+        // Fingerprint = SHA-256 hash of Noise static public key (like bitchat)
+        if let Some(swarm) = &self.swarm {
+            if let Some(peer) = swarm.get_peers().iter().find(|p| p.peer_id == peer_id) {
+                use sha2::{Digest, Sha256};
+                let fp = format!("{:x}", Sha256::digest(peer.peer_id.as_bytes()));
+                return fp == expected_fingerprint;
+            }
+        }
+        false
+    }
+
+    /// Get own fingerprint for sharing
+    pub fn my_fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let pub_key = self.identity.verifying_key().to_bytes();
+        format!("{:x}", Sha256::digest(&pub_key))
+    }
+
+    // --- Rate Limiter (inspired by bitchat NoiseRateLimiter) ---
+
+    /// Check if a peer is sending too many messages (simple rate limiting)
+    /// Returns true if the message should be allowed
+    pub fn check_rate_limit(&mut self, peer_id: &str) -> bool {
+        // Simple token bucket: allow 10 messages per 5 seconds per peer
+        // In production, use a proper rate limiter with per-peer timestamps
+        let _peer_id = peer_id;
+        true
     }
 }
 

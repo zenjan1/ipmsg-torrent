@@ -68,6 +68,9 @@ fn to_js_event(evt: &P2PEvent) -> JsEvent {
             from, file_ref.name
         )),
         P2PEvent::MessageDelivered(msg_id) => JsEvent::Status(format!("Message delivered: {}", msg_id)),
+        P2PEvent::PeerBlocked { peer_id } => JsEvent::Status(format!("Peer blocked: {}", peer_id)),
+        P2PEvent::PeerVerified { peer_id } => JsEvent::Status(format!("Peer verified: {}", peer_id)),
+        P2PEvent::FragmentComplete { message_id, .. } => JsEvent::Status(format!("Fragment assembled: {}", message_id)),
     }
 }
 

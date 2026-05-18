@@ -10,6 +10,8 @@ libp2p = { workspace = true }
 tokio = { workspace = true }
 ed25519-dalek = { workspace = true }
 x25519-dalek = { workspace = true }
+snow = { workspace = true }
+chacha20poly1305 = { workspace = true }
 rusqlite = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -23,3 +25,5 @@ rand = "0.8"
 serde = { workspace = true }
 serde_json = "1"
 serde_cbor = { workspace = true }
+lz4_flex = { workspace = true }
+sha2 = { workspace = true }

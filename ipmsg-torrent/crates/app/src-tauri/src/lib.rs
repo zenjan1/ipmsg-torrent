@@ -122,6 +122,9 @@ fn to_frontend_event(evt: &P2PEvent) -> FrontendEvent {
             from, file_ref.name
         )),
         P2PEvent::MessageDelivered(msg_id) => FrontendEvent::Status(format!("Message delivered: {}", msg_id)),
+        P2PEvent::PeerBlocked { peer_id } => FrontendEvent::Status(format!("Peer blocked: {}", peer_id)),
+        P2PEvent::PeerVerified { peer_id } => FrontendEvent::Status(format!("Peer verified: {}", peer_id)),
+        P2PEvent::FragmentComplete { message_id, .. } => FrontendEvent::Status(format!("Fragment assembled: {}", message_id)),
     }
 }
 

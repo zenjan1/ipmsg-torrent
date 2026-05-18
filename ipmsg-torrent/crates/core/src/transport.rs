@@ -15,6 +15,7 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::swarm::ToSwarm;
 use libp2p::{Multiaddr, PeerId, StreamProtocol, Swarm};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -123,6 +124,7 @@ impl P2PSwarm {
         platforms: &[String],
         _event_tx: &UnboundedSender<P2PEvent>,
         bootstrap_nodes: Vec<String>,
+        data_dir: &Path,
     ) -> Result<Self, P2PError> {
         let keypair = identity.to_keypair();
         let behaviour = IpMsgNetBehaviour::new(&keypair, username, platforms);
@@ -135,8 +137,10 @@ impl P2PSwarm {
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
             .build();
 
-        let store = MessageStore::new(std::path::Path::new("/tmp/ipmsg_msg.db"))
-            .unwrap_or_else(|_| panic!("Failed to create message store"));
+        std::fs::create_dir_all(data_dir).ok();
+        let db_path = data_dir.join("swarm_cache.db");
+        let store = MessageStore::new(&db_path)
+            .unwrap_or_else(|_| panic!("Failed to create swarm message store at {:?}", db_path));
 
         let mut swarm_obj = Self {
             swarm,
