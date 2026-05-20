@@ -1,0 +1,13 @@
+[package]
+name = "ipmsg-protocol"
+version.workspace = true
+edition.workspace = true
+description = "Wire protocol definitions for IPMsg-Torrent"
+
+[dependencies]
+serde = { workspace = true }
+serde_cbor = { workspace = true }
+chrono = { workspace = true }
+bs58 = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }

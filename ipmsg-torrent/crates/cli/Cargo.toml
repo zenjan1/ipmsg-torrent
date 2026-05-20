@@ -1,0 +1,16 @@
+[package]
+name = "ipmsg-cli"
+version.workspace = true
+edition.workspace = true
+description = "Terminal client for IPMsg-Torrent"
+
+[dependencies]
+ipmsg-core = { path = "../core" }
+ipmsg-protocol = { path = "../protocol" }
+tokio = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+futures = { workspace = true }
