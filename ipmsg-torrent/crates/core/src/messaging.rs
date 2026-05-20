@@ -1,3 +1,4 @@
+use ipmsg_protocol::message::ChannelId;
 use libp2p::PeerId;
 
 /// Gossipsub topic for presence announcements

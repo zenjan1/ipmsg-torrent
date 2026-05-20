@@ -1,7 +1,7 @@
 {
-  "productName": "ipmsg-torrent",
+  "productName": "PPX",
   "version": "2.0.0",
-  "identifier": "com.ipmsg.torrent",
+  "identifier": "com.ppx.chat",
   "build": {
     "frontendDist": "../dist"
   },
@@ -9,22 +9,29 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "IPMsg Torrent",
+        "title": "PPX - Decentralized P2P Chat",
         "width": 1024,
         "height": 768,
-        "resizable": true
+        "resizable": true,
+        "center": true
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'"
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ipc: http://ipc.localhost https://*; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["msi", "nsis"],
     "icon": [
       "icons/icon.png",
       "icons/icon@2x.png"
-    ]
+    ],
+    "resources": [],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    }
   }
 }
