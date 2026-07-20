@@ -30,7 +30,7 @@ struct Cli {
     #[arg(long)]
     join: Option<Vec<String>>,
     /// Run in headless mode (no TUI, log to stdout)
-    #[arg(long, default_value = "false")]
+    #[arg(long)]
     headless: bool,
 }
 
