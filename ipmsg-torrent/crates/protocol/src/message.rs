@@ -170,6 +170,55 @@ impl ChatMessage {
         }
     }
 
+    pub fn new_file_share_announce(from: PeerIdStr, shares: Vec<FileShareInfo>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            from,
+            to: None,
+            channel: None,
+            seq: 0,
+            timestamp: Utc::now(),
+            ttl: 0,
+            kind: MessageType::FileShareAnnounce { shares },
+            encrypted_payload: None,
+            signature: Vec::new(),
+            reply_to: None,
+        }
+    }
+
+    pub fn new_file_share_query(from: PeerIdStr, query: String, tags: Vec<String>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            from,
+            to: None,
+            channel: None,
+            seq: 0,
+            timestamp: Utc::now(),
+            ttl: 0,
+            kind: MessageType::FileShareQuery { query, tags },
+            encrypted_payload: None,
+            signature: Vec::new(),
+            reply_to: None,
+        }
+    }
+
+    pub fn new_file_share_response(from: PeerIdStr, results: Vec<FileShareInfo>) -> Self {
+        let responder = from.clone();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            from,
+            to: None,
+            channel: None,
+            seq: 0,
+            timestamp: Utc::now(),
+            ttl: 0,
+            kind: MessageType::FileShareResponse { results, responder },
+            encrypted_payload: None,
+            signature: Vec::new(),
+            reply_to: None,
+        }
+    }
+
     pub fn with_sequence(mut self, seq: u64) -> Self {
         self.seq = seq;
         self
@@ -272,6 +321,24 @@ pub enum MessageType {
         bio: Option<String>,
         avatar_hash: Option<String>,
     },
+    /// File share announcement (broadcast shared files to network)
+    FileShareAnnounce {
+        shares: Vec<FileShareInfo>,
+    },
+    /// File search query (search for files in nearby peers)
+    FileShareQuery {
+        query: String,
+        tags: Vec<String>,
+    },
+    /// File search response
+    FileShareResponse {
+        results: Vec<FileShareInfo>,
+        responder: PeerIdStr,
+    },
+    /// Nearby peer discovery info
+    NearbyDiscovery {
+        peer: NearbyPeer,
+    },
 }
 
 impl MessageType {
@@ -286,6 +353,10 @@ impl MessageType {
             MessageType::Command { .. } => "command",
             MessageType::Ack { .. } => "ack",
             MessageType::Profile { .. } => "profile",
+            MessageType::FileShareAnnounce { .. } => "file_share_announce",
+            MessageType::FileShareQuery { .. } => "file_share_query",
+            MessageType::FileShareResponse { .. } => "file_share_response",
+            MessageType::NearbyDiscovery { .. } => "nearby_discovery",
         }
     }
 }
@@ -359,6 +430,38 @@ pub enum FileTransferMsg {
         file_hash: String,
         indices: Vec<u32>,
     },
+}
+
+/// File share information
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FileShareInfo {
+    /// File reference
+    pub file_ref: FileRef,
+    /// Owner peer ID
+    pub owner: PeerIdStr,
+    /// Tags for search
+    pub tags: Vec<String>,
+    /// Optional description
+    pub description: Option<String>,
+    /// When this file was shared
+    pub created_at: DateTime<Utc>,
+}
+
+/// Nearby peer information
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct NearbyPeer {
+    /// Peer ID
+    pub peer_id: PeerIdStr,
+    /// Username
+    pub username: String,
+    /// Platforms
+    pub platforms: Vec<String>,
+    /// Number of shared files
+    pub shared_files_count: u32,
+    /// Last seen timestamp
+    pub last_seen: DateTime<Utc>,
+    /// RTT in milliseconds (if available)
+    pub rtt_ms: Option<u32>,
 }
 
 /// Geohash utility functions (inspired by BitChat location channels)

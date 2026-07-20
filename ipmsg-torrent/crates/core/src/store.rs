@@ -2,6 +2,7 @@ use chrono::DateTime;
 use ipmsg_protocol::message::ChatMessage;
 use rusqlite::{params, Connection, Result};
 use std::path::Path;
+use std::sync::Mutex;
 
 /// Peer info stored locally
 #[derive(Debug, Clone)]
@@ -16,7 +17,7 @@ pub struct PeerInfo {
 
 /// SQLite-backed message and peer store
 pub struct MessageStore {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl MessageStore {
@@ -69,15 +70,16 @@ impl MessageStore {
             [],
         )?;
 
-        Ok(Self { conn })
+        Ok(Self { conn: Mutex::new(conn) })
     }
 
     pub fn save_message(&self, msg: &ChatMessage) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
         let content = serde_cbor::to_vec(&msg.kind).unwrap_or_default();
         let channel = msg.channel.as_ref().map(|c| format!("{:?}", c));
 
         // Try INSERT, if conflict (duplicate ID) do UPDATE
-        self.conn.execute(
+        conn.execute(
             "INSERT OR REPLACE INTO messages
              (id, from_peer, to_peer, channel, kind, content, seq, timestamp, signature)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -97,7 +99,8 @@ impl MessageStore {
     }
 
     pub fn get_messages(&self, peer_id: &str, limit: u32) -> Vec<ChatMessage> {
-        let mut stmt = match self.conn.prepare(
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
             "SELECT id, from_peer, to_peer, kind, content, seq, timestamp, signature
              FROM messages
              WHERE from_peer = ?1 OR to_peer = ?1
@@ -155,7 +158,8 @@ impl MessageStore {
 
     /// Get messages for a specific channel
     pub fn get_channel_messages(&self, channel: &str, limit: u32) -> Vec<ChatMessage> {
-        let mut stmt = match self.conn.prepare(
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
             "SELECT id, from_peer, to_peer, kind, content, seq, timestamp, signature
              FROM messages
              WHERE channel = ?1
@@ -212,7 +216,8 @@ impl MessageStore {
     }
 
     pub fn upsert_peer(&self, info: &PeerInfo) -> Result<()> {
-        self.conn.execute(
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
             "INSERT INTO peers (peer_id, username, public_key, platforms, last_seen, first_seen)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(peer_id) DO UPDATE SET
@@ -231,7 +236,8 @@ impl MessageStore {
     }
 
     pub fn get_all_peers(&self) -> Vec<PeerInfo> {
-        let mut stmt = match self.conn.prepare(
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
             "SELECT peer_id, username, public_key, platforms, last_seen, first_seen
              FROM peers ORDER BY last_seen DESC",
         ) {
@@ -279,7 +285,8 @@ impl MessageStore {
     }
 
     pub fn cleanup_stale_peers(&self, max_age_secs: i64) -> Result<usize> {
-        let deleted = self.conn.execute(
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute(
             "DELETE FROM peers WHERE last_seen < datetime('now', ?1 || ' seconds')",
             params![format!("-{}", max_age_secs)],
         )?;

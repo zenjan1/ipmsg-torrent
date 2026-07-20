@@ -6,12 +6,14 @@ pub mod store;
 pub mod noise;
 pub mod bloom;
 pub mod fragment;
+pub mod file_sharing;
 
 pub use identity::Identity;
 pub use store::{MessageStore, PeerInfo};
 pub use bloom::DedupCache;
 pub use fragment::{FragmentManager, FragmentMsg};
 pub use noise::NoiseSessionManager;
+pub use file_sharing::FileSharingManager;
 
 use futures::StreamExt;
 use ipmsg_protocol::message::{ChatMessage, ChannelId};
@@ -68,6 +70,16 @@ pub enum P2PEvent {
     PeerVerified { peer_id: String },
     /// Fragment reassembly complete
     FragmentComplete { message_id: String, data: Vec<u8> },
+    /// File share announcement received
+    FileShareAnnounce {
+        from: String,
+        shares: Vec<ipmsg_protocol::message::FileShareInfo>,
+    },
+    /// File search response received
+    FileSearchResponse {
+        from: String,
+        results: Vec<ipmsg_protocol::message::FileShareInfo>,
+    },
 }
 
 /// Peer info returned by list_peers
@@ -90,6 +102,18 @@ pub enum SendCommand {
     SendAck { message_ids: Vec<String> },
     SendTyping { to: String },
     UpdateProfile { username: String, bio: Option<String> },
+    /// Share a file with the network
+    ShareFile {
+        path: PathBuf,
+        tags: Vec<String>,
+        description: Option<String>,
+    },
+    /// Stop sharing a file
+    UnshareFile { hash: String },
+    /// Search for files in the network
+    SearchFiles { query: String, tags: Vec<String> },
+    /// List all shared files (local and discovered)
+    ListFiles,
 }
 
 /// Tracks a pending message awaiting ACK
@@ -125,6 +149,8 @@ pub struct P2PEngine {
     /// Fragment manager for large messages
     #[allow(dead_code)]
     fragment_manager: FragmentManager,
+    /// File sharing manager
+    file_sharing: FileSharingManager,
     /// Social trust: blocked peer IDs
     blocked_peers: HashSet<String>,
     /// Social trust: favorite peer IDs
@@ -141,6 +167,10 @@ impl P2PEngine {
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Initialize file sharing manager
+        let files_dir = data_dir.join("shared_files");
+        let file_sharing = FileSharingManager::new(files_dir);
 
         Ok(Self {
             identity,
@@ -159,6 +189,7 @@ impl P2PEngine {
             pending_acks: HashMap::new(),
             noise_sessions: NoiseSessionManager::new(NOISE_REKEY_THRESHOLD),
             fragment_manager: FragmentManager::new(),
+            file_sharing,
             blocked_peers: HashSet::new(),
             favorite_peers: HashSet::new(),
         })
@@ -276,6 +307,18 @@ impl P2PEngine {
                             }
                             Some(SendCommand::UpdateProfile { username, bio }) => {
                                 let _ = self.update_profile(&username, bio.as_deref());
+                            }
+                            Some(SendCommand::ShareFile { path, tags, description }) => {
+                                let _ = self.share_file(path, tags, description).await;
+                            }
+                            Some(SendCommand::UnshareFile { hash }) => {
+                                let _ = self.unshare_file(&hash).await;
+                            }
+                            Some(SendCommand::SearchFiles { query, tags }) => {
+                                let _ = self.search_files(&query, &tags).await;
+                            }
+                            Some(SendCommand::ListFiles) => {
+                                let _ = self.list_files().await;
                             }
                             None => break,
                         }
@@ -568,6 +611,76 @@ impl P2PEngine {
         // In production, use a proper rate limiter with per-peer timestamps
         let _peer_id = peer_id;
         true
+    }
+
+    // --- File Sharing ---
+
+    /// Share a file with the network
+    pub async fn share_file(
+        &mut self,
+        path: PathBuf,
+        tags: Vec<String>,
+        description: Option<String>,
+    ) -> Result<(), P2PError> {
+        let info = self.file_sharing.share_file(&path, tags, description, self.peer_id_str()).await?;
+        
+        // Broadcast file share announcement
+        let msg = ChatMessage::new_file_share_announce(
+            self.peer_id_str(),
+            vec![info.clone()],
+        );
+        
+        if let Some(swarm) = &mut self.swarm {
+            swarm.publish_to_topic(crate::messaging::FILE_TOPIC, ipmsg_protocol::codec::encode_message(&msg))
+                .map_err(|e| P2PError::Network(e.to_string()))?;
+        }
+        
+        tracing::info!(file = %info.file_ref.name, "File shared successfully");
+        Ok(())
+    }
+
+    /// Stop sharing a file
+    pub async fn unshare_file(&mut self, hash: &str) -> Result<(), P2PError> {
+        self.file_sharing.unshare_file(hash).await;
+        tracing::info!(hash = %hash, "File unshared");
+        Ok(())
+    }
+
+    /// Search for files in the network
+    pub async fn search_files(&mut self, query: &str, tags: &[String]) -> Result<(), P2PError> {
+        // Broadcast search query
+        let msg = ChatMessage::new_file_share_query(
+            self.peer_id_str(),
+            query.to_string(),
+            tags.to_vec(),
+        );
+        
+        if let Some(swarm) = &mut self.swarm {
+            swarm.publish_to_topic(crate::messaging::FILE_TOPIC, ipmsg_protocol::codec::encode_message(&msg))
+                .map_err(|e| P2PError::Network(e.to_string()))?;
+        }
+        
+        tracing::info!(query = %query, "File search query broadcasted");
+        Ok(())
+    }
+
+    /// List all shared files (local and discovered)
+    pub async fn list_files(&mut self) -> Result<(), P2PError> {
+        let shared = self.file_sharing.list_shared_files().await;
+        let discovered = self.file_sharing.list_discovered_files().await;
+        
+        tracing::info!(
+            shared_count = shared.len(),
+            discovered_count = discovered.len(),
+            "Listed files"
+        );
+        
+        Ok(())
+    }
+
+    /// Get file sharing manager reference
+    pub fn file_sharing(&self) -> &FileSharingManager {
+        &self.file_sharing
     }
 }
 

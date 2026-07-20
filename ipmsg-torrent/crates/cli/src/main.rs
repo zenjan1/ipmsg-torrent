@@ -47,6 +47,10 @@ enum Command {
     Ping,
     #[allow(dead_code)] // Planned: file transfer support
     File { target: String, path: String },
+    Share { path: String, tags: Vec<String> },
+    Unshare { hash: String },
+    Search { query: String, tags: Vec<String> },
+    Files,
     Clear,
     Quit,
     Unknown(String),
@@ -86,6 +90,37 @@ fn parse_command(input: &str) -> Command {
             if parts.len() >= 3 { Command::File { target: parts[1].to_string(), path: parts[2].to_string() } }
             else { Command::Unknown("/file <peer> <path>".to_string()) }
         }
+        "share" => {
+            if parts.len() >= 2 {
+                let path = parts[1].to_string();
+                let tags = if parts.len() >= 3 {
+                    parts[2].split(',').map(|s| s.trim().to_string()).collect()
+                } else {
+                    Vec::new()
+                };
+                Command::Share { path, tags }
+            } else {
+                Command::Unknown("/share <path> [tags]".to_string())
+            }
+        }
+        "unshare" => {
+            if parts.len() >= 2 { Command::Unshare { hash: parts[1].to_string() } }
+            else { Command::Unknown("/unshare <hash>".to_string()) }
+        }
+        "search" => {
+            if parts.len() >= 2 {
+                let query = parts[1].to_string();
+                let tags = if parts.len() >= 3 {
+                    parts[2].split(',').map(|s| s.trim().to_string()).collect()
+                } else {
+                    Vec::new()
+                };
+                Command::Search { query, tags }
+            } else {
+                Command::Unknown("/search <query> [tags]".to_string())
+            }
+        }
+        "files" => Command::Files,
         "clear" | "cls" => Command::Clear,
         "quit" | "exit" | "q" => Command::Quit,
         _ => Command::Unknown(input.to_string()),
@@ -103,6 +138,10 @@ fn command_help() -> String {
         "/leave <name>  - Leave a channel",
         "/who           - Show online peers",
         "/ping          - Pong!",
+        "/share <path> [tags] - Share a file with the network",
+        "/unshare <hash> - Stop sharing a file",
+        "/search <query> [tags] - Search for files in the network",
+        "/files         - List all shared files",
         "/clear         - Clear messages",
         "/quit          - Exit",
     ].join("\n")
@@ -533,6 +572,30 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
         Command::File { .. } => {
             let mut s = state.lock().await;
             s.add_system_message("main", "File transfer not yet implemented".to_string());
+        }
+        Command::Share { path, tags } => {
+            let _ = cmd_tx.send(SendCommand::ShareFile { 
+                path: PathBuf::from(path), 
+                tags,
+                description: None,
+            });
+            let mut s = state.lock().await;
+            s.add_system_message("main", "Sharing file...".to_string());
+        }
+        Command::Unshare { hash } => {
+            let _ = cmd_tx.send(SendCommand::UnshareFile { hash });
+            let mut s = state.lock().await;
+            s.add_system_message("main", "File unshared".to_string());
+        }
+        Command::Search { query, tags } => {
+            let _ = cmd_tx.send(SendCommand::SearchFiles { query, tags });
+            let mut s = state.lock().await;
+            s.add_system_message("main", "Searching for files...".to_string());
+        }
+        Command::Files => {
+            let _ = cmd_tx.send(SendCommand::ListFiles);
+            let mut s = state.lock().await;
+            s.add_system_message("main", "Listing shared files...".to_string());
         }
     }
 }

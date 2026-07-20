@@ -27,3 +27,4 @@ serde_json = "1"
 serde_cbor = { workspace = true }
 lz4_flex = { workspace = true }
 sha2 = { workspace = true }
+mime_guess = "2.0"
