@@ -75,6 +75,15 @@ mod inner {
             ).map_err(|e| StoreError(e.to_string()))?;
 
             conn.execute(
+                "CREATE TABLE IF NOT EXISTS peer_addresses (
+                    peer_id TEXT NOT NULL,
+                    addr TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (peer_id, addr)
+                )", [],
+            ).map_err(|e| StoreError(e.to_string()))?;
+
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(from_peer, timestamp DESC)", [],
             ).map_err(|e| StoreError(e.to_string()))?;
             conn.execute(
@@ -211,6 +220,43 @@ mod inner {
             messages.reverse();
             messages
         }
+
+        pub fn save_peer_addresses(&self, peer_id: &str, addrs: &[String]) -> Result<()> {
+            let conn = self.conn.lock().unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            for addr in addrs {
+                conn.execute(
+                    "INSERT INTO peer_addresses (peer_id, addr, updated_at)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(peer_id, addr) DO UPDATE SET updated_at = excluded.updated_at",
+                    params![peer_id, addr, now],
+                ).map_err(|e| StoreError(e.to_string()))?;
+            }
+            Ok(())
+        }
+
+        pub fn get_known_addresses(&self, max_age_days: i64) -> Vec<(String, Vec<String>)> {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = match conn.prepare(
+                "SELECT peer_id, addr FROM peer_addresses
+                 WHERE updated_at >= datetime('now', ?1 || ' days')
+                 ORDER BY updated_at DESC",
+            ) {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
+            let rows = match stmt.query_map(params![format!("-{}", max_age_days)], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) {
+                Ok(r) => r,
+                Err(_) => return Vec::new(),
+            };
+            let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            for row in rows.flatten() {
+                map.entry(row.0).or_default().push(row.1);
+            }
+            map.into_iter().collect()
+        }
     }
 
     fn decode_message_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
@@ -244,6 +290,7 @@ mod inner {
     pub struct MessageStore {
         messages: RefCell<Vec<ChatMessage>>,
         peers: RefCell<HashMap<String, PeerInfo>>,
+        peer_addresses: RefCell<HashMap<String, Vec<(String, chrono::DateTime<chrono::Utc>)>>>,
     }
 
     impl MessageStore {
@@ -251,6 +298,7 @@ mod inner {
             Ok(Self {
                 messages: RefCell::new(Vec::new()),
                 peers: RefCell::new(HashMap::new()),
+                peer_addresses: RefCell::new(HashMap::new()),
             })
         }
 
@@ -332,6 +380,35 @@ mod inner {
             result.truncate(limit as usize);
             result.reverse();
             result
+        }
+
+        pub fn save_peer_addresses(&self, peer_id: &str, addrs: &[String]) -> Result<()> {
+            let mut all = self.peer_addresses.borrow_mut();
+            let now = chrono::Utc::now();
+            let entry = all.entry(peer_id.to_string()).or_default();
+            for addr in addrs {
+                if let Some(existing) = entry.iter_mut().find(|(a, _)| a == addr) {
+                    existing.1 = now;
+                } else {
+                    entry.push((addr.clone(), now));
+                }
+            }
+            Ok(())
+        }
+
+        pub fn get_known_addresses(&self, max_age_days: i64) -> Vec<(String, Vec<String>)> {
+            let all = self.peer_addresses.borrow();
+            let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days);
+            all.iter()
+                .map(|(peer_id, addrs)| {
+                    let filtered: Vec<String> = addrs.iter()
+                        .filter(|(_, ts)| *ts > cutoff)
+                        .map(|(a, _)| a.clone())
+                        .collect();
+                    (peer_id.clone(), filtered)
+                })
+                .filter(|(_, addrs)| !addrs.is_empty())
+                .collect()
         }
     }
 }

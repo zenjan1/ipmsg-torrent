@@ -149,6 +149,7 @@ impl P2PSwarm {
         platforms: &[String],
         _event_tx: &UnboundedSender<P2PEvent>,
         bootstrap_nodes: Vec<String>,
+        known_addrs: Vec<(String, Vec<String>)>,
         data_dir: &Path,
     ) -> Result<Self, P2PError> {
         let keypair = identity.to_keypair();
@@ -197,6 +198,19 @@ impl P2PSwarm {
                     swarm_obj.connected_peers.insert(peer_id);
                     tracing::info!(%peer_id, %addr, "Added bootstrap node");
                 }
+            }
+        }
+
+        // Dial known peers from previous sessions (bootstrap from persistence)
+        for (peer_id_str, addrs) in &known_addrs {
+            if let Ok(peer_id) = peer_id_str.parse::<PeerId>() {
+                for addr_str in addrs {
+                    if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+                        swarm_obj.swarm.behaviour_mut().add_kademlia_peer(peer_id, addr.clone());
+                        let _ = swarm_obj.swarm.dial(addr);
+                    }
+                }
+                tracing::info!(%peer_id, addrs = addrs.len(), "Added known peer from store");
             }
         }
 
@@ -283,6 +297,14 @@ impl P2PSwarm {
         self.peers.values().cloned().collect()
     }
 
+    /// Trigger a Kademlia bootstrap to refresh the DHT routing table
+    pub fn bootstrap_kademlia(&mut self) {
+        match self.swarm.behaviour_mut().kademlia.bootstrap() {
+            Ok(query_id) => tracing::debug!(?query_id, "Kademlia bootstrap started"),
+            Err(e) => tracing::warn!(%e, "Kademlia bootstrap failed"),
+        }
+    }
+
     fn on_gossipsub_message(&mut self, msg: &gossipsub::Message) -> Vec<P2PEvent> {
         let mut events = Vec::new();
         let topic = msg.topic.as_str();
@@ -347,11 +369,25 @@ impl P2PSwarm {
 
         if is_new {
             events.push(P2PEvent::PeerJoined {
-                peer_id: pid_str,
+                peer_id: pid_str.clone(),
                 username,
                 platforms,
             });
         }
+
+        // Collect peer's listen addresses for bootstrap persistence
+        let addrs: Vec<String> = info.listen_addrs.iter().map(|a| a.to_string()).collect();
+        if !addrs.is_empty() {
+            // Add addresses to Kademlia routing table
+            for addr in &info.listen_addrs {
+                self.swarm.behaviour_mut().add_kademlia_peer(info.public_key.to_peer_id(), addr.clone());
+            }
+            events.push(P2PEvent::PeerAddressesDiscovered {
+                peer_id: pid_str,
+                addrs,
+            });
+        }
+
         events
     }
 
@@ -607,6 +643,14 @@ impl futures::Stream for P2PSwarm {
                             tracing::info!("Listening on {}", address);
                             events.push(P2PEvent::Status(format!("listening on {}", address)));
                         }
+                        SwarmEvent::NewExternalAddrCandidate { address } => {
+                            tracing::info!("External address candidate: {}", address);
+                            events.push(P2PEvent::ExternalAddress(address.to_string()));
+                        }
+                        SwarmEvent::ExternalAddrConfirmed { address } => {
+                            tracing::info!("External address confirmed: {}", address);
+                            events.push(P2PEvent::ExternalAddress(address.to_string()));
+                        }
                         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                             tracing::info!("Connected to {}", peer_id);
                         }
@@ -616,7 +660,26 @@ impl futures::Stream for P2PSwarm {
                             self.peers.remove(&pid_str);
                             events.push(P2PEvent::PeerLeft { peer_id: pid_str });
                         }
-                        SwarmEvent::Behaviour(_) => {
+                        SwarmEvent::Behaviour(behaviour_evt) => {
+                            // Handle Identify events directly from the swarm event
+                            if let IpMsgNetBehaviourEvent::Identify(identify::Event::Received { info, .. }) = behaviour_evt {
+                                let new = self.on_identify_received(&info);
+                                events.extend(new);
+                            }
+                            // Handle mDNS events directly
+                            if let IpMsgNetBehaviourEvent::Mdns(libp2p::mdns::Event::Discovered(peers)) = behaviour_evt {
+                                for (peer_id, addr) in peers {
+                                    let new = self.on_mdns_discovered(&peer_id, &addr);
+                                    events.extend(new);
+                                }
+                            }
+                            if let IpMsgNetBehaviourEvent::Mdns(libp2p::mdns::Event::Expired(peers)) = behaviour_evt {
+                                for (peer_id, _addr) in peers {
+                                    let new = self.on_mdns_expired(&peer_id);
+                                    events.extend(new);
+                                }
+                            }
+                            // Drain remaining behaviour events (gossipsub, file_transfer, relay, etc.)
                             let new = self.drain_behaviour_events();
                             events.extend(new);
                         }

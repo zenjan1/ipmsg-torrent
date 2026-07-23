@@ -327,6 +327,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     println!("Peer left: {}", &pid[..8.min(pid.len())]);
                                 }
                                 P2PEvent::Status(st) => { println!("Status: {}", st); }
+                                P2PEvent::ExternalAddress(addr) => {
+                                    println!("External address: {}", addr);
+                                }
                                 _ => {}
                             }
                         }
@@ -418,6 +421,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     s.set_status(format!("{} is typing...", from));
                 }
                 P2PEvent::Status(st) => { s.set_status(st); }
+                P2PEvent::ExternalAddress(addr) => {
+                    s.add_system_message("main", format!("External address: {}", addr));
+                }
+                P2PEvent::PeerAddressesDiscovered { peer_id, addrs } => {
+                    tracing::debug!(%peer_id, count = addrs.len(), "Peer addresses saved for bootstrap");
+                }
                 P2PEvent::LegacyPeerDiscovered { name, host, ip } => {
                     s.add_system_message("main", format!("Legacy IPMSG peer discovered: {}@{} ({})", name, host, ip));
                 }

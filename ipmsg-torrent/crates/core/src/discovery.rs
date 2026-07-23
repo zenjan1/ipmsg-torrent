@@ -13,6 +13,15 @@ pub const DEFAULT_BOOTSTRAP_NODES: &[&str] = &[
     // /ip4/5.6.7.8/udp/4001/quic-v1/p2p/12D3KooW...,
 ];
 
+/// Interval between periodic Kademlia bootstrap calls (seconds)
+pub const BOOTSTRAP_INTERVAL_SECS: u64 = 300;
+
+/// Maximum number of known peer addresses to persist
+pub const MAX_KNOWN_ADDRS: usize = 200;
+
+/// How long to keep known peer addresses (days)
+pub const KNOWN_ADDR_MAX_AGE_DAYS: i64 = 7;
+
 /// LAN multicast address for mDNS discovery
 pub const MDNS_SERVICE_NAME: &str = "_ipmsg._udp.local.";
 

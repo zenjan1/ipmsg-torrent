@@ -138,6 +138,10 @@ pub enum P2PEvent {
         from: String,
         request: crate::file_transfer::FileTransferRequest,
     },
+    /// Peer addresses discovered via Identify protocol (saved for bootstrap)
+    PeerAddressesDiscovered { peer_id: String, addrs: Vec<String> },
+    /// Our external address was discovered or confirmed
+    ExternalAddress(String),
     /// Legacy IPMSG peer discovered
     #[cfg(not(target_arch = "wasm32"))]
     LegacyPeerDiscovered { name: String, host: String, ip: IpAddr },
@@ -242,6 +246,8 @@ pub struct P2PEngine {
     blocked_peers: HashSet<String>,
     /// Social trust: favorite peer IDs
     favorite_peers: HashSet<String>,
+    /// Counter for periodic Kademlia bootstrap (ticks every ACK_TIMEOUT_SECS)
+    bootstrap_counter: u64,
 }
 
 impl P2PEngine {
@@ -283,6 +289,7 @@ impl P2PEngine {
             ipmsg_compat: None,
             blocked_peers: HashSet::new(),
             favorite_peers: HashSet::new(),
+            bootstrap_counter: 0,
         })
     }
 
@@ -294,12 +301,16 @@ impl P2PEngine {
         self.username = username.clone();
         self.platforms = detect_platforms();
 
+        let known_addrs = self.store.get_known_addresses(crate::discovery::KNOWN_ADDR_MAX_AGE_DAYS);
+        tracing::info!(count = known_addrs.len(), "Loaded known peer addresses for bootstrap");
+
         let swarm = transport::P2PSwarm::new(
             &self.identity,
             &self.username,
             &self.platforms,
             &self.event_tx,
             bootstrap_nodes,
+            known_addrs,
             &self.data_dir,
         )
         .await?;
@@ -394,6 +405,10 @@ impl P2PEngine {
                                                 }
                                             }
                                             continue;
+                                        }
+                                        P2PEvent::PeerAddressesDiscovered { peer_id, addrs } => {
+                                            let _ = self.store.save_peer_addresses(peer_id, addrs);
+                                            evt
                                         }
                                         _ => evt,
                                     };
@@ -537,6 +552,15 @@ impl P2PEngine {
                         #[cfg(not(target_arch = "wasm32"))]
                         if let Some(compat) = &self.ipmsg_compat {
                             compat.cleanup_stale_peers().await;
+                        }
+                        // Periodic Kademlia bootstrap
+                        self.bootstrap_counter += 1;
+                        let threshold = crate::discovery::BOOTSTRAP_INTERVAL_SECS / ACK_TIMEOUT_SECS;
+                        if self.bootstrap_counter >= threshold {
+                            self.bootstrap_counter = 0;
+                            if let Some(swarm) = self.swarm.as_mut() {
+                                swarm.bootstrap_kademlia();
+                            }
                         }
                     }
                 }
