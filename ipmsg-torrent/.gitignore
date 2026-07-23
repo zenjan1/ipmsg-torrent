@@ -9,5 +9,4 @@ Cargo.lock
 .DS_Store
 
 /crates/app/src-tauri/gen/
-/crates/app/dist/
 

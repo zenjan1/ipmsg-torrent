@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IPMsg Torrent</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="login-screen" class="screen">
+        <div class="login-card">
+            <h1>&#x1F4E1; IPMsg Torrent</h1>
+            <p class="subtitle">Decentralized P2P Chat</p>
+            <input type="text" id="username-input" placeholder="Username" autocomplete="off" autofocus>
+            <button id="connect-btn" onclick="connect()">Connect</button>
+        </div>
+    </div>
+
+    <div id="chat-screen" class="screen hidden">
+        <div id="sidebar">
+            <div class="sidebar-header">
+                <span id="my-id" class="peer-id-tag" title="My Peer ID"></span>
+            </div>
+            <div class="section-title">Channels</div>
+            <div id="channel-list"></div>
+            <div class="section-title">Peers <span id="peer-count">0</span></div>
+            <div id="peer-list"></div>
+            <div class="sidebar-footer">
+                <input type="text" id="channel-input" placeholder="Channel name">
+                <button onclick="joinChannel()">+</button>
+            </div>
+        </div>
+
+        <div id="chat-area">
+            <div id="chat-header">
+                <span id="current-channel">General</span>
+                <span id="status-text"></span>
+            </div>
+            <div id="messages"></div>
+            <div id="input-area">
+                <input type="text" id="msg-input" placeholder="Message..." autocomplete="off">
+                <button onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
