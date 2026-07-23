@@ -82,6 +82,7 @@ fn to_js_event(evt: &P2PEvent) -> JsEvent {
         P2PEvent::NearbyPeerDiscovered { peer } => JsEvent::Status(format!("Nearby peer: {} ({})", peer.username, peer.peer_id)),
         P2PEvent::SearchResults { query, results } => JsEvent::Status(format!("Search '{}': {} results", query, results.len())),
         P2PEvent::FileTransferRequestReceived { from, .. } => JsEvent::Status(format!("File transfer request from {}", from)),
+        _ => JsEvent::Status(format!("Event: {:?}", evt)),
     }
 }
 

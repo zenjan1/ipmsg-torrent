@@ -416,6 +416,16 @@ pub fn init() -> tauri::plugin::TauriPlugin<tauri::Wry> {
             p2p_leave_channel,
             p2p_peer_id,
             p2p_username,
+            p2p_share_file,
+            p2p_unshare_file,
+            p2p_search_files,
+            p2p_download_file,
+            p2p_block_peer,
+            p2p_unblock_peer,
+            p2p_fingerprint,
+            p2p_search_messages,
+            p2p_start_ipmsg_compat,
+            p2p_send_ipmsg,
         ])
         .setup(|app, _api| {
             let data_dir = app

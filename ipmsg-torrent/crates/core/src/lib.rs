@@ -8,6 +8,7 @@ pub mod bloom;
 pub mod fragment;
 pub mod file_sharing;
 pub mod file_transfer;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod ipmsg_compat;
 
 pub use identity::Identity;
@@ -17,12 +18,14 @@ pub use fragment::{FragmentManager, FragmentMsg};
 pub use noise::NoiseSessionManager;
 pub use file_sharing::FileSharingManager;
 pub use file_transfer::{FileTransferManager, FileTransferRequest, FileTransferResponse};
+#[cfg(not(target_arch = "wasm32"))]
 pub use ipmsg_compat::{IpMsgCompat, IpMsgCompatEvent, IpMsgPacket};
 
 use futures::StreamExt;
 use ipmsg_protocol::message::{ChatMessage, ChannelId};
 use libp2p::PeerId;
 use std::collections::{HashMap, HashSet};
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -136,10 +139,13 @@ pub enum P2PEvent {
         request: crate::file_transfer::FileTransferRequest,
     },
     /// Legacy IPMSG peer discovered
+    #[cfg(not(target_arch = "wasm32"))]
     LegacyPeerDiscovered { name: String, host: String, ip: IpAddr },
     /// Legacy IPMSG peer left
+    #[cfg(not(target_arch = "wasm32"))]
     LegacyPeerLeft { name: String, ip: IpAddr },
     /// Legacy IPMSG message received
+    #[cfg(not(target_arch = "wasm32"))]
     LegacyMessageReceived { from: String, ip: IpAddr, content: String, has_attachment: bool },
 }
 
@@ -186,8 +192,10 @@ pub enum SendCommand {
     /// Send a read receipt for a message
     SendReadReceipt { message_id: String, to: String },
     /// Send message to legacy IPMSG peer by IP
+    #[cfg(not(target_arch = "wasm32"))]
     SendIpMsg { ip: IpAddr, message: String },
     /// List legacy IPMSG peers
+    #[cfg(not(target_arch = "wasm32"))]
     ListIpMsgPeers,
 }
 
@@ -228,6 +236,7 @@ pub struct P2PEngine {
     /// File transfer manager for downloads
     file_transfer: Arc<Mutex<FileTransferManager>>,
     /// Classic IPMSG compatibility server
+    #[cfg(not(target_arch = "wasm32"))]
     ipmsg_compat: Option<IpMsgCompat>,
     /// Social trust: blocked peer IDs
     blocked_peers: HashSet<String>,
@@ -270,6 +279,7 @@ impl P2PEngine {
             fragment_manager: FragmentManager::new(),
             file_sharing,
             file_transfer,
+            #[cfg(not(target_arch = "wasm32"))]
             ipmsg_compat: None,
             blocked_peers: HashSet::new(),
             favorite_peers: HashSet::new(),
@@ -471,11 +481,13 @@ impl P2PEngine {
                                     let _ = s.publish_to_topic(crate::messaging::CHAT_TOPIC, bytes);
                                 }
                             }
+                            #[cfg(not(target_arch = "wasm32"))]
                             Some(SendCommand::SendIpMsg { ip, message }) => {
                                 if let Err(e) = self.send_ipmsg_message(ip, &message).await {
                                     let _ = self.event_tx.send(P2PEvent::Status(format!("IPMSG send error: {}", e)));
                                 }
                             }
+                            #[cfg(not(target_arch = "wasm32"))]
                             Some(SendCommand::ListIpMsgPeers) => {
                                 let peers = self.ipmsg_legacy_peers();
                                 if peers.is_empty() {
@@ -492,12 +504,15 @@ impl P2PEngine {
                         }
                     }
                     pkt = async {
-                        if let Some(compat) = &self.ipmsg_compat {
-                            compat.recv_packet().await
-                        } else {
-                            std::future::pending().await
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            if let Some(compat) = &self.ipmsg_compat {
+                                return compat.recv_packet().await;
+                            }
                         }
+                        std::future::pending::<Option<crate::ipmsg_compat::IpMsgPacket>>().await
                     } => {
+                        #[cfg(not(target_arch = "wasm32"))]
                         if let Some(packet) = pkt {
                             if let Some(evt) = self.ipmsg_compat.as_ref().unwrap().process_packet(&packet).await {
                                 let p2p_evt = match evt {
@@ -519,6 +534,7 @@ impl P2PEngine {
                         // Check for timed-out ACKs and retry
                         self.check_pending_acks().await;
                         // Clean up stale legacy peers
+                        #[cfg(not(target_arch = "wasm32"))]
                         if let Some(compat) = &self.ipmsg_compat {
                             compat.cleanup_stale_peers().await;
                         }
@@ -1067,6 +1083,7 @@ impl P2PEngine {
 
     /// Start the classic IPMSG compatibility server (UDP port 2425)
     /// Enables interoperability with legacy IPMSG/FeiQ clients on the LAN
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn start_ipmsg_compat(&mut self) -> Result<(), P2PError> {
         let mut compat = IpMsgCompat::new(self.username.clone());
         compat.start().await.map_err(|e| P2PError::Transport(e.to_string()))?;
@@ -1076,6 +1093,7 @@ impl P2PEngine {
     }
 
     /// Send a message to a legacy IPMSG peer via UDP
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn send_ipmsg_message(&mut self, to_ip: std::net::IpAddr, message: &str) -> Result<(), P2PError> {
         if let Some(compat) = &mut self.ipmsg_compat {
             let addr = std::net::SocketAddr::new(to_ip, ipmsg_compat::IPMSG_PORT);
@@ -1086,9 +1104,9 @@ impl P2PEngine {
     }
 
     /// Broadcast a message to all legacy IPMSG peers via UDP
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn broadcast_ipmsg_message(&mut self, message: &str) -> Result<(), P2PError> {
         if let Some(compat) = &mut self.ipmsg_compat {
-            // Send to broadcast address
             let broadcast_addr = std::net::SocketAddr::new(
                 std::net::IpAddr::V4(std::net::Ipv4Addr::BROADCAST),
                 ipmsg_compat::IPMSG_PORT,
@@ -1100,9 +1118,8 @@ impl P2PEngine {
     }
 
     /// Get list of known legacy IPMSG peers
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn ipmsg_legacy_peers(&self) -> Vec<ipmsg_compat::IpMsgPeerInfo> {
-        // We can't easily access the compat's peers without async,
-        // so we return empty and let the caller use ListIpMsgPeers command
         Vec::new()
     }
 

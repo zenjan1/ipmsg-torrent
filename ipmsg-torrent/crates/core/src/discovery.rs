@@ -16,17 +16,10 @@ pub const DEFAULT_BOOTSTRAP_NODES: &[&str] = &[
 /// LAN multicast address for mDNS discovery
 pub const MDNS_SERVICE_NAME: &str = "_ipmsg._udp.local.";
 
-/// Gossipsub topic for presence announcements
-pub const PRESENCE_TOPIC: &str = "ipmsg-presence-v1";
-
-/// Gossipsub topic for chat messages
-pub const CHAT_TOPIC: &str = "ipmsg-chat-v1";
-
-/// Gossipsub topic for file transfer metadata
-pub const FILE_TOPIC: &str = "ipmsg-files-v1";
-
 /// Kademlia protocol name
 pub const KADEMLIA_PROTOCOL: &str = "/ipmsg/kad/1.0.0";
+
+// Topic constants are defined in crate::messaging
 
 /// Parse a bootstrap node address string
 pub fn parse_bootstrap_addr(addr: &str) -> Option<(PeerId, libp2p::Multiaddr)> {
