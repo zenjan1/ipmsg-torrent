@@ -393,7 +393,7 @@ async fn p2p_send_ipmsg(
     args: SendMessageArgs,
 ) -> Result<(), String> {
     let ip: std::net::IpAddr = args.to.parse().map_err(|e: std::net::AddrParseError| e.to_string())?;
-    let engine = state.engine.lock().await;
+    let mut engine = state.engine.lock().await;
     engine.send_ipmsg_message(ip, &args.content)
         .await
         .map_err(|e| e.to_string())
