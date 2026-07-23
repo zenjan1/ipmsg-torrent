@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 description = "IPMsg-Torrent Desktop/Mobile App (Tauri v2)"
 
+[[bin]]
+name = "ipmsg-app"
+path = "src/main.rs"
+
 [lib]
 name = "ipmsg_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
