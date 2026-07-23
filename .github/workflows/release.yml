@@ -1,0 +1,224 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # CLI builds for all platforms
+  cli-linux:
+    name: CLI - Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ipmsg-torrent
+      - name: Build CLI
+        run: |
+          cd ipmsg-torrent
+          cargo build --release -p ipmsg-cli --target x86_64-unknown-linux-gnu
+          strip target/x86_64-unknown-linux-gnu/release/ipmsg-cli
+          tar czf ipmsg-cli-${{ github.ref_name }}-linux-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release ipmsg-cli
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-linux-x86_64
+          path: ipmsg-torrent/ipmsg-cli-${{ github.ref_name }}-linux-x86_64.tar.gz
+
+  cli-windows:
+    name: CLI - Windows x86_64
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: ipmsg-torrent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ipmsg-torrent
+      - name: Build CLI
+        run: cargo build --release -p ipmsg-cli --target x86_64-pc-windows-msvc
+      - name: Package
+        run: |
+          cd target/x86_64-pc-windows-msvc/release
+          7z a ../../../ipmsg-cli-${{ github.ref_name }}-windows-x86_64.zip ipmsg-cli.exe
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-windows-x86_64
+          path: ipmsg-torrent/ipmsg-cli-${{ github.ref_name }}-windows-x86_64.zip
+
+  cli-macos:
+    name: CLI - macOS Universal
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: ipmsg-torrent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ipmsg-torrent
+      - name: Build CLI (Intel + Apple Silicon)
+        run: |
+          cargo build --release -p ipmsg-cli --target x86_64-apple-darwin
+          cargo build --release -p ipmsg-cli --target aarch64-apple-darwin
+          # Create universal binary
+          lipo -create -output target/release/ipmsg-cli \
+            target/x86_64-apple-darwin/release/ipmsg-cli \
+            target/aarch64-apple-darwin/release/ipmsg-cli
+          strip target/release/ipmsg-cli
+          tar czf ipmsg-cli-${{ github.ref_name }}-macos-universal.tar.gz -C target/release ipmsg-cli
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-macos-universal
+          path: ipmsg-torrent/ipmsg-cli-${{ github.ref_name }}-macos-universal.tar.gz
+
+  # Tauri app builds
+  tauri-linux:
+    name: App - Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ipmsg-torrent
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Build Tauri App
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: ipmsg-torrent/crates/app
+          args: --bundles deb,appimage
+
+  tauri-windows:
+    name: App - Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ipmsg-torrent
+      - name: Build Tauri App
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: ipmsg-torrent/crates/app
+          args: --bundles msi,nsis
+
+  tauri-macos:
+    name: App - macOS Universal
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ipmsg-torrent
+      - name: Build Tauri App
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: ipmsg-torrent/crates/app
+          args: --bundles dmg --target universal-apple-darwin
+
+  # Android build (APK)
+  tauri-android:
+    name: App - Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ipmsg-torrent
+      - name: Install Android dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android NDK
+        run: |
+          sdkmanager "ndk;26.1.10909125"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> $GITHUB_ENV
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+      - name: Build Android APK
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NDK_HOME: ${{ env.NDK_HOME }}
+        with:
+          projectPath: ipmsg-torrent/crates/app
+          args: --target aarch64 --bundles apk
+
+  # Create release with all artifacts
+  release:
+    name: Create Release
+    needs: [cli-linux, cli-windows, cli-macos, tauri-linux, tauri-windows, tauri-macos, tauri-android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            artifacts/**/*.deb
+            artifacts/**/*.AppImage
+            artifacts/**/*.msi
+            artifacts/**/*.exe
+            artifacts/**/*.dmg
+            artifacts/**/*.apk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
