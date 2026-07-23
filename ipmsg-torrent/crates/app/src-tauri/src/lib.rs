@@ -58,6 +58,36 @@ pub struct LeaveChannelArgs {
     pub name: String,
 }
 
+#[derive(Deserialize)]
+pub struct ShareFileArgs {
+    pub path: String,
+    pub tags: Vec<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SearchFilesArgs {
+    pub query: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct DownloadFileArgs {
+    pub file_hash: String,
+    pub from_peer: String,
+}
+
+#[derive(Deserialize)]
+pub struct SearchMessagesArgs {
+    pub query: String,
+    pub limit: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct PeerActionArgs {
+    pub peer_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Serializable event types for frontend
 // ---------------------------------------------------------------------------
@@ -125,6 +155,7 @@ fn to_frontend_event(evt: &P2PEvent) -> FrontendEvent {
         P2PEvent::PeerBlocked { peer_id } => FrontendEvent::Status(format!("Peer blocked: {}", peer_id)),
         P2PEvent::PeerVerified { peer_id } => FrontendEvent::Status(format!("Peer verified: {}", peer_id)),
         P2PEvent::FragmentComplete { message_id, .. } => FrontendEvent::Status(format!("Fragment assembled: {}", message_id)),
+        _ => FrontendEvent::Status(format!("Event: {:?}", evt)),
     }
 }
 
@@ -261,6 +292,111 @@ async fn p2p_peer_id(state: tauri::State<'_, AppState>) -> Result<String, String
 #[tauri::command]
 async fn p2p_username(state: tauri::State<'_, AppState>) -> Result<String, String> {
     Ok(state.engine.lock().await.username().to_string())
+}
+
+#[tauri::command]
+async fn p2p_share_file(
+    state: tauri::State<'_, AppState>,
+    args: ShareFileArgs,
+) -> Result<(), String> {
+    let mut engine = state.engine.lock().await;
+    engine.share_file(PathBuf::from(args.path), args.tags, args.description)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn p2p_unshare_file(
+    state: tauri::State<'_, AppState>,
+    args: PeerActionArgs,
+) -> Result<(), String> {
+    let mut engine = state.engine.lock().await;
+    engine.unshare_file(&args.peer_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn p2p_search_files(
+    state: tauri::State<'_, AppState>,
+    args: SearchFilesArgs,
+) -> Result<(), String> {
+    let mut engine = state.engine.lock().await;
+    engine.search_files(&args.query, &args.tags)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn p2p_download_file(
+    state: tauri::State<'_, AppState>,
+    args: DownloadFileArgs,
+) -> Result<(), String> {
+    let mut engine = state.engine.lock().await;
+    engine.download_file(&args.file_hash, &args.from_peer)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn p2p_block_peer(
+    state: tauri::State<'_, AppState>,
+    args: PeerActionArgs,
+) -> Result<(), String> {
+    let mut engine = state.engine.lock().await;
+    engine.block_peer(&args.peer_id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn p2p_unblock_peer(
+    state: tauri::State<'_, AppState>,
+    args: PeerActionArgs,
+) -> Result<(), String> {
+    let mut engine = state.engine.lock().await;
+    engine.unblock_peer(&args.peer_id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn p2p_fingerprint(
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let engine = state.engine.lock().await;
+    Ok(engine.my_fingerprint())
+}
+
+#[tauri::command]
+async fn p2p_search_messages(
+    state: tauri::State<'_, AppState>,
+    args: SearchMessagesArgs,
+) -> Result<String, String> {
+    let engine = state.engine.lock().await;
+    let limit = args.limit.unwrap_or(50);
+    let results = engine.get_store().search_messages(&args.query, limit);
+    serde_json::to_string(&results).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn p2p_start_ipmsg_compat(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut engine = state.engine.lock().await;
+    engine.start_ipmsg_compat()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn p2p_send_ipmsg(
+    state: tauri::State<'_, AppState>,
+    args: SendMessageArgs,
+) -> Result<(), String> {
+    let ip: std::net::IpAddr = args.to.parse().map_err(|e: std::net::AddrParseError| e.to_string())?;
+    let engine = state.engine.lock().await;
+    engine.send_ipmsg_message(ip, &args.content)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

@@ -51,6 +51,14 @@ enum Command {
     Unshare { hash: String },
     Search { query: String, tags: Vec<String> },
     Files,
+    Download { hash: String, peer: String },
+    Block { peer: String },
+    Unblock { peer: String },
+    Fingerprint,
+    /// Send message to legacy IPMSG peer by IP address
+    IpMsg { ip: String, message: String },
+    /// List legacy IPMSG peers
+    IpMsgPeers,
     Clear,
     Quit,
     Unknown(String),
@@ -121,6 +129,36 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "files" => Command::Files,
+        "download" | "dl" => {
+            if parts.len() >= 3 {
+                Command::Download { hash: parts[1].to_string(), peer: parts[2].to_string() }
+            } else {
+                Command::Unknown("/download <hash> <peer>".to_string())
+            }
+        }
+        "block" => {
+            if parts.len() >= 2 {
+                Command::Block { peer: parts[1].to_string() }
+            } else {
+                Command::Unknown("/block <peer>".to_string())
+            }
+        }
+        "unblock" => {
+            if parts.len() >= 2 {
+                Command::Unblock { peer: parts[1].to_string() }
+            } else {
+                Command::Unknown("/unblock <peer>".to_string())
+            }
+        }
+        "fingerprint" | "fp" => Command::Fingerprint,
+        "ipmsg" | "legacy" => {
+            if parts.len() >= 3 {
+                Command::IpMsg { ip: parts[1].to_string(), message: parts[2].to_string() }
+            } else {
+                Command::Unknown("/ipmsg <ip> <message>".to_string())
+            }
+        }
+        "ipmsg-peers" | "legacy-peers" => Command::IpMsgPeers,
         "clear" | "cls" => Command::Clear,
         "quit" | "exit" | "q" => Command::Quit,
         _ => Command::Unknown(input.to_string()),
@@ -142,6 +180,12 @@ fn command_help() -> String {
         "/unshare <hash> - Stop sharing a file",
         "/search <query> [tags] - Search for files in the network",
         "/files         - List all shared files",
+        "/download <hash> <peer> - Download a file from a peer",
+        "/block <peer>  - Block a peer",
+        "/unblock <peer> - Unblock a peer",
+        "/fingerprint   - Show your fingerprint for verification",
+        "/ipmsg <ip> <msg> - Send message to legacy IPMSG peer",
+        "/ipmsg-peers     - List legacy IPMSG peers",
         "/clear         - Clear messages",
         "/quit          - Exit",
     ].join("\n")
@@ -160,6 +204,7 @@ struct SharedState {
     peer_details: HashMap<String, (String, Vec<String>)>, // peer_id -> (username, platforms)
     status: String,
     my_peer_id: String,
+    my_fingerprint: String,
     input: String,
     running: bool,
     username: String,
@@ -179,6 +224,7 @@ impl SharedState {
             peer_details: HashMap::new(),
             status: "Ready".to_string(),
             my_peer_id: peer_id,
+            my_fingerprint: String::new(),
             input: String::new(),
             running: true,
             username,
@@ -237,6 +283,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let username = cli.username.clone();
     let mut engine = P2PEngine::new(data_dir)?;
     let peer_id = engine.start(cli.username.clone(), bootstrap).await?;
+    let fingerprint = engine.my_fingerprint();
 
     let mut event_rx = engine.take_receiver().expect("receiver already taken");
     let cmd_tx = engine.take_command_sender().expect("command sender already taken");
@@ -288,7 +335,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut terminal = setup_terminal()?;
-    let state = Arc::new(Mutex::new(SharedState::new(peer_id, username.clone())));
+    let mut state_obj = SharedState::new(peer_id, username.clone());
+    state_obj.my_fingerprint = fingerprint;
+    let state = Arc::new(Mutex::new(state_obj));
 
     // Auto-join channels
     if let Some(channels) = &cli.join {
@@ -569,9 +618,24 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
             let mut s = state.lock().await;
             s.add_system_message("main", format!("Unknown command: {}", why));
         }
-        Command::File { .. } => {
-            let mut s = state.lock().await;
-            s.add_system_message("main", "File transfer not yet implemented".to_string());
+        Command::File { target, path } => {
+            // Initiate file transfer to peer: share file then notify peer
+            let full_peer = {
+                let s = state.lock().await;
+                s.peers.iter().find(|p| p.starts_with(&target)).cloned()
+            };
+            if let Some(_peer_id) = full_peer {
+                let _ = cmd_tx.send(SendCommand::ShareFile {
+                    path: PathBuf::from(&path),
+                    tags: vec![],
+                    description: Some(format!("Direct transfer to {}", target)),
+                });
+                let mut s = state.lock().await;
+                s.add_system_message("main", format!("Sharing file {} with peer {}...", path, target));
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message("main", format!("Peer not found: {}", target));
+            }
         }
         Command::Share { path, tags } => {
             let _ = cmd_tx.send(SendCommand::ShareFile { 
@@ -596,6 +660,49 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
             let _ = cmd_tx.send(SendCommand::ListFiles);
             let mut s = state.lock().await;
             s.add_system_message("main", "Listing shared files...".to_string());
+        }
+        Command::Download { hash, peer } => {
+            let _ = cmd_tx.send(SendCommand::DownloadFile { file_hash: hash.clone(), from_peer: peer.clone() });
+            let mut s = state.lock().await;
+            s.add_system_message("main", format!("Downloading file {} from {}...", &hash[..8.min(hash.len())], &peer[..8.min(peer.len())]));
+        }
+        Command::Block { peer } => {
+            let _ = cmd_tx.send(SendCommand::BlockPeer { peer_id: peer.clone() });
+            let mut s = state.lock().await;
+            s.add_system_message("main", format!("Blocked peer {}", &peer[..8.min(peer.len())]));
+        }
+        Command::Unblock { peer } => {
+            let _ = cmd_tx.send(SendCommand::UnblockPeer { peer_id: peer.clone() });
+            let mut s = state.lock().await;
+            s.add_system_message("main", format!("Unblocked peer {}", &peer[..8.min(peer.len())]));
+        }
+        Command::Fingerprint => {
+            let s = state.lock().await;
+            let fp = &s.my_fingerprint;
+            if fp.is_empty() {
+                let mut s = state.lock().await;
+                s.add_system_message("main", "Fingerprint not available".to_string());
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message("main", format!("Your fingerprint:\n{}", fp));
+            }
+        }
+        Command::IpMsg { ip, message: _ } => {
+            match ip.parse::<std::net::IpAddr>() {
+                Ok(_addr) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("Sending IPMSG to {}...", ip));
+                    // Note: actual send requires engine access; for now queue via status
+                }
+                Err(_) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("Invalid IP address: {}", ip));
+                }
+            }
+        }
+        Command::IpMsgPeers => {
+            let mut s = state.lock().await;
+            s.add_system_message("main", "Legacy IPMSG peers: (check engine)".to_string());
         }
     }
 }

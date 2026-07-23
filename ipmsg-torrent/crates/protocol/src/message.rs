@@ -219,6 +219,38 @@ impl ChatMessage {
         }
     }
 
+    pub fn new_image(from: PeerIdStr, to: Option<PeerIdStr>, data: Vec<u8>, mime_type: String, name: String) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            from,
+            to,
+            channel: None,
+            seq: 0,
+            timestamp: Utc::now(),
+            ttl: 0,
+            kind: MessageType::Image { data, mime_type, name },
+            encrypted_payload: None,
+            signature: Vec::new(),
+            reply_to: None,
+        }
+    }
+
+    pub fn new_read_receipt(from: PeerIdStr, to: PeerIdStr, message_id: String) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            from,
+            to: Some(to),
+            channel: None,
+            seq: 0,
+            timestamp: Utc::now(),
+            ttl: 0,
+            kind: MessageType::ReadReceipt { message_id },
+            encrypted_payload: None,
+            signature: Vec::new(),
+            reply_to: None,
+        }
+    }
+
     pub fn with_sequence(mut self, seq: u64) -> Self {
         self.seq = seq;
         self

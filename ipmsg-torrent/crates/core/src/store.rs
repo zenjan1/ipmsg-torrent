@@ -292,4 +292,63 @@ impl MessageStore {
         )?;
         Ok(deleted)
     }
+
+    /// Search messages by text content
+    pub fn search_messages(&self, query: &str, limit: u32) -> Vec<ChatMessage> {
+        let conn = self.conn.lock().unwrap();
+        let pattern = format!("%{}%", query);
+        let mut stmt = match conn.prepare(
+            "SELECT id, from_peer, to_peer, kind, content, seq, timestamp, signature
+             FROM messages
+             WHERE kind = 'text' AND CAST(content AS TEXT) LIKE ?1
+             ORDER BY timestamp DESC
+             LIMIT ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let rows = match stmt.query_map(params![pattern, limit], |row| {
+            let id: String = row.get(0)?;
+            let from: String = row.get(1)?;
+            let to: Option<String> = row.get(2)?;
+            let content: Vec<u8> = row.get(3)?;
+            let seq: i64 = row.get(4)?;
+            let ts_str: String = row.get(5)?;
+            let signature: Vec<u8> = row.get(6)?;
+
+            let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or(chrono::Utc::now());
+
+            let kind = serde_cbor::from_slice(&content).unwrap_or_default();
+
+            Ok(ChatMessage {
+                id,
+                from,
+                to,
+                channel: None,
+                seq: seq as u64,
+                timestamp,
+                ttl: 0,
+                kind,
+                encrypted_payload: None,
+                signature,
+                reply_to: None,
+            })
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut messages: Vec<ChatMessage> = Vec::new();
+        for row in rows {
+            if let Ok(msg) = row {
+                messages.push(msg);
+            }
+        }
+        messages.reverse();
+        messages
+    }
 }

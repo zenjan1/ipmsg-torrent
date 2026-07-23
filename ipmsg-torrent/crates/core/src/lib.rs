@@ -7,6 +7,8 @@ pub mod noise;
 pub mod bloom;
 pub mod fragment;
 pub mod file_sharing;
+pub mod file_transfer;
+pub mod ipmsg_compat;
 
 pub use identity::Identity;
 pub use store::{MessageStore, PeerInfo};
@@ -14,13 +16,18 @@ pub use bloom::DedupCache;
 pub use fragment::{FragmentManager, FragmentMsg};
 pub use noise::NoiseSessionManager;
 pub use file_sharing::FileSharingManager;
+pub use file_transfer::{FileTransferManager, FileTransferRequest, FileTransferResponse};
+pub use ipmsg_compat::{IpMsgCompat, IpMsgCompatEvent, IpMsgPacket};
 
 use futures::StreamExt;
 use ipmsg_protocol::message::{ChatMessage, ChannelId};
+use libp2p::PeerId;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 /// Maximum tracked message IDs for dedup
 const MAX_DEDUP_CACHE: usize = 4096;
@@ -44,6 +51,8 @@ pub enum P2PError {
     PeerNotFound(String),
     #[error("network error: {0}")]
     Network(String),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Events emitted by the P2P engine
@@ -68,8 +77,6 @@ pub enum P2PEvent {
     PeerBlocked { peer_id: String },
     /// Peer verified via fingerprint
     PeerVerified { peer_id: String },
-    /// Fragment reassembly complete
-    FragmentComplete { message_id: String, data: Vec<u8> },
     /// File share announcement received
     FileShareAnnounce {
         from: String,
@@ -79,6 +86,53 @@ pub enum P2PEvent {
     FileSearchResponse {
         from: String,
         results: Vec<ipmsg_protocol::message::FileShareInfo>,
+    },
+    /// Fragment received (for reassembly)
+    FragmentReceived {
+        fragment: crate::fragment::FragmentMsg,
+    },
+    /// Fragment reassembly complete
+    FragmentComplete {
+        message_id: String,
+        data: Vec<u8>,
+    },
+    /// File transfer response received
+    FileTransferResponse {
+        from: String,
+        response: crate::file_transfer::FileTransferResponse,
+    },
+    /// File download progress update
+    FileTransferProgress {
+        file_hash: String,
+        progress: f32,
+        chunk_index: u32,
+        total_chunks: u32,
+    },
+    /// Image message received
+    ImageReceived {
+        from: String,
+        data: Vec<u8>,
+        mime_type: String,
+        name: String,
+    },
+    /// Read receipt received
+    ReadReceiptReceived {
+        from: String,
+        message_id: String,
+    },
+    /// Nearby peer discovered with details
+    NearbyPeerDiscovered {
+        peer: ipmsg_protocol::message::NearbyPeer,
+    },
+    /// Message search results
+    SearchResults {
+        query: String,
+        results: Vec<ChatMessage>,
+    },
+    /// File transfer request received (needs response)
+    FileTransferRequestReceived {
+        from: String,
+        request: crate::file_transfer::FileTransferRequest,
     },
 }
 
@@ -114,6 +168,16 @@ pub enum SendCommand {
     SearchFiles { query: String, tags: Vec<String> },
     /// List all shared files (local and discovered)
     ListFiles,
+    /// Download a file from a peer
+    DownloadFile { file_hash: String, from_peer: String },
+    /// Block a peer
+    BlockPeer { peer_id: String },
+    /// Unblock a peer
+    UnblockPeer { peer_id: String },
+    /// Search messages by text content
+    SearchMessages { query: String, limit: u32 },
+    /// Send a read receipt for a message
+    SendReadReceipt { message_id: String, to: String },
 }
 
 /// Tracks a pending message awaiting ACK
@@ -147,10 +211,13 @@ pub struct P2PEngine {
     /// Noise session manager for E2E encryption
     noise_sessions: NoiseSessionManager,
     /// Fragment manager for large messages
-    #[allow(dead_code)]
     fragment_manager: FragmentManager,
     /// File sharing manager
     file_sharing: FileSharingManager,
+    /// File transfer manager for downloads
+    file_transfer: Arc<Mutex<FileTransferManager>>,
+    /// Classic IPMSG compatibility server
+    ipmsg_compat: Option<IpMsgCompat>,
     /// Social trust: blocked peer IDs
     blocked_peers: HashSet<String>,
     /// Social trust: favorite peer IDs
@@ -171,6 +238,7 @@ impl P2PEngine {
         // Initialize file sharing manager
         let files_dir = data_dir.join("shared_files");
         let file_sharing = FileSharingManager::new(files_dir);
+        let file_transfer = Arc::new(Mutex::new(FileTransferManager::new(Arc::new(Mutex::new(file_sharing.clone())))));
 
         Ok(Self {
             identity,
@@ -190,6 +258,8 @@ impl P2PEngine {
             noise_sessions: NoiseSessionManager::new(NOISE_REKEY_THRESHOLD),
             fragment_manager: FragmentManager::new(),
             file_sharing,
+            file_transfer,
+            ipmsg_compat: None,
             blocked_peers: HashSet::new(),
             favorite_peers: HashSet::new(),
         })
@@ -268,6 +338,42 @@ impl P2PEngine {
                                             }
                                             evt
                                         }
+                                        P2PEvent::FragmentReceived { fragment } => {
+                                            // Extract message_id from the fragment before processing
+                                            let message_id = match &fragment {
+                                                crate::fragment::FragmentMsg::Start { message_id, .. } => message_id.clone(),
+                                                crate::fragment::FragmentMsg::Data { message_id, .. } => message_id.clone(),
+                                                crate::fragment::FragmentMsg::End { message_id, .. } => message_id.clone(),
+                                            };
+                                            // Process fragment through fragment manager
+                                            match self.fragment_manager.process_fragment(fragment.clone()) {
+                                                Ok(Some(data)) => {
+                                                    // Fragment reassembly complete
+                                                    P2PEvent::FragmentComplete { message_id, data }
+                                                }
+                                                Ok(None) => continue,
+                                                Err(e) => {
+                                                    tracing::warn!(message_id = %message_id, error = %e, "Fragment processing error");
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        P2PEvent::FileTransferResponse { from, response } => {
+                                            // Handle file transfer response
+                                            let _ = self.handle_file_transfer_response(&from, response.clone()).await;
+                                            continue;
+                                        }
+                                        P2PEvent::FileTransferRequestReceived { from, request } => {
+                                            // Auto-respond to file transfer requests using file_sharing manager
+                                            let response = self.file_transfer.lock().await.handle_request(request.clone()).await;
+                                            let peer_id: Result<PeerId, _> = from.parse();
+                                            if let Ok(pid) = peer_id {
+                                                if let Some(swarm) = &mut self.swarm {
+                                                    let _ = swarm.send_file_transfer_response(&pid, response);
+                                                }
+                                            }
+                                            continue;
+                                        }
                                         _ => evt,
                                     };
                                     let _ = self.event_tx.send(evt);
@@ -319,6 +425,40 @@ impl P2PEngine {
                             }
                             Some(SendCommand::ListFiles) => {
                                 let _ = self.list_files().await;
+                            }
+                            Some(SendCommand::DownloadFile { file_hash, from_peer }) => {
+                                let _ = self.download_file(&file_hash, &from_peer).await;
+                            }
+                            Some(SendCommand::BlockPeer { peer_id }) => {
+                                self.block_peer(&peer_id);
+                            }
+                            Some(SendCommand::UnblockPeer { peer_id }) => {
+                                self.unblock_peer(&peer_id);
+                            }
+                            Some(SendCommand::SearchMessages { query, limit }) => {
+                                let results = self.store.search_messages(&query, limit);
+                                let count = results.len();
+                                let _ = self.event_tx.send(P2PEvent::Status(
+                                    format!("Found {} messages matching '{}'", count, query)
+                                ));
+                                for msg in results {
+                                    let content = msg.text_content().unwrap_or("[non-text]").to_string();
+                                    let _ = self.event_tx.send(P2PEvent::Status(
+                                        format!("  [{}] {}: {}", msg.timestamp.format("%Y-%m-%d %H:%M"), msg.from, content)
+                                    ));
+                                }
+                            }
+                            Some(SendCommand::SendReadReceipt { message_id, to }) => {
+                                let receipt = ChatMessage::new_read_receipt(
+                                    self.peer_id_str(),
+                                    to,
+                                    message_id,
+                                );
+                                self.sign_message(&mut receipt.clone());
+                                let bytes = ipmsg_protocol::codec::encode_message(&receipt);
+                                if let Some(s) = self.swarm.as_mut() {
+                                    let _ = s.publish_to_topic(crate::messaging::CHAT_TOPIC, bytes);
+                                }
                             }
                             None => break,
                         }
@@ -389,10 +529,49 @@ impl P2PEngine {
         // Sign the message
         self.sign_message(&mut msg);
 
+        // Encrypt with Noise if we have an active session (E2E encryption)
+        if let Some(session) = self.noise_sessions.get_mut(to) {
+            if session.is_ready() {
+                let plaintext = ipmsg_protocol::codec::encode_message(&msg);
+                match session.encrypt(&plaintext) {
+                    Ok(ciphertext) => {
+                        // Create encrypted payload wrapper
+                        msg.encrypted_payload = Some(ipmsg_protocol::message::EncryptedPayload {
+                            ephemeral_key: String::new(), // Noise handles key exchange internally
+                            ciphertext,
+                            nonce: Vec::new(),
+                            ratchet_index: 0,
+                        });
+                        // Clear the plaintext content since we're sending encrypted
+                        msg.kind = ipmsg_protocol::message::MessageType::Text { content: String::new() };
+                    }
+                    Err(e) => {
+                        tracing::warn!(peer = %to, error = %e, "Noise encryption failed, sending plaintext");
+                    }
+                }
+            }
+        }
+
         let bytes = ipmsg_protocol::codec::encode_message(&msg);
 
-        if let Some(swarm) = &mut self.swarm {
-            swarm.send_message(to, &msg).await?;
+        // Check if message needs fragmentation
+        if self.fragment_manager.needs_fragment(bytes.len()) {
+            // Fragment the message
+            let fragments = self.fragment_manager.fragment(&msg.id, &bytes, "text");
+            
+            // Send fragments via gossipsub
+            if let Some(swarm) = &mut self.swarm {
+                for fragment in fragments {
+                    let fragment_bytes = serde_cbor::to_vec(&fragment)
+                        .map_err(|e| P2PError::Network(e.to_string()))?;
+                    swarm.publish_to_topic(crate::messaging::FRAGMENT_TOPIC, fragment_bytes)?;
+                }
+            }
+        } else {
+            // Send as regular message
+            if let Some(swarm) = &mut self.swarm {
+                swarm.send_message(to, &msg).await?;
+            }
         }
 
         // Track for ACK
@@ -490,6 +669,10 @@ impl P2PEngine {
 
     pub fn get_history(&self, peer_id: &str, limit: u32) -> Vec<ChatMessage> {
         self.store.get_messages(peer_id, limit)
+    }
+
+    pub fn get_store(&self) -> &MessageStore {
+        &self.store
     }
 
     pub fn get_channel_history(&self, channel: &str, limit: u32) -> Vec<ChatMessage> {
@@ -604,13 +787,53 @@ impl P2PEngine {
 
     // --- Rate Limiter (inspired by bitchat NoiseRateLimiter) ---
 
-    /// Check if a peer is sending too many messages (simple rate limiting)
+    /// Check if a peer is sending too many messages (sliding window rate limiting)
     /// Returns true if the message should be allowed
     pub fn check_rate_limit(&mut self, peer_id: &str) -> bool {
-        // Simple token bucket: allow 10 messages per 5 seconds per peer
-        // In production, use a proper rate limiter with per-peer timestamps
-        let _peer_id = peer_id;
-        true
+        use std::collections::VecDeque;
+        use std::time::{Duration, Instant};
+        
+        // Per-peer rate limit state
+        struct RateLimitState {
+            timestamps: VecDeque<Instant>,
+            max_messages: usize,
+            window: Duration,
+        }
+        
+        // Thread-local storage for rate limit states
+        thread_local! {
+            static RATE_LIMITS: std::cell::RefCell<HashMap<String, RateLimitState>> = 
+                std::cell::RefCell::new(HashMap::new());
+        }
+        
+        RATE_LIMITS.with(|limits| {
+            let mut limits = limits.borrow_mut();
+            let state = limits.entry(peer_id.to_string()).or_insert_with(|| RateLimitState {
+                timestamps: VecDeque::new(),
+                max_messages: 10,
+                window: Duration::from_secs(5),
+            });
+            
+            let now = Instant::now();
+            
+            // Remove old timestamps outside the window
+            while let Some(old) = state.timestamps.front() {
+                if now.duration_since(*old) > state.window {
+                    state.timestamps.pop_front();
+                } else {
+                    break;
+                }
+            }
+            
+            // Check if under limit
+            if state.timestamps.len() < state.max_messages {
+                state.timestamps.push_back(now);
+                true
+            } else {
+                tracing::warn!(peer = %peer_id, "Rate limit exceeded");
+                false
+            }
+        })
     }
 
     // --- File Sharing ---
@@ -678,9 +901,161 @@ impl P2PEngine {
         Ok(())
     }
 
+    /// Download a file from a peer
+    pub async fn download_file(&mut self, file_hash: &str, from_peer: &str) -> Result<(), P2PError> {
+        // Parse peer ID
+        let peer_id: PeerId = from_peer.parse().map_err(|e| P2PError::PeerNotFound(format!("Invalid peer ID: {}", e)))?;
+        
+        // Request file info first
+        let req = FileTransferRequest::GetInfo { file_hash: file_hash.to_string() };
+        if let Some(swarm) = &mut self.swarm {
+            swarm.send_file_request(&peer_id, req)?;
+        }
+        
+        tracing::info!(file_hash = %file_hash, from_peer = %from_peer, "File download initiated");
+        Ok(())
+    }
+
+    /// Request a specific chunk from a peer
+    pub async fn request_chunk(&mut self, file_hash: &str, chunk_index: u32, from_peer: &str) -> Result<(), P2PError> {
+        let peer_id: PeerId = from_peer.parse().map_err(|e| P2PError::PeerNotFound(format!("Invalid peer ID: {}", e)))?;
+        
+        let req = FileTransferRequest::GetChunk { 
+            file_hash: file_hash.to_string(), 
+            chunk_index 
+        };
+        
+        if let Some(swarm) = &mut self.swarm {
+            swarm.send_file_request(&peer_id, req)?;
+        }
+        
+        Ok(())
+    }
+
+    /// Process file transfer requests and send responses
+    pub async fn process_file_transfer_requests(&mut self) -> Result<(), P2PError> {
+        let file_transfer = self.file_transfer.clone();
+        let pending_requests = file_transfer.lock().await.take_pending_requests().await;
+        
+        for (peer_id_str, req) in pending_requests {
+            let response = file_transfer.lock().await.handle_request(req).await;
+            
+            // Send response back via request-response protocol
+            if let Ok(peer_id) = peer_id_str.parse::<PeerId>() {
+                if let Some(swarm) = &mut self.swarm {
+                    swarm.send_file_transfer_response(&peer_id, response)?;
+                    tracing::info!(peer_id = %peer_id_str, "File transfer response sent");
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Handle incoming file transfer response
+    pub async fn handle_file_transfer_response(&mut self, peer_id: &str, response: FileTransferResponse) -> Result<(), P2PError> {
+        match response {
+            FileTransferResponse::Info { file_ref, available } => {
+                if available {
+                    tracing::info!(file_hash = %file_ref.hash, "File info received, starting download");
+                    
+                    // Start download tracking
+                    let file_transfer = self.file_transfer.clone();
+                    file_transfer.lock().await.start_download(file_ref.clone(), peer_id.to_string()).await;
+                    
+                    // Request first chunk
+                    self.request_chunk(&file_ref.hash, 0, peer_id).await?;
+                } else {
+                    tracing::warn!("File not available from peer");
+                }
+            }
+            FileTransferResponse::Chunk { file_hash, chunk_index, data } => {
+                tracing::info!(file_hash = %file_hash, chunk = %chunk_index, "Chunk received");
+                
+                let file_transfer = self.file_transfer.clone();
+                let is_complete = file_transfer.lock().await.record_chunk(&file_hash, chunk_index, data).await;
+                
+                if is_complete {
+                    tracing::info!(file_hash = %file_hash, "File download complete");
+                    
+                    // Assemble file
+                    if let Some(file_data) = file_transfer.lock().await.try_assemble(&file_hash).await {
+                        // Save to disk
+                        let file_info = file_transfer.lock().await.finish_download(&file_hash).await;
+                        if let Some(info) = file_info {
+                            let output_path = self.data_dir.join("downloads").join(&info.file_ref.name);
+                            std::fs::create_dir_all(output_path.parent().unwrap())?;
+                            std::fs::write(&output_path, &file_data)?;
+                            tracing::info!(path = %output_path.display(), "File saved");
+                            
+                            let _ = self.event_tx.send(P2PEvent::Status(format!(
+                                "Downloaded file: {}",
+                                info.file_ref.name
+                            )));
+                        }
+                    }
+                } else {
+                    // Request next chunk
+                    let next_chunk = chunk_index + 1;
+                    self.request_chunk(&file_hash, next_chunk, peer_id).await?;
+                }
+            }
+            FileTransferResponse::Error { message } => {
+                tracing::error!(error = %message, "File transfer error");
+                let _ = self.event_tx.send(P2PEvent::Status(format!("File transfer error: {}", message)));
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Start the classic IPMSG compatibility server (UDP port 2425)
+    /// Enables interoperability with legacy IPMSG/FeiQ clients on the LAN
+    pub async fn start_ipmsg_compat(&mut self) -> Result<(), P2PError> {
+        let mut compat = IpMsgCompat::new(self.username.clone());
+        compat.start().await.map_err(|e| P2PError::Transport(e.to_string()))?;
+        self.ipmsg_compat = Some(compat);
+        tracing::info!("Classic IPMSG compatibility server started");
+        Ok(())
+    }
+
+    /// Send a message to a legacy IPMSG peer via UDP
+    pub async fn send_ipmsg_message(&self, to_ip: std::net::IpAddr, message: &str) -> Result<(), P2PError> {
+        if let Some(compat) = &self.ipmsg_compat {
+            let addr = std::net::SocketAddr::new(to_ip, ipmsg_compat::IPMSG_PORT);
+            compat.send_message(addr, message).await.map_err(|e| P2PError::Transport(e.to_string()))
+        } else {
+            Err(P2PError::Transport("IPMSG compat server not started".to_string()))
+        }
+    }
+
+    /// Broadcast a message to all legacy IPMSG peers via UDP
+    pub async fn broadcast_ipmsg_message(&self, message: &str) -> Result<(), P2PError> {
+        if let Some(compat) = &self.ipmsg_compat {
+            // Send to broadcast address
+            let broadcast_addr = std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::BROADCAST),
+                ipmsg_compat::IPMSG_PORT,
+            );
+            compat.send_message(broadcast_addr, message).await.map_err(|e| P2PError::Transport(e.to_string()))
+        } else {
+            Err(P2PError::Transport("IPMSG compat server not started".to_string()))
+        }
+    }
+
+    /// Get list of known legacy IPMSG peers
+    pub async fn ipmsg_legacy_peers(&self) -> Vec<ipmsg_compat::IpMsgPeerInfo> {
+        Vec::new()
+    }
+
     /// Get file sharing manager reference
     pub fn file_sharing(&self) -> &FileSharingManager {
         &self.file_sharing
+    }
+
+    /// Get file transfer manager reference
+    pub fn file_transfer(&self) -> &Arc<Mutex<FileTransferManager>> {
+        &self.file_transfer
     }
 }
 

@@ -7,6 +7,9 @@ pub const CHAT_TOPIC: &str = "ipmsg-chat-v1";
 /// Gossipsub topic for file transfers
 pub const FILE_TOPIC: &str = "ipmsg-files-v1";
 
+/// Gossipsub topic for message fragments
+pub const FRAGMENT_TOPIC: &str = "ipmsg-fragments-v1";
+
 /// Channel topic builder
 pub fn channel_topic(channel: &str) -> String {
     format!("ipmsg-chan-{}", channel)

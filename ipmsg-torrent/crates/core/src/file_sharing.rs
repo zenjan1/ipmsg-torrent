@@ -7,6 +7,7 @@ use ipmsg_protocol::message::{FileRef, FileShareInfo};
 use crate::{P2PError, P2PEvent};
 
 /// File sharing manager - tracks shared files and handles search queries
+#[derive(Clone)]
 pub struct FileSharingManager {
     /// Files we are sharing (hash -> FileShareInfo)
     shared_files: Arc<Mutex<HashMap<String, FileShareInfo>>>,
@@ -92,16 +93,20 @@ impl FileSharingManager {
 
     /// Read file chunk by hash and index
     pub async fn read_chunk(&self, hash: &str, index: u32) -> Result<Vec<u8>, P2PError> {
-        let shared = self.shared_files.lock().unwrap();
-        let info = shared
-            .get(hash)
-            .ok_or_else(|| P2PError::Transport(format!("File not found: {}", hash)))?;
+        // Extract file info under lock, then release lock before async I/O
+        let (file_path, start, end) = {
+            let shared = self.shared_files.lock().unwrap();
+            let info = shared
+                .get(hash)
+                .ok_or_else(|| P2PError::Transport(format!("File not found: {}", hash)))?;
 
-        let start = (index as u64) * (info.file_ref.chunk_size as u64);
-        let end = std::cmp::min(start + info.file_ref.chunk_size as u64, info.file_ref.size);
+            let start = (index as u64) * (info.file_ref.chunk_size as u64);
+            let end = std::cmp::min(start + info.file_ref.chunk_size as u64, info.file_ref.size);
+            let file_path = self.files_dir.join(&info.file_ref.name);
+            (file_path, start, end)
+        };
 
-        // Read the actual file from disk
-        let file_path = self.files_dir.join(&info.file_ref.name);
+        // Read the actual file from disk (async, no lock held)
         let data = tokio::fs::read(&file_path)
             .await
             .map_err(|e| P2PError::Transport(format!("Failed to read file: {}", e)))?;
