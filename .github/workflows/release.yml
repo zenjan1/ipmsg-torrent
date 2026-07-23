@@ -105,6 +105,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
       - name: Build Tauri App
         uses: tauri-apps/tauri-action@v0
         env:
@@ -124,6 +126,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ipmsg-torrent
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
       - name: Build Tauri App
         uses: tauri-apps/tauri-action@v0
         env:
@@ -143,6 +147,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ipmsg-torrent
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
       - name: Build Tauri App
         uses: tauri-apps/tauri-action@v0
         env:
@@ -163,7 +169,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ipmsg-torrent
-      - name: Install Android dependencies
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev
@@ -178,8 +184,8 @@ jobs:
         run: |
           sdkmanager "ndk;26.1.10909125"
           echo "NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> $GITHUB_ENV
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
       - name: Build Android APK
         uses: tauri-apps/tauri-action@v0
         env:
