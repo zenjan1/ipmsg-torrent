@@ -425,6 +425,26 @@ impl IpMsgCompat {
         }
     }
 
+    /// Receive an incoming packet (blocking - awaits UDP data)
+    pub async fn recv_packet(&self) -> Option<IpMsgPacket> {
+        let socket = self.socket.as_ref()?;
+        let mut buf = vec![0u8; 65536];
+        match socket.recv_from(&mut buf).await {
+            Ok((len, addr)) => {
+                IpMsgPacket::parse(&buf[..len], addr)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "IPMSG UDP recv error");
+                None
+            }
+        }
+    }
+
+    /// Get the underlying socket for select purposes
+    pub fn socket(&self) -> Option<&UdpSocket> {
+        self.socket.as_ref().map(|s| s.as_ref())
+    }
+
     /// Process an incoming packet and update peer state
     pub async fn process_packet(&self, packet: &IpMsgPacket) -> Option<IpMsgCompatEvent> {
         let peer_key = format!("{}@{}", packet.sender_name, packet.source_addr.ip());

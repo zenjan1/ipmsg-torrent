@@ -285,6 +285,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let peer_id = engine.start(cli.username.clone(), bootstrap).await?;
     let fingerprint = engine.my_fingerprint();
 
+    // Start legacy IPMSG compatibility server
+    if let Err(e) = engine.start_ipmsg_compat().await {
+        eprintln!("Warning: Failed to start IPMSG compat server: {}", e);
+    }
+
     let mut event_rx = engine.take_receiver().expect("receiver already taken");
     let cmd_tx = engine.take_command_sender().expect("command sender already taken");
 
@@ -413,6 +418,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     s.set_status(format!("{} is typing...", from));
                 }
                 P2PEvent::Status(st) => { s.set_status(st); }
+                P2PEvent::LegacyPeerDiscovered { name, host, ip } => {
+                    s.add_system_message("main", format!("Legacy IPMSG peer discovered: {}@{} ({})", name, host, ip));
+                }
+                P2PEvent::LegacyPeerLeft { name, ip } => {
+                    s.add_system_message("main", format!("Legacy IPMSG peer left: {} ({})", name, ip));
+                }
+                P2PEvent::LegacyMessageReceived { from, ip, content, has_attachment } => {
+                    let attach_str = if has_attachment { " [has attachment]" } else { "" };
+                    s.add_system_message("main", format!("[IPMSG] {} ({}): {}{}", from, ip, content, attach_str));
+                }
                 _ => {}
             }
         }
@@ -687,12 +702,12 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
                 s.add_system_message("main", format!("Your fingerprint:\n{}", fp));
             }
         }
-        Command::IpMsg { ip, message: _ } => {
+        Command::IpMsg { ip, message } => {
             match ip.parse::<std::net::IpAddr>() {
-                Ok(_addr) => {
+                Ok(addr) => {
+                    let _ = cmd_tx.send(SendCommand::SendIpMsg { ip: addr, message: message.clone() });
                     let mut s = state.lock().await;
-                    s.add_system_message("main", format!("Sending IPMSG to {}...", ip));
-                    // Note: actual send requires engine access; for now queue via status
+                    s.add_system_message("main", format!("Sent IPMSG to {}", ip));
                 }
                 Err(_) => {
                     let mut s = state.lock().await;
@@ -701,8 +716,7 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
             }
         }
         Command::IpMsgPeers => {
-            let mut s = state.lock().await;
-            s.add_system_message("main", "Legacy IPMSG peers: (check engine)".to_string());
+            let _ = cmd_tx.send(SendCommand::ListIpMsgPeers);
         }
     }
 }

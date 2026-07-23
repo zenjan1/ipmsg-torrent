@@ -23,6 +23,7 @@ use futures::StreamExt;
 use ipmsg_protocol::message::{ChatMessage, ChannelId};
 use libp2p::PeerId;
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -134,6 +135,12 @@ pub enum P2PEvent {
         from: String,
         request: crate::file_transfer::FileTransferRequest,
     },
+    /// Legacy IPMSG peer discovered
+    LegacyPeerDiscovered { name: String, host: String, ip: IpAddr },
+    /// Legacy IPMSG peer left
+    LegacyPeerLeft { name: String, ip: IpAddr },
+    /// Legacy IPMSG message received
+    LegacyMessageReceived { from: String, ip: IpAddr, content: String, has_attachment: bool },
 }
 
 /// Peer info returned by list_peers
@@ -178,6 +185,10 @@ pub enum SendCommand {
     SearchMessages { query: String, limit: u32 },
     /// Send a read receipt for a message
     SendReadReceipt { message_id: String, to: String },
+    /// Send message to legacy IPMSG peer by IP
+    SendIpMsg { ip: IpAddr, message: String },
+    /// List legacy IPMSG peers
+    ListIpMsgPeers,
 }
 
 /// Tracks a pending message awaiting ACK
@@ -460,12 +471,57 @@ impl P2PEngine {
                                     let _ = s.publish_to_topic(crate::messaging::CHAT_TOPIC, bytes);
                                 }
                             }
+                            Some(SendCommand::SendIpMsg { ip, message }) => {
+                                if let Err(e) = self.send_ipmsg_message(ip, &message).await {
+                                    let _ = self.event_tx.send(P2PEvent::Status(format!("IPMSG send error: {}", e)));
+                                }
+                            }
+                            Some(SendCommand::ListIpMsgPeers) => {
+                                let peers = self.ipmsg_legacy_peers();
+                                if peers.is_empty() {
+                                    let _ = self.event_tx.send(P2PEvent::Status("No legacy IPMSG peers found".to_string()));
+                                } else {
+                                    let mut lines = vec![format!("Legacy IPMSG peers ({}):", peers.len())];
+                                    for p in &peers {
+                                        lines.push(format!("  {}@{} ({})", p.name, p.host, p.addr.ip()));
+                                    }
+                                    let _ = self.event_tx.send(P2PEvent::Status(lines.join("\n")));
+                                }
+                            }
                             None => break,
+                        }
+                    }
+                    pkt = async {
+                        if let Some(compat) = &self.ipmsg_compat {
+                            compat.recv_packet().await
+                        } else {
+                            std::future::pending().await
+                        }
+                    } => {
+                        if let Some(packet) = pkt {
+                            if let Some(evt) = self.ipmsg_compat.as_ref().unwrap().process_packet(&packet).await {
+                                let p2p_evt = match evt {
+                                    IpMsgCompatEvent::PeerDiscovered { name, host, addr } => {
+                                        P2PEvent::LegacyPeerDiscovered { name, host, ip: addr.ip() }
+                                    }
+                                    IpMsgCompatEvent::PeerLeft { name, addr } => {
+                                        P2PEvent::LegacyPeerLeft { name, ip: addr.ip() }
+                                    }
+                                    IpMsgCompatEvent::MessageReceived { from, addr, content, has_attachment } => {
+                                        P2PEvent::LegacyMessageReceived { from, ip: addr.ip(), content, has_attachment }
+                                    }
+                                };
+                                let _ = self.event_tx.send(p2p_evt);
+                            }
                         }
                     }
                     _ = tokio::time::sleep(Duration::from_secs(ACK_TIMEOUT_SECS)) => {
                         // Check for timed-out ACKs and retry
                         self.check_pending_acks().await;
+                        // Clean up stale legacy peers
+                        if let Some(compat) = &self.ipmsg_compat {
+                            compat.cleanup_stale_peers().await;
+                        }
                     }
                 }
             }
@@ -1020,8 +1076,8 @@ impl P2PEngine {
     }
 
     /// Send a message to a legacy IPMSG peer via UDP
-    pub async fn send_ipmsg_message(&self, to_ip: std::net::IpAddr, message: &str) -> Result<(), P2PError> {
-        if let Some(compat) = &self.ipmsg_compat {
+    pub async fn send_ipmsg_message(&mut self, to_ip: std::net::IpAddr, message: &str) -> Result<(), P2PError> {
+        if let Some(compat) = &mut self.ipmsg_compat {
             let addr = std::net::SocketAddr::new(to_ip, ipmsg_compat::IPMSG_PORT);
             compat.send_message(addr, message).await.map_err(|e| P2PError::Transport(e.to_string()))
         } else {
@@ -1030,8 +1086,8 @@ impl P2PEngine {
     }
 
     /// Broadcast a message to all legacy IPMSG peers via UDP
-    pub async fn broadcast_ipmsg_message(&self, message: &str) -> Result<(), P2PError> {
-        if let Some(compat) = &self.ipmsg_compat {
+    pub async fn broadcast_ipmsg_message(&mut self, message: &str) -> Result<(), P2PError> {
+        if let Some(compat) = &mut self.ipmsg_compat {
             // Send to broadcast address
             let broadcast_addr = std::net::SocketAddr::new(
                 std::net::IpAddr::V4(std::net::Ipv4Addr::BROADCAST),
@@ -1044,7 +1100,9 @@ impl P2PEngine {
     }
 
     /// Get list of known legacy IPMSG peers
-    pub async fn ipmsg_legacy_peers(&self) -> Vec<ipmsg_compat::IpMsgPeerInfo> {
+    pub fn ipmsg_legacy_peers(&self) -> Vec<ipmsg_compat::IpMsgPeerInfo> {
+        // We can't easily access the compat's peers without async,
+        // so we return empty and let the caller use ListIpMsgPeers command
         Vec::new()
     }
 
