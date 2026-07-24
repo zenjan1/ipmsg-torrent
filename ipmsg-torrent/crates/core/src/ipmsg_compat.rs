@@ -1,11 +1,11 @@
 //! Classic IPMSG (FeiQ/Feige) protocol compatibility layer
-//! 
+//!
 //! This module implements the original IPMSG/FeiQ UDP broadcast protocol
 //! so this client can interoperate with legacy FeiQ/Feige desktop clients.
-//! 
+//!
 //! Protocol format:
 //!   VERSION:PACKET_NO:SENDER_NAME:SENDER_HOST:CMD_NO:EXTRA_INFO
-//! 
+//!
 //! CMD_NO values:
 //!   0x00000001 - IPMSG_SENDMSG (send message)
 //!   0x00000003 - IPMSG_ANSLIST (reply to broadcast)
@@ -131,7 +131,11 @@ impl IpMsgPacket {
         let sender_name = parts[2].to_string();
         let sender_host = parts[3].to_string();
         let cmd_no = parts[4].parse::<u32>().ok()?;
-        let extra_info = if parts.len() > 5 { parts[5].to_string() } else { String::new() };
+        let extra_info = if parts.len() > 5 {
+            parts[5].to_string()
+        } else {
+            String::new()
+        };
 
         Some(Self {
             version,
@@ -306,7 +310,10 @@ pub struct IpMsgFileEntry {
 
 impl IpMsgFileEntry {
     pub fn serialize(&self) -> String {
-        format!("{}:{}:{}:{}:{}", self.file_id, self.filename, self.size, self.mtime, self.file_type)
+        format!(
+            "{}:{}:{}:{}:{}",
+            self.file_id, self.filename, self.size, self.mtime, self.file_type
+        )
     }
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -319,7 +326,11 @@ impl IpMsgFileEntry {
             filename: parts[1].to_string(),
             size: parts[2].parse().unwrap_or(0),
             mtime: parts[3].parse().unwrap_or(0),
-            file_type: if parts.len() > 4 { parts[4].to_string() } else { String::new() },
+            file_type: if parts.len() > 4 {
+                parts[4].to_string()
+            } else {
+                String::new()
+            },
         })
     }
 }
@@ -344,9 +355,7 @@ pub struct IpMsgPeerInfo {
 
 impl IpMsgCompat {
     pub fn new(username: String) -> Self {
-        let hostname = gethostname::gethostname()
-            .to_string_lossy()
-            .to_string();
+        let hostname = gethostname::gethostname().to_string_lossy().to_string();
         let builder = IpMsgPacketBuilder::new(username.clone(), hostname.clone());
         Self {
             socket: None,
@@ -418,9 +427,7 @@ impl IpMsgCompat {
         let socket = self.socket.as_ref()?;
         let mut buf = vec![0u8; 65536];
         match socket.try_recv_from(&mut buf) {
-            Ok((len, addr)) => {
-                IpMsgPacket::parse(&buf[..len], addr)
-            }
+            Ok((len, addr)) => IpMsgPacket::parse(&buf[..len], addr),
             Err(_) => None,
         }
     }
@@ -430,9 +437,7 @@ impl IpMsgCompat {
         let socket = self.socket.as_ref()?;
         let mut buf = vec![0u8; 65536];
         match socket.recv_from(&mut buf).await {
-            Ok((len, addr)) => {
-                IpMsgPacket::parse(&buf[..len], addr)
-            }
+            Ok((len, addr)) => IpMsgPacket::parse(&buf[..len], addr),
             Err(e) => {
                 tracing::warn!(error = %e, "IPMSG UDP recv error");
                 None
@@ -453,12 +458,15 @@ impl IpMsgCompat {
             IpMsgCmd::BrEntry => {
                 // New peer announced - reply with AnsEntry
                 let mut peers = self.known_peers.lock().await;
-                peers.insert(peer_key.clone(), IpMsgPeerInfo {
-                    name: packet.sender_name.clone(),
-                    host: packet.sender_host.clone(),
-                    addr: packet.source_addr,
-                    last_seen: std::time::Instant::now(),
-                });
+                peers.insert(
+                    peer_key.clone(),
+                    IpMsgPeerInfo {
+                        name: packet.sender_name.clone(),
+                        host: packet.sender_host.clone(),
+                        addr: packet.source_addr,
+                        last_seen: std::time::Instant::now(),
+                    },
+                );
                 drop(peers);
                 let _ = self.reply_entry(packet.source_addr).await;
                 Some(IpMsgCompatEvent::PeerDiscovered {
@@ -469,12 +477,15 @@ impl IpMsgCompat {
             }
             IpMsgCmd::AnsEntry => {
                 let mut peers = self.known_peers.lock().await;
-                peers.insert(peer_key, IpMsgPeerInfo {
-                    name: packet.sender_name.clone(),
-                    host: packet.sender_host.clone(),
-                    addr: packet.source_addr,
-                    last_seen: std::time::Instant::now(),
-                });
+                peers.insert(
+                    peer_key,
+                    IpMsgPeerInfo {
+                        name: packet.sender_name.clone(),
+                        host: packet.sender_host.clone(),
+                        addr: packet.source_addr,
+                        last_seen: std::time::Instant::now(),
+                    },
+                );
                 Some(IpMsgCompatEvent::PeerDiscovered {
                     name: packet.sender_name.clone(),
                     host: packet.sender_host.clone(),
@@ -503,10 +514,15 @@ impl IpMsgCompat {
             }
             IpMsgCmd::GetInfo => {
                 // Respond with our info
-                let info = format!("{}:{}:{}", self.username, self.hostname, "ipmsg-torrent/2.0");
+                let info = format!(
+                    "{}:{}:{}",
+                    self.username, self.hostname, "ipmsg-torrent/2.0"
+                );
                 if let Some(socket) = &self.socket {
                     let packet = self.builder.send_info(&info);
-                    let _ = socket.send_to(&packet.serialize(), packet.source_addr).await;
+                    let _ = socket
+                        .send_to(&packet.serialize(), packet.source_addr)
+                        .await;
                 }
                 None
             }
@@ -553,7 +569,9 @@ mod tests {
     #[test]
     fn test_packet_parse() {
         let raw = b"1:100:testuser:TESTHOST:4:testuser";
-        let packet = IpMsgPacket::parse(raw, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2425)).unwrap();
+        let packet =
+            IpMsgPacket::parse(raw, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2425))
+                .unwrap();
         assert_eq!(packet.version, 1);
         assert_eq!(packet.packet_no, 100);
         assert_eq!(packet.sender_name, "testuser");
@@ -566,7 +584,11 @@ mod tests {
         let builder = IpMsgPacketBuilder::new("alice".to_string(), "ALICE-PC".to_string());
         let packet = builder.send_msg("Hello World");
         let data = packet.serialize();
-        let parsed = IpMsgPacket::parse(&data, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2425)).unwrap();
+        let parsed = IpMsgPacket::parse(
+            &data,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2425),
+        )
+        .unwrap();
         assert_eq!(parsed.cmd(), IpMsgCmd::SendMsg);
         assert_eq!(parsed.message_content(), Some("Hello World".to_string()));
     }
@@ -592,7 +614,10 @@ mod tests {
         let file_info = "1:report.pdf:2048:1700000000:";
         let packet = builder.send_msg_with_file("Check this file", file_info);
         assert!(packet.has_flag(IPMSG_FILEATTACHOPT));
-        assert_eq!(packet.message_content(), Some("Check this file".to_string()));
+        assert_eq!(
+            packet.message_content(),
+            Some("Check this file".to_string())
+        );
         assert_eq!(packet.attachment_info(), Some(file_info.to_string()));
     }
 }

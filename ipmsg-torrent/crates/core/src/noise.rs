@@ -78,7 +78,8 @@ impl NoiseSession {
         match &mut self.state {
             SessionState::Handshake(hs) => {
                 let mut buf = vec![0u8; MAX_NOISE_MSG];
-                let len = hs.write_message(&[], &mut buf)
+                let len = hs
+                    .write_message(&[], &mut buf)
                     .map_err(|e: snow::Error| NoiseError::Noise(e.to_string()))?;
                 buf.truncate(len);
                 let done = hs.is_handshake_finished();
@@ -128,7 +129,8 @@ impl NoiseSession {
             SessionState::Transport(ts) => {
                 let max_len = plaintext.len() + 16; // +16 for Poly1305 MAC
                 let mut buf = vec![0u8; max_len];
-                let len = ts.write_message(plaintext, &mut buf)
+                let len = ts
+                    .write_message(plaintext, &mut buf)
                     .map_err(|_| NoiseError::EncryptionFailed)?;
                 buf.truncate(len);
                 Ok(buf)
@@ -142,7 +144,8 @@ impl NoiseSession {
         match &mut self.state {
             SessionState::Transport(ts) => {
                 let mut buf = vec![0u8; ciphertext.len()];
-                let len = ts.read_message(ciphertext, &mut buf)
+                let len = ts
+                    .read_message(ciphertext, &mut buf)
                     .map_err(|_| NoiseError::DecryptionFailed)?;
                 buf.truncate(len);
                 Ok(buf)
@@ -153,7 +156,10 @@ impl NoiseSession {
 
     pub fn rekey(&mut self) {
         self.rekey_count += 1;
-        tracing::debug!(rekey_count = self.rekey_count, "Noise session re-key requested");
+        tracing::debug!(
+            rekey_count = self.rekey_count,
+            "Noise session re-key requested"
+        );
     }
 
     pub fn is_ready(&self) -> bool {
@@ -183,7 +189,10 @@ impl NoiseSessionManager {
         }
     }
 
-    pub fn get_or_create_initiator(&mut self, peer_id: &str) -> Result<&mut NoiseSession, NoiseError> {
+    pub fn get_or_create_initiator(
+        &mut self,
+        peer_id: &str,
+    ) -> Result<&mut NoiseSession, NoiseError> {
         use std::collections::hash_map::Entry;
         match self.sessions.entry(peer_id.to_string()) {
             Entry::Occupied(entry) => Ok(entry.into_mut()),

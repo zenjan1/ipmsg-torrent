@@ -1,13 +1,13 @@
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ipmsg_core::{P2PEvent, P2PEngine, SendCommand};
+use ipmsg_core::{P2PEngine, P2PEvent, SendCommand};
 use ipmsg_protocol::message::{ChannelId, ChatMessage};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs};
-use ratatui::Terminal;
 use std::collections::HashMap;
 use std::io::{self, stdout};
 use std::path::PathBuf;
@@ -38,7 +38,10 @@ struct Cli {
 enum Command {
     Help,
     Nick(String),
-    Msg { target: String, content: String },
+    Msg {
+        target: String,
+        content: String,
+    },
     Peers,
     Join(String),
     Leave(String),
@@ -46,17 +49,38 @@ enum Command {
     Who,
     Ping,
     #[allow(dead_code)] // Planned: file transfer support
-    File { target: String, path: String },
-    Share { path: String, tags: Vec<String> },
-    Unshare { hash: String },
-    Search { query: String, tags: Vec<String> },
+    File {
+        target: String,
+        path: String,
+    },
+    Share {
+        path: String,
+        tags: Vec<String>,
+    },
+    Unshare {
+        hash: String,
+    },
+    Search {
+        query: String,
+        tags: Vec<String>,
+    },
     Files,
-    Download { hash: String, peer: String },
-    Block { peer: String },
-    Unblock { peer: String },
+    Download {
+        hash: String,
+        peer: String,
+    },
+    Block {
+        peer: String,
+    },
+    Unblock {
+        peer: String,
+    },
     Fingerprint,
     /// Send message to legacy IPMSG peer by IP address
-    IpMsg { ip: String, message: String },
+    IpMsg {
+        ip: String,
+        message: String,
+    },
     /// List legacy IPMSG peers
     IpMsgPeers,
     Clear,
@@ -71,11 +95,21 @@ fn parse_command(input: &str) -> Command {
     match parts[0].to_lowercase().as_str() {
         "help" | "h" => Command::Help,
         "nick" | "n" => {
-            if parts.len() > 1 { Command::Nick(parts[1].to_string()) } else { Command::Unknown("nick requires a name".to_string()) }
+            if parts.len() > 1 {
+                Command::Nick(parts[1].to_string())
+            } else {
+                Command::Unknown("nick requires a name".to_string())
+            }
         }
         "msg" | "m" | "dm" => {
-            if parts.len() >= 3 { Command::Msg { target: parts[1].to_string(), content: parts[2].to_string() } }
-            else { Command::Unknown("/msg <peer> <text>".to_string()) }
+            if parts.len() >= 3 {
+                Command::Msg {
+                    target: parts[1].to_string(),
+                    content: parts[2].to_string(),
+                }
+            } else {
+                Command::Unknown("/msg <peer> <text>".to_string())
+            }
         }
         "peers" | "p" | "list" => Command::Peers,
         "join" | "j" => {
@@ -86,17 +120,28 @@ fn parse_command(input: &str) -> Command {
                 } else {
                     Command::Join(name)
                 }
-            } else { Command::Unknown("/join <channel>".to_string()) }
+            } else {
+                Command::Unknown("/join <channel>".to_string())
+            }
         }
         "leave" | "part" | "l" => {
-            if parts.len() > 1 { Command::Leave(parts[1].to_string()) }
-            else { Command::Unknown("/leave <channel>".to_string()) }
+            if parts.len() > 1 {
+                Command::Leave(parts[1].to_string())
+            } else {
+                Command::Unknown("/leave <channel>".to_string())
+            }
         }
         "who" | "w" => Command::Who,
         "ping" => Command::Ping,
         "file" | "send" => {
-            if parts.len() >= 3 { Command::File { target: parts[1].to_string(), path: parts[2].to_string() } }
-            else { Command::Unknown("/file <peer> <path>".to_string()) }
+            if parts.len() >= 3 {
+                Command::File {
+                    target: parts[1].to_string(),
+                    path: parts[2].to_string(),
+                }
+            } else {
+                Command::Unknown("/file <peer> <path>".to_string())
+            }
         }
         "share" => {
             if parts.len() >= 2 {
@@ -112,8 +157,13 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "unshare" => {
-            if parts.len() >= 2 { Command::Unshare { hash: parts[1].to_string() } }
-            else { Command::Unknown("/unshare <hash>".to_string()) }
+            if parts.len() >= 2 {
+                Command::Unshare {
+                    hash: parts[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/unshare <hash>".to_string())
+            }
         }
         "search" => {
             if parts.len() >= 2 {
@@ -131,21 +181,28 @@ fn parse_command(input: &str) -> Command {
         "files" => Command::Files,
         "download" | "dl" => {
             if parts.len() >= 3 {
-                Command::Download { hash: parts[1].to_string(), peer: parts[2].to_string() }
+                Command::Download {
+                    hash: parts[1].to_string(),
+                    peer: parts[2].to_string(),
+                }
             } else {
                 Command::Unknown("/download <hash> <peer>".to_string())
             }
         }
         "block" => {
             if parts.len() >= 2 {
-                Command::Block { peer: parts[1].to_string() }
+                Command::Block {
+                    peer: parts[1].to_string(),
+                }
             } else {
                 Command::Unknown("/block <peer>".to_string())
             }
         }
         "unblock" => {
             if parts.len() >= 2 {
-                Command::Unblock { peer: parts[1].to_string() }
+                Command::Unblock {
+                    peer: parts[1].to_string(),
+                }
             } else {
                 Command::Unknown("/unblock <peer>".to_string())
             }
@@ -153,7 +210,10 @@ fn parse_command(input: &str) -> Command {
         "fingerprint" | "fp" => Command::Fingerprint,
         "ipmsg" | "legacy" => {
             if parts.len() >= 3 {
-                Command::IpMsg { ip: parts[1].to_string(), message: parts[2].to_string() }
+                Command::IpMsg {
+                    ip: parts[1].to_string(),
+                    message: parts[2].to_string(),
+                }
             } else {
                 Command::Unknown("/ipmsg <ip> <message>".to_string())
             }
@@ -188,7 +248,8 @@ fn command_help() -> String {
         "/ipmsg-peers     - List legacy IPMSG peers",
         "/clear         - Clear messages",
         "/quit          - Exit",
-    ].join("\n")
+    ]
+    .join("\n")
 }
 
 struct TabView {
@@ -249,7 +310,9 @@ impl SharedState {
     }
 
     fn find_tab_for_channel(&self, channel: &ChannelId) -> Option<usize> {
-        self.tabs.iter().position(|t| t.channel.as_ref() == Some(channel))
+        self.tabs
+            .iter()
+            .position(|t| t.channel.as_ref() == Some(channel))
     }
 }
 
@@ -291,7 +354,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut event_rx = engine.take_receiver().expect("receiver already taken");
-    let cmd_tx = engine.take_command_sender().expect("command sender already taken");
+    let cmd_tx = engine
+        .take_command_sender()
+        .expect("command sender already taken");
 
     // Spawn swarm loop
     tokio::spawn(async move {
@@ -401,17 +466,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let tab = s.active_tab;
                     s.tabs[tab].messages.push(msg);
                 }
-                P2PEvent::PeerJoined { peer_id: pid, username: uname, platforms } => {
+                P2PEvent::PeerJoined {
+                    peer_id: pid,
+                    username: uname,
+                    platforms,
+                } => {
                     if !s.peers.contains(&pid) {
                         s.peers.push(pid.clone());
                     }
-                    s.peer_details.insert(pid.clone(), (uname.clone(), platforms.clone()));
+                    s.peer_details
+                        .insert(pid.clone(), (uname.clone(), platforms.clone()));
                     let platforms_str = if platforms.is_empty() {
                         String::new()
                     } else {
                         format!(" [{}]", platforms.join(", "))
                     };
-                    s.set_status(format!("Peer joined: {}{}{}", uname, platforms_str, &pid[..8.min(pid.len())]));
+                    s.set_status(format!(
+                        "Peer joined: {}{}{}",
+                        uname,
+                        platforms_str,
+                        &pid[..8.min(pid.len())]
+                    ));
                 }
                 P2PEvent::PeerLeft { peer_id: pid } => {
                     s.peers.retain(|p| p != &pid);
@@ -420,7 +495,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 P2PEvent::Typing { from } => {
                     s.set_status(format!("{} is typing...", from));
                 }
-                P2PEvent::Status(st) => { s.set_status(st); }
+                P2PEvent::Status(st) => {
+                    s.set_status(st);
+                }
                 P2PEvent::ExternalAddress(addr) => {
                     s.add_system_message("main", format!("External address: {}", addr));
                 }
@@ -428,14 +505,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tracing::debug!(%peer_id, count = addrs.len(), "Peer addresses saved for bootstrap");
                 }
                 P2PEvent::LegacyPeerDiscovered { name, host, ip } => {
-                    s.add_system_message("main", format!("Legacy IPMSG peer discovered: {}@{} ({})", name, host, ip));
+                    s.add_system_message(
+                        "main",
+                        format!("Legacy IPMSG peer discovered: {}@{} ({})", name, host, ip),
+                    );
                 }
                 P2PEvent::LegacyPeerLeft { name, ip } => {
-                    s.add_system_message("main", format!("Legacy IPMSG peer left: {} ({})", name, ip));
+                    s.add_system_message(
+                        "main",
+                        format!("Legacy IPMSG peer left: {} ({})", name, ip),
+                    );
                 }
-                P2PEvent::LegacyMessageReceived { from, ip, content, has_attachment } => {
-                    let attach_str = if has_attachment { " [has attachment]" } else { "" };
-                    s.add_system_message("main", format!("[IPMSG] {} ({}): {}{}", from, ip, content, attach_str));
+                P2PEvent::LegacyMessageReceived {
+                    from,
+                    ip,
+                    content,
+                    has_attachment,
+                } => {
+                    let attach_str = if has_attachment {
+                        " [has attachment]"
+                    } else {
+                        ""
+                    };
+                    s.add_system_message(
+                        "main",
+                        format!("[IPMSG] {} ({}): {}{}", from, ip, content, attach_str),
+                    );
                 }
                 _ => {}
             }
@@ -444,12 +539,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let s = state.lock().await;
             draw(&mut terminal, &s)?;
-            if !s.running { break; }
+            if !s.running {
+                break;
+            }
             drop(s);
 
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
-                    if key.kind != KeyEventKind::Press { continue; }
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
                     let mut s = state.lock().await;
                     match key.code {
                         KeyCode::Enter => {
@@ -458,9 +557,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             drop(s);
                             handle_command(&state, &cmd_tx, &input).await;
                         }
-                        KeyCode::Char(c) => { state.lock().await.input.push(c); }
-                        KeyCode::Backspace => { state.lock().await.input.pop(); }
-                        KeyCode::Esc => { state.lock().await.running = false; }
+                        KeyCode::Char(c) => {
+                            state.lock().await.input.push(c);
+                        }
+                        KeyCode::Backspace => {
+                            state.lock().await.input.pop();
+                        }
+                        KeyCode::Esc => {
+                            state.lock().await.running = false;
+                        }
                         KeyCode::Tab => {
                             let len = state.lock().await.tabs.len();
                             if len > 1 {
@@ -470,11 +575,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Left => {
                             let mut s = state.lock().await;
-                            if s.active_tab > 0 { s.active_tab -= 1; }
+                            if s.active_tab > 0 {
+                                s.active_tab -= 1;
+                            }
                         }
                         KeyCode::Right => {
                             let mut s = state.lock().await;
-                            if s.active_tab + 1 < s.tabs.len() { s.active_tab += 1; }
+                            if s.active_tab + 1 < s.tabs.len() {
+                                s.active_tab += 1;
+                            }
                         }
                         _ => {}
                     }
@@ -496,11 +605,7 @@ impl SharedState {
     }
 
     fn add_system_message(&mut self, tab: &str, text: String) {
-        let msg = ChatMessage::new_text(
-            "system".to_string(),
-            None,
-            text,
-        );
+        let msg = ChatMessage::new_text("system".to_string(), None, text);
         self.add_message(tab, msg);
     }
 
@@ -509,7 +614,11 @@ impl SharedState {
     }
 }
 
-async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::mpsc::UnboundedSender<SendCommand>, input: &str) {
+async fn handle_command(
+    state: &Arc<Mutex<SharedState>>,
+    cmd_tx: &tokio::sync::mpsc::UnboundedSender<SendCommand>,
+    input: &str,
+) {
     if !input.starts_with('/') {
         // Regular message - send to active tab's channel or broadcast
         let s = state.lock().await;
@@ -520,7 +629,10 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
         drop(s);
 
         if let Some(ch) = channel {
-            let _ = cmd_tx.send(SendCommand::SendToChannel { channel: ch, content });
+            let _ = cmd_tx.send(SendCommand::SendToChannel {
+                channel: ch,
+                content,
+            });
         } else if let Some(peer) = tab_name.strip_prefix("dm:") {
             // DM: peer is the short identifier, we need the full peer ID
             let full_peer = {
@@ -528,7 +640,10 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
                 s.peers.iter().find(|p| p.starts_with(peer)).cloned()
             };
             if let Some(peer_id) = full_peer {
-                let _ = cmd_tx.send(SendCommand::SendText { to: peer_id, content });
+                let _ = cmd_tx.send(SendCommand::SendText {
+                    to: peer_id,
+                    content,
+                });
             }
         } else {
             // Broadcast to main
@@ -555,7 +670,10 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
                 s.peers.iter().find(|p| p.starts_with(&target)).cloned()
             };
             if let Some(peer_id) = full_peer {
-                let _ = cmd_tx.send(SendCommand::SendText { to: peer_id, content: content.clone() });
+                let _ = cmd_tx.send(SendCommand::SendText {
+                    to: peer_id,
+                    content: content.clone(),
+                });
                 let mut s = state.lock().await;
                 s.add_system_message("main", format!("Sent DM to {}", target));
             } else {
@@ -565,25 +683,43 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
         }
         Command::Peers => {
             let s = state.lock().await;
-            let peer_list: Vec<String> = s.peers.iter().map(|p| {
-                let detail = s.peer_details.get(p);
-                match detail {
-                    Some((uname, platforms)) => format!("{} - {} [{}]", &p[..8.min(p.len())], uname, platforms.join(", ")),
-                    None => format!("{} - unknown", &p[..8.min(p.len())]),
-                }
-            }).collect();
+            let peer_list: Vec<String> = s
+                .peers
+                .iter()
+                .map(|p| {
+                    let detail = s.peer_details.get(p);
+                    match detail {
+                        Some((uname, platforms)) => format!(
+                            "{} - {} [{}]",
+                            &p[..8.min(p.len())],
+                            uname,
+                            platforms.join(", ")
+                        ),
+                        None => format!("{} - unknown", &p[..8.min(p.len())]),
+                    }
+                })
+                .collect();
             let mut s = state.lock().await;
             if peer_list.is_empty() {
                 s.add_system_message("main", "No peers connected".to_string());
             } else {
-                s.add_system_message("main", format!("Connected peers ({}):\n{}", peer_list.len(), peer_list.join("\n")));
+                s.add_system_message(
+                    "main",
+                    format!(
+                        "Connected peers ({}):\n{}",
+                        peer_list.len(),
+                        peer_list.join("\n")
+                    ),
+                );
             }
         }
         Command::Join(name) => {
             let channel = ChannelId::Group(name.clone());
             let tab_name = format!("#{}", name);
             let msg_text = format!("Joined channel #{}", name);
-            let _ = cmd_tx.send(SendCommand::AddChannel { channel: channel.clone() });
+            let _ = cmd_tx.send(SendCommand::AddChannel {
+                channel: channel.clone(),
+            });
             let mut s = state.lock().await;
             let idx = s.find_or_create_tab(&tab_name, Some(channel));
             s.active_tab = idx;
@@ -593,7 +729,9 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
             let channel = ChannelId::Geohash(hash.clone());
             let tab_name = format!("@{}", hash);
             let msg_text = format!("Joined geohash channel @{}", hash);
-            let _ = cmd_tx.send(SendCommand::AddChannel { channel: channel.clone() });
+            let _ = cmd_tx.send(SendCommand::AddChannel {
+                channel: channel.clone(),
+            });
             let mut s = state.lock().await;
             let idx = s.find_or_create_tab(&tab_name, Some(channel));
             s.active_tab = idx;
@@ -601,7 +739,11 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
         }
         Command::Leave(name) => {
             let mut s = state.lock().await;
-            if let Some(idx) = s.tabs.iter().position(|t| t.name == format!("#{}", name) || t.name == format!("@{}", name)) {
+            if let Some(idx) = s
+                .tabs
+                .iter()
+                .position(|t| t.name == format!("#{}", name) || t.name == format!("@{}", name))
+            {
                 let removed_name = s.tabs[idx].name.clone();
                 let removed_channel = s.tabs[idx].channel.clone();
                 s.tabs.remove(idx);
@@ -619,7 +761,12 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
             let mut lines = vec![format!("Online peers ({}):", s.peers.len())];
             for p in &s.peers {
                 if let Some((uname, platforms)) = s.peer_details.get(p) {
-                    lines.push(format!("  {} - {} ({})", &p[..8.min(p.len())], uname, platforms.join(", ")));
+                    lines.push(format!(
+                        "  {} - {} ({})",
+                        &p[..8.min(p.len())],
+                        uname,
+                        platforms.join(", ")
+                    ));
                 }
             }
             drop(s);
@@ -655,15 +802,18 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
                     description: Some(format!("Direct transfer to {}", target)),
                 });
                 let mut s = state.lock().await;
-                s.add_system_message("main", format!("Sharing file {} with peer {}...", path, target));
+                s.add_system_message(
+                    "main",
+                    format!("Sharing file {} with peer {}...", path, target),
+                );
             } else {
                 let mut s = state.lock().await;
                 s.add_system_message("main", format!("Peer not found: {}", target));
             }
         }
         Command::Share { path, tags } => {
-            let _ = cmd_tx.send(SendCommand::ShareFile { 
-                path: PathBuf::from(path), 
+            let _ = cmd_tx.send(SendCommand::ShareFile {
+                path: PathBuf::from(path),
                 tags,
                 description: None,
             });
@@ -686,19 +836,39 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
             s.add_system_message("main", "Listing shared files...".to_string());
         }
         Command::Download { hash, peer } => {
-            let _ = cmd_tx.send(SendCommand::DownloadFile { file_hash: hash.clone(), from_peer: peer.clone() });
+            let _ = cmd_tx.send(SendCommand::DownloadFile {
+                file_hash: hash.clone(),
+                from_peer: peer.clone(),
+            });
             let mut s = state.lock().await;
-            s.add_system_message("main", format!("Downloading file {} from {}...", &hash[..8.min(hash.len())], &peer[..8.min(peer.len())]));
+            s.add_system_message(
+                "main",
+                format!(
+                    "Downloading file {} from {}...",
+                    &hash[..8.min(hash.len())],
+                    &peer[..8.min(peer.len())]
+                ),
+            );
         }
         Command::Block { peer } => {
-            let _ = cmd_tx.send(SendCommand::BlockPeer { peer_id: peer.clone() });
+            let _ = cmd_tx.send(SendCommand::BlockPeer {
+                peer_id: peer.clone(),
+            });
             let mut s = state.lock().await;
-            s.add_system_message("main", format!("Blocked peer {}", &peer[..8.min(peer.len())]));
+            s.add_system_message(
+                "main",
+                format!("Blocked peer {}", &peer[..8.min(peer.len())]),
+            );
         }
         Command::Unblock { peer } => {
-            let _ = cmd_tx.send(SendCommand::UnblockPeer { peer_id: peer.clone() });
+            let _ = cmd_tx.send(SendCommand::UnblockPeer {
+                peer_id: peer.clone(),
+            });
             let mut s = state.lock().await;
-            s.add_system_message("main", format!("Unblocked peer {}", &peer[..8.min(peer.len())]));
+            s.add_system_message(
+                "main",
+                format!("Unblocked peer {}", &peer[..8.min(peer.len())]),
+            );
         }
         Command::Fingerprint => {
             let s = state.lock().await;
@@ -711,19 +881,20 @@ async fn handle_command(state: &Arc<Mutex<SharedState>>, cmd_tx: &tokio::sync::m
                 s.add_system_message("main", format!("Your fingerprint:\n{}", fp));
             }
         }
-        Command::IpMsg { ip, message } => {
-            match ip.parse::<std::net::IpAddr>() {
-                Ok(addr) => {
-                    let _ = cmd_tx.send(SendCommand::SendIpMsg { ip: addr, message: message.clone() });
-                    let mut s = state.lock().await;
-                    s.add_system_message("main", format!("Sent IPMSG to {}", ip));
-                }
-                Err(_) => {
-                    let mut s = state.lock().await;
-                    s.add_system_message("main", format!("Invalid IP address: {}", ip));
-                }
+        Command::IpMsg { ip, message } => match ip.parse::<std::net::IpAddr>() {
+            Ok(addr) => {
+                let _ = cmd_tx.send(SendCommand::SendIpMsg {
+                    ip: addr,
+                    message: message.clone(),
+                });
+                let mut s = state.lock().await;
+                s.add_system_message("main", format!("Sent IPMSG to {}", ip));
             }
-        }
+            Err(_) => {
+                let mut s = state.lock().await;
+                s.add_system_message("main", format!("Invalid IP address: {}", ip));
+            }
+        },
         Command::IpMsgPeers => {
             let _ = cmd_tx.send(SendCommand::ListIpMsgPeers);
         }
@@ -739,11 +910,17 @@ fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 fn restore_terminal(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen)?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen
+    )?;
     Ok(())
 }
 
-fn draw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, state: &SharedState) -> io::Result<()> {
+fn draw(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &SharedState,
+) -> io::Result<()> {
     terminal.draw(|f| {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -753,29 +930,34 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, state: &SharedSta
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // Tabs
-                Constraint::Min(3),     // Messages
-                Constraint::Length(3),  // Input
+                Constraint::Length(1), // Tabs
+                Constraint::Min(3),    // Messages
+                Constraint::Length(3), // Input
             ])
             .split(chunks[1]);
 
         // Peer list
         let peer_items: Vec<ListItem> = if state.peers.is_empty() {
             vec![ListItem::new(Line::from(Span::styled(
-                "  Waiting...", Style::default().fg(Color::DarkGray),
+                "  Waiting...",
+                Style::default().fg(Color::DarkGray),
             )))]
         } else {
-            state.peers.iter().map(|p| {
-                let detail = state.peer_details.get(p);
-                let name = match detail {
-                    Some((uname, _)) => uname.clone(),
-                    None => "unknown".to_string(),
-                };
-                ListItem::new(Line::from(vec![
-                    Span::styled("● ", Style::default().fg(Color::Green)),
-                    Span::styled(name, Style::default().fg(Color::White)),
-                ]))
-            }).collect()
+            state
+                .peers
+                .iter()
+                .map(|p| {
+                    let detail = state.peer_details.get(p);
+                    let name = match detail {
+                        Some((uname, _)) => uname.clone(),
+                        None => "unknown".to_string(),
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled("● ", Style::default().fg(Color::Green)),
+                        Span::styled(name, Style::default().fg(Color::White)),
+                    ]))
+                })
+                .collect()
         };
 
         let peers_block = Block::default()
@@ -785,52 +967,78 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, state: &SharedSta
         f.render_widget(List::new(peer_items).block(peers_block), chunks[0]);
 
         // Tabs
-        let tab_titles: Vec<Line> = state.tabs.iter().enumerate().map(|(i, t)| {
-            let style = if i == state.active_tab {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            Line::from(Span::styled(format!(" {} ", t.name), style))
-        }).collect();
-        f.render_widget(Tabs::new(tab_titles).highlight_style(
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ), right_chunks[0]);
+        let tab_titles: Vec<Line> = state
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let style = if i == state.active_tab {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                Line::from(Span::styled(format!(" {} ", t.name), style))
+            })
+            .collect();
+        f.render_widget(
+            Tabs::new(tab_titles).highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            right_chunks[0],
+        );
 
         // Messages
         let tab = state.active_tab();
-        let msg_lines: Vec<Line> = tab.messages.iter().flat_map(|m| {
-            let from_color = if m.from == "system" {
-                Color::Yellow
-            } else if m.from == state.my_peer_id {
-                Color::Green
-            } else {
-                Color::Blue
-            };
-            let content = match &m.kind {
-                ipmsg_protocol::message::MessageType::Text { content } => content.clone(),
-                _ => format!("[{}]", m.kind.label()),
-            };
-            let sender = if m.from == state.my_peer_id { "you" } else { &m.from };
-            vec![
-                Line::from(Span::styled(
-                    format!("[{}] {} ", m.timestamp.format("%H:%M"), sender),
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Line::from(Span::styled(format!("  {}", content), Style::default().fg(from_color))),
-            ]
-        }).collect();
+        let msg_lines: Vec<Line> = tab
+            .messages
+            .iter()
+            .flat_map(|m| {
+                let from_color = if m.from == "system" {
+                    Color::Yellow
+                } else if m.from == state.my_peer_id {
+                    Color::Green
+                } else {
+                    Color::Blue
+                };
+                let content = match &m.kind {
+                    ipmsg_protocol::message::MessageType::Text { content } => content.clone(),
+                    _ => format!("[{}]", m.kind.label()),
+                };
+                let sender = if m.from == state.my_peer_id {
+                    "you"
+                } else {
+                    &m.from
+                };
+                vec![
+                    Line::from(Span::styled(
+                        format!("[{}] {} ", m.timestamp.format("%H:%M"), sender),
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    Line::from(Span::styled(
+                        format!("  {}", content),
+                        Style::default().fg(from_color),
+                    )),
+                ]
+            })
+            .collect();
 
         let messages_block = Block::default()
             .title(format!(" {} ", tab.name))
             .borders(Borders::ALL)
             .style(Style::default().fg(Color::White));
 
-        let scroll = tab.messages.len().saturating_sub(
-            right_chunks[1].height.saturating_sub(2) as usize
-        );
+        let scroll = tab
+            .messages
+            .len()
+            .saturating_sub(right_chunks[1].height.saturating_sub(2) as usize);
         f.render_widget(
-            Paragraph::new(msg_lines).block(messages_block).scroll((scroll as u16, 0)),
+            Paragraph::new(msg_lines)
+                .block(messages_block)
+                .scroll((scroll as u16, 0)),
             right_chunks[1],
         );
 

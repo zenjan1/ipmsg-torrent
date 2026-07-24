@@ -1,6 +1,10 @@
-use crate::file_transfer::{create_file_transfer_behaviour, FileTransferCodec, FileTransferRequest, FileTransferResponse};
+use crate::file_transfer::{
+    FileTransferCodec, FileTransferRequest, FileTransferResponse, create_file_transfer_behaviour,
+};
 use crate::identity::Identity;
-use crate::messaging::{parse_agent_version, CHAT_TOPIC, FILE_TOPIC, FRAGMENT_TOPIC, PRESENCE_TOPIC};
+use crate::messaging::{
+    CHAT_TOPIC, FILE_TOPIC, FRAGMENT_TOPIC, PRESENCE_TOPIC, parse_agent_version,
+};
 use crate::store::PeerInfo as StoredPeerInfo;
 use crate::{ConnectedPeer, MessageStore, P2PError, P2PEvent};
 use futures::stream::StreamExt;
@@ -59,28 +63,22 @@ impl IpMsgNetBehaviour {
             .validation_mode(gossipsub::ValidationMode::Permissive)
             .build()
             .expect("valid gossipsub config");
-        let gossipsub = gossipsub::Behaviour::new(
-            MessageAuthenticity::Signed(local_key.clone()),
-            gs_config,
-        )
-        .expect("valid gossipsub");
+        let gossipsub =
+            gossipsub::Behaviour::new(MessageAuthenticity::Signed(local_key.clone()), gs_config)
+                .expect("valid gossipsub");
 
         // Identify
-        let identify_config = identify::Config::new(
-            "ipmsg/1.0.0".to_string(),
-            local_key.public(),
-        )
-        .with_agent_version(format!(
-            "ipmsg/2.1.0 ({}, {})",
-            username,
-            platforms.join(", ")
-        ))
-        .with_interval(Duration::from_secs(300));
+        let identify_config = identify::Config::new("ipmsg/1.0.0".to_string(), local_key.public())
+            .with_agent_version(format!(
+                "ipmsg/2.1.0 ({}, {})",
+                username,
+                platforms.join(", ")
+            ))
+            .with_interval(Duration::from_secs(300));
         let identify = identify::Behaviour::new(identify_config);
 
         // mDNS
-        let mdns = Mdns::new(Default::default(), local_peer_id)
-            .expect("mDNS creation failed");
+        let mdns = Mdns::new(Default::default(), local_peer_id).expect("mDNS creation failed");
 
         // File transfer request-response
         let file_transfer = create_file_transfer_behaviour();
@@ -139,7 +137,8 @@ pub struct P2PSwarm {
     store: MessageStore,
     connected_peers: HashSet<PeerId>,
     /// Pending response channels for file transfer requests
-    pending_response_channels: HashMap<String, request_response::ResponseChannel<FileTransferResponse>>,
+    pending_response_channels:
+        HashMap<String, request_response::ResponseChannel<FileTransferResponse>>,
 }
 
 impl P2PSwarm {
@@ -166,7 +165,12 @@ impl P2PSwarm {
             .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)
             .map_err(|e| P2PError::Transport(e.to_string()))?
             .with_behaviour(|key, relay_client| {
-                Ok(IpMsgNetBehaviour::new(key, username, platforms, relay_client))
+                Ok(IpMsgNetBehaviour::new(
+                    key,
+                    username,
+                    platforms,
+                    relay_client,
+                ))
             })
             .map_err(|e| P2PError::Transport(e.to_string()))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
@@ -194,7 +198,10 @@ impl P2PSwarm {
                     _ => None,
                 }) {
                     let _ = swarm_obj.swarm.dial(addr.clone());
-                    swarm_obj.swarm.behaviour_mut().add_kademlia_peer(peer_id, addr.clone());
+                    swarm_obj
+                        .swarm
+                        .behaviour_mut()
+                        .add_kademlia_peer(peer_id, addr.clone());
                     swarm_obj.connected_peers.insert(peer_id);
                     tracing::info!(%peer_id, %addr, "Added bootstrap node");
                 }
@@ -206,7 +213,10 @@ impl P2PSwarm {
             if let Ok(peer_id) = peer_id_str.parse::<PeerId>() {
                 for addr_str in addrs {
                     if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                        swarm_obj.swarm.behaviour_mut().add_kademlia_peer(peer_id, addr.clone());
+                        swarm_obj
+                            .swarm
+                            .behaviour_mut()
+                            .add_kademlia_peer(peer_id, addr.clone());
                         let _ = swarm_obj.swarm.dial(addr);
                     }
                 }
@@ -252,7 +262,9 @@ impl P2PSwarm {
 
     pub fn subscribe_topic(&mut self, name: &str) -> Result<(), P2PError> {
         let topic = IdentTopic::new(name);
-        self.swarm.behaviour_mut().gossipsub
+        self.swarm
+            .behaviour_mut()
+            .gossipsub
             .subscribe(&topic)
             .map_err(|e| P2PError::Network(e.to_string()))?;
         self.subscribed_topics.push(name.to_string());
@@ -269,27 +281,46 @@ impl P2PSwarm {
 
     pub fn publish_to_topic(&mut self, topic_name: &str, data: Vec<u8>) -> Result<(), P2PError> {
         let topic = IdentTopic::new(topic_name);
-        self.swarm.behaviour_mut().gossipsub
+        self.swarm
+            .behaviour_mut()
+            .gossipsub
             .publish(topic, data)
             .map_err(|e| P2PError::Network(e.to_string()))?;
         Ok(())
     }
 
     /// Send a file transfer request to a peer
-    pub fn send_file_request(&mut self, peer_id: &PeerId, req: FileTransferRequest) -> Result<(), P2PError> {
-        self.swarm.behaviour_mut().file_transfer.send_request(peer_id, req);
+    pub fn send_file_request(
+        &mut self,
+        peer_id: &PeerId,
+        req: FileTransferRequest,
+    ) -> Result<(), P2PError> {
+        self.swarm
+            .behaviour_mut()
+            .file_transfer
+            .send_request(peer_id, req);
         Ok(())
     }
 
     /// Send a file transfer response to a peer using the saved response channel
-    pub fn send_file_transfer_response(&mut self, peer_id: &PeerId, resp: FileTransferResponse) -> Result<(), P2PError> {
+    pub fn send_file_transfer_response(
+        &mut self,
+        peer_id: &PeerId,
+        resp: FileTransferResponse,
+    ) -> Result<(), P2PError> {
         let pid_str = peer_id.to_base58();
         if let Some(channel) = self.pending_response_channels.remove(&pid_str) {
-            self.swarm.behaviour_mut().file_transfer.send_response(channel, resp)
+            self.swarm
+                .behaviour_mut()
+                .file_transfer
+                .send_response(channel, resp)
                 .map_err(|e| P2PError::Network(format!("Failed to send response: {:?}", e)))?;
             Ok(())
         } else {
-            Err(P2PError::PeerNotFound(format!("No pending response channel for peer {}", pid_str)))
+            Err(P2PError::PeerNotFound(format!(
+                "No pending response channel for peer {}",
+                pid_str
+            )))
         }
     }
 
@@ -316,7 +347,12 @@ impl P2PSwarm {
         match decode_message(&msg.data) {
             Ok(chat_msg) => {
                 if topic == PRESENCE_TOPIC {
-                    if let ipmsg_protocol::message::MessageType::Presence { username, platforms, .. } = &chat_msg.kind {
+                    if let ipmsg_protocol::message::MessageType::Presence {
+                        username,
+                        platforms,
+                        ..
+                    } = &chat_msg.kind
+                    {
                         let peer = ConnectedPeer {
                             peer_id: chat_msg.from.clone(),
                             username: username.clone(),
@@ -332,7 +368,9 @@ impl P2PSwarm {
                     }
                 } else if topic == FRAGMENT_TOPIC {
                     // Handle fragment messages - decode as FragmentMsg
-                    if let Ok(fragment) = serde_cbor::from_slice::<crate::fragment::FragmentMsg>(&msg.data) {
+                    if let Ok(fragment) =
+                        serde_cbor::from_slice::<crate::fragment::FragmentMsg>(&msg.data)
+                    {
                         // Store fragment for later processing by fragment manager
                         events.push(P2PEvent::FragmentReceived { fragment });
                     }
@@ -351,8 +389,8 @@ impl P2PSwarm {
     fn on_identify_received(&mut self, info: &identify::Info) -> Vec<P2PEvent> {
         let mut events = Vec::new();
         let pid_str = info.public_key.to_peer_id().to_base58();
-        let (username, platforms) = parse_agent_version(&info.agent_version)
-            .unwrap_or_else(|| (String::new(), Vec::new()));
+        let (username, platforms) =
+            parse_agent_version(&info.agent_version).unwrap_or_else(|| (String::new(), Vec::new()));
 
         let peer = ConnectedPeer {
             peer_id: pid_str.clone(),
@@ -380,7 +418,9 @@ impl P2PSwarm {
         if !addrs.is_empty() {
             // Add addresses to Kademlia routing table
             for addr in &info.listen_addrs {
-                self.swarm.behaviour_mut().add_kademlia_peer(info.public_key.to_peer_id(), addr.clone());
+                self.swarm
+                    .behaviour_mut()
+                    .add_kademlia_peer(info.public_key.to_peer_id(), addr.clone());
             }
             events.push(P2PEvent::PeerAddressesDiscovered {
                 peer_id: pid_str,
@@ -401,7 +441,9 @@ impl P2PSwarm {
         let pid_str = peer_id.to_base58();
         tracing::info!(%peer_id, "mDNS discovered peer");
 
-        self.swarm.behaviour_mut().add_kademlia_peer(*peer_id, addr.clone());
+        self.swarm
+            .behaviour_mut()
+            .add_kademlia_peer(*peer_id, addr.clone());
         let _ = self.swarm.dial(*peer_id);
 
         events.push(P2PEvent::PeerJoined {
@@ -422,22 +464,32 @@ impl P2PSwarm {
         events
     }
 
-    fn on_file_transfer_request(&mut self, peer_id: &PeerId, request: FileTransferRequest, channel: request_response::ResponseChannel<FileTransferResponse>) -> Vec<P2PEvent> {
+    fn on_file_transfer_request(
+        &mut self,
+        peer_id: &PeerId,
+        request: FileTransferRequest,
+        channel: request_response::ResponseChannel<FileTransferResponse>,
+    ) -> Vec<P2PEvent> {
         tracing::info!(peer = %peer_id, ?request, "Received file transfer request");
-        
+
         // Save the response channel keyed by peer_id
-        self.pending_response_channels.insert(peer_id.to_base58(), channel);
-        
+        self.pending_response_channels
+            .insert(peer_id.to_base58(), channel);
+
         // Emit event for engine to handle
         let event = P2PEvent::FileTransferRequestReceived {
             from: peer_id.to_base58(),
             request,
         };
-        
+
         vec![event]
     }
 
-    fn on_file_transfer_response(&mut self, peer_id: &PeerId, response: FileTransferResponse) -> Vec<P2PEvent> {
+    fn on_file_transfer_response(
+        &mut self,
+        peer_id: &PeerId,
+        response: FileTransferResponse,
+    ) -> Vec<P2PEvent> {
         let mut events = Vec::new();
         let pid_str = peer_id.to_base58();
         events.push(P2PEvent::FileTransferResponse {
@@ -465,61 +517,67 @@ impl P2PSwarm {
 
         // Poll gossipsub for messages
         loop {
-            match self.swarm.behaviour_mut().gossipsub.poll(
-                &mut std::task::Context::from_waker(futures::task::noop_waker_ref()),
-            ) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => {
-                    match evt {
-                        gossipsub::Event::Message { message, .. } => {
-                            let new = self.on_gossipsub_message(&message);
-                            events.extend(new);
-                        }
-                        _ => {}
+            match self
+                .swarm
+                .behaviour_mut()
+                .gossipsub
+                .poll(&mut std::task::Context::from_waker(
+                    futures::task::noop_waker_ref(),
+                )) {
+                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => match evt {
+                    gossipsub::Event::Message { message, .. } => {
+                        let new = self.on_gossipsub_message(&message);
+                        events.extend(new);
                     }
-                }
+                    _ => {}
+                },
                 _ => break,
             }
         }
 
         // Poll identify
         loop {
-            match self.swarm.behaviour_mut().identify.poll(
-                &mut std::task::Context::from_waker(futures::task::noop_waker_ref()),
-            ) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => {
-                    match evt {
-                        IdentifyEvent::Received { info, .. } => {
-                            let new = self.on_identify_received(&info);
-                            events.extend(new);
-                        }
-                        _ => {}
+            match self
+                .swarm
+                .behaviour_mut()
+                .identify
+                .poll(&mut std::task::Context::from_waker(
+                    futures::task::noop_waker_ref(),
+                )) {
+                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => match evt {
+                    IdentifyEvent::Received { info, .. } => {
+                        let new = self.on_identify_received(&info);
+                        events.extend(new);
                     }
-                }
+                    _ => {}
+                },
                 _ => break,
             }
         }
 
         // Poll mdns
         loop {
-            match self.swarm.behaviour_mut().mdns.poll(
-                &mut std::task::Context::from_waker(futures::task::noop_waker_ref()),
-            ) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => {
-                    match evt {
-                        MdnsEvent::Discovered(peers) => {
-                            for (peer_id, addr) in peers {
-                                let new = self.on_mdns_discovered(&peer_id, &addr);
-                                events.extend(new);
-                            }
-                        }
-                        MdnsEvent::Expired(peers) => {
-                            for (peer_id, _addr) in peers {
-                                let new = self.on_mdns_expired(&peer_id);
-                                events.extend(new);
-                            }
+            match self
+                .swarm
+                .behaviour_mut()
+                .mdns
+                .poll(&mut std::task::Context::from_waker(
+                    futures::task::noop_waker_ref(),
+                )) {
+                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => match evt {
+                    MdnsEvent::Discovered(peers) => {
+                        for (peer_id, addr) in peers {
+                            let new = self.on_mdns_discovered(&peer_id, &addr);
+                            events.extend(new);
                         }
                     }
-                }
+                    MdnsEvent::Expired(peers) => {
+                        for (peer_id, _addr) in peers {
+                            let new = self.on_mdns_expired(&peer_id);
+                            events.extend(new);
+                        }
+                    }
+                },
                 _ => break,
             }
         }
@@ -533,9 +591,12 @@ impl P2PSwarm {
                     match evt {
                         RequestResponseEvent::Message { peer, message, .. } => {
                             match message {
-                                request_response::Message::Request { request, channel, .. } => {
+                                request_response::Message::Request {
+                                    request, channel, ..
+                                } => {
                                     // Handle incoming file transfer request
-                                    let new = self.on_file_transfer_request(&peer, request, channel);
+                                    let new =
+                                        self.on_file_transfer_request(&peer, request, channel);
                                     events.extend(new);
                                 }
                                 request_response::Message::Response { response, .. } => {
@@ -554,44 +615,73 @@ impl P2PSwarm {
 
         // Poll relay events
         loop {
-            match self.swarm.behaviour_mut().relay.poll(
-                &mut std::task::Context::from_waker(futures::task::noop_waker_ref()),
-            ) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => {
-                    match evt {
-                        relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
-                            tracing::info!(%relay_peer_id, renewal, "Relay reservation accepted");
-                            events.push(P2PEvent::Status(format!("Relay reservation accepted by {}", &relay_peer_id.to_base58()[..8])));
-                        }
-                        relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
-                            tracing::info!(%relay_peer_id, "Outbound circuit established");
-                            events.push(P2PEvent::Status(format!("Relay circuit established with {}", &relay_peer_id.to_base58()[..8])));
-                        }
-                        relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
-                            tracing::info!(%src_peer_id, "Inbound circuit established");
-                            events.push(P2PEvent::Status(format!("Incoming relay circuit from {}", &src_peer_id.to_base58()[..8])));
-                        }
+            match self
+                .swarm
+                .behaviour_mut()
+                .relay
+                .poll(&mut std::task::Context::from_waker(
+                    futures::task::noop_waker_ref(),
+                )) {
+                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => match evt {
+                    relay::client::Event::ReservationReqAccepted {
+                        relay_peer_id,
+                        renewal,
+                        ..
+                    } => {
+                        tracing::info!(%relay_peer_id, renewal, "Relay reservation accepted");
+                        events.push(P2PEvent::Status(format!(
+                            "Relay reservation accepted by {}",
+                            &relay_peer_id.to_base58()[..8]
+                        )));
                     }
-                }
+                    relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
+                        tracing::info!(%relay_peer_id, "Outbound circuit established");
+                        events.push(P2PEvent::Status(format!(
+                            "Relay circuit established with {}",
+                            &relay_peer_id.to_base58()[..8]
+                        )));
+                    }
+                    relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
+                        tracing::info!(%src_peer_id, "Inbound circuit established");
+                        events.push(P2PEvent::Status(format!(
+                            "Incoming relay circuit from {}",
+                            &src_peer_id.to_base58()[..8]
+                        )));
+                    }
+                },
                 _ => break,
             }
         }
 
         // Poll dcutr events (hole punching)
         loop {
-            match self.swarm.behaviour_mut().dcutr.poll(
-                &mut std::task::Context::from_waker(futures::task::noop_waker_ref()),
-            ) {
+            match self
+                .swarm
+                .behaviour_mut()
+                .dcutr
+                .poll(&mut std::task::Context::from_waker(
+                    futures::task::noop_waker_ref(),
+                )) {
                 std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => {
-                    let dcutr::Event { remote_peer_id, result } = evt;
+                    let dcutr::Event {
+                        remote_peer_id,
+                        result,
+                    } = evt;
                     match result {
                         Ok(connection_id) => {
                             tracing::info!(%remote_peer_id, ?connection_id, "DCUtR: Direct connection upgrade succeeded");
-                            events.push(P2PEvent::Status(format!("Hole punch success with {}", &remote_peer_id.to_base58()[..8])));
+                            events.push(P2PEvent::Status(format!(
+                                "Hole punch success with {}",
+                                &remote_peer_id.to_base58()[..8]
+                            )));
                         }
                         Err(error) => {
                             tracing::warn!(%remote_peer_id, %error, "DCUtR: Direct connection upgrade failed");
-                            events.push(P2PEvent::Status(format!("Hole punch failed with {}: {}", &remote_peer_id.to_base58()[..8], error)));
+                            events.push(P2PEvent::Status(format!(
+                                "Hole punch failed with {}: {}",
+                                &remote_peer_id.to_base58()[..8],
+                                error
+                            )));
                         }
                     }
                 }
@@ -601,23 +691,25 @@ impl P2PSwarm {
 
         // Poll autonat events (NAT detection)
         loop {
-            match self.swarm.behaviour_mut().autonat.poll(
-                &mut std::task::Context::from_waker(futures::task::noop_waker_ref()),
-            ) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => {
-                    match evt {
-                        autonat::Event::StatusChanged { old, new } => {
-                            tracing::info!(?old, ?new, "NAT status changed");
-                            events.push(P2PEvent::Status(format!("NAT status: {:?}", new)));
-                        }
-                        autonat::Event::InboundProbe(event) => {
-                            tracing::debug!(?event, "AutoNAT inbound probe");
-                        }
-                        autonat::Event::OutboundProbe(event) => {
-                            tracing::debug!(?event, "AutoNAT outbound probe");
-                        }
+            match self
+                .swarm
+                .behaviour_mut()
+                .autonat
+                .poll(&mut std::task::Context::from_waker(
+                    futures::task::noop_waker_ref(),
+                )) {
+                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => match evt {
+                    autonat::Event::StatusChanged { old, new } => {
+                        tracing::info!(?old, ?new, "NAT status changed");
+                        events.push(P2PEvent::Status(format!("NAT status: {:?}", new)));
                     }
-                }
+                    autonat::Event::InboundProbe(event) => {
+                        tracing::debug!(?event, "AutoNAT inbound probe");
+                    }
+                    autonat::Event::OutboundProbe(event) => {
+                        tracing::debug!(?event, "AutoNAT outbound probe");
+                    }
+                },
                 _ => break,
             }
         }
@@ -662,18 +754,28 @@ impl futures::Stream for P2PSwarm {
                         }
                         SwarmEvent::Behaviour(behaviour_evt) => {
                             // Handle Identify events directly from the swarm event
-                            if let IpMsgNetBehaviourEvent::Identify(identify::Event::Received { info, .. }) = behaviour_evt {
+                            if let IpMsgNetBehaviourEvent::Identify(identify::Event::Received {
+                                info,
+                                ..
+                            }) = behaviour_evt
+                            {
                                 let new = self.on_identify_received(&info);
                                 events.extend(new);
                             }
                             // Handle mDNS events directly
-                            if let IpMsgNetBehaviourEvent::Mdns(libp2p::mdns::Event::Discovered(peers)) = behaviour_evt {
+                            if let IpMsgNetBehaviourEvent::Mdns(libp2p::mdns::Event::Discovered(
+                                peers,
+                            )) = behaviour_evt
+                            {
                                 for (peer_id, addr) in peers {
                                     let new = self.on_mdns_discovered(&peer_id, &addr);
                                     events.extend(new);
                                 }
                             }
-                            if let IpMsgNetBehaviourEvent::Mdns(libp2p::mdns::Event::Expired(peers)) = behaviour_evt {
+                            if let IpMsgNetBehaviourEvent::Mdns(libp2p::mdns::Event::Expired(
+                                peers,
+                            )) = behaviour_evt
+                            {
                                 for (peer_id, _addr) in peers {
                                     let new = self.on_mdns_expired(&peer_id);
                                     events.extend(new);

@@ -23,11 +23,14 @@ impl BloomFilter {
     /// false_positive_rate: target FPR (0.01 = 1%)
     pub fn new(capacity: usize, false_positive_rate: f64) -> Self {
         // Optimal bit array size: m = -n * ln(p) / (ln(2))^2
-        let m = ((-(capacity as f64) * false_positive_rate.ln()) / (2.0f64.ln().powi(2))).ceil() as usize;
+        let m = ((-(capacity as f64) * false_positive_rate.ln()) / (2.0f64.ln().powi(2))).ceil()
+            as usize;
         // Optimal number of hash functions: k = (m/n) * ln(2)
         let k = ((m as f64 / capacity as f64) * 2.0f64.ln()).ceil() as usize;
 
-        let hash_seeds: Vec<u64> = (0..k).map(|i| (i as u64).wrapping_mul(0x517cc1b727220a95)).collect();
+        let hash_seeds: Vec<u64> = (0..k)
+            .map(|i| (i as u64).wrapping_mul(0x517cc1b727220a95))
+            .collect();
 
         Self {
             bits: vec![false; m.max(64)],

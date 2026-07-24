@@ -43,8 +43,7 @@ mod inner {
 
     impl MessageStore {
         pub fn new(path: &Path) -> Result<Self> {
-            let conn = rusqlite::Connection::open(path)
-                .map_err(|e| StoreError(e.to_string()))?;
+            let conn = rusqlite::Connection::open(path).map_err(|e| StoreError(e.to_string()))?;
             conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
                 .map_err(|e| StoreError(e.to_string()))?;
 
@@ -56,8 +55,10 @@ mod inner {
                     platforms TEXT DEFAULT '[]',
                     last_seen TIMESTAMP NOT NULL,
                     first_seen TIMESTAMP NOT NULL
-                )", [],
-            ).map_err(|e| StoreError(e.to_string()))?;
+                )",
+                [],
+            )
+            .map_err(|e| StoreError(e.to_string()))?;
 
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS messages (
@@ -71,8 +72,10 @@ mod inner {
                     timestamp TIMESTAMP NOT NULL,
                     signature BLOB DEFAULT X'',
                     stored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )", [],
-            ).map_err(|e| StoreError(e.to_string()))?;
+                )",
+                [],
+            )
+            .map_err(|e| StoreError(e.to_string()))?;
 
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS peer_addresses (
@@ -80,20 +83,26 @@ mod inner {
                     addr TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (peer_id, addr)
-                )", [],
-            ).map_err(|e| StoreError(e.to_string()))?;
+                )",
+                [],
+            )
+            .map_err(|e| StoreError(e.to_string()))?;
 
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(from_peer, timestamp DESC)", [],
             ).map_err(|e| StoreError(e.to_string()))?;
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(to_peer, timestamp DESC)", [],
-            ).map_err(|e| StoreError(e.to_string()))?;
+                "CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(to_peer, timestamp DESC)",
+                [],
+            )
+            .map_err(|e| StoreError(e.to_string()))?;
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel, timestamp DESC)", [],
             ).map_err(|e| StoreError(e.to_string()))?;
 
-            Ok(Self { conn: Mutex::new(conn) })
+            Ok(Self {
+                conn: Mutex::new(conn),
+            })
         }
 
         pub fn save_message(&self, msg: &ChatMessage) -> Result<()> {
@@ -105,11 +114,18 @@ mod inner {
                  (id, from_peer, to_peer, channel, kind, content, seq, timestamp, signature)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
-                    msg.id, msg.from, msg.to, channel,
-                    msg.kind.label(), content, msg.seq as i64,
-                    msg.timestamp.to_rfc3339(), msg.signature,
+                    msg.id,
+                    msg.from,
+                    msg.to,
+                    channel,
+                    msg.kind.label(),
+                    content,
+                    msg.seq as i64,
+                    msg.timestamp.to_rfc3339(),
+                    msg.signature,
                 ],
-            ).map_err(|e| StoreError(e.to_string()))?;
+            )
+            .map_err(|e| StoreError(e.to_string()))?;
             Ok(())
         }
 
@@ -177,13 +193,20 @@ mod inner {
             };
             let rows = match stmt.query_map([], |row| {
                 let last_seen = DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                    .ok().map(|dt| dt.with_timezone(&chrono::Utc)).unwrap_or_else(chrono::Utc::now);
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(chrono::Utc::now);
                 let first_seen = DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
-                    .ok().map(|dt| dt.with_timezone(&chrono::Utc)).unwrap_or_else(chrono::Utc::now);
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(chrono::Utc::now);
                 Ok(PeerInfo {
-                    peer_id: row.get(0)?, username: row.get(1)?,
-                    public_key: row.get(2)?, platforms: row.get(3)?,
-                    last_seen, first_seen,
+                    peer_id: row.get(0)?,
+                    username: row.get(1)?,
+                    public_key: row.get(2)?,
+                    platforms: row.get(3)?,
+                    last_seen,
+                    first_seen,
                 })
             }) {
                 Ok(r) => r,
@@ -194,10 +217,12 @@ mod inner {
 
         pub fn cleanup_stale_peers(&self, max_age_secs: i64) -> Result<usize> {
             let conn = self.conn.lock().unwrap();
-            let deleted = conn.execute(
-                "DELETE FROM peers WHERE last_seen < datetime('now', ?1 || ' seconds')",
-                params![format!("-{}", max_age_secs)],
-            ).map_err(|e| StoreError(e.to_string()))?;
+            let deleted = conn
+                .execute(
+                    "DELETE FROM peers WHERE last_seen < datetime('now', ?1 || ' seconds')",
+                    params![format!("-{}", max_age_secs)],
+                )
+                .map_err(|e| StoreError(e.to_string()))?;
             Ok(deleted)
         }
 
@@ -230,7 +255,8 @@ mod inner {
                      VALUES (?1, ?2, ?3)
                      ON CONFLICT(peer_id, addr) DO UPDATE SET updated_at = excluded.updated_at",
                     params![peer_id, addr, now],
-                ).map_err(|e| StoreError(e.to_string()))?;
+                )
+                .map_err(|e| StoreError(e.to_string()))?;
             }
             Ok(())
         }
@@ -251,7 +277,8 @@ mod inner {
                 Ok(r) => r,
                 Err(_) => return Vec::new(),
             };
-            let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            let mut map: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
             for row in rows.flatten() {
                 map.entry(row.0).or_default().push(row.1);
             }
@@ -268,11 +295,22 @@ mod inner {
         let ts_str: String = row.get(6)?;
         let signature: Vec<u8> = row.get(7)?;
         let timestamp = DateTime::parse_from_rfc3339(&ts_str)
-            .ok().map(|dt| dt.with_timezone(&chrono::Utc)).unwrap_or_else(chrono::Utc::now);
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(chrono::Utc::now);
         let kind = serde_cbor::from_slice(&content).unwrap_or_default();
         Ok(ChatMessage {
-            id, from, to, channel: None, seq: seq as u64,
-            timestamp, ttl: 0, kind, encrypted_payload: None, signature, reply_to: None,
+            id,
+            from,
+            to,
+            channel: None,
+            seq: seq as u64,
+            timestamp,
+            ttl: 0,
+            kind,
+            encrypted_payload: None,
+            signature,
+            reply_to: None,
         })
     }
 }
@@ -315,7 +353,8 @@ mod inner {
 
         pub fn get_messages(&self, peer_id: &str, limit: u32) -> Vec<ChatMessage> {
             let msgs = self.messages.borrow();
-            let mut result: Vec<ChatMessage> = msgs.iter()
+            let mut result: Vec<ChatMessage> = msgs
+                .iter()
                 .filter(|m| m.from == peer_id || m.to.as_deref() == Some(peer_id))
                 .cloned()
                 .collect();
@@ -329,8 +368,11 @@ mod inner {
         pub fn get_channel_messages(&self, channel: &str, limit: u32) -> Vec<ChatMessage> {
             let msgs = self.messages.borrow();
             let chan_tag = format!("Group(\"{}\")", channel);
-            let mut result: Vec<ChatMessage> = msgs.iter()
-                .filter(|m| m.channel.as_ref().map(|c| format!("{:?}", c)) == Some(chan_tag.clone()))
+            let mut result: Vec<ChatMessage> = msgs
+                .iter()
+                .filter(|m| {
+                    m.channel.as_ref().map(|c| format!("{:?}", c)) == Some(chan_tag.clone())
+                })
                 .cloned()
                 .collect();
             result.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
@@ -369,10 +411,13 @@ mod inner {
         pub fn search_messages(&self, query: &str, limit: u32) -> Vec<ChatMessage> {
             let msgs = self.messages.borrow();
             let query_lower = query.to_lowercase();
-            let mut result: Vec<ChatMessage> = msgs.iter()
+            let mut result: Vec<ChatMessage> = msgs
+                .iter()
                 .filter(|m| {
                     matches!(m.kind, ipmsg_protocol::message::MessageType::Text(_))
-                        && m.text_content().map(|t| t.to_lowercase().contains(&query_lower)).unwrap_or(false)
+                        && m.text_content()
+                            .map(|t| t.to_lowercase().contains(&query_lower))
+                            .unwrap_or(false)
                 })
                 .cloned()
                 .collect();
@@ -401,7 +446,8 @@ mod inner {
             let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days);
             all.iter()
                 .map(|(peer_id, addrs)| {
-                    let filtered: Vec<String> = addrs.iter()
+                    let filtered: Vec<String> = addrs
+                        .iter()
                         .filter(|(_, ts)| *ts > cutoff)
                         .map(|(a, _)| a.clone())
                         .collect();

@@ -3,8 +3,8 @@
 
 use crate::file_sharing::FileSharingManager;
 use ipmsg_protocol::message::FileRef;
-use libp2p::request_response::{self, Codec, ProtocolSupport};
 use libp2p::StreamProtocol;
+use libp2p::request_response::{self, Codec, ProtocolSupport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
@@ -25,16 +25,16 @@ pub enum FileTransferRequest {
     /// Request a specific chunk
     GetChunk { file_hash: String, chunk_index: u32 },
     /// Request multiple chunks (batch)
-    GetChunks { file_hash: String, chunk_indices: Vec<u32> },
+    GetChunks {
+        file_hash: String,
+        chunk_indices: Vec<u32>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FileTransferResponse {
     /// File metadata response
-    Info {
-        file_ref: FileRef,
-        available: bool,
-    },
+    Info { file_ref: FileRef, available: bool },
     /// Chunk data response
     Chunk {
         file_hash: String,
@@ -42,9 +42,7 @@ pub enum FileTransferResponse {
         data: Vec<u8>,
     },
     /// Error response
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 impl Codec for FileTransferCodec {
@@ -56,7 +54,9 @@ impl Codec for FileTransferCodec {
         &'life0 mut self,
         _protocol: &'life1 Self::Protocol,
         io: &'life2 mut T,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Self::Request>> + Send + 'async_trait>>
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = io::Result<Self::Request>> + Send + 'async_trait>,
+    >
     where
         T: futures::io::AsyncRead + Unpin + Send,
         'life0: 'async_trait,
@@ -75,7 +75,9 @@ impl Codec for FileTransferCodec {
         &'life0 mut self,
         _protocol: &'life1 Self::Protocol,
         io: &'life2 mut T,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Self::Response>> + Send + 'async_trait>>
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = io::Result<Self::Response>> + Send + 'async_trait>,
+    >
     where
         T: futures::io::AsyncRead + Unpin + Send,
         'life0: 'async_trait,
@@ -104,7 +106,8 @@ impl Codec for FileTransferCodec {
     {
         Box::pin(async move {
             use futures::AsyncWriteExt;
-            let data = serde_cbor::to_vec(&req).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let data = serde_cbor::to_vec(&req)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             io.write_all(&data).await?;
             io.close().await?;
             Ok(())
@@ -125,7 +128,8 @@ impl Codec for FileTransferCodec {
     {
         Box::pin(async move {
             use futures::AsyncWriteExt;
-            let data = serde_cbor::to_vec(&resp).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let data = serde_cbor::to_vec(&resp)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             io.write_all(&data).await?;
             io.close().await?;
             Ok(())
@@ -211,7 +215,11 @@ impl FileDownload {
 
     /// Get the next batch of missing chunk indices for parallel downloading
     pub fn next_missing_chunks(&self, batch_size: usize) -> Vec<u32> {
-        self.missing_chunks.iter().take(batch_size).copied().collect()
+        self.missing_chunks
+            .iter()
+            .take(batch_size)
+            .copied()
+            .collect()
     }
 
     /// Check if download is stalled (no activity for given duration)
@@ -261,7 +269,7 @@ impl FileTransferManager {
             download.missing_chunks.retain(|&i| i != chunk_index);
             download.bytes_received += chunk_size;
             download.last_activity = chrono::Utc::now();
-            
+
             // Log progress
             let progress = download.progress();
             let speed = download.download_speed_bps();
@@ -272,7 +280,7 @@ impl FileTransferManager {
                 speed = %format!("{:.1} KB/s", speed / 1024.0),
                 "Chunk received"
             );
-            
+
             return download.is_complete();
         }
         false
@@ -297,7 +305,12 @@ impl FileTransferManager {
     pub async fn get_missing_chunks(&self, file_hash: &str, batch_size: usize) -> Vec<u32> {
         let downloads = self.downloads.lock().await;
         if let Some(download) = downloads.get(file_hash) {
-            download.missing_chunks.iter().take(batch_size).copied().collect()
+            download
+                .missing_chunks
+                .iter()
+                .take(batch_size)
+                .copied()
+                .collect()
         } else {
             Vec::new()
         }
@@ -329,7 +342,7 @@ impl FileTransferManager {
     /// Handle an incoming file transfer request
     pub async fn handle_request(&self, req: FileTransferRequest) -> FileTransferResponse {
         let file_sharing = self.file_sharing.lock().await;
-        
+
         match req {
             FileTransferRequest::GetInfo { file_hash } => {
                 if let Some(info) = file_sharing.get_shared_file(&file_hash).await {
@@ -352,24 +365,28 @@ impl FileTransferManager {
                     }
                 }
             }
-            FileTransferRequest::GetChunk { file_hash, chunk_index } => {
-                match file_sharing.read_chunk(&file_hash, chunk_index).await {
-                    Ok(data) => FileTransferResponse::Chunk {
-                        file_hash,
-                        chunk_index,
-                        data,
-                    },
-                    Err(e) => FileTransferResponse::Error {
-                        message: format!("Failed to read chunk: {}", e),
-                    },
-                }
-            }
-            FileTransferRequest::GetChunks { file_hash, chunk_indices } => {
+            FileTransferRequest::GetChunk {
+                file_hash,
+                chunk_index,
+            } => match file_sharing.read_chunk(&file_hash, chunk_index).await {
+                Ok(data) => FileTransferResponse::Chunk {
+                    file_hash,
+                    chunk_index,
+                    data,
+                },
+                Err(e) => FileTransferResponse::Error {
+                    message: format!("Failed to read chunk: {}", e),
+                },
+            },
+            FileTransferRequest::GetChunks {
+                file_hash,
+                chunk_indices,
+            } => {
                 // Batch request: return all requested chunks concatenated
                 // Each chunk is prefixed with its index (4 bytes) and length (4 bytes)
                 let mut combined_data = Vec::new();
                 let mut errors = Vec::new();
-                
+
                 for &chunk_index in &chunk_indices {
                     match file_sharing.read_chunk(&file_hash, chunk_index).await {
                         Ok(data) => {
@@ -382,7 +399,7 @@ impl FileTransferManager {
                         }
                     }
                 }
-                
+
                 if combined_data.is_empty() && !errors.is_empty() {
                     FileTransferResponse::Error {
                         message: format!("Failed to read chunks: {}", errors.join("; ")),
@@ -414,7 +431,10 @@ impl FileTransferManager {
 /// Create request-response behaviour for file transfer
 pub fn create_file_transfer_behaviour() -> request_response::Behaviour<FileTransferCodec> {
     request_response::Behaviour::new(
-        [(StreamProtocol::new(FILE_TRANSFER_PROTOCOL), ProtocolSupport::Full)],
+        [(
+            StreamProtocol::new(FILE_TRANSFER_PROTOCOL),
+            ProtocolSupport::Full,
+        )],
         request_response::Config::default(),
     )
 }
@@ -436,21 +456,21 @@ mod tests {
             thumbnail: None,
         };
         let mut download = FileDownload::new(file_ref, "peer1".to_string());
-        
+
         assert_eq!(download.progress(), 0.0);
         assert!(!download.is_complete());
-        
+
         download.received_chunks.insert(0, vec![0; 250]);
         download.missing_chunks.retain(|&i| i != 0);
         assert_eq!(download.progress(), 25.0);
-        
+
         download.received_chunks.insert(1, vec![0; 250]);
         download.missing_chunks.retain(|&i| i != 1);
         download.received_chunks.insert(2, vec![0; 250]);
         download.missing_chunks.retain(|&i| i != 2);
         download.received_chunks.insert(3, vec![0; 250]);
         download.missing_chunks.retain(|&i| i != 3);
-        
+
         assert_eq!(download.progress(), 100.0);
         assert!(download.is_complete());
         assert!(download.reassemble().is_some());

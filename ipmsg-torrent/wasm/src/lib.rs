@@ -59,29 +59,52 @@ fn to_js_event(evt: &P2PEvent) -> JsEvent {
             content: msg.text_content().map(|s| s.to_string()),
             timestamp: msg.timestamp.to_rfc3339(),
         },
-        P2PEvent::Typing { from } => JsEvent::Typing {
-            from: from.clone(),
-        },
+        P2PEvent::Typing { from } => JsEvent::Typing { from: from.clone() },
         P2PEvent::Status(s) => JsEvent::Status(s.clone()),
-        P2PEvent::FileOffer { from, file_ref } => JsEvent::Status(format!(
-            "file offer from {} -> {}",
-            from, file_ref.name
-        )),
-        P2PEvent::MessageDelivered(msg_id) => JsEvent::Status(format!("Message delivered: {}", msg_id)),
+        P2PEvent::FileOffer { from, file_ref } => {
+            JsEvent::Status(format!("file offer from {} -> {}", from, file_ref.name))
+        }
+        P2PEvent::MessageDelivered(msg_id) => {
+            JsEvent::Status(format!("Message delivered: {}", msg_id))
+        }
         P2PEvent::PeerBlocked { peer_id } => JsEvent::Status(format!("Peer blocked: {}", peer_id)),
-        P2PEvent::PeerVerified { peer_id } => JsEvent::Status(format!("Peer verified: {}", peer_id)),
-        P2PEvent::FragmentComplete { message_id, .. } => JsEvent::Status(format!("Fragment assembled: {}", message_id)),
+        P2PEvent::PeerVerified { peer_id } => {
+            JsEvent::Status(format!("Peer verified: {}", peer_id))
+        }
+        P2PEvent::FragmentComplete { message_id, .. } => {
+            JsEvent::Status(format!("Fragment assembled: {}", message_id))
+        }
         // Handle remaining event variants as status messages
-        P2PEvent::FileShareAnnounce { from, shares } => JsEvent::Status(format!("{} shared {} file(s)", from, shares.len())),
-        P2PEvent::FileSearchResponse { from, results } => JsEvent::Status(format!("{} found {} file(s)", from, results.len())),
+        P2PEvent::FileShareAnnounce { from, shares } => {
+            JsEvent::Status(format!("{} shared {} file(s)", from, shares.len()))
+        }
+        P2PEvent::FileSearchResponse { from, results } => {
+            JsEvent::Status(format!("{} found {} file(s)", from, results.len()))
+        }
         P2PEvent::FragmentReceived { .. } => JsEvent::Status("Fragment received".to_string()),
-        P2PEvent::FileTransferResponse { from, .. } => JsEvent::Status(format!("File transfer response from {}", from)),
-        P2PEvent::FileTransferProgress { file_hash, progress, .. } => JsEvent::Status(format!("Download {}: {:.1}%", file_hash, progress)),
-        P2PEvent::ImageReceived { from, name, .. } => JsEvent::Status(format!("Image received from {}: {}", from, name)),
-        P2PEvent::ReadReceiptReceived { message_id, .. } => JsEvent::Status(format!("Read receipt: {}", message_id)),
-        P2PEvent::NearbyPeerDiscovered { peer } => JsEvent::Status(format!("Nearby peer: {} ({})", peer.username, peer.peer_id)),
-        P2PEvent::SearchResults { query, results } => JsEvent::Status(format!("Search '{}': {} results", query, results.len())),
-        P2PEvent::FileTransferRequestReceived { from, .. } => JsEvent::Status(format!("File transfer request from {}", from)),
+        P2PEvent::FileTransferResponse { from, .. } => {
+            JsEvent::Status(format!("File transfer response from {}", from))
+        }
+        P2PEvent::FileTransferProgress {
+            file_hash,
+            progress,
+            ..
+        } => JsEvent::Status(format!("Download {}: {:.1}%", file_hash, progress)),
+        P2PEvent::ImageReceived { from, name, .. } => {
+            JsEvent::Status(format!("Image received from {}: {}", from, name))
+        }
+        P2PEvent::ReadReceiptReceived { message_id, .. } => {
+            JsEvent::Status(format!("Read receipt: {}", message_id))
+        }
+        P2PEvent::NearbyPeerDiscovered { peer } => {
+            JsEvent::Status(format!("Nearby peer: {} ({})", peer.username, peer.peer_id))
+        }
+        P2PEvent::SearchResults { query, results } => {
+            JsEvent::Status(format!("Search '{}': {} results", query, results.len()))
+        }
+        P2PEvent::FileTransferRequestReceived { from, .. } => {
+            JsEvent::Status(format!("File transfer request from {}", from))
+        }
         _ => JsEvent::Status(format!("Event: {:?}", evt)),
     }
 }
@@ -143,8 +166,7 @@ impl IpmsgClient {
                     Some(evt) => {
                         if let Some(cb) = &*on_event.borrow() {
                             let js_evt = to_js_event(&evt);
-                            let json =
-                                serde_json::to_string(&js_evt).unwrap_or_default();
+                            let json = serde_json::to_string(&js_evt).unwrap_or_default();
                             let _ = cb.call1(&JsValue::UNDEFINED, &JsValue::from_str(&json));
                         }
                     }

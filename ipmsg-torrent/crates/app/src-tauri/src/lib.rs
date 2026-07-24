@@ -116,7 +116,9 @@ pub enum FrontendEvent {
         from: String,
     },
     Status(String),
-    Ready { peer_id: String },
+    Ready {
+        peer_id: String,
+    },
     Error(String),
 }
 
@@ -143,18 +145,23 @@ fn to_frontend_event(evt: &P2PEvent) -> FrontendEvent {
             content: msg.text_content().map(|s| s.to_string()),
             timestamp: msg.timestamp.to_rfc3339(),
         },
-        P2PEvent::Typing { from } => FrontendEvent::Typing {
-            from: from.clone(),
-        },
+        P2PEvent::Typing { from } => FrontendEvent::Typing { from: from.clone() },
         P2PEvent::Status(s) => FrontendEvent::Status(s.clone()),
-        P2PEvent::FileOffer { from, file_ref } => FrontendEvent::Status(format!(
-            "file offer from {} -> {}",
-            from, file_ref.name
-        )),
-        P2PEvent::MessageDelivered(msg_id) => FrontendEvent::Status(format!("Message delivered: {}", msg_id)),
-        P2PEvent::PeerBlocked { peer_id } => FrontendEvent::Status(format!("Peer blocked: {}", peer_id)),
-        P2PEvent::PeerVerified { peer_id } => FrontendEvent::Status(format!("Peer verified: {}", peer_id)),
-        P2PEvent::FragmentComplete { message_id, .. } => FrontendEvent::Status(format!("Fragment assembled: {}", message_id)),
+        P2PEvent::FileOffer { from, file_ref } => {
+            FrontendEvent::Status(format!("file offer from {} -> {}", from, file_ref.name))
+        }
+        P2PEvent::MessageDelivered(msg_id) => {
+            FrontendEvent::Status(format!("Message delivered: {}", msg_id))
+        }
+        P2PEvent::PeerBlocked { peer_id } => {
+            FrontendEvent::Status(format!("Peer blocked: {}", peer_id))
+        }
+        P2PEvent::PeerVerified { peer_id } => {
+            FrontendEvent::Status(format!("Peer verified: {}", peer_id))
+        }
+        P2PEvent::FragmentComplete { message_id, .. } => {
+            FrontendEvent::Status(format!("Fragment assembled: {}", message_id))
+        }
         _ => FrontendEvent::Status(format!("Event: {:?}", evt)),
     }
 }
@@ -210,10 +217,7 @@ async fn p2p_start(
 }
 
 #[tauri::command]
-async fn p2p_send(
-    state: tauri::State<'_, AppState>,
-    args: SendMessageArgs,
-) -> Result<(), String> {
+async fn p2p_send(state: tauri::State<'_, AppState>, args: SendMessageArgs) -> Result<(), String> {
     let mut engine = state.engine.lock().await;
     engine
         .send_text(&args.to, &args.content)
@@ -247,9 +251,7 @@ async fn p2p_broadcast(
 }
 
 #[tauri::command]
-async fn p2p_get_peers(
-    state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
+async fn p2p_get_peers(state: tauri::State<'_, AppState>) -> Result<String, String> {
     let engine = state.engine.lock().await;
     serde_json::to_string(&engine.list_peers()).map_err(|e| e.to_string())
 }
@@ -260,8 +262,7 @@ async fn p2p_get_history(
     args: HistoryArgs,
 ) -> Result<String, String> {
     let engine = state.engine.lock().await;
-    serde_json::to_string(&engine.get_history(&args.peer_id, args.limit))
-        .map_err(|e| e.to_string())
+    serde_json::to_string(&engine.get_history(&args.peer_id, args.limit)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -300,7 +301,8 @@ async fn p2p_share_file(
     args: ShareFileArgs,
 ) -> Result<(), String> {
     let mut engine = state.engine.lock().await;
-    engine.share_file(PathBuf::from(args.path), args.tags, args.description)
+    engine
+        .share_file(PathBuf::from(args.path), args.tags, args.description)
         .await
         .map_err(|e| e.to_string())
 }
@@ -311,7 +313,8 @@ async fn p2p_unshare_file(
     args: PeerActionArgs,
 ) -> Result<(), String> {
     let mut engine = state.engine.lock().await;
-    engine.unshare_file(&args.peer_id)
+    engine
+        .unshare_file(&args.peer_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -322,7 +325,8 @@ async fn p2p_search_files(
     args: SearchFilesArgs,
 ) -> Result<(), String> {
     let mut engine = state.engine.lock().await;
-    engine.search_files(&args.query, &args.tags)
+    engine
+        .search_files(&args.query, &args.tags)
         .await
         .map_err(|e| e.to_string())
 }
@@ -333,7 +337,8 @@ async fn p2p_download_file(
     args: DownloadFileArgs,
 ) -> Result<(), String> {
     let mut engine = state.engine.lock().await;
-    engine.download_file(&args.file_hash, &args.from_peer)
+    engine
+        .download_file(&args.file_hash, &args.from_peer)
         .await
         .map_err(|e| e.to_string())
 }
@@ -359,9 +364,7 @@ async fn p2p_unblock_peer(
 }
 
 #[tauri::command]
-async fn p2p_fingerprint(
-    state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
+async fn p2p_fingerprint(state: tauri::State<'_, AppState>) -> Result<String, String> {
     let engine = state.engine.lock().await;
     Ok(engine.my_fingerprint())
 }
@@ -378,13 +381,9 @@ async fn p2p_search_messages(
 }
 
 #[tauri::command]
-async fn p2p_start_ipmsg_compat(
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+async fn p2p_start_ipmsg_compat(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut engine = state.engine.lock().await;
-    engine.start_ipmsg_compat()
-        .await
-        .map_err(|e| e.to_string())
+    engine.start_ipmsg_compat().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -392,9 +391,13 @@ async fn p2p_send_ipmsg(
     state: tauri::State<'_, AppState>,
     args: SendMessageArgs,
 ) -> Result<(), String> {
-    let ip: std::net::IpAddr = args.to.parse().map_err(|e: std::net::AddrParseError| e.to_string())?;
+    let ip: std::net::IpAddr = args
+        .to
+        .parse()
+        .map_err(|e: std::net::AddrParseError| e.to_string())?;
     let mut engine = state.engine.lock().await;
-    engine.send_ipmsg_message(ip, &args.content)
+    engine
+        .send_ipmsg_message(ip, &args.content)
         .await
         .map_err(|e| e.to_string())
 }

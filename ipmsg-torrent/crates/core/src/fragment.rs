@@ -116,7 +116,12 @@ impl FragmentManager {
     }
 
     /// Fragment a large payload into a sequence of FragmentMsg
-    pub fn fragment(&self, message_id: &str, payload: &[u8], content_type: &str) -> Vec<FragmentMsg> {
+    pub fn fragment(
+        &self,
+        message_id: &str,
+        payload: &[u8],
+        content_type: &str,
+    ) -> Vec<FragmentMsg> {
         if payload.len() <= MAX_FRAGMENT_SIZE {
             // No fragmentation needed
             return vec![];

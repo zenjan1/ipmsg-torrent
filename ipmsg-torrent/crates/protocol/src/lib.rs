@@ -1,9 +1,8 @@
-pub mod message;
 pub mod codec;
+pub mod message;
 
-pub use message::{
-    ChatMessage, MessageType, FileRef, FileTransferMsg,
-    ChannelId, EncryptedPayload, PeerIdStr,
-};
+pub use codec::{decode_file_msg, decode_message, encode_file_msg, encode_message};
 pub use message::geohash;
-pub use codec::{encode_message, decode_message, encode_file_msg, decode_file_msg};
+pub use message::{
+    ChannelId, ChatMessage, EncryptedPayload, FileRef, FileTransferMsg, MessageType, PeerIdStr,
+};

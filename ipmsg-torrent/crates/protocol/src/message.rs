@@ -99,7 +99,11 @@ impl ChatMessage {
             seq: 0,
             timestamp: Utc::now(),
             ttl: 0,
-            kind: MessageType::Presence { username, platforms, bio: None },
+            kind: MessageType::Presence {
+                username,
+                platforms,
+                bio: None,
+            },
             encrypted_payload: None,
             signature: Vec::new(),
             reply_to: None,
@@ -154,7 +158,12 @@ impl ChatMessage {
         }
     }
 
-    pub fn new_profile(from: PeerIdStr, username: String, bio: Option<String>, avatar_hash: Option<String>) -> Self {
+    pub fn new_profile(
+        from: PeerIdStr,
+        username: String,
+        bio: Option<String>,
+        avatar_hash: Option<String>,
+    ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             from,
@@ -163,7 +172,11 @@ impl ChatMessage {
             seq: 0,
             timestamp: Utc::now(),
             ttl: 0,
-            kind: MessageType::Profile { username, bio, avatar_hash },
+            kind: MessageType::Profile {
+                username,
+                bio,
+                avatar_hash,
+            },
             encrypted_payload: None,
             signature: Vec::new(),
             reply_to: None,
@@ -219,7 +232,13 @@ impl ChatMessage {
         }
     }
 
-    pub fn new_image(from: PeerIdStr, to: Option<PeerIdStr>, data: Vec<u8>, mime_type: String, name: String) -> Self {
+    pub fn new_image(
+        from: PeerIdStr,
+        to: Option<PeerIdStr>,
+        data: Vec<u8>,
+        mime_type: String,
+        name: String,
+    ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             from,
@@ -228,7 +247,11 @@ impl ChatMessage {
             seq: 0,
             timestamp: Utc::now(),
             ttl: 0,
-            kind: MessageType::Image { data, mime_type, name },
+            kind: MessageType::Image {
+                data,
+                mime_type,
+                name,
+            },
             encrypted_payload: None,
             signature: Vec::new(),
             reply_to: None,
@@ -295,7 +318,9 @@ impl ChatMessage {
         if self.ttl == 0 {
             return false;
         }
-        let age_secs = Utc::now().signed_duration_since(self.timestamp).num_seconds() as u64;
+        let age_secs = Utc::now()
+            .signed_duration_since(self.timestamp)
+            .num_seconds() as u64;
         age_secs > self.ttl
     }
 }
@@ -339,14 +364,9 @@ pub enum MessageType {
         bio: Option<String>,
     },
     /// IRC-style command (for CLI interoperability)
-    Command {
-        command: String,
-        args: Vec<String>,
-    },
+    Command { command: String, args: Vec<String> },
     /// Message acknowledgment (delivery confirmed)
-    Ack {
-        message_ids: Vec<String>,
-    },
+    Ack { message_ids: Vec<String> },
     /// Peer profile update
     Profile {
         username: String,
@@ -354,23 +374,16 @@ pub enum MessageType {
         avatar_hash: Option<String>,
     },
     /// File share announcement (broadcast shared files to network)
-    FileShareAnnounce {
-        shares: Vec<FileShareInfo>,
-    },
+    FileShareAnnounce { shares: Vec<FileShareInfo> },
     /// File search query (search for files in nearby peers)
-    FileShareQuery {
-        query: String,
-        tags: Vec<String>,
-    },
+    FileShareQuery { query: String, tags: Vec<String> },
     /// File search response
     FileShareResponse {
         results: Vec<FileShareInfo>,
         responder: PeerIdStr,
     },
     /// Nearby peer discovery info
-    NearbyDiscovery {
-        peer: NearbyPeer,
-    },
+    NearbyDiscovery { peer: NearbyPeer },
 }
 
 impl MessageType {
@@ -395,7 +408,9 @@ impl MessageType {
 
 impl Default for MessageType {
     fn default() -> Self {
-        MessageType::Text { content: String::new() }
+        MessageType::Text {
+            content: String::new(),
+        }
     }
 }
 
@@ -546,7 +561,11 @@ pub mod geohash {
 
     /// Get parent geohash (one level up)
     pub fn parent(hash: &str) -> Option<String> {
-        if hash.is_empty() { None } else { Some(hash[..hash.len() - 1].to_string()) }
+        if hash.is_empty() {
+            None
+        } else {
+            Some(hash[..hash.len() - 1].to_string())
+        }
     }
 
     /// Channel name for a given geohash precision level

@@ -56,5 +56,8 @@ pub fn bootstrap_addresses(addrs: &[String]) -> Vec<(PeerId, libp2p::Multiaddr)>
 
 /// Default list of bootstrap addresses
 pub fn default_bootstrap_addrs() -> Vec<String> {
-    DEFAULT_BOOTSTRAP_NODES.iter().map(|s| s.to_string()).collect()
+    DEFAULT_BOOTSTRAP_NODES
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }

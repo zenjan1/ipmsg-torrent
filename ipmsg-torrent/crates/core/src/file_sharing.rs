@@ -1,10 +1,10 @@
+use crate::{P2PError, P2PEvent};
+use chrono::Utc;
+use ipmsg_protocol::message::{FileRef, FileShareInfo};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use chrono::Utc;
-use sha2::{Digest, Sha256};
-use ipmsg_protocol::message::{FileRef, FileShareInfo};
-use crate::{P2PError, P2PEvent};
 
 /// File sharing manager - tracks shared files and handles search queries
 #[derive(Clone)]
@@ -173,7 +173,11 @@ impl FileSharingManager {
         // Match by tags
         if !tags.is_empty() {
             for tag in tags {
-                if info.tags.iter().any(|t| t.to_lowercase() == tag.to_lowercase()) {
+                if info
+                    .tags
+                    .iter()
+                    .any(|t| t.to_lowercase() == tag.to_lowercase())
+                {
                     return true;
                 }
             }
