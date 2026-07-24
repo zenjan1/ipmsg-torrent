@@ -15,4 +15,4 @@ jobs:
 
       - name: Mirror push to GitLab
         run: |
-          git push --force --prune https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/zenjan1/ipmsg-torrent.git +refs/heads/*:refs/heads/* +refs/tags/*:refs/tags/*
+          git push --mirror https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/zenjan1/ipmsg-torrent.git
