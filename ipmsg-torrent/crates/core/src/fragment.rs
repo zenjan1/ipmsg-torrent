@@ -90,10 +90,8 @@ impl FragmentAssembly {
 
     fn reassemble(self) -> Vec<u8> {
         let mut result = Vec::with_capacity(self.total_size);
-        for fragment in self.fragments {
-            if let Some(data) = fragment {
-                result.extend_from_slice(&data);
-            }
+        for data in self.fragments.into_iter().flatten() {
+            result.extend_from_slice(&data);
         }
         result
     }
@@ -105,6 +103,12 @@ pub struct FragmentManager {
     assemblies: std::collections::HashMap<String, FragmentAssembly>,
     /// Maximum message size (10MB)
     max_message_size: usize,
+}
+
+impl Default for FragmentManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FragmentManager {
@@ -199,11 +203,11 @@ impl FragmentManager {
                 final_index: _,
             } => {
                 // Check if assembly is already complete
-                if let Some(asm) = self.assemblies.get(&message_id) {
-                    if asm.is_complete() {
-                        let asm = self.assemblies.remove(&message_id).unwrap();
-                        return Ok(Some(asm.reassemble()));
-                    }
+                if let Some(asm) = self.assemblies.get(&message_id)
+                    && asm.is_complete()
+                {
+                    let asm = self.assemblies.remove(&message_id).unwrap();
+                    return Ok(Some(asm.reassemble()));
                 }
                 // Otherwise wait for missing fragments
                 Ok(None)
@@ -264,7 +268,7 @@ pub mod padding {
         let mut result = data.to_vec();
         let pad_len = target - result.len();
         // PKCS#7-style padding
-        result.extend(std::iter::repeat(pad_len as u8).take(pad_len));
+        result.extend(std::iter::repeat_n(pad_len as u8, pad_len));
         result
     }
 

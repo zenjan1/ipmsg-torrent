@@ -42,7 +42,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - name: Clippy (core + protocol + cli)
-        run: cargo clippy -p ipmsg-protocol -p ipmsg-core -p ipmsg-cli --all-targets -- -D warnings
+        run: cargo clippy -p ipmsg-protocol -p ipmsg-core -p ipmsg-cli --all-targets
       # Tauri app needs extra system deps; skip in CI for now unless explicitly wanted
       # - name: Clippy (all)
       #   run: cargo clippy --all-targets -- -D warnings

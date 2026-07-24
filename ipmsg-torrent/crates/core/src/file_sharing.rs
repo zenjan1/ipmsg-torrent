@@ -164,10 +164,10 @@ impl FileSharingManager {
         }
 
         // Match by description
-        if let Some(desc) = &info.description {
-            if desc.to_lowercase().contains(query_lower) {
-                return true;
-            }
+        if let Some(desc) = &info.description
+            && desc.to_lowercase().contains(query_lower)
+        {
+            return true;
         }
 
         // Match by tags

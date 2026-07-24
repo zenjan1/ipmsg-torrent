@@ -204,10 +204,9 @@ impl FileDownload {
         }
         let mut data = Vec::with_capacity(self.file_ref.size as usize);
         for i in 0..self.file_ref.chunks {
-            if let Some(chunk) = self.received_chunks.get(&i) {
+            {
+                let chunk = self.received_chunks.get(&i)?;
                 data.extend_from_slice(chunk);
-            } else {
-                return None;
             }
         }
         Some(data)
@@ -325,10 +324,10 @@ impl FileTransferManager {
     /// Check if download is complete and get assembled data
     pub async fn try_assemble(&self, file_hash: &str) -> Option<Vec<u8>> {
         let downloads = self.downloads.lock().await;
-        if let Some(download) = downloads.get(file_hash) {
-            if download.is_complete() {
-                return download.reassemble();
-            }
+        if let Some(download) = downloads.get(file_hash)
+            && download.is_complete()
+        {
+            return download.reassemble();
         }
         None
     }

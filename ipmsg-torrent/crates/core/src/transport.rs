@@ -192,19 +192,19 @@ impl P2PSwarm {
 
         // Dial bootstrap nodes
         for addr_str in &bootstrap_nodes {
-            if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                if let Some(peer_id) = addr.iter().find_map(|p| match p {
+            if let Ok(addr) = addr_str.parse::<Multiaddr>()
+                && let Some(peer_id) = addr.iter().find_map(|p| match p {
                     libp2p::multiaddr::Protocol::P2p(pid) => Some(pid),
                     _ => None,
-                }) {
-                    let _ = swarm_obj.swarm.dial(addr.clone());
-                    swarm_obj
-                        .swarm
-                        .behaviour_mut()
-                        .add_kademlia_peer(peer_id, addr.clone());
-                    swarm_obj.connected_peers.insert(peer_id);
-                    tracing::info!(%peer_id, %addr, "Added bootstrap node");
-                }
+                })
+            {
+                let _ = swarm_obj.swarm.dial(addr.clone());
+                swarm_obj
+                    .swarm
+                    .behaviour_mut()
+                    .add_kademlia_peer(peer_id, addr.clone());
+                swarm_obj.connected_peers.insert(peer_id);
+                tracing::info!(%peer_id, %addr, "Added bootstrap node");
             }
         }
 
@@ -524,13 +524,12 @@ impl P2PSwarm {
                 .poll(&mut std::task::Context::from_waker(
                     futures::task::noop_waker_ref(),
                 )) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => match evt {
-                    gossipsub::Event::Message { message, .. } => {
+                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => {
+                    if let gossipsub::Event::Message { message, .. } = evt {
                         let new = self.on_gossipsub_message(&message);
                         events.extend(new);
                     }
-                    _ => {}
-                },
+                }
                 _ => break,
             }
         }
@@ -544,13 +543,12 @@ impl P2PSwarm {
                 .poll(&mut std::task::Context::from_waker(
                     futures::task::noop_waker_ref(),
                 )) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => match evt {
-                    IdentifyEvent::Received { info, .. } => {
+                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => {
+                    if let IdentifyEvent::Received { info, .. } = evt {
                         let new = self.on_identify_received(&info);
                         events.extend(new);
                     }
-                    _ => {}
-                },
+                }
                 _ => break,
             }
         }
@@ -588,25 +586,21 @@ impl P2PSwarm {
                 &mut std::task::Context::from_waker(futures::task::noop_waker_ref()),
             ) {
                 std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => {
-                    match evt {
-                        RequestResponseEvent::Message { peer, message, .. } => {
-                            match message {
-                                request_response::Message::Request {
-                                    request, channel, ..
-                                } => {
-                                    // Handle incoming file transfer request
-                                    let new =
-                                        self.on_file_transfer_request(&peer, request, channel);
-                                    events.extend(new);
-                                }
-                                request_response::Message::Response { response, .. } => {
-                                    // Handle incoming file transfer response
-                                    let new = self.on_file_transfer_response(&peer, response);
-                                    events.extend(new);
-                                }
+                    if let RequestResponseEvent::Message { peer, message, .. } = evt {
+                        match message {
+                            request_response::Message::Request {
+                                request, channel, ..
+                            } => {
+                                // Handle incoming file transfer request
+                                let new = self.on_file_transfer_request(&peer, request, channel);
+                                events.extend(new);
+                            }
+                            request_response::Message::Response { response, .. } => {
+                                // Handle incoming file transfer response
+                                let new = self.on_file_transfer_response(&peer, response);
+                                events.extend(new);
                             }
                         }
-                        _ => {}
                     }
                 }
                 _ => break,
@@ -759,7 +753,7 @@ impl futures::Stream for P2PSwarm {
                                 ..
                             }) = behaviour_evt
                             {
-                                let new = self.on_identify_received(&info);
+                                let new = self.on_identify_received(info);
                                 events.extend(new);
                             }
                             // Handle mDNS events directly
@@ -768,7 +762,7 @@ impl futures::Stream for P2PSwarm {
                             )) = behaviour_evt
                             {
                                 for (peer_id, addr) in peers {
-                                    let new = self.on_mdns_discovered(&peer_id, &addr);
+                                    let new = self.on_mdns_discovered(peer_id, addr);
                                     events.extend(new);
                                 }
                             }
@@ -777,7 +771,7 @@ impl futures::Stream for P2PSwarm {
                             )) = behaviour_evt
                             {
                                 for (peer_id, _addr) in peers {
-                                    let new = self.on_mdns_expired(&peer_id);
+                                    let new = self.on_mdns_expired(peer_id);
                                     events.extend(new);
                                 }
                             }

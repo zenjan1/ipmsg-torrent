@@ -493,16 +493,14 @@ impl IpMsgCompat {
                 })
             }
             IpMsgCmd::SendMsg => {
-                if let Some(content) = packet.message_content() {
-                    Some(IpMsgCompatEvent::MessageReceived {
+                packet
+                    .message_content()
+                    .map(|content| IpMsgCompatEvent::MessageReceived {
                         from: packet.sender_name.clone(),
                         addr: packet.source_addr,
                         content,
                         has_attachment: packet.has_flag(IPMSG_FILEATTACHOPT),
                     })
-                } else {
-                    None
-                }
             }
             IpMsgCmd::BrExit => {
                 let mut peers = self.known_peers.lock().await;

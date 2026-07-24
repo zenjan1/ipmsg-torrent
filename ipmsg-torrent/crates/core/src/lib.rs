@@ -8,6 +8,8 @@ pub mod identity;
 pub mod ipmsg_compat;
 pub mod messaging;
 pub mod noise;
+pub mod scoring;
+pub mod stats;
 pub mod store;
 pub mod transport;
 
@@ -19,6 +21,8 @@ pub use identity::Identity;
 #[cfg(not(target_arch = "wasm32"))]
 pub use ipmsg_compat::{IpMsgCompat, IpMsgCompatEvent, IpMsgPacket};
 pub use noise::NoiseSessionManager;
+pub use scoring::{PeerBehavior, PeerScore, PeerScoreManager};
+pub use stats::NetworkStats;
 pub use store::{MessageStore, PeerInfo};
 
 use futures::StreamExt;
@@ -302,6 +306,10 @@ pub struct P2PEngine {
     file_sharing: FileSharingManager,
     /// File transfer manager for downloads
     file_transfer: Arc<Mutex<FileTransferManager>>,
+    /// Peer scoring manager (inspired by libp2p gossipsub PeerScore)
+    peer_scores: PeerScoreManager,
+    /// Network statistics tracker
+    stats: NetworkStats,
     /// Classic IPMSG compatibility server
     #[cfg(not(target_arch = "wasm32"))]
     ipmsg_compat: Option<IpMsgCompat>,
@@ -350,6 +358,8 @@ impl P2PEngine {
             fragment_manager: FragmentManager::new(),
             file_sharing,
             file_transfer,
+            peer_scores: PeerScoreManager::new(),
+            stats: NetworkStats::new(),
             #[cfg(not(target_arch = "wasm32"))]
             ipmsg_compat: None,
             blocked_peers: HashSet::new(),
@@ -422,9 +432,19 @@ impl P2PEngine {
                                                 continue;
                                             }
                                             if self.dedup.is_duplicate(&msg.id) {
+                                                // Record duplicate message behavior
+                                                self.peer_scores.record_behavior(
+                                                    &msg.from,
+                                                    PeerBehavior::DuplicateMessage
+                                                );
                                                 continue;
                                             }
                                             self.dedup.mark_seen(&msg.id);
+                                            // Record valid message behavior
+                                            self.peer_scores.record_behavior(
+                                                &msg.from,
+                                                PeerBehavior::ValidMessage
+                                            );
                                             // Auto-ACK
                                             let ack_msg = ChatMessage::new_ack(
                                                 self.peer_id_str(),
@@ -462,18 +482,17 @@ impl P2PEngine {
                                         }
                                         P2PEvent::FileTransferResponse { from, response } => {
                                             // Handle file transfer response
-                                            let _ = self.handle_file_transfer_response(&from, response.clone()).await;
+                                            let _ = self.handle_file_transfer_response(from, response.clone()).await;
                                             continue;
                                         }
                                         P2PEvent::FileTransferRequestReceived { from, request } => {
                                             // Auto-respond to file transfer requests using file_sharing manager
                                             let response = self.file_transfer.lock().await.handle_request(request.clone()).await;
                                             let peer_id: Result<PeerId, _> = from.parse();
-                                            if let Ok(pid) = peer_id {
-                                                if let Some(swarm) = &mut self.swarm {
+                                            if let Ok(pid) = peer_id
+                                                && let Some(swarm) = &mut self.swarm {
                                                     let _ = swarm.send_file_transfer_response(&pid, response);
                                                 }
-                                            }
                                             continue;
                                         }
                                         P2PEvent::PeerAddressesDiscovered { peer_id, addrs } => {
@@ -598,8 +617,8 @@ impl P2PEngine {
                         std::future::pending::<Option<crate::ipmsg_compat::IpMsgPacket>>().await
                     } => {
                         #[cfg(not(target_arch = "wasm32"))]
-                        if let Some(packet) = pkt {
-                            if let Some(evt) = self.ipmsg_compat.as_ref().unwrap().process_packet(&packet).await {
+                        if let Some(packet) = pkt
+                            && let Some(evt) = self.ipmsg_compat.as_ref().unwrap().process_packet(&packet).await {
                                 let p2p_evt = match evt {
                                     IpMsgCompatEvent::PeerDiscovered { name, host, addr } => {
                                         P2PEvent::LegacyPeerDiscovered { name, host, ip: addr.ip() }
@@ -613,7 +632,6 @@ impl P2PEngine {
                                 };
                                 let _ = self.event_tx.send(p2p_evt);
                             }
-                        }
                     }
                     _ = tokio::time::sleep(Duration::from_secs(ACK_TIMEOUT_SECS)) => {
                         // Check for timed-out ACKs and retry
@@ -704,26 +722,26 @@ impl P2PEngine {
         self.sign_message(&mut msg);
 
         // Encrypt with Noise if we have an active session (E2E encryption)
-        if let Some(session) = self.noise_sessions.get_mut(to) {
-            if session.is_ready() {
-                let plaintext = ipmsg_protocol::codec::encode_message(&msg);
-                match session.encrypt(&plaintext) {
-                    Ok(ciphertext) => {
-                        // Create encrypted payload wrapper
-                        msg.encrypted_payload = Some(ipmsg_protocol::message::EncryptedPayload {
-                            ephemeral_key: String::new(), // Noise handles key exchange internally
-                            ciphertext,
-                            nonce: Vec::new(),
-                            ratchet_index: 0,
-                        });
-                        // Clear the plaintext content since we're sending encrypted
-                        msg.kind = ipmsg_protocol::message::MessageType::Text {
-                            content: String::new(),
-                        };
-                    }
-                    Err(e) => {
-                        tracing::warn!(peer = %to, error = %e, "Noise encryption failed, sending plaintext");
-                    }
+        if let Some(session) = self.noise_sessions.get_mut(to)
+            && session.is_ready()
+        {
+            let plaintext = ipmsg_protocol::codec::encode_message(&msg);
+            match session.encrypt(&plaintext) {
+                Ok(ciphertext) => {
+                    // Create encrypted payload wrapper
+                    msg.encrypted_payload = Some(ipmsg_protocol::message::EncryptedPayload {
+                        ephemeral_key: String::new(), // Noise handles key exchange internally
+                        ciphertext,
+                        nonce: Vec::new(),
+                        ratchet_index: 0,
+                    });
+                    // Clear the plaintext content since we're sending encrypted
+                    msg.kind = ipmsg_protocol::message::MessageType::Text {
+                        content: String::new(),
+                    };
+                }
+                Err(e) => {
+                    tracing::warn!(peer = %to, error = %e, "Noise encryption failed, sending plaintext");
                 }
             }
         }
@@ -964,12 +982,12 @@ impl P2PEngine {
     /// Verify a peer's fingerprint (out-of-band verification)
     pub fn verify_peer_fingerprint(&self, peer_id: &str, expected_fingerprint: &str) -> bool {
         // Fingerprint = SHA-256 hash of Noise static public key (like bitchat)
-        if let Some(swarm) = &self.swarm {
-            if let Some(peer) = swarm.get_peers().iter().find(|p| p.peer_id == peer_id) {
-                use sha2::{Digest, Sha256};
-                let fp = format!("{:x}", Sha256::digest(peer.peer_id.as_bytes()));
-                return fp == expected_fingerprint;
-            }
+        if let Some(swarm) = &self.swarm
+            && let Some(peer) = swarm.get_peers().iter().find(|p| p.peer_id == peer_id)
+        {
+            use sha2::{Digest, Sha256};
+            let fp = format!("{:x}", Sha256::digest(peer.peer_id.as_bytes()));
+            return fp == expected_fingerprint;
         }
         false
     }
@@ -978,7 +996,7 @@ impl P2PEngine {
     pub fn my_fingerprint(&self) -> String {
         use sha2::{Digest, Sha256};
         let pub_key = self.identity.verifying_key().to_bytes();
-        format!("{:x}", Sha256::digest(&pub_key))
+        format!("{:x}", Sha256::digest(pub_key))
     }
 
     // --- Rate Limiter (inspired by bitchat NoiseRateLimiter) ---
@@ -1159,11 +1177,11 @@ impl P2PEngine {
             let response = file_transfer.lock().await.handle_request(req).await;
 
             // Send response back via request-response protocol
-            if let Ok(peer_id) = peer_id_str.parse::<PeerId>() {
-                if let Some(swarm) = &mut self.swarm {
-                    swarm.send_file_transfer_response(&peer_id, response)?;
-                    tracing::info!(peer_id = %peer_id_str, "File transfer response sent");
-                }
+            if let Ok(peer_id) = peer_id_str.parse::<PeerId>()
+                && let Some(swarm) = &mut self.swarm
+            {
+                swarm.send_file_transfer_response(&peer_id, response)?;
+                tracing::info!(peer_id = %peer_id_str, "File transfer response sent");
             }
         }
 
@@ -1320,6 +1338,21 @@ impl P2PEngine {
     /// Get file transfer manager reference
     pub fn file_transfer(&self) -> &Arc<Mutex<FileTransferManager>> {
         &self.file_transfer
+    }
+
+    /// Get peer scoring manager reference
+    pub fn peer_scores(&self) -> &PeerScoreManager {
+        &self.peer_scores
+    }
+
+    /// Get network statistics reference
+    pub fn stats(&self) -> &NetworkStats {
+        &self.stats
+    }
+
+    /// Get network statistics summary as string
+    pub fn stats_summary(&self) -> String {
+        self.stats.summary()
     }
 }
 

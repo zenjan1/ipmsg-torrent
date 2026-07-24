@@ -184,10 +184,10 @@ impl DedupCache {
     /// Mark an item as seen
     pub fn mark_seen(&mut self, id: &str) {
         // Evict oldest if at capacity
-        if self.set.len() >= self.max_size {
-            if let Some(old) = self.queue.pop_front() {
-                self.set.remove(&old);
-            }
+        if self.set.len() >= self.max_size
+            && let Some(old) = self.queue.pop_front()
+        {
+            self.set.remove(&old);
         }
 
         self.bloom.insert(id);
