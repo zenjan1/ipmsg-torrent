@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 *.rs.bk
 *.log
 .idea/
@@ -8,5 +7,4 @@ Cargo.lock
 *.swo
 .DS_Store
 
-/crates/app/src-tauri/gen/
 
