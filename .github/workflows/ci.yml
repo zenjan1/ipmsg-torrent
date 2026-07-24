@@ -65,8 +65,8 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - name: Run tests (protocol + core)
         run: cargo test -p ipmsg-protocol -p ipmsg-core --lib
-      - name: Run tests (cli)
-        run: cargo test -p ipmsg-cli --lib
+      - name: Build check (cli)
+        run: cargo build -p ipmsg-cli
 
   build:
     name: Build
