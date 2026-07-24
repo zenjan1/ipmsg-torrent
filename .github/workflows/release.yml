@@ -111,7 +111,7 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
       - name: Build Tauri App
-        run: cargo tauri build --manifest-path crates/app/src-tauri/Cargo.toml --bundles deb,appimage
+        run: cd crates/app/src-tauri && cargo tauri build --bundles deb,appimage
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -137,7 +137,7 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
       - name: Build Tauri App
-        run: cargo tauri build --manifest-path crates/app/src-tauri/Cargo.toml --bundles msi,nsis
+        run: cd crates/app/src-tauri && cargo tauri build --bundles msi,nsis
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -163,9 +163,9 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
       - name: Build x86_64
-        run: cargo build --release --target x86_64-apple-darwin --manifest-path crates/app/src-tauri/Cargo.toml
+        run: cd crates/app/src-tauri && cargo build --release --target x86_64-apple-darwin
       - name: Build aarch64
-        run: cargo build --release --target aarch64-apple-darwin --manifest-path crates/app/src-tauri/Cargo.toml
+        run: cd crates/app/src-tauri && cargo build --release --target aarch64-apple-darwin
       - name: Create universal binary
         run: |
           mkdir -p release
@@ -173,7 +173,7 @@ jobs:
             crates/app/src-tauri/target/x86_64-apple-darwin/release/ipmsg-app \
             crates/app/src-tauri/target/aarch64-apple-darwin/release/ipmsg-app
       - name: Build arm64 .app bundle
-        run: cargo tauri build --manifest-path crates/app/src-tauri/Cargo.toml --target aarch64-apple-darwin --bundles macos
+        run: cd crates/app/src-tauri && cargo tauri build --target aarch64-apple-darwin --bundles macos
       - name: Create universal .app and DMG
         run: |
           APP="crates/app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ipmsg-torrent.app"
@@ -221,7 +221,7 @@ jobs:
           echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
       - name: Build Android APK
         working-directory: ipmsg-torrent
-        run: cargo tauri android build --manifest-path crates/app/src-tauri/Cargo.toml --apk
+        run: cd crates/app/src-tauri && cargo tauri android build --apk
         env:
           NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
       - name: Upload APK
