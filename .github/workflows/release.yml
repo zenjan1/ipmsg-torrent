@@ -173,7 +173,7 @@ jobs:
             target/x86_64-apple-darwin/release/ipmsg-app \
             target/aarch64-apple-darwin/release/ipmsg-app
       - name: Build arm64 .app bundle
-        run: cd crates/app/src-tauri && cargo tauri build --target aarch64-apple-darwin --bundles macos
+        run: cd crates/app/src-tauri && cargo tauri build --target aarch64-apple-darwin --bundles app
       - name: Create universal .app and DMG
         run: |
           APP="target/aarch64-apple-darwin/release/bundle/macos/ipmsg-torrent.app"
