@@ -117,8 +117,8 @@ jobs:
         with:
           name: app-linux
           path: |
-            ipmsg-torrent/crates/app/src-tauri/target/release/bundle/deb/*.deb
-            ipmsg-torrent/crates/app/src-tauri/target/release/bundle/appimage/*.AppImage
+            ipmsg-torrent/target/release/bundle/deb/*.deb
+            ipmsg-torrent/target/release/bundle/appimage/*.AppImage
 
   app-windows:
     name: App - Windows (MSI + NSIS)
@@ -143,8 +143,8 @@ jobs:
         with:
           name: app-windows
           path: |
-            ipmsg-torrent/crates/app/src-tauri/target/release/bundle/msi/*.msi
-            ipmsg-torrent/crates/app/src-tauri/target/release/bundle/nsis/*.exe
+            ipmsg-torrent/target/release/bundle/msi/*.msi
+            ipmsg-torrent/target/release/bundle/nsis/*.exe
 
   app-macos:
     name: App - macOS Universal DMG
@@ -170,13 +170,13 @@ jobs:
         run: |
           mkdir -p release
           lipo -create -output release/ipmsg-app \
-            crates/app/src-tauri/target/x86_64-apple-darwin/release/ipmsg-app \
-            crates/app/src-tauri/target/aarch64-apple-darwin/release/ipmsg-app
+            target/x86_64-apple-darwin/release/ipmsg-app \
+            target/aarch64-apple-darwin/release/ipmsg-app
       - name: Build arm64 .app bundle
         run: cd crates/app/src-tauri && cargo tauri build --target aarch64-apple-darwin --bundles macos
       - name: Create universal .app and DMG
         run: |
-          APP="crates/app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ipmsg-torrent.app"
+          APP="target/aarch64-apple-darwin/release/bundle/macos/ipmsg-torrent.app"
           cp release/ipmsg-app "$APP/Contents/MacOS/ipmsg-app"
           mkdir -p release/dmg
           cp -R "$APP" release/dmg/
