@@ -187,13 +187,12 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
       - name: Build Android APK
-        uses: tauri-apps/tauri-action@v0
+        run: |
+          cd ipmsg-torrent/crates/app
+          cargo tauri android build --apk --target aarch64
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NDK_HOME: ${{ env.NDK_HOME }}
-        with:
-          projectPath: ipmsg-torrent/crates/app
-          args: --target aarch64 --bundles apk
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Create release with all artifacts
   release:
