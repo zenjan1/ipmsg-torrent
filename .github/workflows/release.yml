@@ -1,4 +1,4 @@
-name: Release Build
+name: Release
 
 on:
   push:
@@ -9,10 +9,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # CLI builds for all platforms
   cli-linux:
     name: CLI - Linux x86_64
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ipmsg-torrent
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -23,7 +25,6 @@ jobs:
           workspaces: ipmsg-torrent
       - name: Build CLI
         run: |
-          cd ipmsg-torrent
           cargo build --release -p ipmsg-cli --target x86_64-unknown-linux-gnu
           strip target/x86_64-unknown-linux-gnu/release/ipmsg-cli
           tar czf ipmsg-cli-${{ github.ref_name }}-linux-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release ipmsg-cli
@@ -73,11 +74,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ipmsg-torrent
-      - name: Build CLI (Intel + Apple Silicon)
+      - name: Build CLI universal
         run: |
           cargo build --release -p ipmsg-cli --target x86_64-apple-darwin
           cargo build --release -p ipmsg-cli --target aarch64-apple-darwin
-          # Create universal binary
           lipo -create -output target/release/ipmsg-cli \
             target/x86_64-apple-darwin/release/ipmsg-cli \
             target/aarch64-apple-darwin/release/ipmsg-cli
@@ -89,10 +89,12 @@ jobs:
           name: cli-macos-universal
           path: ipmsg-torrent/ipmsg-cli-${{ github.ref_name }}-macos-universal.tar.gz
 
-  # Tauri app builds
-  tauri-linux:
-    name: App - Linux x86_64
+  app-linux:
+    name: App - Linux (deb + AppImage)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ipmsg-torrent
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -104,20 +106,26 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
       - name: Build Tauri App
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo tauri build --manifest-path crates/app/src-tauri/Cargo.toml --bundles deb,appimage
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
-          projectPath: ipmsg-torrent/crates/app
-          args: --bundles deb,appimage
+          name: app-linux
+          path: |
+            ipmsg-torrent/crates/app/src-tauri/target/release/bundle/deb/*.deb
+            ipmsg-torrent/crates/app/src-tauri/target/release/bundle/appimage/*.AppImage
 
-  tauri-windows:
-    name: App - Windows x86_64
+  app-windows:
+    name: App - Windows (MSI + NSIS)
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: ipmsg-torrent
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -129,16 +137,21 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
       - name: Build Tauri App
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo tauri build --manifest-path crates/app/src-tauri/Cargo.toml --bundles msi,nsis
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
-          projectPath: ipmsg-torrent/crates/app
-          args: --bundles msi,nsis
+          name: app-windows
+          path: |
+            ipmsg-torrent/crates/app/src-tauri/target/release/bundle/msi/*.msi
+            ipmsg-torrent/crates/app/src-tauri/target/release/bundle/nsis/*.exe
 
-  tauri-macos:
-    name: App - macOS Universal
+  app-macos:
+    name: App - macOS Universal DMG
     runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: ipmsg-torrent
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -149,16 +162,34 @@ jobs:
           workspaces: ipmsg-torrent
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
-      - name: Build Tauri App
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build x86_64
+        run: cargo build --release --target x86_64-apple-darwin --manifest-path crates/app/src-tauri/Cargo.toml
+      - name: Build aarch64
+        run: cargo build --release --target aarch64-apple-darwin --manifest-path crates/app/src-tauri/Cargo.toml
+      - name: Create universal binary
+        run: |
+          mkdir -p release
+          lipo -create -output release/ipmsg-app \
+            crates/app/src-tauri/target/x86_64-apple-darwin/release/ipmsg-app \
+            crates/app/src-tauri/target/aarch64-apple-darwin/release/ipmsg-app
+      - name: Build arm64 .app bundle
+        run: cargo tauri build --manifest-path crates/app/src-tauri/Cargo.toml --target aarch64-apple-darwin --bundles macos
+      - name: Create universal .app and DMG
+        run: |
+          APP="crates/app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ipmsg-torrent.app"
+          cp release/ipmsg-app "$APP/Contents/MacOS/ipmsg-app"
+          mkdir -p release/dmg
+          cp -R "$APP" release/dmg/
+          ln -s /Applications release/dmg/Applications
+          hdiutil create -volname "IPMsg-Torrent" -srcfolder release/dmg \
+            -ov -format UDZO "release/IPMsg-Torrent-universal.dmg"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          projectPath: ipmsg-torrent/crates/app
-          args: --bundles dmg --target universal-apple-darwin
+          name: app-macos
+          path: ipmsg-torrent/release/IPMsg-Torrent-universal.dmg
 
-  # Android build (APK)
-  tauri-android:
+  app-android:
     name: App - Android APK
     runs-on: ubuntu-latest
     steps:
@@ -172,58 +203,68 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev
-      - name: Setup Java
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
-      - name: Setup Android SDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-      - name: Install Android NDK
+      - name: Install Android NDK and build tools
         run: |
-          sdkmanager "ndk;26.1.10909125"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> $GITHUB_ENV
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
+          sdkmanager "ndk;27.0.12077973" "build-tools;36.0.0" "platforms;android-36"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
       - name: Build Android APK
-        run: |
-          cd ipmsg-torrent/crates/app
-          cargo tauri android build --apk --target aarch64
+        working-directory: ipmsg-torrent
+        run: cargo tauri android build --manifest-path crates/app/src-tauri/Cargo.toml --apk
         env:
-          NDK_HOME: ${{ env.NDK_HOME }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-android
+          path: ipmsg-torrent/crates/app/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
 
-  # Create release with all artifacts
-  release:
-    name: Create Release
-    needs: [cli-linux, cli-windows, cli-macos, tauri-linux, tauri-windows, tauri-macos, tauri-android]
+  publish-release:
+    name: Publish Release
     runs-on: ubuntu-latest
+    needs: [cli-linux, cli-windows, cli-macos, app-linux, app-windows, app-macos, app-android]
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Display structure of downloaded files
-        run: ls -R artifacts
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts/ -name '*.msi' -exec cp {} release/ \;
+          find artifacts/ -name '*.exe' -exec cp {} release/ \;
+          find artifacts/ -name '*.dmg' -exec cp {} release/ \;
+          find artifacts/ -name '*.apk' -exec cp {} release/ \;
+          find artifacts/ -name '*.zip' -exec cp {} release/ \;
+          find artifacts/ -name '*.tar.gz' -exec cp {} release/ \;
+          find artifacts/ -name '*.deb' -exec cp {} release/ \;
+          find artifacts/ -name '*.AppImage' -exec cp {} release/ \;
+          echo "Release files:"
+          ls -la release/
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            artifacts/**/*.tar.gz
-            artifacts/**/*.zip
-            artifacts/**/*.deb
-            artifacts/**/*.AppImage
-            artifacts/**/*.msi
-            artifacts/**/*.exe
-            artifacts/**/*.dmg
-            artifacts/**/*.apk
-          generate_release_notes: true
+      - name: Create GitHub Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "IPMsg-Torrent $TAG" \
+            --generate-notes \
+            release/*
