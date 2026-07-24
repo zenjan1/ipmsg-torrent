@@ -1,6 +1,6 @@
 {
   "productName": "ipmsg-torrent",
-  "version": "2.1.0",
+  "version": "2.4.0",
   "identifier": "com.ipmsg.torrent",
   "build": {
     "frontendDist": "../dist"
