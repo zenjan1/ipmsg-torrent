@@ -11,7 +11,7 @@ resolver = "2"
 [workspace.package]
 version = "2.0.0"
 edition = "2024"
-license = "MIT"
+license = "GPL-3.0-or-later"
 description = "IPMsg-Torrent: Decentralized P2P chat based on libp2p"
 
 [workspace.dependencies]

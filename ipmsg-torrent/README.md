@@ -119,4 +119,47 @@ crates/
 
 ## License
 
-MIT
+This project is licensed under the **GNU General Public License v3.0 or later (GPL-3.0-or-later)**.
+
+See [LICENSE](../LICENSE) for the full text.
+
+## Related Projects & Inspiration
+
+IPMsg-Torrent draws inspiration from and is related to the following projects:
+
+### P2P Chat / Messaging
+
+| Project | Description | What we learned |
+|---------|-------------|------------------|
+| [bitchat](https://github.com/bitchat/bitchat) | Bluetooth mesh chat with Noise XX encryption, Bloom filter dedup, fixed-size padding | Noise XX handshake, Bloom filter dedup, message fragmentation, padding for traffic analysis resistance |
+| [qaul.net](https://github.com/qaul/qaul.net) | Internet-independent wireless mesh communication app (Rust) | Mesh networking patterns, offline-first design |
+| [iroh-messenger](https://github.com/n0-computer/iroh) | Rust P2P chat using iroh (QUIC-based) | QUIC transport, gossip protocols |
+| [Iron Messenger](https://github.com/anthdm/iron-messenger) | Rust CLI P2P chat using iroh-gossip | Terminal UI patterns, gossipsub usage |
+| [tor-chat](https://github.com/) | E2E-encrypted (MLS) chat over Tor onion services (Rust + Tauri 2) | Tauri 2 architecture, MLS encryption concepts |
+| [PKARR chat](https://github.com/) | Decentralized P2P chat with Rust and PKARR | Censorship-resistant peer discovery |
+
+### libp2p Ecosystem
+
+| Project | Description | What we learned |
+|---------|-------------|------------------|
+| [rust-libp2p](https://github.com/libp2p/rust-libp2p) | The Rust implementation of the libp2p networking stack | Core transport, swarm, NetworkBehaviour patterns |
+| [IPFS / Filecoin](https://github.com/ipfs/ipfs) | Content-addressed storage and P2P file sharing | Torrent-style chunked transfer, DHT usage |
+| [Locutus](https://github.com/freenet/locutus) | Global decentralized key-value store (Rust) | Contract-based state management |
+| [Substrate](https://github.com/paritytech/substrate) | Blockchain framework built on libp2p | Grandpa/BABE consensus, peer scoring |
+
+### IPMSG / FeiQ Compatibility
+
+| Project | Description | What we learned |
+|---------|-------------|------------------|
+| [IPMsg for Android](https://github.com/) | Android IPMSG client compatible with FeiQ | UDP broadcast protocol, file attachment handling |
+| [CodeMsg](https://github.com/) | VS Code extension with IPMsg compatibility | IDE integration patterns |
+| Original IPMSG (ipmsg.org) | The classic Windows LAN messenger by H.Bito | The UDP protocol format (VERSION:PACKET_NO:USER:HOST:CMD_NO:EXTRA) |
+
+### Technologies Used
+
+- **[libp2p](https://libp2p.io/)** — P2P networking stack (transport, discovery, pubsub)
+- **[Noise Protocol](https://noiseprotocol.org/)** — E2E encryption (XX handshake, ChaCha20-Poly1305)
+- **[CBOR](https://cbor.io/)** — Compact binary serialization
+- **[Tauri](https://tauri.app/)** — Cross-platform desktop/mobile apps
+- **[Ed25519](https://ed25519.cr.yp.to/)** — Digital signatures
+- **[SQLite](https://www.sqlite.org/)** — Local message storage
