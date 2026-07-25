@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.io.FileInputStream
 
 plugins {
     id("com.android.application")
@@ -13,9 +14,24 @@ val tauriProperties = Properties().apply {
     }
 }
 
+val keyProperties = Properties().apply {
+    val propFile = file("key.properties")
+    if (propFile.exists()) {
+        propFile.inputStream().use { load(it) }
+    }
+}
+
 android {
     compileSdk = 36
     namespace = "com.ipmsg.torrent"
+    signingConfigs {
+        create("release") {
+            storeFile = file(keyProperties.getProperty("storeFile", "release.keystore"))
+            storePassword = keyProperties.getProperty("storePassword", "")
+            keyAlias = keyProperties.getProperty("keyAlias", "ipmsg")
+            keyPassword = keyProperties.getProperty("keyPassword", "")
+        }
+    }
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.ipmsg.torrent"
@@ -38,6 +54,7 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
