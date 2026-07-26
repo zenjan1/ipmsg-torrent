@@ -26,7 +26,10 @@ android {
     namespace = "com.ipmsg.torrent"
     signingConfigs {
         create("release") {
-            storeFile = file(keyProperties.getProperty("storeFile", "release.keystore"))
+            val storeFile = file(keyProperties.getProperty("storeFile", "release.keystore"))
+            if (storeFile.exists()) {
+                this.storeFile = storeFile
+            }
             storePassword = keyProperties.getProperty("storePassword", "")
             keyAlias = keyProperties.getProperty("keyAlias", "ipmsg")
             keyPassword = keyProperties.getProperty("keyPassword", "")
