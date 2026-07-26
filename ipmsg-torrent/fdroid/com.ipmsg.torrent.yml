@@ -13,9 +13,9 @@ RepoType: git
 Repo: https://github.com/zenjan1/ipmsg-torrent
 
 Builds:
-  - versionName: '2.2.0'
-    versionCode: 220
-    commit: v2.2.0
+  - versionName: '2.4.0'
+    versionCode: 240
+    commit: v2.4.0
     subdir: crates/app/src-tauri/gen/android
     sudo: apt-get install -y curl build-essential && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --target aarch64-linux-android --target armv7-linux-androideabi --target i686-linux-android --target x86_64-linux-android
     gradle:
