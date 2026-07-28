@@ -32,6 +32,9 @@ struct Cli {
     /// Run in headless mode (no TUI, log to stdout)
     #[arg(long)]
     headless: bool,
+    /// TCP/UDP port to listen on (default: 0 = random)
+    #[arg(long, default_value = "0")]
+    port: u16,
 }
 
 /// IRC-style command parser

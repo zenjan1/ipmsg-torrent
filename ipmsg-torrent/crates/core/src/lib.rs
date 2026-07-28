@@ -372,6 +372,7 @@ impl P2PEngine {
         &mut self,
         username: String,
         bootstrap_nodes: Vec<String>,
+        listen_port: u16,
     ) -> Result<String, P2PError> {
         self.username = username.clone();
         self.platforms = detect_platforms();
@@ -392,6 +393,7 @@ impl P2PEngine {
             bootstrap_nodes,
             known_addrs,
             &self.data_dir,
+            listen_port,
         )
         .await?;
 

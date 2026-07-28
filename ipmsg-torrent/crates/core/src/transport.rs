@@ -164,6 +164,7 @@ impl P2PSwarm {
         bootstrap_nodes: Vec<String>,
         known_addrs: Vec<(String, Vec<String>)>,
         data_dir: &Path,
+        listen_port: u16,
     ) -> Result<Self, P2PError> {
         let keypair = identity.to_keypair();
 
@@ -247,15 +248,27 @@ impl P2PSwarm {
         }
 
         // Listen on TCP
+        let tcp_addr = if listen_port > 0 {
+            format!("/ip4/0.0.0.0/tcp/{}", listen_port).parse().unwrap()
+        } else {
+            "/ip4/0.0.0.0/tcp/0".parse().unwrap()
+        };
         swarm_obj
             .swarm
-            .listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap())
+            .listen_on(tcp_addr)
             .map_err(|e| P2PError::Transport(e.to_string()))?;
 
         // Listen on QUIC
+        let quic_addr = if listen_port > 0 {
+            format!("/ip4/0.0.0.0/udp/{}/quic-v1", listen_port)
+                .parse()
+                .unwrap()
+        } else {
+            "/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap()
+        };
         swarm_obj
             .swarm
-            .listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap())
+            .listen_on(quic_addr)
             .map_err(|e| P2PError::Transport(e.to_string()))?;
 
         // Subscribe to topics
@@ -443,25 +456,26 @@ impl P2PSwarm {
             for addr in &info.listen_addrs {
                 let addr_str = addr.to_string();
                 // Skip private/internal addresses
-                if addr_str.contains("/ip4/127.0.0.1/") 
-                    || addr_str.contains("/ip4/10.") 
-                    || addr_str.contains("/ip4/172.16.") 
-                    || addr_str.contains("/ip4/172.17.") 
-                    || addr_str.contains("/ip4/172.18.") 
-                    || addr_str.contains("/ip4/172.19.") 
-                    || addr_str.contains("/ip4/172.20.") 
-                    || addr_str.contains("/ip4/172.21.") 
-                    || addr_str.contains("/ip4/172.22.") 
-                    || addr_str.contains("/ip4/172.23.") 
-                    || addr_str.contains("/ip4/172.24.") 
-                    || addr_str.contains("/ip4/172.25.") 
-                    || addr_str.contains("/ip4/172.26.") 
-                    || addr_str.contains("/ip4/172.27.") 
-                    || addr_str.contains("/ip4/172.28.") 
-                    || addr_str.contains("/ip4/172.29.") 
-                    || addr_str.contains("/ip4/172.30.") 
-                    || addr_str.contains("/ip4/172.31.") 
-                    || addr_str.contains("/ip4/192.168.") {
+                if addr_str.contains("/ip4/127.0.0.1/")
+                    || addr_str.contains("/ip4/10.")
+                    || addr_str.contains("/ip4/172.16.")
+                    || addr_str.contains("/ip4/172.17.")
+                    || addr_str.contains("/ip4/172.18.")
+                    || addr_str.contains("/ip4/172.19.")
+                    || addr_str.contains("/ip4/172.20.")
+                    || addr_str.contains("/ip4/172.21.")
+                    || addr_str.contains("/ip4/172.22.")
+                    || addr_str.contains("/ip4/172.23.")
+                    || addr_str.contains("/ip4/172.24.")
+                    || addr_str.contains("/ip4/172.25.")
+                    || addr_str.contains("/ip4/172.26.")
+                    || addr_str.contains("/ip4/172.27.")
+                    || addr_str.contains("/ip4/172.28.")
+                    || addr_str.contains("/ip4/172.29.")
+                    || addr_str.contains("/ip4/172.30.")
+                    || addr_str.contains("/ip4/172.31.")
+                    || addr_str.contains("/ip4/192.168.")
+                {
                     continue;
                 }
                 self.swarm
@@ -703,7 +717,10 @@ impl P2PSwarm {
                     futures::task::noop_waker_ref(),
                 )) {
                 std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => match evt {
-                    relay::Event::ReservationReqAccepted { src_peer_id, renewed } => {
+                    relay::Event::ReservationReqAccepted {
+                        src_peer_id,
+                        renewed,
+                    } => {
                         tracing::info!(%src_peer_id, renewed, "Relay server: reservation accepted");
                         events.push(P2PEvent::Status(format!(
                             "Relay server: reservation accepted for {}",
@@ -716,7 +733,11 @@ impl P2PSwarm {
                     relay::Event::ReservationTimedOut { src_peer_id } => {
                         tracing::info!(%src_peer_id, "Relay server: reservation timed out");
                     }
-                    relay::Event::CircuitReqAccepted { src_peer_id, dst_peer_id, .. } => {
+                    relay::Event::CircuitReqAccepted {
+                        src_peer_id,
+                        dst_peer_id,
+                        ..
+                    } => {
                         tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit accepted");
                         events.push(P2PEvent::Status(format!(
                             "Relay server: circuit {} -> {}",
@@ -724,10 +745,18 @@ impl P2PSwarm {
                             &dst_peer_id.to_base58()[..8]
                         )));
                     }
-                    relay::Event::CircuitReqDenied { src_peer_id, dst_peer_id, .. } => {
+                    relay::Event::CircuitReqDenied {
+                        src_peer_id,
+                        dst_peer_id,
+                        ..
+                    } => {
                         tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit denied");
                     }
-                    relay::Event::CircuitClosed { src_peer_id, dst_peer_id, .. } => {
+                    relay::Event::CircuitClosed {
+                        src_peer_id,
+                        dst_peer_id,
+                        ..
+                    } => {
                         tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit closed");
                     }
                     _ => {}
@@ -828,7 +857,11 @@ impl futures::Stream for P2PSwarm {
                             tracing::info!("External address confirmed: {}", address);
                             events.push(P2PEvent::ExternalAddress(address.to_string()));
                         }
-                        SwarmEvent::ConnectionEstablished { peer_id, endpoint: _, .. } => {
+                        SwarmEvent::ConnectionEstablished {
+                            peer_id,
+                            endpoint: _,
+                            ..
+                        } => {
                             tracing::info!("Connected to {}", peer_id);
                             // Mark as connected immediately to prevent RoutingUpdated dial loops
                             self.connected_peers.insert(*peer_id);
@@ -876,7 +909,9 @@ impl futures::Stream for P2PSwarm {
                             // Handle Kademlia events - discover and dial new peers
                             if let IpMsgNetBehaviourEvent::Kademlia(kad_evt) = behaviour_evt {
                                 match kad_evt {
-                                    libp2p::kad::Event::RoutingUpdated { peer, addresses, .. } => {
+                                    libp2p::kad::Event::RoutingUpdated {
+                                        peer, addresses, ..
+                                    } => {
                                         if !self.connected_peers.contains(&peer) {
                                             let public_addrs: Vec<_> = addresses
                                                 .iter()
