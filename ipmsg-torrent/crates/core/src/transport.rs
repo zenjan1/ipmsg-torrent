@@ -28,6 +28,15 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
+/// Check if a multiaddr contains a private/internal IP address
+fn is_private_addr(addr: &Multiaddr) -> bool {
+    let addr_str = addr.to_string();
+    addr_str.contains("/ip4/127.0.0.1/")
+        || addr_str.contains("/ip4/10.")
+        || addr_str.contains("/ip4/192.168.")
+        || (16..=31).any(|i| addr_str.contains(&format!("/ip4/172.{}.", i)))
+}
+
 /// Combined LibP2P behaviour — all sub-protocols
 #[derive(NetworkBehaviour)]
 pub struct IpMsgNetBehaviour {
@@ -37,6 +46,7 @@ pub struct IpMsgNetBehaviour {
     pub mdns: Mdns<libp2p::mdns::tokio::Tokio>,
     pub file_transfer: request_response::Behaviour<FileTransferCodec>,
     pub relay: relay::client::Behaviour,
+    pub relay_server: relay::Behaviour,
     pub dcutr: dcutr::Behaviour,
     pub autonat: autonat::Behaviour,
 }
@@ -89,6 +99,9 @@ impl IpMsgNetBehaviour {
         // AutoNAT (NAT detection)
         let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
 
+        // Relay server — allow other peers to use this node as a relay
+        let relay_server = relay::Behaviour::new(local_peer_id, relay::Config::default());
+
         Self {
             gossipsub,
             identify,
@@ -96,6 +109,7 @@ impl IpMsgNetBehaviour {
             mdns,
             file_transfer,
             relay: relay_client,
+            relay_server,
             dcutr,
             autonat,
         }
@@ -211,16 +225,24 @@ impl P2PSwarm {
         // Dial known peers from previous sessions (bootstrap from persistence)
         for (peer_id_str, addrs) in &known_addrs {
             if let Ok(peer_id) = peer_id_str.parse::<PeerId>() {
+                let mut public_addrs = Vec::new();
                 for addr_str in addrs {
                     if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+                        // Skip private/internal addresses
+                        if is_private_addr(&addr) {
+                            continue;
+                        }
                         swarm_obj
                             .swarm
                             .behaviour_mut()
                             .add_kademlia_peer(peer_id, addr.clone());
-                        let _ = swarm_obj.swarm.dial(addr);
+                        let _ = swarm_obj.swarm.dial(addr.clone());
+                        public_addrs.push(addr);
                     }
                 }
-                tracing::info!(%peer_id, addrs = addrs.len(), "Added known peer from store");
+                if !public_addrs.is_empty() {
+                    tracing::info!(%peer_id, addrs = public_addrs.len(), "Added known peer from store");
+                }
             }
         }
 
@@ -403,7 +425,7 @@ impl P2PSwarm {
 
         let is_new = !self.peers.contains_key(&pid_str);
         self.peers.insert(pid_str.clone(), peer);
-        self.connected_peers.insert(info.public_key.to_peer_id());
+        // connected_peers is already set in ConnectionEstablished to prevent dial loops
 
         if is_new {
             events.push(P2PEvent::PeerJoined {
@@ -416,8 +438,32 @@ impl P2PSwarm {
         // Collect peer's listen addresses for bootstrap persistence
         let addrs: Vec<String> = info.listen_addrs.iter().map(|a| a.to_string()).collect();
         if !addrs.is_empty() {
-            // Add addresses to Kademlia routing table
+            // Add only externally reachable addresses to Kademlia routing table
+            // Filter out private/internal addresses (127.0.0.1, 10.x.x.x, 172.16-31.x.x, 192.168.x.x)
             for addr in &info.listen_addrs {
+                let addr_str = addr.to_string();
+                // Skip private/internal addresses
+                if addr_str.contains("/ip4/127.0.0.1/") 
+                    || addr_str.contains("/ip4/10.") 
+                    || addr_str.contains("/ip4/172.16.") 
+                    || addr_str.contains("/ip4/172.17.") 
+                    || addr_str.contains("/ip4/172.18.") 
+                    || addr_str.contains("/ip4/172.19.") 
+                    || addr_str.contains("/ip4/172.20.") 
+                    || addr_str.contains("/ip4/172.21.") 
+                    || addr_str.contains("/ip4/172.22.") 
+                    || addr_str.contains("/ip4/172.23.") 
+                    || addr_str.contains("/ip4/172.24.") 
+                    || addr_str.contains("/ip4/172.25.") 
+                    || addr_str.contains("/ip4/172.26.") 
+                    || addr_str.contains("/ip4/172.27.") 
+                    || addr_str.contains("/ip4/172.28.") 
+                    || addr_str.contains("/ip4/172.29.") 
+                    || addr_str.contains("/ip4/172.30.") 
+                    || addr_str.contains("/ip4/172.31.") 
+                    || addr_str.contains("/ip4/192.168.") {
+                    continue;
+                }
                 self.swarm
                     .behaviour_mut()
                     .add_kademlia_peer(info.public_key.to_peer_id(), addr.clone());
@@ -607,7 +653,7 @@ impl P2PSwarm {
             }
         }
 
-        // Poll relay events
+        // Poll relay client events
         loop {
             match self
                 .swarm
@@ -642,6 +688,49 @@ impl P2PSwarm {
                             &src_peer_id.to_base58()[..8]
                         )));
                     }
+                },
+                _ => break,
+            }
+        }
+
+        // Poll relay server events
+        loop {
+            match self
+                .swarm
+                .behaviour_mut()
+                .relay_server
+                .poll(&mut std::task::Context::from_waker(
+                    futures::task::noop_waker_ref(),
+                )) {
+                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => match evt {
+                    relay::Event::ReservationReqAccepted { src_peer_id, renewed } => {
+                        tracing::info!(%src_peer_id, renewed, "Relay server: reservation accepted");
+                        events.push(P2PEvent::Status(format!(
+                            "Relay server: reservation accepted for {}",
+                            &src_peer_id.to_base58()[..8]
+                        )));
+                    }
+                    relay::Event::ReservationReqDenied { src_peer_id } => {
+                        tracing::info!(%src_peer_id, "Relay server: reservation denied");
+                    }
+                    relay::Event::ReservationTimedOut { src_peer_id } => {
+                        tracing::info!(%src_peer_id, "Relay server: reservation timed out");
+                    }
+                    relay::Event::CircuitReqAccepted { src_peer_id, dst_peer_id, .. } => {
+                        tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit accepted");
+                        events.push(P2PEvent::Status(format!(
+                            "Relay server: circuit {} -> {}",
+                            &src_peer_id.to_base58()[..8],
+                            &dst_peer_id.to_base58()[..8]
+                        )));
+                    }
+                    relay::Event::CircuitReqDenied { src_peer_id, dst_peer_id, .. } => {
+                        tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit denied");
+                    }
+                    relay::Event::CircuitClosed { src_peer_id, dst_peer_id, .. } => {
+                        tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit closed");
+                    }
+                    _ => {}
                 },
                 _ => break,
             }
@@ -731,14 +820,23 @@ impl futures::Stream for P2PSwarm {
                         }
                         SwarmEvent::NewExternalAddrCandidate { address } => {
                             tracing::info!("External address candidate: {}", address);
+                            // Confirm the external address to enable hole punching
+                            self.swarm.add_external_address(address.clone());
                             events.push(P2PEvent::ExternalAddress(address.to_string()));
                         }
                         SwarmEvent::ExternalAddrConfirmed { address } => {
                             tracing::info!("External address confirmed: {}", address);
                             events.push(P2PEvent::ExternalAddress(address.to_string()));
                         }
-                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                        SwarmEvent::ConnectionEstablished { peer_id, endpoint: _, .. } => {
                             tracing::info!("Connected to {}", peer_id);
+                            // Mark as connected immediately to prevent RoutingUpdated dial loops
+                            self.connected_peers.insert(*peer_id);
+                            // Don't add addresses to Kademlia here — wait for Identify
+                            // to get the peer's actual listen addresses (which are filtered
+                            // for private IPs in on_identify_received).
+                            // Trigger Kademlia bootstrap to refresh routing table
+                            let _ = self.swarm.behaviour_mut().kademlia.bootstrap();
                         }
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {
                             tracing::info!("Disconnected from {}", peer_id);
@@ -773,6 +871,26 @@ impl futures::Stream for P2PSwarm {
                                 for (peer_id, _addr) in peers {
                                     let new = self.on_mdns_expired(peer_id);
                                     events.extend(new);
+                                }
+                            }
+                            // Handle Kademlia events - discover and dial new peers
+                            if let IpMsgNetBehaviourEvent::Kademlia(kad_evt) = behaviour_evt {
+                                match kad_evt {
+                                    libp2p::kad::Event::RoutingUpdated { peer, addresses, .. } => {
+                                        if !self.connected_peers.contains(&peer) {
+                                            let public_addrs: Vec<_> = addresses
+                                                .iter()
+                                                .filter(|a| !is_private_addr(a))
+                                                .collect();
+                                            if !public_addrs.is_empty() {
+                                                tracing::info!(%peer, addrs = public_addrs.len(), "Kademlia discovered new peer, dialing");
+                                                for addr in public_addrs {
+                                                    let _ = self.swarm.dial(addr.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                             // Drain remaining behaviour events (gossipsub, file_transfer, relay, etc.)
