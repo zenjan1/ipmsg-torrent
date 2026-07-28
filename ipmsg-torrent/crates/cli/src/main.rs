@@ -348,7 +348,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let username = cli.username.clone();
     let mut engine = P2PEngine::new(data_dir)?;
-    let peer_id = engine.start(cli.username.clone(), bootstrap).await?;
+    let peer_id = engine.start(cli.username.clone(), bootstrap, cli.port).await?;
     let fingerprint = engine.my_fingerprint();
 
     // Start legacy IPMSG compatibility server
