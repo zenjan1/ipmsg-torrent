@@ -148,10 +148,12 @@ impl IpmsgClient {
         &self,
         username: String,
         bootstrap_nodes: Vec<String>,
+        listen_port: Option<u16>,
     ) -> Result<String, JsError> {
+        let port = listen_port.unwrap_or(0);
         let mut engine = self.engine.lock().await;
         let peer_id = engine
-            .start(username.clone(), bootstrap_nodes)
+            .start(username.clone(), bootstrap_nodes, port)
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
 

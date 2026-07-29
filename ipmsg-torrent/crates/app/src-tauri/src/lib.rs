@@ -23,6 +23,8 @@ pub struct StartArgs {
     pub username: String,
     pub bootstrap_nodes: Vec<String>,
     pub data_dir: String,
+    #[serde(default)]
+    pub port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -197,8 +199,9 @@ async fn p2p_start(
     args: StartArgs,
 ) -> Result<String, String> {
     let mut engine = state.engine.lock().await;
+    let port = args.port.unwrap_or(0);
     let peer_id = engine
-        .start(args.username, args.bootstrap_nodes)
+        .start(args.username, args.bootstrap_nodes, port)
         .await
         .map_err(|e| e.to_string())?;
 
