@@ -153,6 +153,8 @@ pub struct P2PSwarm {
     /// Pending response channels for file transfer requests
     pending_response_channels:
         HashMap<String, request_response::ResponseChannel<FileTransferResponse>>,
+    /// Store relay node addresses for later relay address construction
+    relay_node_addrs: HashMap<PeerId, Vec<Multiaddr>>,
 }
 
 impl P2PSwarm {
@@ -203,6 +205,7 @@ impl P2PSwarm {
             store,
             connected_peers: HashSet::new(),
             pending_response_channels: HashMap::new(),
+            relay_node_addrs: HashMap::new(),
         };
 
         // Dial bootstrap nodes
@@ -426,6 +429,17 @@ impl P2PSwarm {
         let pid_str = info.public_key.to_peer_id().to_base58();
         let (username, platforms) =
             parse_agent_version(&info.agent_version).unwrap_or_else(|| (String::new(), Vec::new()));
+
+        // Log supported protocols for debugging relay support
+        tracing::info!(
+            peer = %pid_str,
+            protocols = ?info.protocols,
+            "Identify received"
+        );
+        
+        // Check if peer supports relay protocol
+        let supports_relay = info.protocols.iter().any(|p| p.to_string().contains("circuit/relay"));
+        tracing::info!(peer = %pid_str, supports_relay, "Peer relay support check");
 
         let peer = ConnectedPeer {
             peer_id: pid_str.clone(),
@@ -687,6 +701,19 @@ impl P2PSwarm {
                             "Relay reservation accepted by {}",
                             &relay_peer_id.to_base58()[..8]
                         )));
+                        
+                        // Now that reservation is accepted, try to listen on relay address
+                        // We need to find the relay's address from connected peers
+                        if let Some(peer_info) = self.peers.get(&relay_peer_id.to_base58()) {
+                            for addr in &peer_info.addrs {
+                                let relay_addr = addr.clone().with(libp2p::multiaddr::Protocol::P2p(relay_peer_id.into())).with(libp2p::multiaddr::Protocol::P2pCircuit);
+                                tracing::info!("Attempting to listen on relay address after reservation: {}", relay_addr);
+                                match self.swarm.listen_on(relay_addr.clone()) {
+                                    Ok(_) => tracing::info!("Successfully initiated relay listen on {}", relay_addr),
+                                    Err(e) => tracing::warn!("Failed to listen on relay address {}: {:?}", relay_addr, e),
+                                }
+                            }
+                        }
                     }
                     relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
                         tracing::info!(%relay_peer_id, "Outbound circuit established");
@@ -859,17 +886,30 @@ impl futures::Stream for P2PSwarm {
                         }
                         SwarmEvent::ConnectionEstablished {
                             peer_id,
-                            endpoint: _,
+                            endpoint,
                             ..
                         } => {
                             tracing::info!("Connected to {}", peer_id);
                             // Mark as connected immediately to prevent RoutingUpdated dial loops
                             self.connected_peers.insert(*peer_id);
+                            
+                            // Store relay node addresses for later relay address construction
+                            if let libp2p::core::ConnectedPoint::Dialer { address, .. } = endpoint {
+                                self.relay_node_addrs.entry(*peer_id).or_default().push(address.clone());
+                            } else if let libp2p::core::ConnectedPoint::Listener { local_addr, .. } = endpoint {
+                                // For incoming connections, we don't have the remote address directly
+                                // but we can use the connection to request reservation later
+                            }
+                            
                             // Don't add addresses to Kademlia here — wait for Identify
                             // to get the peer's actual listen addresses (which are filtered
                             // for private IPs in on_identify_received).
                             // Trigger Kademlia bootstrap to refresh routing table
                             let _ = self.swarm.behaviour_mut().kademlia.bootstrap();
+                            
+                            // Don't listen on relay address here - wait for reservation to complete
+                            // The relay client will automatically request reservation when connecting
+                            // We'll listen on the relay address after ReservationReqAccepted event
                         }
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {
                             tracing::info!("Disconnected from {}", peer_id);
@@ -928,7 +968,87 @@ impl futures::Stream for P2PSwarm {
                                     _ => {}
                                 }
                             }
-                            // Drain remaining behaviour events (gossipsub, file_transfer, relay, etc.)
+                            // Handle relay client events (reservation accepted, circuits)
+                            if let IpMsgNetBehaviourEvent::Relay(relay_evt) = behaviour_evt {
+                                match relay_evt {
+                                    relay::client::Event::ReservationReqAccepted {
+                                        relay_peer_id,
+                                        renewal,
+                                        ..
+                                    } => {
+                                        tracing::info!(%relay_peer_id, renewal, "Relay reservation accepted");
+                                        events.push(P2PEvent::Status(format!(
+                                            "Relay reservation accepted by {}",
+                                            &relay_peer_id.to_base58()[..8]
+                                        )));
+                                    }
+                                    relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
+                                        tracing::info!(%relay_peer_id, "Outbound circuit established");
+                                        events.push(P2PEvent::Status(format!(
+                                            "Relay circuit established with {}",
+                                            &relay_peer_id.to_base58()[..8]
+                                        )));
+                                    }
+                                    relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
+                                        tracing::info!(%src_peer_id, "Inbound circuit established");
+                                        events.push(P2PEvent::Status(format!(
+                                            "Incoming relay circuit from {}",
+                                            &src_peer_id.to_base58()[..8]
+                                        )));
+                                    }
+                                }
+                            }
+                            // Handle relay server events
+                            if let IpMsgNetBehaviourEvent::RelayServer(relay_evt) = behaviour_evt {
+                                match relay_evt {
+                                    relay::Event::ReservationReqAccepted { src_peer_id, renewed } => {
+                                        tracing::info!(%src_peer_id, renewed, "Relay server: reservation accepted");
+                                    }
+                                    relay::Event::ReservationReqDenied { src_peer_id } => {
+                                        tracing::info!(%src_peer_id, "Relay server: reservation denied");
+                                    }
+                                    relay::Event::ReservationTimedOut { src_peer_id } => {
+                                        tracing::info!(%src_peer_id, "Relay server: reservation timed out");
+                                    }
+                                    relay::Event::CircuitReqAccepted { src_peer_id, dst_peer_id, .. } => {
+                                        tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit accepted");
+                                    }
+                                    relay::Event::CircuitReqDenied { src_peer_id, dst_peer_id, .. } => {
+                                        tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit denied");
+                                    }
+                                    relay::Event::CircuitClosed { src_peer_id, dst_peer_id, .. } => {
+                                        tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit closed");
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            // Handle DCUtR events (hole punching)
+                            if let IpMsgNetBehaviourEvent::Dcutr(dcutr_evt) = behaviour_evt {
+                                let dcutr::Event { remote_peer_id, result } = dcutr_evt;
+                                match result {
+                                    Ok(connection_id) => {
+                                        tracing::info!(%remote_peer_id, ?connection_id, "DCUtR: Direct connection upgrade succeeded");
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(%remote_peer_id, %error, "DCUtR: Direct connection upgrade failed");
+                                    }
+                                }
+                            }
+                            // Handle AutoNAT events
+                            if let IpMsgNetBehaviourEvent::Autonat(autonat_evt) = behaviour_evt {
+                                match autonat_evt {
+                                    autonat::Event::StatusChanged { old, new } => {
+                                        tracing::info!(?old, ?new, "AutoNAT status changed");
+                                    }
+                                    autonat::Event::InboundProbe(event) => {
+                                        tracing::debug!(?event, "AutoNAT inbound probe");
+                                    }
+                                    autonat::Event::OutboundProbe(event) => {
+                                        tracing::debug!(?event, "AutoNAT outbound probe");
+                                    }
+                                }
+                            }
+                            // Drain remaining behaviour events (gossipsub, file_transfer, etc.)
                             let new = self.drain_behaviour_events();
                             events.extend(new);
                         }
