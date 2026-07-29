@@ -684,73 +684,7 @@ impl P2PSwarm {
             }
         }
 
-        // Poll relay client events
-        loop {
-            match self
-                .swarm
-                .behaviour_mut()
-                .relay
-                .poll(&mut std::task::Context::from_waker(
-                    futures::task::noop_waker_ref(),
-                )) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => match evt {
-                    relay::client::Event::ReservationReqAccepted {
-                        relay_peer_id,
-                        renewal,
-                        ..
-                    } => {
-                        tracing::info!(%relay_peer_id, renewal, "Relay reservation accepted");
-                        events.push(P2PEvent::Status(format!(
-                            "Relay reservation accepted by {}",
-                            &relay_peer_id.to_base58()[..8]
-                        )));
-
-                        // Now that reservation is accepted, try to listen on relay address
-                        // Use the stored relay node addresses
-                        if let Some(addrs) = self.relay_node_addrs.get(&relay_peer_id) {
-                            for addr in addrs {
-                                let relay_addr = addr
-                                    .clone()
-                                    .with(libp2p::multiaddr::Protocol::P2p(relay_peer_id.into()))
-                                    .with(libp2p::multiaddr::Protocol::P2pCircuit);
-                                tracing::info!(
-                                    "Attempting to listen on relay address after reservation: {}",
-                                    relay_addr
-                                );
-                                match self.swarm.listen_on(relay_addr.clone()) {
-                                    Ok(_) => tracing::info!(
-                                        "Successfully initiated relay listen on {}",
-                                        relay_addr
-                                    ),
-                                    Err(e) => tracing::warn!(
-                                        "Failed to listen on relay address {}: {:?}",
-                                        relay_addr,
-                                        e
-                                    ),
-                                }
-                            }
-                        } else {
-                            tracing::warn!("No addresses stored for relay peer {}", relay_peer_id);
-                        }
-                    }
-                    relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
-                        tracing::info!(%relay_peer_id, "Outbound circuit established");
-                        events.push(P2PEvent::Status(format!(
-                            "Relay circuit established with {}",
-                            &relay_peer_id.to_base58()[..8]
-                        )));
-                    }
-                    relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
-                        tracing::info!(%src_peer_id, "Inbound circuit established");
-                        events.push(P2PEvent::Status(format!(
-                            "Incoming relay circuit from {}",
-                            &src_peer_id.to_base58()[..8]
-                        )));
-                    }
-                },
-                _ => break,
-            }
-        }
+        // Relay events are handled in SwarmEvent::Behaviour via IpMsgNetBehaviourEvent::Relay
 
         // Poll relay server events
         loop {
@@ -929,19 +863,34 @@ impl futures::Stream for P2PSwarm {
                             // for private IPs in on_identify_received).
                             // Trigger Kademlia bootstrap to refresh routing table
                             let _ = self.swarm.behaviour_mut().kademlia.bootstrap();
-                            
+
                             // Trigger relay reservation by listening on p2p-circuit address
                             // This sends a reservation request to the relay peer
                             if let libp2p::core::ConnectedPoint::Dialer { address, .. } = endpoint {
                                 // Build proper relay address: /ip4/.../tcp/.../p2p/<peer_id>/p2p-circuit
-                                let relay_addr = address
-                                    .clone()
-                                    .with(libp2p::multiaddr::Protocol::P2p(*peer_id))
-                                    .with(libp2p::multiaddr::Protocol::P2pCircuit);
-                                tracing::info!("Attempting to listen on relay address: {}", relay_addr);
+                                // Check if address already contains /p2p/<peer_id> to avoid duplication
+                                let has_p2p = address
+                                    .iter()
+                                    .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)));
+                                let relay_addr = if has_p2p {
+                                    address
+                                        .clone()
+                                        .with(libp2p::multiaddr::Protocol::P2pCircuit)
+                                } else {
+                                    address
+                                        .clone()
+                                        .with(libp2p::multiaddr::Protocol::P2p(*peer_id))
+                                        .with(libp2p::multiaddr::Protocol::P2pCircuit)
+                                };
+                                tracing::info!(
+                                    "Attempting to listen on relay address: {}",
+                                    relay_addr
+                                );
                                 match self.swarm.listen_on(relay_addr) {
                                     Ok(_) => tracing::info!("Successfully initiated relay listen"),
-                                    Err(e) => tracing::warn!("Failed to listen on relay address: {:?}", e),
+                                    Err(e) => {
+                                        tracing::warn!("Failed to listen on relay address: {:?}", e)
+                                    }
                                 }
                             }
                         }
@@ -1003,6 +952,8 @@ impl futures::Stream for P2PSwarm {
                                 }
                             }
                             // Handle relay client events (reservation accepted, circuits)
+                            // Note: libp2p automatically handles relay listening after reservation,
+                            // we only need to log the events
                             if let IpMsgNetBehaviourEvent::Relay(relay_evt) = behaviour_evt {
                                 match relay_evt {
                                     relay::client::Event::ReservationReqAccepted {
@@ -1015,37 +966,6 @@ impl futures::Stream for P2PSwarm {
                                             "Relay reservation accepted by {}",
                                             &relay_peer_id.to_base58()[..8]
                                         )));
-                                        
-                                        // Now that reservation is accepted, try to listen on relay address
-                                        let addrs_to_listen: Vec<Multiaddr> = self.relay_node_addrs
-                                            .get(relay_peer_id)
-                                            .cloned()
-                                            .unwrap_or_default();
-                                        if !addrs_to_listen.is_empty() {
-                                            for addr in &addrs_to_listen {
-                                                let relay_addr = addr
-                                                    .clone()
-                                                    .with(libp2p::multiaddr::Protocol::P2p((*relay_peer_id).into()))
-                                                    .with(libp2p::multiaddr::Protocol::P2pCircuit);
-                                                tracing::info!(
-                                                    "Attempting to listen on relay address after reservation: {}",
-                                                    relay_addr
-                                                );
-                                                match self.swarm.listen_on(relay_addr.clone()) {
-                                                    Ok(_) => tracing::info!(
-                                                        "Successfully initiated relay listen on {}",
-                                                        relay_addr
-                                                    ),
-                                                    Err(e) => tracing::warn!(
-                                                        "Failed to listen on relay address {}: {:?}",
-                                                        relay_addr,
-                                                        e
-                                                    ),
-                                                }
-                                            }
-                                        } else {
-                                            tracing::warn!("No addresses stored for relay peer {}", relay_peer_id);
-                                        }
                                     }
                                     relay::client::Event::OutboundCircuitEstablished {
                                         relay_peer_id,
