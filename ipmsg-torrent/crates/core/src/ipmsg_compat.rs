@@ -384,8 +384,11 @@ impl IpMsgCompat {
             let packet = self.builder.br_entry();
             let data = packet.serialize();
             let broadcast = SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), IPMSG_PORT);
-            socket.send_to(&data, broadcast).await?;
-            tracing::info!("Broadcast IPMSG BrEntry");
+            // Ignore broadcast errors (ENXIO on some network configurations)
+            match socket.send_to(&data, broadcast).await {
+                Ok(_) => {}
+                Err(e) => tracing::warn!("Failed to broadcast IPMSG BrEntry: {}", e),
+            }
         }
         Ok(())
     }
