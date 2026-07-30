@@ -6,6 +6,7 @@ description = "P2P networking engine for IPMsg-Torrent"
 
 [dependencies]
 ipmsg-protocol = { path = "../protocol" }
+ipmsg-download = { path = "../download" }
 libp2p = { workspace = true }
 ed25519-dalek = { workspace = true }
 x25519-dalek = { workspace = true }

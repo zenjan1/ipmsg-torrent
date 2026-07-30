@@ -69,7 +69,7 @@ impl IpMsgNetBehaviour {
 
         // Gossipsub
         let gs_config = gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(Duration::from_secs(10))
+            .heartbeat_interval(Duration::from_millis(1000))
             .validation_mode(gossipsub::ValidationMode::Permissive)
             .build()
             .expect("valid gossipsub config");
@@ -319,6 +319,17 @@ impl P2PSwarm {
 
     pub fn publish_to_topic(&mut self, topic_name: &str, data: Vec<u8>) -> Result<(), P2PError> {
         let topic = IdentTopic::new(topic_name);
+        let mesh_peers = self
+            .swarm
+            .behaviour_mut()
+            .gossipsub
+            .mesh_peers(&topic.hash());
+        let mesh_count = mesh_peers.count();
+        tracing::info!(
+            topic = topic_name,
+            mesh_peers = mesh_count,
+            "Publishing to topic"
+        );
         self.swarm
             .behaviour_mut()
             .gossipsub
@@ -377,6 +388,11 @@ impl P2PSwarm {
     fn on_gossipsub_message(&mut self, msg: &gossipsub::Message) -> Vec<P2PEvent> {
         let mut events = Vec::new();
         let topic = msg.topic.as_str();
+        tracing::info!(
+            topic = topic,
+            data_len = msg.data.len(),
+            "Received gossipsub message"
+        );
 
         if topic != CHAT_TOPIC && topic != PRESENCE_TOPIC && topic != FRAGMENT_TOPIC {
             return events;
@@ -1055,6 +1071,14 @@ impl futures::Stream for P2PSwarm {
                                     autonat::Event::OutboundProbe(event) => {
                                         tracing::debug!(?event, "AutoNAT outbound probe");
                                     }
+                                }
+                            }
+                            // Handle Gossipsub events (message delivery)
+                            if let IpMsgNetBehaviourEvent::Gossipsub(gossipsub_evt) = behaviour_evt
+                            {
+                                if let gossipsub::Event::Message { message, .. } = gossipsub_evt {
+                                    let new = self.on_gossipsub_message(&message);
+                                    events.extend(new);
                                 }
                             }
                             // Drain remaining behaviour events (gossipsub, file_transfer, etc.)

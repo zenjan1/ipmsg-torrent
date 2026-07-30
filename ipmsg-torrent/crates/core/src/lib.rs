@@ -268,6 +268,31 @@ pub enum SendCommand {
     /// List legacy IPMSG peers
     #[cfg(not(target_arch = "wasm32"))]
     ListIpMsgPeers,
+    /// Download from .torrent file
+    DownloadTorrent {
+        path: PathBuf,
+    },
+    /// Download from ed2k link
+    DownloadEd2k {
+        hash: String,
+        size: u64,
+        name: String,
+        servers: Vec<String>,
+    },
+    /// Download from HTTP/FTP URL (P2SP)
+    DownloadUrl {
+        url: String,
+    },
+    /// List all download tasks
+    ListDownloads,
+    /// Pause a download task
+    PauseDownload {
+        task_id: String,
+    },
+    /// Resume a download task
+    ResumeDownload {
+        task_id: String,
+    },
 }
 
 /// Tracks a pending message awaiting ACK
@@ -319,6 +344,8 @@ pub struct P2PEngine {
     favorite_peers: HashSet<String>,
     /// Counter for periodic Kademlia bootstrap (ticks every ACK_TIMEOUT_SECS)
     bootstrap_counter: u64,
+    /// Multi-protocol download manager
+    download_manager: Arc<ipmsg_download::DownloadManager>,
 }
 
 impl P2PEngine {
@@ -338,6 +365,9 @@ impl P2PEngine {
         let file_transfer = Arc::new(Mutex::new(FileTransferManager::new(Arc::new(Mutex::new(
             file_sharing.clone(),
         )))));
+
+        // Initialize download manager
+        let download_manager = Arc::new(ipmsg_download::DownloadManager::new(data_dir.clone()));
 
         Ok(Self {
             identity,
@@ -365,6 +395,7 @@ impl P2PEngine {
             blocked_peers: HashSet::new(),
             favorite_peers: HashSet::new(),
             bootstrap_counter: 0,
+            download_manager,
         })
     }
 
@@ -518,13 +549,26 @@ impl P2PEngine {
                     } => {
                         match cmd {
                             Some(SendCommand::SendText { to, content }) => {
-                                let _ = self.send_text(&to, &content).await;
+                                let mut msg = ChatMessage::new_text(self.peer_id_str(), Some(to.clone()), content);
+                                self.sign_message(&mut msg);
+                                let bytes = ipmsg_protocol::codec::encode_message(&msg);
+                                let _ = swarm.publish_to_topic(crate::messaging::CHAT_TOPIC, bytes);
+                                let _ = self.event_tx.send(P2PEvent::MessageSent(msg));
                             }
                             Some(SendCommand::SendToChannel { channel, content }) => {
-                                let _ = self.send_to_channel(&channel, &content).await;
+                                let mut msg = ChatMessage::new_text(self.peer_id_str(), None, content);
+                                msg.channel = Some(channel.clone());
+                                self.sign_message(&mut msg);
+                                let bytes = ipmsg_protocol::codec::encode_message(&msg);
+                                let _ = swarm.publish_to_topic(crate::messaging::CHAT_TOPIC, bytes);
+                                let _ = self.event_tx.send(P2PEvent::MessageSent(msg));
                             }
                             Some(SendCommand::Broadcast { content }) => {
-                                let _ = self.broadcast(content).await;
+                                let mut msg = ChatMessage::new_text(self.peer_id_str(), None, content);
+                                self.sign_message(&mut msg);
+                                let bytes = ipmsg_protocol::codec::encode_message(&msg);
+                                let _ = swarm.publish_to_topic(crate::messaging::CHAT_TOPIC, bytes);
+                                let _ = self.event_tx.send(P2PEvent::MessageSent(msg));
                             }
                             Some(SendCommand::AddChannel { channel }) => {
                                 self.add_channel(channel);
@@ -604,6 +648,93 @@ impl P2PEngine {
                                         lines.push(format!("  {}@{} ({})", p.name, p.host, p.addr.ip()));
                                     }
                                     let _ = self.event_tx.send(P2PEvent::Status(lines.join("\n")));
+                                }
+                            }
+                            Some(SendCommand::DownloadTorrent { path }) => {
+                                match self.download_manager.add_torrent(path).await {
+                                    Ok(task_id) => {
+                                        let _ = self.event_tx.send(P2PEvent::Status(format!("Started torrent download: {}", task_id)));
+                                    }
+                                    Err(e) => {
+                                        let _ = self.event_tx.send(P2PEvent::Status(format!("Failed to start torrent: {}", e)));
+                                    }
+                                }
+                            }
+                            Some(SendCommand::DownloadEd2k { hash, size, name, servers }) => {
+                                let server_addrs: Vec<std::net::SocketAddr> = servers
+                                    .iter()
+                                    .filter_map(|s| s.parse().ok())
+                                    .collect();
+                                let file_hash = match ipmsg_download::ed2k::Ed2kFileHash::from_hex(&hash) {
+                                    Ok(h) => h,
+                                    Err(e) => {
+                                        let _ = self.event_tx.send(P2PEvent::Status(format!("Invalid ed2k hash: {}", e)));
+                                        return;
+                                    }
+                                };
+                                match self.download_manager.add_ed2k(file_hash, size, name, server_addrs).await {
+                                    Ok(task_id) => {
+                                        let _ = self.event_tx.send(P2PEvent::Status(format!("Started ed2k download: {}", task_id)));
+                                    }
+                                    Err(e) => {
+                                        let _ = self.event_tx.send(P2PEvent::Status(format!("Failed to start ed2k: {}", e)));
+                                    }
+                                }
+                            }
+                            Some(SendCommand::DownloadUrl { url }) => {
+                                let name = url.split('/').last().unwrap_or("download").to_string();
+                                let sources = vec![ipmsg_download::xunlei::XunleiSource::Http {
+                                    url: url.clone(),
+                                    cookies: None,
+                                    referer: None,
+                                }];
+                                match self.download_manager.add_xunlei(name, 0, sources).await {
+                                    Ok(task_id) => {
+                                        let _ = self.event_tx.send(P2PEvent::Status(format!("Started P2SP download: {}", task_id)));
+                                    }
+                                    Err(e) => {
+                                        let _ = self.event_tx.send(P2PEvent::Status(format!("Failed to start P2SP: {}", e)));
+                                    }
+                                }
+                            }
+                            Some(SendCommand::ListDownloads) => {
+                                let tasks = self.download_manager.list_tasks().await;
+                                if tasks.is_empty() {
+                                    let _ = self.event_tx.send(P2PEvent::Status("No download tasks".to_string()));
+                                } else {
+                                    let mut lines = vec![format!("Download tasks ({}):", tasks.len())];
+                                    for task in tasks {
+                                        let progress = task.progress();
+                                        let state_str = match task.state {
+                                            ipmsg_download::DownloadState::Queued => "queued",
+                                            ipmsg_download::DownloadState::Downloading => "downloading",
+                                            ipmsg_download::DownloadState::Paused => "paused",
+                                            ipmsg_download::DownloadState::Complete => "complete",
+                                            ipmsg_download::DownloadState::Error => "error",
+                                        };
+                                        lines.push(format!(
+                                            "  {} - {} [{:.1}%] ({})",
+                                            &task.id[..8.min(task.id.len())],
+                                            task.name,
+                                            progress,
+                                            state_str
+                                        ));
+                                    }
+                                    let _ = self.event_tx.send(P2PEvent::Status(lines.join("\n")));
+                                }
+                            }
+                            Some(SendCommand::PauseDownload { task_id }) => {
+                                if self.download_manager.pause_task(&task_id).await {
+                                    let _ = self.event_tx.send(P2PEvent::Status(format!("Paused task {}", &task_id[..8.min(task_id.len())])));
+                                } else {
+                                    let _ = self.event_tx.send(P2PEvent::Status(format!("Failed to pause task {}", &task_id[..8.min(task_id.len())])));
+                                }
+                            }
+                            Some(SendCommand::ResumeDownload { task_id }) => {
+                                if self.download_manager.resume_task(&task_id).await {
+                                    let _ = self.event_tx.send(P2PEvent::Status(format!("Resumed task {}", &task_id[..8.min(task_id.len())])));
+                                } else {
+                                    let _ = self.event_tx.send(P2PEvent::Status(format!("Failed to resume task {}", &task_id[..8.min(task_id.len())])));
                                 }
                             }
                             None => break,

@@ -7,6 +7,7 @@ description = "Terminal client for IPMsg-Torrent"
 [dependencies]
 ipmsg-core = { path = "../core" }
 ipmsg-protocol = { path = "../protocol" }
+ipmsg-download = { path = "../download" }
 tokio = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }

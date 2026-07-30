@@ -72,6 +72,20 @@ enum Command {
         hash: String,
         peer: String,
     },
+    /// Multi-protocol download (torrent/ed2k/url)
+    Dl {
+        target: String,
+    },
+    /// List download tasks
+    Dls,
+    /// Pause a download task
+    Dlp {
+        task_id: String,
+    },
+    /// Resume a download task
+    Dlr {
+        task_id: String,
+    },
     Block {
         peer: String,
     },
@@ -188,8 +202,32 @@ fn parse_command(input: &str) -> Command {
                     hash: parts[1].to_string(),
                     peer: parts[2].to_string(),
                 }
+            } else if parts.len() == 2 {
+                // /dl <torrent|ed2k|url>
+                Command::Dl {
+                    target: parts[1].to_string(),
+                }
             } else {
-                Command::Unknown("/download <hash> <peer>".to_string())
+                Command::Unknown("/download <hash> <peer> or /dl <target>".to_string())
+            }
+        }
+        "dls" => Command::Dls,
+        "dlp" => {
+            if parts.len() >= 2 {
+                Command::Dlp {
+                    task_id: parts[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlp <task_id>".to_string())
+            }
+        }
+        "dlr" => {
+            if parts.len() >= 2 {
+                Command::Dlr {
+                    task_id: parts[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlr <task_id>".to_string())
             }
         }
         "block" => {
@@ -244,6 +282,10 @@ fn command_help() -> String {
         "/search <query> [tags] - Search for files in the network",
         "/files         - List all shared files",
         "/download <hash> <peer> - Download a file from a peer",
+        "/dl <target>       - Multi-protocol download (torrent/ed2k/url)",
+        "/dls               - List download tasks",
+        "/dlp <task_id>     - Pause a download task",
+        "/dlr <task_id>     - Resume a download task",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -272,15 +314,17 @@ struct SharedState {
     input: String,
     running: bool,
     username: String,
+    download_manager: Arc<ipmsg_download::DownloadManager>,
 }
 
 impl SharedState {
-    fn new(peer_id: String, username: String) -> Self {
+    fn new(peer_id: String, username: String, data_dir: PathBuf) -> Self {
         let main_tab = TabView {
             name: "main".to_string(),
             messages: Vec::new(),
             channel: None,
         };
+        let download_manager = Arc::new(ipmsg_download::DownloadManager::new(data_dir));
         Self {
             tabs: vec![main_tab],
             active_tab: 0,
@@ -292,6 +336,7 @@ impl SharedState {
             input: String::new(),
             running: true,
             username,
+            download_manager,
         }
     }
 
@@ -347,7 +392,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_default();
 
     let username = cli.username.clone();
-    let mut engine = P2PEngine::new(data_dir)?;
+    let mut engine = P2PEngine::new(data_dir.clone())?;
     let peer_id = engine
         .start(cli.username.clone(), bootstrap, cli.port)
         .await?;
@@ -371,10 +416,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Headless mode: just log events to stdout
     if cli.headless {
         println!("P2P engine running in headless mode. Press Ctrl+C to exit.");
+        println!("Commands: /msg <peer> <text>, /peers, /help");
+
+        // Create state for headless mode
+        let mut state_obj = SharedState::new(peer_id.clone(), username.clone(), data_dir.clone());
+        state_obj.my_fingerprint = fingerprint.clone();
+        let state = Arc::new(Mutex::new(state_obj));
+
+        // Spawn stdin reader thread
+        let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<String>(16);
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines() {
+                match line {
+                    Ok(l) => {
+                        if stdin_tx.blocking_send(l).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
         loop {
             tokio::select! {
                 Ok(()) = tokio::signal::ctrl_c() => {
                     break;
+                }
+                Some(line) = stdin_rx.recv() => {
+                    let line = line.trim().to_string();
+                    if !line.is_empty() {
+                        let cmd = parse_command(&line);
+                        handle_command_headless(&state, &cmd_tx, &cmd, &peer_id).await;
+                    }
                 }
                 result = event_rx.recv() => {
                     match result {
@@ -388,7 +464,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     println!("[{}] {}: {}", msg.timestamp.format("%H:%M"), msg.from, content);
                                 }
                                 P2PEvent::MessageSent(msg) => {
-                                    println!("[you] {}", msg.timestamp.format("%H:%M"));
+                                    println!("[{}] you: {}", msg.timestamp.format("%H:%M"),
+                                        match &msg.kind {
+                                            ipmsg_protocol::message::MessageType::Text { content } => content.clone(),
+                                            _ => msg.kind.label().to_string(),
+                                        });
                                 }
                                 P2PEvent::PeerJoined { peer_id: pid, username: uname, .. } => {
                                     println!("Peer joined: {} ({})", uname, &pid[..8.min(pid.len())]);
@@ -413,7 +493,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut terminal = setup_terminal()?;
-    let mut state_obj = SharedState::new(peer_id, username.clone());
+    let mut state_obj = SharedState::new(peer_id, username.clone(), data_dir.clone());
     state_obj.my_fingerprint = fingerprint;
     let state = Arc::new(Mutex::new(state_obj));
 
@@ -855,6 +935,142 @@ async fn handle_command(
                 ),
             );
         }
+        Command::Dl { target } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let mut s = state.lock().await;
+            if target.ends_with(".torrent") {
+                // Torrent file
+                match download_manager
+                    .add_torrent(std::path::PathBuf::from(&target))
+                    .await
+                {
+                    Ok(task_id) => {
+                        s.add_system_message(
+                            "main",
+                            format!("Started torrent download: {}", task_id),
+                        );
+                    }
+                    Err(e) => {
+                        s.add_system_message("main", format!("Failed to start torrent: {}", e));
+                    }
+                }
+            } else if target.starts_with("ed2k://") {
+                // ed2k link: ed2k://|file|<name>|<size>|<hash>|/
+                let parts: Vec<&str> = target.split('|').collect();
+                if parts.len() >= 5 {
+                    let name = parts[2].to_string();
+                    let size: u64 = parts[3].parse().unwrap_or(0);
+                    let hash = parts[4].to_string();
+                    let hash = ipmsg_download::ed2k::Ed2kFileHash::from_hex(&hash).unwrap();
+                    match download_manager.add_ed2k(hash, size, name, vec![]).await {
+                        Ok(task_id) => {
+                            s.add_system_message(
+                                "main",
+                                format!("Started ed2k download: {}", task_id),
+                            );
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Failed to start ed2k: {}", e));
+                        }
+                    }
+                } else {
+                    s.add_system_message("main", "Invalid ed2k link format".to_string());
+                }
+            } else if target.starts_with("http://")
+                || target.starts_with("https://")
+                || target.starts_with("ftp://")
+            {
+                // HTTP/FTP URL (P2SP)
+                let name = target.split('/').last().unwrap_or("download").to_string();
+                // TODO: Get file size from HEAD request
+                let size = 0u64; // Unknown for now
+                let sources = vec![ipmsg_download::xunlei::XunleiSource::Http {
+                    url: target.clone(),
+                    cookies: None,
+                    referer: None,
+                }];
+                match download_manager.add_xunlei(name, size, sources).await {
+                    Ok(task_id) => {
+                        s.add_system_message("main", format!("Started P2SP download: {}", task_id));
+                    }
+                    Err(e) => {
+                        s.add_system_message("main", format!("Failed to start P2SP: {}", e));
+                    }
+                }
+            } else {
+                s.add_system_message("main", "Unsupported download target. Use .torrent file, ed2k:// link, or http(s):// URL".to_string());
+            }
+        }
+        Command::Dls => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let tasks = download_manager.list_tasks().await;
+            let mut s = state.lock().await;
+            if tasks.is_empty() {
+                s.add_system_message("main", "No download tasks".to_string());
+            } else {
+                let mut lines = vec![format!("Download tasks ({}):", tasks.len())];
+                for task in tasks {
+                    let progress = task.progress();
+                    let state_str = match task.state {
+                        ipmsg_download::DownloadState::Queued => "queued",
+                        ipmsg_download::DownloadState::Downloading => "downloading",
+                        ipmsg_download::DownloadState::Paused => "paused",
+                        ipmsg_download::DownloadState::Complete => "complete",
+                        ipmsg_download::DownloadState::Error => "error",
+                    };
+                    lines.push(format!(
+                        "  {} - {} [{:.1}%] ({})",
+                        &task.id[..8.min(task.id.len())],
+                        task.name,
+                        progress,
+                        state_str
+                    ));
+                }
+                s.add_system_message("main", lines.join("\n"));
+            }
+        }
+        Command::Dlp { task_id } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let mut s = state.lock().await;
+            if download_manager.pause_task(&task_id).await {
+                s.add_system_message(
+                    "main",
+                    format!("Paused task {}", &task_id[..8.min(task_id.len())]),
+                );
+            } else {
+                s.add_system_message(
+                    "main",
+                    format!("Failed to pause task {}", &task_id[..8.min(task_id.len())]),
+                );
+            }
+        }
+        Command::Dlr { task_id } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let mut s = state.lock().await;
+            if download_manager.resume_task(&task_id).await {
+                s.add_system_message(
+                    "main",
+                    format!("Resumed task {}", &task_id[..8.min(task_id.len())]),
+                );
+            } else {
+                s.add_system_message(
+                    "main",
+                    format!("Failed to resume task {}", &task_id[..8.min(task_id.len())]),
+                );
+            }
+        }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {
                 peer_id: peer.clone(),
@@ -906,6 +1122,60 @@ async fn handle_command(
     }
 }
 
+/// Handle commands in headless mode (no TUI state needed)
+async fn handle_command_headless(
+    state: &Arc<Mutex<SharedState>>,
+    cmd_tx: &tokio::sync::mpsc::UnboundedSender<SendCommand>,
+    cmd: &Command,
+    _my_peer_id: &str,
+) {
+    match cmd {
+        Command::Help => {
+            println!("Commands: /msg <peer> <text>, /peers, /who, /ping, /quit");
+        }
+        Command::Msg { target, content } => {
+            let full_peer = {
+                let s = state.lock().await;
+                s.peers.iter().find(|p| p.starts_with(target)).cloned()
+            };
+            if let Some(peer_id) = full_peer {
+                let _ = cmd_tx.send(SendCommand::SendText {
+                    to: peer_id,
+                    content: content.clone(),
+                });
+                println!("[sent] -> {}: {}", target, content);
+            } else {
+                println!("[error] Peer not found: {}", target);
+            }
+        }
+        Command::Peers | Command::Who => {
+            let s = state.lock().await;
+            if s.peers.is_empty() {
+                println!("[peers] No peers connected");
+            } else {
+                println!("[peers] Connected ({}):", s.peers.len());
+                for p in &s.peers {
+                    if let Some((uname, _platforms)) = s.peer_details.get(p) {
+                        println!("  {} - {}", &p[..8.min(p.len())], uname);
+                    } else {
+                        println!("  {} - unknown", &p[..8.min(p.len())]);
+                    }
+                }
+            }
+        }
+        Command::Ping => {
+            println!("[pong] Local OK");
+        }
+        Command::Quit => {
+            println!("[quit] Shutting down...");
+            std::process::exit(0);
+        }
+        _ => {
+            println!("[error] Command not supported in headless mode");
+        }
+    }
+}
+
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = stdout();
@@ -937,6 +1207,7 @@ fn draw(
             .constraints([
                 Constraint::Length(1), // Tabs
                 Constraint::Min(3),    // Messages
+                Constraint::Length(3), // Downloads
                 Constraint::Length(3), // Input
             ])
             .split(chunks[1]);
@@ -1047,6 +1318,71 @@ fn draw(
             right_chunks[1],
         );
 
+        // Downloads
+        let download_tasks = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { state.download_manager.list_tasks().await })
+        });
+
+        let download_lines: Vec<Line> = if download_tasks.is_empty() {
+            vec![Line::from(Span::styled(
+                "  No downloads",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
+            download_tasks
+                .iter()
+                .take(3) // Show max 3 downloads
+                .map(|task| {
+                    let progress = task.progress();
+                    let bar_width = 20;
+                    let filled = (progress / 100.0 * bar_width as f32) as usize;
+                    let bar: String = std::iter::repeat('=')
+                        .take(filled)
+                        .chain(std::iter::repeat(' ').take(bar_width - filled))
+                        .collect();
+
+                    let state_icon = match task.state {
+                        ipmsg_download::DownloadState::Downloading => "⬇",
+                        ipmsg_download::DownloadState::Paused => "⏸",
+                        ipmsg_download::DownloadState::Complete => "✓",
+                        ipmsg_download::DownloadState::Error => "✗",
+                        ipmsg_download::DownloadState::Queued => "⏳",
+                    };
+
+                    let state_color = match task.state {
+                        ipmsg_download::DownloadState::Downloading => Color::Green,
+                        ipmsg_download::DownloadState::Paused => Color::Yellow,
+                        ipmsg_download::DownloadState::Complete => Color::Cyan,
+                        ipmsg_download::DownloadState::Error => Color::Red,
+                        ipmsg_download::DownloadState::Queued => Color::DarkGray,
+                    };
+
+                    Line::from(vec![
+                        Span::styled(format!("{} ", state_icon), Style::default().fg(state_color)),
+                        Span::styled(
+                            format!("{:<12} ", &task.name[..12.min(task.name.len())]),
+                            Style::default().fg(Color::White),
+                        ),
+                        Span::styled(format!("[{}] ", bar), Style::default().fg(state_color)),
+                        Span::styled(
+                            format!("{:.0}%", progress),
+                            Style::default().fg(Color::White),
+                        ),
+                    ])
+                })
+                .collect()
+        };
+
+        let downloads_block = Block::default()
+            .title(format!(" Downloads ({}) ", download_tasks.len()))
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::Magenta));
+        f.render_widget(
+            Paragraph::new(download_lines).block(downloads_block),
+            right_chunks[2],
+        );
+
         // Input
         let input_block = Block::default()
             .title(" /cmd or type [Tab/←/→]=switch [Esc]=quit ")
@@ -1054,7 +1390,7 @@ fn draw(
             .style(Style::default().fg(Color::White));
         f.render_widget(
             Paragraph::new(format!("> {} ", state.input)).block(input_block),
-            right_chunks[2],
+            right_chunks[3],
         );
     })?;
     Ok(())
