@@ -96,7 +96,8 @@ impl Ed2kEngine {
         for i in 0..chunk_count {
             let chunk_start = i as u64 * ED2K_CHUNK_SIZE;
             let chunk_size = std::cmp::min(ED2K_CHUNK_SIZE, file_size - chunk_start);
-            // TODO: Get chunk hash from file metadata
+            // Chunk hashes are obtained from peers via HashSet message
+            // Initially unknown, will be updated when peer sends hash set
             let chunk_hash = [0u8; 16];
             chunks.push(ChunkState::new(i, chunk_size, chunk_hash));
         }
@@ -111,6 +112,13 @@ impl Ed2kEngine {
             peers: HashMap::new(),
             downloaded_chunks: HashSet::new(),
             downloaded: 0,
+        }
+    }
+
+    /// Update chunk hash from peer's HashSet message
+    pub fn update_chunk_hash(&mut self, chunk_idx: u32, hash: [u8; 16]) {
+        if let Some(chunk) = self.chunks.get_mut(chunk_idx as usize) {
+            chunk.hash = hash;
         }
     }
 

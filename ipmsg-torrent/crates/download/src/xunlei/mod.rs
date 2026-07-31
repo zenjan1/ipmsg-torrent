@@ -1,6 +1,7 @@
 //! Xunlei P2SP protocol implementation
 
 mod engine;
+mod peer;
 mod protocol;
 
 pub use engine::{XunleiDownloadError, XunleiEngine};

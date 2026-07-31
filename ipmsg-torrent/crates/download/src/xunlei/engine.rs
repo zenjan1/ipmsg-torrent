@@ -1,8 +1,12 @@
 //! Xunlei P2SP download engine
 
+use super::peer::PeerClient;
 use super::protocol::{DownloadProgress, P2spBlock, XunleiSource};
 use reqwest::Client;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
 /// P2SP block size (1MB)
@@ -12,10 +16,12 @@ const BLOCK_SIZE: u64 = 1024 * 1024;
 pub struct XunleiEngine {
     file_name: String,
     file_size: u64,
+    file_hash: [u8; 16],
     sources: Vec<XunleiSource>,
     blocks: Vec<P2spBlock>,
     download_dir: PathBuf,
     http_client: Client,
+    peer_clients: Arc<Mutex<HashMap<usize, PeerClient>>>,
     downloaded: u64,
     start_time: Option<std::time::Instant>,
 }
@@ -43,6 +49,13 @@ impl XunleiEngine {
             offset += size;
         }
 
+        // Compute a simple hash from file name for peer requests
+        let mut file_hash = [0u8; 16];
+        let name_bytes = file_name.as_bytes();
+        for (i, &b) in name_bytes.iter().enumerate() {
+            file_hash[i % 16] ^= b;
+        }
+
         let http_client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -51,10 +64,12 @@ impl XunleiEngine {
         Self {
             file_name,
             file_size,
+            file_hash,
             sources,
             blocks,
             download_dir,
             http_client,
+            peer_clients: Arc::new(Mutex::new(HashMap::new())),
             downloaded: 0,
             start_time: None,
         }
@@ -151,9 +166,15 @@ impl XunleiEngine {
                         });
                         tasks.push((block_idx, task));
                     }
-                    XunleiSource::Peer { .. } => {
-                        // TODO: Implement P2P peer download
-                        tracing::debug!("P2P peer download not yet implemented");
+                    XunleiSource::Peer { addr, .. } => {
+                        let peer_clients = self.peer_clients.clone();
+                        let file_hash = self.file_hash;
+                        let addr = *addr;
+                        let source_idx_copy = source_idx;
+                        let task = tokio::spawn(async move {
+                            Self::download_peer_block(peer_clients, file_hash, source_idx_copy, addr, offset, size).await
+                        });
+                        tasks.push((block_idx, task));
                     }
                 }
             }
@@ -216,6 +237,35 @@ impl XunleiEngine {
             .map_err(|e| XunleiDownloadError::Http(e.to_string()))?;
 
         Ok(data.to_vec())
+    }
+
+    async fn download_peer_block(
+        peer_clients: Arc<Mutex<HashMap<usize, PeerClient>>>,
+        file_hash: [u8; 16],
+        source_idx: usize,
+        addr: std::net::SocketAddr,
+        offset: u64,
+        size: u64,
+    ) -> Result<Vec<u8>, XunleiDownloadError> {
+        let mut clients = peer_clients.lock().await;
+        
+        let client = if let Some(client) = clients.get_mut(&source_idx) {
+            client
+        } else {
+            // Connect to peer
+            let client = PeerClient::connect(addr)
+                .await
+                .map_err(|e| XunleiDownloadError::Peer(e.to_string()))?;
+            clients.insert(source_idx, client);
+            clients.get_mut(&source_idx).unwrap()
+        };
+
+        let data = client
+            .request_block(&file_hash, offset, size)
+            .await
+            .map_err(|e| XunleiDownloadError::Peer(e.to_string()))?;
+
+        Ok(data)
     }
 
     fn is_complete(&self) -> bool {
