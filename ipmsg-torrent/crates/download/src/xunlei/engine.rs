@@ -30,7 +30,6 @@ impl XunleiEngine {
         // Initialize blocks
         let mut blocks = Vec::new();
         let mut offset = 0u64;
-        let mut block_idx = 0;
 
         while offset < file_size {
             let size = std::cmp::min(BLOCK_SIZE, file_size - offset);
@@ -42,7 +41,6 @@ impl XunleiEngine {
                 data: None,
             });
             offset += size;
-            block_idx += 1;
         }
 
         let http_client = Client::builder()

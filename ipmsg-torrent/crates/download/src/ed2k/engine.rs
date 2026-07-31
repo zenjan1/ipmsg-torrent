@@ -323,7 +323,7 @@ impl Ed2kEngine {
         for (addr, peer) in &mut self.peers {
             // Try to receive data (non-blocking)
             match tokio::time::timeout(Duration::from_millis(100), peer.receive_block()).await {
-                Ok(Ok((hash, offset, data))) => {
+                Ok(Ok((_hash, offset, data))) => {
                     let block_size = data.len() as u64;
                     // Determine which chunk this block belongs to
                     let chunk_idx = (offset / ED2K_CHUNK_SIZE) as u32;

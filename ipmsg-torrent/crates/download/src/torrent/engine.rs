@@ -240,39 +240,72 @@ impl TorrentEngine {
             return;
         }
 
+        // Calculate piece rarity (how many peers have each piece)
+        let mut piece_counts: HashMap<u32, usize> = HashMap::new();
+        for &piece_idx in &needed_pieces {
+            let count = self.peers.values()
+                .filter(|p| p.available_pieces.contains(&piece_idx))
+                .count();
+            piece_counts.insert(piece_idx, count);
+        }
+
+        // Sort by rarity (fewest peers first)
+        let mut rarest_pieces: Vec<_> = piece_counts.into_iter().collect();
+        rarest_pieces.sort_by_key(|(_, count)| *count);
+
         // Request blocks from available peers
         for (addr, peer_state) in &mut self.peers {
             if peer_state.connection.is_choking() {
                 continue;
             }
 
-            // Find a piece this peer has that we need
-            for &piece_idx in &needed_pieces {
-                if peer_state.available_pieces.contains(&piece_idx) {
-                    // Request blocks for this piece
-                    let piece = &self.pieces[piece_idx as usize];
-                    for block_idx in 0..piece.blocks_total {
-                        let offset = block_idx * BLOCK_SIZE;
-                        let length =
-                            std::cmp::min(BLOCK_SIZE, (piece.length - offset as u64) as u32);
+            // Limit in-flight requests per peer
+            const MAX_IN_FLIGHT: usize = 10;
+            if peer_state.requests_sent.len() >= MAX_IN_FLIGHT {
+                continue;
+            }
 
-                        let request = PeerMessage::Request {
-                            index: piece_idx,
-                            begin: offset,
-                            length,
-                        };
-
-                        if let Err(e) = peer_state.connection.send(request).await {
-                            tracing::warn!(addr = %addr, error = %e, "Failed to send request");
-                            break;
-                        }
-
-                        peer_state
-                            .requests_sent
-                            .insert((piece_idx, offset), tokio::time::Instant::now());
-                    }
-                    break;
+            // Find a piece this peer has that we need (rarest first)
+            for (piece_idx, _) in &rarest_pieces {
+                if !peer_state.available_pieces.contains(piece_idx) {
+                    continue;
                 }
+
+                let piece = &self.pieces[*piece_idx as usize];
+                
+                // Find blocks we haven't requested yet
+                for block_idx in 0..piece.blocks_total {
+                    let offset = block_idx * BLOCK_SIZE;
+                    
+                    // Skip if already requested
+                    if peer_state.requests_sent.contains_key(&(*piece_idx, offset)) {
+                        continue;
+                    }
+                    
+                    let length = std::cmp::min(BLOCK_SIZE, (piece.length - offset as u64) as u32);
+                    let request = PeerMessage::Request {
+                        index: *piece_idx,
+                        begin: offset,
+                        length,
+                    };
+
+                    if let Err(e) = peer_state.connection.send(request).await {
+                        tracing::warn!(addr = %addr, error = %e, "Failed to send request");
+                        break;
+                    }
+
+                    peer_state
+                        .requests_sent
+                        .insert((*piece_idx, offset), tokio::time::Instant::now());
+                    
+                    // Stop if we hit the limit
+                    if peer_state.requests_sent.len() >= MAX_IN_FLIGHT {
+                        break;
+                    }
+                }
+                
+                // Only request from one piece per peer per iteration
+                break;
             }
         }
     }
@@ -378,6 +411,14 @@ impl TorrentEngine {
 
     fn is_complete(&self) -> bool {
         self.downloaded_pieces.len() == self.pieces.len()
+    }
+
+    pub fn progress(&self) -> (usize, usize) {
+        (self.downloaded_pieces.len(), self.pieces.len())
+    }
+
+    pub fn peer_count(&self) -> usize {
+        self.peers.len()
     }
 
     async fn save_file(&self) -> Result<(), DownloadError> {

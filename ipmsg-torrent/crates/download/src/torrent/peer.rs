@@ -1,6 +1,6 @@
 //! BitTorrent peer protocol implementation
 
-use std::io::{self, Read, Write};
+use std::io;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
