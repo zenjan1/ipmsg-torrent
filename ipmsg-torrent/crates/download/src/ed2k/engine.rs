@@ -179,9 +179,91 @@ impl Ed2kEngine {
 
         tracing::info!(addr = %addr, "Connected to ed2k server");
 
-        // TODO: Parse server response to get peer list
-        // For now, we'll just keep the connection open
+        // Parse server responses to get peer list
+        self.parse_server_responses(&mut client).await?;
 
+        Ok(())
+    }
+
+    async fn parse_server_responses(&mut self, client: &mut Ed2kClient) -> Result<(), Ed2kDownloadError> {
+        use tokio::time::Duration;
+        
+        // Read responses with timeout
+        for _ in 0..10 {
+            match tokio::time::timeout(Duration::from_secs(2), client.recv()).await {
+                Ok(Ok((protocol, payload))) => {
+                    match protocol {
+                        0x20 => {
+                            // LoginAnswer - server accepted our login
+                            tracing::debug!("Server login accepted");
+                        }
+                        0x42 => {
+                            // OP_SERVER_ANSWER - contains peer list for our file
+                            // Format: [1 byte count][count * (4 bytes IP + 2 bytes port)]
+                            if payload.len() >= 1 {
+                                let peer_count = payload[0] as usize;
+                                let mut offset = 1;
+                                
+                                for _ in 0..peer_count {
+                                    if offset + 6 > payload.len() {
+                                        break;
+                                    }
+                                    
+                                    let ip = std::net::Ipv4Addr::new(
+                                        payload[offset],
+                                        payload[offset + 1],
+                                        payload[offset + 2],
+                                        payload[offset + 3],
+                                    );
+                                    let port = u16::from_le_bytes([
+                                        payload[offset + 4],
+                                        payload[offset + 5],
+                                    ]);
+                                    
+                                    let peer_addr = std::net::SocketAddr::new(
+                                        std::net::IpAddr::V4(ip),
+                                        port,
+                                    );
+                                    
+                                    tracing::info!(peer = %peer_addr, "Discovered peer from server");
+                                    
+                                    // Connect to peer
+                                    if let Err(e) = self.add_peer(peer_addr).await {
+                                        tracing::warn!(peer = %peer_addr, error = %e, "Failed to connect to peer");
+                                    }
+                                    
+                                    offset += 6;
+                                }
+                            }
+                        }
+                        0x34 => {
+                            // ServerStatus - server stats
+                            if payload.len() >= 8 {
+                                let user_count = u32::from_le_bytes([
+                                    payload[0], payload[1], payload[2], payload[3],
+                                ]);
+                                let file_count = u32::from_le_bytes([
+                                    payload[4], payload[5], payload[6], payload[7],
+                                ]);
+                                tracing::debug!(users = user_count, files = file_count, "Server status");
+                            }
+                        }
+                        _ => {
+                            tracing::debug!(protocol = format!("0x{:02x}", protocol), "Server message");
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "Server connection error");
+                    break;
+                }
+                Err(_) => {
+                    // Timeout - no more responses
+                    break;
+                }
+            }
+        }
+        
         Ok(())
     }
 
