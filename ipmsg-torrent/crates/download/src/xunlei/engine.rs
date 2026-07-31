@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
+use tokio_util::sync::CancellationToken;
 
 /// P2SP block size (1MB)
 const BLOCK_SIZE: u64 = 1024 * 1024;
@@ -76,7 +77,10 @@ impl XunleiEngine {
     }
 
     /// Start the download process
-    pub async fn download(&mut self) -> Result<(), XunleiDownloadError> {
+    pub async fn download(
+        &mut self,
+        cancel: Option<CancellationToken>,
+    ) -> Result<(), XunleiDownloadError> {
         tracing::info!(
             name = %self.file_name,
             size = self.file_size,
@@ -93,6 +97,14 @@ impl XunleiEngine {
         loop {
             tokio::select! {
                 _ = tick.tick() => {
+                    // Check if cancelled
+                    if let Some(ref cancel) = cancel {
+                        if cancel.is_cancelled() {
+                            tracing::info!("Download cancelled");
+                            return Err(XunleiDownloadError::Io("cancelled".to_string()));
+                        }
+                    }
+
                     // Check if download is complete
                     if self.is_complete() {
                         tracing::info!("Download complete!");
@@ -172,7 +184,15 @@ impl XunleiEngine {
                         let addr = *addr;
                         let source_idx_copy = source_idx;
                         let task = tokio::spawn(async move {
-                            Self::download_peer_block(peer_clients, file_hash, source_idx_copy, addr, offset, size).await
+                            Self::download_peer_block(
+                                peer_clients,
+                                file_hash,
+                                source_idx_copy,
+                                addr,
+                                offset,
+                                size,
+                            )
+                            .await
                         });
                         tasks.push((block_idx, task));
                     }
@@ -248,7 +268,7 @@ impl XunleiEngine {
         size: u64,
     ) -> Result<Vec<u8>, XunleiDownloadError> {
         let mut clients = peer_clients.lock().await;
-        
+
         let client = if let Some(client) = clients.get_mut(&source_idx) {
             client
         } else {

@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tokio::time::{Duration, interval};
+use tokio_util::sync::CancellationToken;
 
 /// ed2k chunk state
 #[derive(Debug, Clone)]
@@ -123,7 +124,10 @@ impl Ed2kEngine {
     }
 
     /// Start the download process
-    pub async fn download(&mut self) -> Result<(), Ed2kDownloadError> {
+    pub async fn download(
+        &mut self,
+        cancel: Option<CancellationToken>,
+    ) -> Result<(), Ed2kDownloadError> {
         tracing::info!(
             name = %self.file_name,
             size = self.file_size,
@@ -145,6 +149,14 @@ impl Ed2kEngine {
         loop {
             tokio::select! {
                 _ = tick.tick() => {
+                    // Check if cancelled
+                    if let Some(ref cancel) = cancel {
+                        if cancel.is_cancelled() {
+                            tracing::info!("Download cancelled");
+                            return Err(Ed2kDownloadError::Io("cancelled".to_string()));
+                        }
+                    }
+
                     // Check if download is complete
                     if self.is_complete() {
                         tracing::info!("Download complete!");

@@ -56,15 +56,20 @@ impl PeerClient {
 
         // Receive response: [4 bytes length][data...]
         let mut len_buf = [0u8; 4];
-        timeout(Duration::from_secs(30), self.stream.read_exact(&mut len_buf))
-            .await
-            .map_err(|_| PeerClientError::Timeout)?
-            .map_err(PeerClientError::Io)?;
+        timeout(
+            Duration::from_secs(30),
+            self.stream.read_exact(&mut len_buf),
+        )
+        .await
+        .map_err(|_| PeerClientError::Timeout)?
+        .map_err(PeerClientError::Io)?;
 
         let data_len = u32::from_le_bytes(len_buf) as usize;
 
         if data_len == 0 {
-            return Err(PeerClientError::Protocol("peer returned no data".to_string()));
+            return Err(PeerClientError::Protocol(
+                "peer returned no data".to_string(),
+            ));
         }
 
         if data_len > 10 * 1024 * 1024 {

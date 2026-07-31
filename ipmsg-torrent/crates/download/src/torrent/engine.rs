@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::time::{Duration, interval};
+use tokio_util::sync::CancellationToken;
 
 /// Block size for requests (16KB standard)
 const BLOCK_SIZE: u32 = 16 * 1024;
@@ -124,7 +125,10 @@ impl TorrentEngine {
     }
 
     /// Start the download process
-    pub async fn download(&mut self) -> Result<(), DownloadError> {
+    pub async fn download(
+        &mut self,
+        cancel: Option<CancellationToken>,
+    ) -> Result<(), DownloadError> {
         tracing::info!(
             name = %self.meta.info.name,
             pieces = self.pieces.len(),
@@ -161,6 +165,14 @@ impl TorrentEngine {
         loop {
             tokio::select! {
                 _ = tick.tick() => {
+                    // Check if cancelled
+                    if let Some(ref cancel) = cancel {
+                        if cancel.is_cancelled() {
+                            tracing::info!("Download cancelled");
+                            return Err(DownloadError::Io("cancelled".to_string()));
+                        }
+                    }
+
                     // Check if download is complete
                     if self.is_complete() {
                         tracing::info!("Download complete!");

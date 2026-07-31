@@ -7,6 +7,7 @@ description = "Multi-protocol download engines (Torrent, eDonkey, Xunlei P2SP)"
 [dependencies]
 ipmsg-protocol = { path = "../protocol" }
 tokio = { workspace = true }
+tokio-util = "0.7"
 tracing = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
