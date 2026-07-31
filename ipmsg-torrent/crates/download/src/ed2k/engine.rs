@@ -1,13 +1,11 @@
 //! eDonkey download engine
 
 use super::client::Ed2kClient;
-use super::protocol::{ED2K_BLOCK_SIZE, ED2K_CHUNK_SIZE, Ed2kFileHash, Ed2kPeer};
-use sha2::{Digest, Sha256};
+use super::protocol::{ED2K_BLOCK_SIZE, ED2K_CHUNK_SIZE, Ed2kFileHash};
+use md4::{Digest, Md4};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
 /// ed2k chunk state
@@ -55,10 +53,18 @@ impl ChunkState {
     }
 
     fn verify(&self, data: &[u8]) -> bool {
-        // Note: Real ed2k uses MD4, but we're using SHA-256 for simplicity
-        // TODO: Implement MD4 or use md-5 crate
-        let hash = Sha256::digest(data);
-        &hash[..16] == self.hash
+        let hash = Md4::digest(data);
+        &hash[..] == self.hash
+    }
+
+    fn next_block_needed(&self) -> Option<u64> {
+        for i in 0..self.blocks_total {
+            let offset = i * ED2K_BLOCK_SIZE;
+            if !self.blocks_received.contains_key(&offset) {
+                return Some(offset);
+            }
+        }
+        None
     }
 }
 
@@ -208,20 +214,23 @@ impl Ed2kEngine {
             return;
         }
 
-        // Request blocks from peers
-        for (addr, peer) in &mut self.peers {
-            for &chunk_idx in &needed_chunks {
-                let chunk = &self.chunks[chunk_idx as usize];
-                for block_idx in 0..chunk.blocks_total {
-                    let offset = block_idx * ED2K_BLOCK_SIZE;
-                    let size = std::cmp::min(ED2K_BLOCK_SIZE, chunk.size - offset);
-
+        // Request blocks from peers - each peer gets different blocks
+        let mut peer_iter = self.peers.iter_mut();
+        for &chunk_idx in &needed_chunks {
+            let chunk = &self.chunks[chunk_idx as usize];
+            
+            // Find next block needed in this chunk
+            if let Some(offset) = chunk.next_block_needed() {
+                let size = std::cmp::min(ED2K_BLOCK_SIZE, chunk.size - offset);
+                
+                // Request from next available peer
+                if let Some((addr, peer)) = peer_iter.next() {
                     if let Err(e) = peer.request_block(&self.file_hash, offset, size).await {
                         tracing::warn!(addr = %addr, error = %e, "Failed to request block");
-                        break;
                     }
+                } else {
+                    break; // No more peers
                 }
-                break;
             }
         }
     }
@@ -232,11 +241,33 @@ impl Ed2kEngine {
         for (addr, peer) in &mut self.peers {
             // Try to receive data (non-blocking)
             match tokio::time::timeout(Duration::from_millis(100), peer.receive_block()).await {
-                Ok(Ok(data)) => {
-                    // TODO: Parse which chunk/block this data belongs to
-                    // For now, just track downloaded bytes
-                    self.downloaded += data.len() as u64;
-                    tracing::debug!(addr = %addr, size = data.len(), "Received block");
+                Ok(Ok((hash, offset, data))) => {
+                    let block_size = data.len() as u64;
+                    // Determine which chunk this block belongs to
+                    let chunk_idx = (offset / ED2K_CHUNK_SIZE) as u32;
+                    let chunk_offset_in_chunk = offset % ED2K_CHUNK_SIZE;
+
+                    if (chunk_idx as usize) < self.chunks.len() {
+                        let chunk = &mut self.chunks[chunk_idx as usize];
+                        chunk.add_block(chunk_offset_in_chunk, data);
+
+                        if chunk.complete {
+                            if let Some(assembled) = chunk.assemble() {
+                                if chunk.verify(&assembled) {
+                                    tracing::info!(chunk = chunk_idx, "Chunk verified");
+                                    self.downloaded_chunks.insert(chunk_idx);
+                                } else {
+                                    tracing::warn!(chunk = chunk_idx, "Chunk verification failed");
+                                    // Reset chunk state
+                                    let hash = chunk.hash;
+                                    let size = chunk.size;
+                                    *chunk = ChunkState::new(chunk_idx, size, hash);
+                                }
+                            }
+                        }
+                    }
+                    self.downloaded += block_size;
+                    tracing::debug!(addr = %addr, offset = offset, size = block_size, "Received block");
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(addr = %addr, error = %e, "Peer error");

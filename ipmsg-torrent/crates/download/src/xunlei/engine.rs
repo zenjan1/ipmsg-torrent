@@ -2,10 +2,7 @@
 
 use super::protocol::{DownloadProgress, P2spBlock, XunleiSource};
 use reqwest::Client;
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
 /// P2SP block size (1MB)

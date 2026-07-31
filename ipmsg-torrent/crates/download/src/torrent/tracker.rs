@@ -2,7 +2,7 @@
 
 use super::meta::TorrentMeta;
 use reqwest::Client;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use url::Url;
 

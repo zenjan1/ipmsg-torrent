@@ -3,12 +3,11 @@
 use super::meta::TorrentMeta;
 use super::peer::{PeerConnection, PeerMessage};
 use super::tracker::{AnnounceEvent, HttpTracker};
-use sha2::{Digest, Sha256};
+use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
 /// Block size for requests (16KB standard)
@@ -59,10 +58,8 @@ impl PieceState {
     }
 
     fn verify(&self, data: &[u8]) -> bool {
-        let hash = Sha256::digest(data);
-        // Note: BitTorrent uses SHA-1 for piece hashes, but we're using SHA-256
-        // This is a simplification - real implementation should use SHA-1
-        &hash[..20] == self.hash
+        let hash = Sha1::digest(data);
+        &hash[..] == self.hash
     }
 }
 

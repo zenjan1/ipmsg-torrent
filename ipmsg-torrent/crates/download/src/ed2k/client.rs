@@ -1,6 +1,6 @@
 //! eDonkey TCP client for server and peer connections
 
-use super::protocol::{ED2K_BLOCK_SIZE, Ed2kFileHash};
+use super::protocol::Ed2kFileHash;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -134,7 +134,8 @@ impl Ed2kClient {
     }
 
     /// Receive a file block from peer
-    pub async fn receive_block(&mut self) -> Result<Vec<u8>, Ed2kClientError> {
+    /// Returns (file_hash, offset, data)
+    pub async fn receive_block(&mut self) -> Result<([u8; 16], u64, Vec<u8>), Ed2kClientError> {
         let (protocol, payload) = self.recv().await?;
 
         if protocol != 0x48 {
@@ -145,12 +146,20 @@ impl Ed2kClient {
             )));
         }
 
-        // FileAnswer: [16 bytes hash][data...]
-        if payload.len() < 16 {
+        // FileAnswer: [16 bytes hash][8 bytes offset][data...]
+        if payload.len() < 24 {
             return Err(Ed2kClientError::Protocol("invalid file answer".to_string()));
         }
 
-        Ok(payload[16..].to_vec())
+        let mut hash = [0u8; 16];
+        hash.copy_from_slice(&payload[..16]);
+        let offset = u64::from_le_bytes([
+            payload[16], payload[17], payload[18], payload[19], payload[20], payload[21],
+            payload[22], payload[23],
+        ]);
+        let data = payload[24..].to_vec();
+
+        Ok((hash, offset, data))
     }
 
     pub fn addr(&self) -> SocketAddr {
