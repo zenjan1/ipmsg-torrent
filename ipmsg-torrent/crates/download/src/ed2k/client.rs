@@ -154,8 +154,14 @@ impl Ed2kClient {
         let mut hash = [0u8; 16];
         hash.copy_from_slice(&payload[..16]);
         let offset = u64::from_le_bytes([
-            payload[16], payload[17], payload[18], payload[19], payload[20], payload[21],
-            payload[22], payload[23],
+            payload[16],
+            payload[17],
+            payload[18],
+            payload[19],
+            payload[20],
+            payload[21],
+            payload[22],
+            payload[23],
         ]);
         let data = payload[24..].to_vec();
 

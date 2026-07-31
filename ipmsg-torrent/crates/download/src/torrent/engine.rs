@@ -243,7 +243,9 @@ impl TorrentEngine {
         // Calculate piece rarity (how many peers have each piece)
         let mut piece_counts: HashMap<u32, usize> = HashMap::new();
         for &piece_idx in &needed_pieces {
-            let count = self.peers.values()
+            let count = self
+                .peers
+                .values()
                 .filter(|p| p.available_pieces.contains(&piece_idx))
                 .count();
             piece_counts.insert(piece_idx, count);
@@ -272,16 +274,16 @@ impl TorrentEngine {
                 }
 
                 let piece = &self.pieces[*piece_idx as usize];
-                
+
                 // Find blocks we haven't requested yet
                 for block_idx in 0..piece.blocks_total {
                     let offset = block_idx * BLOCK_SIZE;
-                    
+
                     // Skip if already requested
                     if peer_state.requests_sent.contains_key(&(*piece_idx, offset)) {
                         continue;
                     }
-                    
+
                     let length = std::cmp::min(BLOCK_SIZE, (piece.length - offset as u64) as u32);
                     let request = PeerMessage::Request {
                         index: *piece_idx,
@@ -297,13 +299,13 @@ impl TorrentEngine {
                     peer_state
                         .requests_sent
                         .insert((*piece_idx, offset), tokio::time::Instant::now());
-                    
+
                     // Stop if we hit the limit
                     if peer_state.requests_sent.len() >= MAX_IN_FLIGHT {
                         break;
                     }
                 }
-                
+
                 // Only request from one piece per peer per iteration
                 break;
             }

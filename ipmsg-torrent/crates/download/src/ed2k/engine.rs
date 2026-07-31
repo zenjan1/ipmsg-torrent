@@ -185,9 +185,12 @@ impl Ed2kEngine {
         Ok(())
     }
 
-    async fn parse_server_responses(&mut self, client: &mut Ed2kClient) -> Result<(), Ed2kDownloadError> {
+    async fn parse_server_responses(
+        &mut self,
+        client: &mut Ed2kClient,
+    ) -> Result<(), Ed2kDownloadError> {
         use tokio::time::Duration;
-        
+
         // Read responses with timeout
         for _ in 0..10 {
             match tokio::time::timeout(Duration::from_secs(2), client.recv()).await {
@@ -203,12 +206,12 @@ impl Ed2kEngine {
                             if payload.len() >= 1 {
                                 let peer_count = payload[0] as usize;
                                 let mut offset = 1;
-                                
+
                                 for _ in 0..peer_count {
                                     if offset + 6 > payload.len() {
                                         break;
                                     }
-                                    
+
                                     let ip = std::net::Ipv4Addr::new(
                                         payload[offset],
                                         payload[offset + 1],
@@ -219,19 +222,17 @@ impl Ed2kEngine {
                                         payload[offset + 4],
                                         payload[offset + 5],
                                     ]);
-                                    
-                                    let peer_addr = std::net::SocketAddr::new(
-                                        std::net::IpAddr::V4(ip),
-                                        port,
-                                    );
-                                    
+
+                                    let peer_addr =
+                                        std::net::SocketAddr::new(std::net::IpAddr::V4(ip), port);
+
                                     tracing::info!(peer = %peer_addr, "Discovered peer from server");
-                                    
+
                                     // Connect to peer
                                     if let Err(e) = self.add_peer(peer_addr).await {
                                         tracing::warn!(peer = %peer_addr, error = %e, "Failed to connect to peer");
                                     }
-                                    
+
                                     offset += 6;
                                 }
                             }
@@ -245,11 +246,18 @@ impl Ed2kEngine {
                                 let file_count = u32::from_le_bytes([
                                     payload[4], payload[5], payload[6], payload[7],
                                 ]);
-                                tracing::debug!(users = user_count, files = file_count, "Server status");
+                                tracing::debug!(
+                                    users = user_count,
+                                    files = file_count,
+                                    "Server status"
+                                );
                             }
                         }
                         _ => {
-                            tracing::debug!(protocol = format!("0x{:02x}", protocol), "Server message");
+                            tracing::debug!(
+                                protocol = format!("0x{:02x}", protocol),
+                                "Server message"
+                            );
                         }
                     }
                 }
@@ -263,7 +271,7 @@ impl Ed2kEngine {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -300,11 +308,11 @@ impl Ed2kEngine {
         let mut peer_iter = self.peers.iter_mut();
         for &chunk_idx in &needed_chunks {
             let chunk = &self.chunks[chunk_idx as usize];
-            
+
             // Find next block needed in this chunk
             if let Some(offset) = chunk.next_block_needed() {
                 let size = std::cmp::min(ED2K_BLOCK_SIZE, chunk.size - offset);
-                
+
                 // Request from next available peer
                 if let Some((addr, peer)) = peer_iter.next() {
                     if let Err(e) = peer.request_block(&self.file_hash, offset, size).await {
