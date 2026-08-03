@@ -10,6 +10,7 @@ pub struct NoiseSession {
     rekey_count: u64,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum SessionState {
     Handshake(snow::HandshakeState),
     Transport(snow::TransportState),

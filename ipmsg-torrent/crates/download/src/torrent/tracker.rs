@@ -13,7 +13,7 @@ pub enum TrackerError {
     #[error("invalid tracker response: {0}")]
     InvalidResponse(String),
     #[error("tracker returned error: {0}")]
-    TrackerError(String),
+    ServerError(String),
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
 }
@@ -162,7 +162,7 @@ impl HttpTracker {
 
         // Check for error
         if let Some(error) = dict.get("failure reason") {
-            return Err(TrackerError::TrackerError(
+            return Err(TrackerError::ServerError(
                 error
                     .as_string()
                     .unwrap_or_else(|| "unknown error".to_string()),

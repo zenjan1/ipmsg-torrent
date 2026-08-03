@@ -157,16 +157,20 @@ pub struct P2PSwarm {
     relay_node_addrs: HashMap<PeerId, Vec<Multiaddr>>,
 }
 
+pub struct SwarmConfig {
+    pub bootstrap_nodes: Vec<String>,
+    pub known_addrs: Vec<(String, Vec<String>)>,
+    pub listen_port: u16,
+}
+
 impl P2PSwarm {
     pub async fn new(
         identity: &Identity,
         username: &str,
         platforms: &[String],
         _event_tx: &UnboundedSender<P2PEvent>,
-        bootstrap_nodes: Vec<String>,
-        known_addrs: Vec<(String, Vec<String>)>,
+        config: SwarmConfig,
         data_dir: &Path,
-        listen_port: u16,
     ) -> Result<Self, P2PError> {
         let keypair = identity.to_keypair();
 
@@ -209,8 +213,10 @@ impl P2PSwarm {
         };
 
         // Listen on TCP FIRST (must listen before dialing)
-        let tcp_addr = if listen_port > 0 {
-            format!("/ip4/0.0.0.0/tcp/{}", listen_port).parse().unwrap()
+        let tcp_addr = if config.listen_port > 0 {
+            format!("/ip4/0.0.0.0/tcp/{}", config.listen_port)
+                .parse()
+                .unwrap()
         } else {
             "/ip4/0.0.0.0/tcp/0".parse().unwrap()
         };
@@ -220,8 +226,8 @@ impl P2PSwarm {
             .map_err(|e| P2PError::Transport(e.to_string()))?;
 
         // Listen on QUIC
-        let quic_addr = if listen_port > 0 {
-            format!("/ip4/0.0.0.0/udp/{}/quic-v1", listen_port)
+        let quic_addr = if config.listen_port > 0 {
+            format!("/ip4/0.0.0.0/udp/{}/quic-v1", config.listen_port)
                 .parse()
                 .unwrap()
         } else {
@@ -233,7 +239,7 @@ impl P2PSwarm {
             .map_err(|e| P2PError::Transport(e.to_string()))?;
 
         // Dial bootstrap nodes
-        for addr_str in &bootstrap_nodes {
+        for addr_str in &config.bootstrap_nodes {
             if let Ok(addr) = addr_str.parse::<Multiaddr>()
                 && let Some(peer_id) = addr.iter().find_map(|p| match p {
                     libp2p::multiaddr::Protocol::P2p(pid) => Some(pid),
@@ -251,7 +257,7 @@ impl P2PSwarm {
         }
 
         // Dial known peers from previous sessions (bootstrap from persistence)
-        for (peer_id_str, addrs) in &known_addrs {
+        for (peer_id_str, addrs) in &config.known_addrs {
             if let Ok(peer_id) = peer_id_str.parse::<PeerId>() {
                 let mut public_addrs = Vec::new();
                 for addr_str in addrs {
@@ -609,215 +615,197 @@ impl P2PSwarm {
         let mut events = Vec::new();
 
         // Poll gossipsub for messages
-        loop {
-            match self
-                .swarm
-                .behaviour_mut()
-                .gossipsub
-                .poll(&mut std::task::Context::from_waker(
-                    futures::task::noop_waker_ref(),
-                )) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => {
-                    if let gossipsub::Event::Message { message, .. } = evt {
-                        let new = self.on_gossipsub_message(&message);
-                        events.extend(new);
-                    }
-                }
-                _ => break,
+        while let std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) = self
+            .swarm
+            .behaviour_mut()
+            .gossipsub
+            .poll(&mut std::task::Context::from_waker(
+                futures::task::noop_waker_ref(),
+            ))
+        {
+            if let gossipsub::Event::Message { message, .. } = evt {
+                let new = self.on_gossipsub_message(&message);
+                events.extend(new);
             }
         }
 
         // Poll identify
-        loop {
-            match self
-                .swarm
-                .behaviour_mut()
-                .identify
-                .poll(&mut std::task::Context::from_waker(
-                    futures::task::noop_waker_ref(),
-                )) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => {
-                    if let IdentifyEvent::Received { info, .. } = evt {
-                        let new = self.on_identify_received(&info);
-                        events.extend(new);
-                    }
-                }
-                _ => break,
+        while let std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) = self
+            .swarm
+            .behaviour_mut()
+            .identify
+            .poll(&mut std::task::Context::from_waker(
+                futures::task::noop_waker_ref(),
+            ))
+        {
+            if let IdentifyEvent::Received { info, .. } = evt {
+                let new = self.on_identify_received(&info);
+                events.extend(new);
             }
         }
 
         // Poll mdns
-        loop {
-            match self
-                .swarm
-                .behaviour_mut()
-                .mdns
-                .poll(&mut std::task::Context::from_waker(
-                    futures::task::noop_waker_ref(),
-                )) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => match evt {
-                    MdnsEvent::Discovered(peers) => {
-                        for (peer_id, addr) in peers {
-                            let new = self.on_mdns_discovered(&peer_id, &addr);
-                            events.extend(new);
-                        }
+        while let std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) = self
+            .swarm
+            .behaviour_mut()
+            .mdns
+            .poll(&mut std::task::Context::from_waker(
+                futures::task::noop_waker_ref(),
+            ))
+        {
+            match evt {
+                MdnsEvent::Discovered(peers) => {
+                    for (peer_id, addr) in peers {
+                        let new = self.on_mdns_discovered(&peer_id, &addr);
+                        events.extend(new);
                     }
-                    MdnsEvent::Expired(peers) => {
-                        for (peer_id, _addr) in peers {
-                            let new = self.on_mdns_expired(&peer_id);
-                            events.extend(new);
-                        }
+                }
+                MdnsEvent::Expired(peers) => {
+                    for (peer_id, _addr) in peers {
+                        let new = self.on_mdns_expired(&peer_id);
+                        events.extend(new);
                     }
-                },
-                _ => break,
+                }
             }
         }
 
         // Poll file_transfer request-response
-        loop {
-            match self.swarm.behaviour_mut().file_transfer.poll(
-                &mut std::task::Context::from_waker(futures::task::noop_waker_ref()),
-            ) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => {
-                    if let RequestResponseEvent::Message { peer, message, .. } = evt {
-                        match message {
-                            request_response::Message::Request {
-                                request, channel, ..
-                            } => {
-                                // Handle incoming file transfer request
-                                let new = self.on_file_transfer_request(&peer, request, channel);
-                                events.extend(new);
-                            }
-                            request_response::Message::Response { response, .. } => {
-                                // Handle incoming file transfer response
-                                let new = self.on_file_transfer_response(&peer, response);
-                                events.extend(new);
-                            }
-                        }
+        while let std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) = self
+            .swarm
+            .behaviour_mut()
+            .file_transfer
+            .poll(&mut std::task::Context::from_waker(
+                futures::task::noop_waker_ref(),
+            ))
+        {
+            if let RequestResponseEvent::Message { peer, message, .. } = evt {
+                match message {
+                    request_response::Message::Request {
+                        request, channel, ..
+                    } => {
+                        // Handle incoming file transfer request
+                        let new = self.on_file_transfer_request(&peer, request, channel);
+                        events.extend(new);
+                    }
+                    request_response::Message::Response { response, .. } => {
+                        // Handle incoming file transfer response
+                        let new = self.on_file_transfer_response(&peer, response);
+                        events.extend(new);
                     }
                 }
-                _ => break,
             }
         }
 
         // Relay events are handled in SwarmEvent::Behaviour via IpMsgNetBehaviourEvent::Relay
 
         // Poll relay server events
-        loop {
-            match self
-                .swarm
-                .behaviour_mut()
-                .relay_server
-                .poll(&mut std::task::Context::from_waker(
-                    futures::task::noop_waker_ref(),
-                )) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => match evt {
-                    relay::Event::ReservationReqAccepted {
-                        src_peer_id,
-                        renewed,
-                    } => {
-                        tracing::info!(%src_peer_id, renewed, "Relay server: reservation accepted");
-                        events.push(P2PEvent::Status(format!(
-                            "Relay server: reservation accepted for {}",
-                            &src_peer_id.to_base58()[..8]
-                        )));
-                    }
-                    relay::Event::ReservationReqDenied { src_peer_id } => {
-                        tracing::info!(%src_peer_id, "Relay server: reservation denied");
-                    }
-                    relay::Event::ReservationTimedOut { src_peer_id } => {
-                        tracing::info!(%src_peer_id, "Relay server: reservation timed out");
-                    }
-                    relay::Event::CircuitReqAccepted {
-                        src_peer_id,
-                        dst_peer_id,
-                        ..
-                    } => {
-                        tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit accepted");
-                        events.push(P2PEvent::Status(format!(
-                            "Relay server: circuit {} -> {}",
-                            &src_peer_id.to_base58()[..8],
-                            &dst_peer_id.to_base58()[..8]
-                        )));
-                    }
-                    relay::Event::CircuitReqDenied {
-                        src_peer_id,
-                        dst_peer_id,
-                        ..
-                    } => {
-                        tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit denied");
-                    }
-                    relay::Event::CircuitClosed {
-                        src_peer_id,
-                        dst_peer_id,
-                        ..
-                    } => {
-                        tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit closed");
-                    }
-                    _ => {}
-                },
-                _ => break,
+        while let std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) = self
+            .swarm
+            .behaviour_mut()
+            .relay_server
+            .poll(&mut std::task::Context::from_waker(
+                futures::task::noop_waker_ref(),
+            ))
+        {
+            match evt {
+                relay::Event::ReservationReqAccepted {
+                    src_peer_id,
+                    renewed,
+                } => {
+                    tracing::info!(%src_peer_id, renewed, "Relay server: reservation accepted");
+                    events.push(P2PEvent::Status(format!(
+                        "Relay server: reservation accepted for {}",
+                        &src_peer_id.to_base58()[..8]
+                    )));
+                }
+                relay::Event::ReservationReqDenied { src_peer_id } => {
+                    tracing::info!(%src_peer_id, "Relay server: reservation denied");
+                }
+                relay::Event::ReservationTimedOut { src_peer_id } => {
+                    tracing::info!(%src_peer_id, "Relay server: reservation timed out");
+                }
+                relay::Event::CircuitReqAccepted {
+                    src_peer_id,
+                    dst_peer_id,
+                    ..
+                } => {
+                    tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit accepted");
+                    events.push(P2PEvent::Status(format!(
+                        "Relay server: circuit {} -> {}",
+                        &src_peer_id.to_base58()[..8],
+                        &dst_peer_id.to_base58()[..8]
+                    )));
+                }
+                relay::Event::CircuitReqDenied {
+                    src_peer_id,
+                    dst_peer_id,
+                    ..
+                } => {
+                    tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit denied");
+                }
+                relay::Event::CircuitClosed {
+                    src_peer_id,
+                    dst_peer_id,
+                    ..
+                } => {
+                    tracing::info!(%src_peer_id, %dst_peer_id, "Relay server: circuit closed");
+                }
+                _ => {}
             }
         }
 
         // Poll dcutr events (hole punching)
-        loop {
-            match self
-                .swarm
-                .behaviour_mut()
-                .dcutr
-                .poll(&mut std::task::Context::from_waker(
-                    futures::task::noop_waker_ref(),
-                )) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => {
-                    let dcutr::Event {
-                        remote_peer_id,
-                        result,
-                    } = evt;
-                    match result {
-                        Ok(connection_id) => {
-                            tracing::info!(%remote_peer_id, ?connection_id, "DCUtR: Direct connection upgrade succeeded");
-                            events.push(P2PEvent::Status(format!(
-                                "Hole punch success with {}",
-                                &remote_peer_id.to_base58()[..8]
-                            )));
-                        }
-                        Err(error) => {
-                            tracing::warn!(%remote_peer_id, %error, "DCUtR: Direct connection upgrade failed");
-                            events.push(P2PEvent::Status(format!(
-                                "Hole punch failed with {}: {}",
-                                &remote_peer_id.to_base58()[..8],
-                                error
-                            )));
-                        }
-                    }
+        while let std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) = self
+            .swarm
+            .behaviour_mut()
+            .dcutr
+            .poll(&mut std::task::Context::from_waker(
+                futures::task::noop_waker_ref(),
+            ))
+        {
+            let dcutr::Event {
+                remote_peer_id,
+                result,
+            } = evt;
+            match result {
+                Ok(connection_id) => {
+                    tracing::info!(%remote_peer_id, ?connection_id, "DCUtR: Direct connection upgrade succeeded");
+                    events.push(P2PEvent::Status(format!(
+                        "Hole punch success with {}",
+                        &remote_peer_id.to_base58()[..8]
+                    )));
                 }
-                _ => break,
+                Err(error) => {
+                    tracing::warn!(%remote_peer_id, %error, "DCUtR: Direct connection upgrade failed");
+                    events.push(P2PEvent::Status(format!(
+                        "Hole punch failed with {}: {}",
+                        &remote_peer_id.to_base58()[..8],
+                        error
+                    )));
+                }
             }
         }
 
         // Poll autonat events (NAT detection)
-        loop {
-            match self
-                .swarm
-                .behaviour_mut()
-                .autonat
-                .poll(&mut std::task::Context::from_waker(
-                    futures::task::noop_waker_ref(),
-                )) {
-                std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) => match evt {
-                    autonat::Event::StatusChanged { old, new } => {
-                        tracing::info!(?old, ?new, "NAT status changed");
-                        events.push(P2PEvent::Status(format!("NAT status: {:?}", new)));
-                    }
-                    autonat::Event::InboundProbe(event) => {
-                        tracing::debug!(?event, "AutoNAT inbound probe");
-                    }
-                    autonat::Event::OutboundProbe(event) => {
-                        tracing::debug!(?event, "AutoNAT outbound probe");
-                    }
-                },
-                _ => break,
+        while let std::task::Poll::Ready(ToSwarm::GenerateEvent(evt)) = self
+            .swarm
+            .behaviour_mut()
+            .autonat
+            .poll(&mut std::task::Context::from_waker(
+                futures::task::noop_waker_ref(),
+            ))
+        {
+            match evt {
+                autonat::Event::StatusChanged { old, new } => {
+                    tracing::info!(?old, ?new, "NAT status changed");
+                    events.push(P2PEvent::Status(format!("NAT status: {:?}", new)));
+                }
+                autonat::Event::InboundProbe(event) => {
+                    tracing::debug!(?event, "AutoNAT inbound probe");
+                }
+                autonat::Event::OutboundProbe(event) => {
+                    tracing::debug!(?event, "AutoNAT outbound probe");
+                }
             }
         }
 

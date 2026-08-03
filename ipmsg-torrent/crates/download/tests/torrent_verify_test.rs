@@ -26,7 +26,7 @@ fn test_empty_piece_verification() {
     let hash = Sha1::digest(piece_data);
     // SHA1 of empty string is da39a3ee5e6b4b0d3255bfef95601890afd80709
     assert_eq!(
-        hex::encode(&hash),
+        hex::encode(hash),
         "da39a3ee5e6b4b0d3255bfef95601890afd80709"
     );
 }

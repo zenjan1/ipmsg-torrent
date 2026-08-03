@@ -165,6 +165,8 @@ impl NetworkStats {
 
     /// Format stats as human-readable string
     pub fn summary(&self) -> String {
+        let msg_rate = format!("{:.2}", self.messages_per_second());
+        let bandwidth = format!("{:.2}", self.bytes_per_second());
         format!(
             "Uptime: {}\n\
              Peers: {} connected ({} total connections)\n\
@@ -177,10 +179,10 @@ impl NetworkStats {
             self.total_connections.load(Ordering::Relaxed),
             self.messages_sent.load(Ordering::Relaxed),
             self.messages_received.load(Ordering::Relaxed),
-            format!("{:.2}", self.messages_per_second()),
+            msg_rate,
             format_bytes(self.bytes_sent.load(Ordering::Relaxed)),
             format_bytes(self.bytes_received.load(Ordering::Relaxed)),
-            format!("{:.2}", self.bytes_per_second()),
+            bandwidth,
             self.files_shared.load(Ordering::Relaxed),
             self.files_downloaded.load(Ordering::Relaxed),
             self.duplicates_rejected.load(Ordering::Relaxed),

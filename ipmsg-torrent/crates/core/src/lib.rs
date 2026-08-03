@@ -421,10 +421,12 @@ impl P2PEngine {
             &self.username,
             &self.platforms,
             &self.event_tx,
-            bootstrap_nodes,
-            known_addrs,
+            transport::SwarmConfig {
+                bootstrap_nodes,
+                known_addrs,
+                listen_port,
+            },
             &self.data_dir,
-            listen_port,
         )
         .await?;
 

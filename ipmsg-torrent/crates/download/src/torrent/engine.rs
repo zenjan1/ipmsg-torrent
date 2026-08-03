@@ -118,8 +118,8 @@ impl TorrentEngine {
         // Use "-IP0001-" prefix (IPMsg-Torrent version 0001)
         id[0..8].copy_from_slice(b"-IP0001-");
         // Fill rest with random bytes
-        for i in 8..20 {
-            id[i] = rand::random();
+        for byte in id.iter_mut().skip(8) {
+            *byte = rand::random();
         }
         id
     }
