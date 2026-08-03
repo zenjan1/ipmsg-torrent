@@ -630,49 +630,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             drop(s);
 
             if event::poll(Duration::from_millis(100))?
-                && let Event::Key(key) = event::read()? {
-                    if key.kind != KeyEventKind::Press {
-                        continue;
-                    }
-                    let mut s = state.lock().await;
-                    match key.code {
-                        KeyCode::Enter => {
-                            let input = s.input.clone();
-                            s.input.clear();
-                            drop(s);
-                            handle_command(&state, &cmd_tx, &input).await;
-                        }
-                        KeyCode::Char(c) => {
-                            state.lock().await.input.push(c);
-                        }
-                        KeyCode::Backspace => {
-                            state.lock().await.input.pop();
-                        }
-                        KeyCode::Esc => {
-                            state.lock().await.running = false;
-                        }
-                        KeyCode::Tab => {
-                            let len = state.lock().await.tabs.len();
-                            if len > 1 {
-                                let mut s = state.lock().await;
-                                s.active_tab = (s.active_tab + 1) % len;
-                            }
-                        }
-                        KeyCode::Left => {
-                            let mut s = state.lock().await;
-                            if s.active_tab > 0 {
-                                s.active_tab -= 1;
-                            }
-                        }
-                        KeyCode::Right => {
-                            let mut s = state.lock().await;
-                            if s.active_tab + 1 < s.tabs.len() {
-                                s.active_tab += 1;
-                            }
-                        }
-                        _ => {}
-                    }
+                && let Event::Key(key) = event::read()?
+            {
+                if key.kind != KeyEventKind::Press {
+                    continue;
                 }
+                let mut s = state.lock().await;
+                match key.code {
+                    KeyCode::Enter => {
+                        let input = s.input.clone();
+                        s.input.clear();
+                        drop(s);
+                        handle_command(&state, &cmd_tx, &input).await;
+                    }
+                    KeyCode::Char(c) => {
+                        state.lock().await.input.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        state.lock().await.input.pop();
+                    }
+                    KeyCode::Esc => {
+                        state.lock().await.running = false;
+                    }
+                    KeyCode::Tab => {
+                        let len = state.lock().await.tabs.len();
+                        if len > 1 {
+                            let mut s = state.lock().await;
+                            s.active_tab = (s.active_tab + 1) % len;
+                        }
+                    }
+                    KeyCode::Left => {
+                        let mut s = state.lock().await;
+                        if s.active_tab > 0 {
+                            s.active_tab -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        let mut s = state.lock().await;
+                        if s.active_tab + 1 < s.tabs.len() {
+                            s.active_tab += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -983,7 +984,11 @@ async fn handle_command(
                 || target.starts_with("ftp://")
             {
                 // HTTP/FTP URL (P2SP)
-                let name = target.split('/').next_back().unwrap_or("download").to_string();
+                let name = target
+                    .split('/')
+                    .next_back()
+                    .unwrap_or("download")
+                    .to_string();
                 // TODO: Get file size from HEAD request
                 let size = 0u64; // Unknown for now
                 let sources = vec![ipmsg_download::xunlei::XunleiSource::Http {

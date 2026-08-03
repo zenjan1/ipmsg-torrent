@@ -865,10 +865,7 @@ impl futures::Stream for P2PSwarm {
                                     .entry(*peer_id)
                                     .or_default()
                                     .push(address.clone());
-                            } else if let libp2p::core::ConnectedPoint::Listener {
-                                ..
-                            } = endpoint
-                            {
+                            } else if let libp2p::core::ConnectedPoint::Listener { .. } = endpoint {
                                 // For incoming connections, we don't have the remote address directly
                                 // but we can use the connection to request reservation later
                             }
@@ -949,19 +946,18 @@ impl futures::Stream for P2PSwarm {
                                 match kad_evt {
                                     libp2p::kad::Event::RoutingUpdated {
                                         peer, addresses, ..
-                                    }
-                                        if !self.connected_peers.contains(peer) => {
-                                            let public_addrs: Vec<_> = addresses
-                                                .iter()
-                                                .filter(|a| !is_private_addr(a))
-                                                .collect();
-                                            if !public_addrs.is_empty() {
-                                                tracing::info!(%peer, addrs = public_addrs.len(), "Kademlia discovered new peer, dialing");
-                                                for addr in public_addrs {
-                                                    let _ = self.swarm.dial(addr.clone());
-                                                }
+                                    } if !self.connected_peers.contains(peer) => {
+                                        let public_addrs: Vec<_> = addresses
+                                            .iter()
+                                            .filter(|a| !is_private_addr(a))
+                                            .collect();
+                                        if !public_addrs.is_empty() {
+                                            tracing::info!(%peer, addrs = public_addrs.len(), "Kademlia discovered new peer, dialing");
+                                            for addr in public_addrs {
+                                                let _ = self.swarm.dial(addr.clone());
                                             }
                                         }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -1073,10 +1069,11 @@ impl futures::Stream for P2PSwarm {
                             }
                             // Handle Gossipsub events (message delivery)
                             if let IpMsgNetBehaviourEvent::Gossipsub(gossipsub_evt) = behaviour_evt
-                                && let gossipsub::Event::Message { message, .. } = gossipsub_evt {
-                                    let new = self.on_gossipsub_message(message);
-                                    events.extend(new);
-                                }
+                                && let gossipsub::Event::Message { message, .. } = gossipsub_evt
+                            {
+                                let new = self.on_gossipsub_message(message);
+                                events.extend(new);
+                            }
                             // Drain remaining behaviour events (gossipsub, file_transfer, etc.)
                             let new = self.drain_behaviour_events();
                             events.extend(new);

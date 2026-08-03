@@ -296,10 +296,11 @@ impl DownloadManager {
         // Update state
         let mut tasks = self.tasks.lock().await;
         if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id)
-            && task.state == DownloadState::Downloading {
-                task.state = DownloadState::Paused;
-                return true;
-            }
+            && task.state == DownloadState::Downloading
+        {
+            task.state = DownloadState::Paused;
+            return true;
+        }
         false
     }
 
@@ -307,12 +308,13 @@ impl DownloadManager {
     pub async fn resume_task(&self, task_id: &str) -> bool {
         let mut tasks = self.tasks.lock().await;
         if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id)
-            && task.state == DownloadState::Paused {
-                task.state = DownloadState::Downloading;
-                // Note: actual resume requires re-creating the engine
-                // For now, just mark as downloading - the task loop will pick it up
-                return true;
-            }
+            && task.state == DownloadState::Paused
+        {
+            task.state = DownloadState::Downloading;
+            // Note: actual resume requires re-creating the engine
+            // For now, just mark as downloading - the task loop will pick it up
+            return true;
+        }
         false
     }
 

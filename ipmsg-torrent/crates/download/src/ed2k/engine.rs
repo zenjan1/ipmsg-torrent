@@ -361,18 +361,19 @@ impl Ed2kEngine {
                         chunk.add_block(chunk_offset_in_chunk, data);
 
                         if chunk.complete
-                            && let Some(assembled) = chunk.assemble() {
-                                if chunk.verify(&assembled) {
-                                    tracing::info!(chunk = chunk_idx, "Chunk verified");
-                                    self.downloaded_chunks.insert(chunk_idx);
-                                } else {
-                                    tracing::warn!(chunk = chunk_idx, "Chunk verification failed");
-                                    // Reset chunk state
-                                    let hash = chunk.hash;
-                                    let size = chunk.size;
-                                    *chunk = ChunkState::new(chunk_idx, size, hash);
-                                }
+                            && let Some(assembled) = chunk.assemble()
+                        {
+                            if chunk.verify(&assembled) {
+                                tracing::info!(chunk = chunk_idx, "Chunk verified");
+                                self.downloaded_chunks.insert(chunk_idx);
+                            } else {
+                                tracing::warn!(chunk = chunk_idx, "Chunk verification failed");
+                                // Reset chunk state
+                                let hash = chunk.hash;
+                                let size = chunk.size;
+                                *chunk = ChunkState::new(chunk_idx, size, hash);
                             }
+                        }
                     }
                     self.downloaded += block_size;
                     tracing::debug!(addr = %addr, offset = offset, size = block_size, "Received block");

@@ -404,17 +404,18 @@ impl TorrentEngine {
 
                 // Check if piece is complete
                 if piece.complete
-                    && let Some(data) = piece.assemble() {
-                        if piece.verify(&data) {
-                            tracing::info!(piece = index, "Piece verified");
-                            self.downloaded_pieces.insert(*index);
-                        } else {
-                            tracing::warn!(piece = index, "Piece verification failed");
-                            // Reset piece state
-                            let hash = piece.hash;
-                            *piece = PieceState::new(*index, piece.length, hash);
-                        }
+                    && let Some(data) = piece.assemble()
+                {
+                    if piece.verify(&data) {
+                        tracing::info!(piece = index, "Piece verified");
+                        self.downloaded_pieces.insert(*index);
+                    } else {
+                        tracing::warn!(piece = index, "Piece verification failed");
+                        // Reset piece state
+                        let hash = piece.hash;
+                        *piece = PieceState::new(*index, piece.length, hash);
                     }
+                }
             }
             _ => {}
         }

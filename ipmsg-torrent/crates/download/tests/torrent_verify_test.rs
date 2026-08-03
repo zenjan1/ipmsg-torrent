@@ -1,20 +1,20 @@
 //! Test torrent piece verification logic
-use sha1::{Sha1, Digest};
+use sha1::{Digest, Sha1};
 
 #[test]
 fn test_piece_verification() {
     // Create test data
     let piece_data = b"Hello, BitTorrent!";
-    
+
     // Calculate SHA1 hash
     let mut hasher = Sha1::new();
     hasher.update(piece_data);
     let hash = hasher.finalize();
-    
+
     // Verify the hash matches
     let mut expected = [0u8; 20];
     expected.copy_from_slice(&hash);
-    
+
     // This simulates what TorrentEngine does for piece verification
     let verify_hash = Sha1::digest(piece_data);
     assert_eq!(&verify_hash[..], &expected[..]);
