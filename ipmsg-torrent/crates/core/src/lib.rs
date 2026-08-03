@@ -682,7 +682,7 @@ impl P2PEngine {
                                 }
                             }
                             Some(SendCommand::DownloadUrl { url }) => {
-                                let name = url.split('/').last().unwrap_or("download").to_string();
+                                let name = url.split('/').next_back().unwrap_or("download").to_string();
                                 let sources = vec![ipmsg_download::xunlei::XunleiSource::Http {
                                     url: url.clone(),
                                     cookies: None,

@@ -55,7 +55,7 @@ impl ChunkState {
 
     fn verify(&self, data: &[u8]) -> bool {
         let hash = Md4::digest(data);
-        &hash[..] == self.hash
+        hash[..] == self.hash
     }
 
     fn next_block_needed(&self) -> Option<u64> {
@@ -150,12 +150,11 @@ impl Ed2kEngine {
             tokio::select! {
                 _ = tick.tick() => {
                     // Check if cancelled
-                    if let Some(ref cancel) = cancel {
-                        if cancel.is_cancelled() {
+                    if let Some(ref cancel) = cancel
+                        && cancel.is_cancelled() {
                             tracing::info!("Download cancelled");
                             return Err(Ed2kDownloadError::Io("cancelled".to_string()));
                         }
-                    }
 
                     // Check if download is complete
                     if self.is_complete() {
@@ -223,7 +222,7 @@ impl Ed2kEngine {
                         0x42 => {
                             // OP_SERVER_ANSWER - contains peer list for our file
                             // Format: [1 byte count][count * (4 bytes IP + 2 bytes port)]
-                            if payload.len() >= 1 {
+                            if !payload.is_empty() {
                                 let peer_count = payload[0] as usize;
                                 let mut offset = 1;
 
@@ -361,8 +360,8 @@ impl Ed2kEngine {
                         let chunk = &mut self.chunks[chunk_idx as usize];
                         chunk.add_block(chunk_offset_in_chunk, data);
 
-                        if chunk.complete {
-                            if let Some(assembled) = chunk.assemble() {
+                        if chunk.complete
+                            && let Some(assembled) = chunk.assemble() {
                                 if chunk.verify(&assembled) {
                                     tracing::info!(chunk = chunk_idx, "Chunk verified");
                                     self.downloaded_chunks.insert(chunk_idx);
@@ -374,7 +373,6 @@ impl Ed2kEngine {
                                     *chunk = ChunkState::new(chunk_idx, size, hash);
                                 }
                             }
-                        }
                     }
                     self.downloaded += block_size;
                     tracing::debug!(addr = %addr, offset = offset, size = block_size, "Received block");

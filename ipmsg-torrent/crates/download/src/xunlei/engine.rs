@@ -104,12 +104,11 @@ impl XunleiEngine {
             tokio::select! {
                 _ = tick.tick() => {
                     // Check if cancelled
-                    if let Some(ref cancel) = cancel {
-                        if cancel.is_cancelled() {
+                    if let Some(ref cancel) = cancel
+                        && cancel.is_cancelled() {
                             tracing::info!("Download cancelled");
                             return Err(XunleiDownloadError::Io("cancelled".to_string()));
                         }
-                    }
 
                     // Check if download is complete
                     if self.is_complete() {

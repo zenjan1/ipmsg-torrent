@@ -60,7 +60,7 @@ impl PieceState {
 
     fn verify(&self, data: &[u8]) -> bool {
         let hash = Sha1::digest(data);
-        &hash[..] == self.hash
+        hash[..] == self.hash
     }
 }
 
@@ -166,12 +166,11 @@ impl TorrentEngine {
             tokio::select! {
                 _ = tick.tick() => {
                     // Check if cancelled
-                    if let Some(ref cancel) = cancel {
-                        if cancel.is_cancelled() {
+                    if let Some(ref cancel) = cancel
+                        && cancel.is_cancelled() {
                             tracing::info!("Download cancelled");
                             return Err(DownloadError::Io("cancelled".to_string()));
                         }
-                    }
 
                     // Check if download is complete
                     if self.is_complete() {
@@ -180,15 +179,14 @@ impl TorrentEngine {
                     }
 
                     // Re-announce if needed
-                    if last_announce.elapsed() > announce_interval {
-                        if let Ok(resp) = self.tracker.announce(&self.meta, AnnounceEvent::None).await {
+                    if last_announce.elapsed() > announce_interval
+                        && let Ok(resp) = self.tracker.announce(&self.meta, AnnounceEvent::None).await {
                             for peer in resp.peers {
                                 let addr = SocketAddr::new(peer.ip, peer.port);
                                 let _ = self.connect_peer(addr).await;
                             }
                             last_announce = tokio::time::Instant::now();
                         }
-                    }
 
                     // Request blocks from peers
                     self.request_blocks().await;
@@ -405,8 +403,8 @@ impl TorrentEngine {
                     .update_stats(self.uploaded, self.downloaded, left);
 
                 // Check if piece is complete
-                if piece.complete {
-                    if let Some(data) = piece.assemble() {
+                if piece.complete
+                    && let Some(data) = piece.assemble() {
                         if piece.verify(&data) {
                             tracing::info!(piece = index, "Piece verified");
                             self.downloaded_pieces.insert(*index);
@@ -417,7 +415,6 @@ impl TorrentEngine {
                             *piece = PieceState::new(*index, piece.length, hash);
                         }
                     }
-                }
             }
             _ => {}
         }

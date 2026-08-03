@@ -629,8 +629,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             drop(s);
 
-            if event::poll(Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
+            if event::poll(Duration::from_millis(100))?
+                && let Event::Key(key) = event::read()? {
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
@@ -673,7 +673,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => {}
                     }
                 }
-            }
         }
     }
 
@@ -984,7 +983,7 @@ async fn handle_command(
                 || target.starts_with("ftp://")
             {
                 // HTTP/FTP URL (P2SP)
-                let name = target.split('/').last().unwrap_or("download").to_string();
+                let name = target.split('/').next_back().unwrap_or("download").to_string();
                 // TODO: Get file size from HEAD request
                 let size = 0u64; // Unknown for now
                 let sources = vec![ipmsg_download::xunlei::XunleiSource::Http {
@@ -1337,9 +1336,8 @@ fn draw(
                     let progress = task.progress();
                     let bar_width = 20;
                     let filled = (progress / 100.0 * bar_width as f32) as usize;
-                    let bar: String = std::iter::repeat('=')
-                        .take(filled)
-                        .chain(std::iter::repeat(' ').take(bar_width - filled))
+                    let bar: String = std::iter::repeat_n('=', filled)
+                        .chain(std::iter::repeat_n(' ', bar_width - filled))
                         .collect();
 
                     let state_icon = match task.state {
