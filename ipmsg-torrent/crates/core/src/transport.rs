@@ -866,7 +866,7 @@ impl futures::Stream for P2PSwarm {
                                     .or_default()
                                     .push(address.clone());
                             } else if let libp2p::core::ConnectedPoint::Listener {
-                                local_addr,
+                                local_addr: _,
                                 ..
                             } = endpoint
                             {

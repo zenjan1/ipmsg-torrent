@@ -24,6 +24,7 @@ pub enum PeerClientError {
 /// 3. Receive: [4 bytes length][data...]
 pub struct PeerClient {
     stream: TcpStream,
+    #[allow(dead_code)]
     addr: SocketAddr,
 }
 
@@ -85,6 +86,7 @@ impl PeerClient {
         Ok(data)
     }
 
+    #[allow(dead_code)]
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }

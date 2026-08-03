@@ -15,13 +15,12 @@ pub enum Ed2kClientError {
     Timeout,
     #[error("protocol error: {0}")]
     Protocol(String),
-    #[error("disconnected")]
-    Disconnected,
 }
 
 /// eDonkey client connection
 pub struct Ed2kClient {
     stream: TcpStream,
+    #[allow(dead_code)]
     addr: SocketAddr,
 }
 
@@ -100,6 +99,7 @@ impl Ed2kClient {
     }
 
     /// Send hello to peer
+    #[allow(dead_code)]
     pub async fn peer_hello(
         &mut self,
         client_hash: &[u8; 16],
@@ -168,6 +168,7 @@ impl Ed2kClient {
         Ok((hash, offset, data))
     }
 
+    #[allow(dead_code)]
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }

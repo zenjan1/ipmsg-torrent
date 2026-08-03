@@ -41,6 +41,7 @@ pub struct Ed2kPeer {
 /// eDonkey message types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(dead_code)]
 pub enum Ed2kClientOpcode {
     LoginRequest = 0x01,
     GetServerList = 0x14,
@@ -53,6 +54,7 @@ pub enum Ed2kClientOpcode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(dead_code)]
 pub enum Ed2kServerOpcode {
     LoginAnswer = 0x20,
     ServerMessage = 0x38,
@@ -65,6 +67,7 @@ pub enum Ed2kServerOpcode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(dead_code)]
 pub enum Ed2kPeerOpcode {
     Hello = 0x01,
     GetSources = 0x19,
@@ -78,6 +81,7 @@ pub enum Ed2kPeerOpcode {
 
 /// eDonkey file status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Ed2kFileStatus {
     Unknown,
     Hashing,
@@ -89,6 +93,7 @@ pub enum Ed2kFileStatus {
 
 /// eDonkey search result
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Ed2kSearchResult {
     pub name: String,
     pub size: u64,

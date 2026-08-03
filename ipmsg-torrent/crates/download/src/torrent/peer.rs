@@ -48,15 +48,19 @@ pub enum PeerError {
     #[error("timeout")]
     Timeout,
     #[error("peer disconnected")]
+    #[allow(dead_code)]
     Disconnected,
 }
 
 /// BitTorrent peer connection
 pub struct PeerConnection {
     stream: TcpStream,
+    #[allow(dead_code)]
     peer_id: [u8; 20],
     info_hash: [u8; 20],
+    #[allow(dead_code)]
     am_choking: bool,
+    #[allow(dead_code)]
     am_interested: bool,
     peer_choking: bool,
     peer_interested: bool,
@@ -328,6 +332,7 @@ impl PeerConnection {
         }
     }
 
+    #[allow(dead_code)]
     pub fn peer_id(&self) -> &[u8; 20] {
         &self.peer_id
     }
@@ -336,10 +341,12 @@ impl PeerConnection {
         self.peer_choking
     }
 
+    #[allow(dead_code)]
     pub fn is_interested(&self) -> bool {
         self.peer_interested
     }
 
+    #[allow(dead_code)]
     pub fn has_piece(&self, piece_index: u32) -> bool {
         if self.peer_bitfield.is_empty() {
             return false;

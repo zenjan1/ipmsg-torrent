@@ -13,6 +13,12 @@ use tokio_util::sync::CancellationToken;
 /// P2SP block size (1MB)
 const BLOCK_SIZE: u64 = 1024 * 1024;
 
+/// Max retries per block before giving up
+const MAX_BLOCK_RETRIES: u32 = 3;
+
+/// Retry delay base (doubles each attempt)
+const RETRY_BASE_DELAY_MS: u64 = 500;
+
 /// Xunlei P2SP download engine
 pub struct XunleiEngine {
     file_name: String,
@@ -166,7 +172,7 @@ impl XunleiEngine {
                         let client = self.http_client.clone();
                         let url = url.clone();
                         let task = tokio::spawn(async move {
-                            Self::download_http_block(client, url, offset, size).await
+                            Self::download_http_block_with_retry(client, url, offset, size).await
                         });
                         tasks.push((block_idx, task));
                     }
@@ -174,7 +180,7 @@ impl XunleiEngine {
                         let client = self.http_client.clone();
                         let url = url.clone();
                         let task = tokio::spawn(async move {
-                            Self::download_http_block(client, url, offset, size).await
+                            Self::download_http_block_with_retry(client, url, offset, size).await
                         });
                         tasks.push((block_idx, task));
                     }
@@ -224,6 +230,41 @@ impl XunleiEngine {
                 }
             }
         }
+    }
+
+    async fn download_http_block_with_retry(
+        client: Client,
+        url: String,
+        offset: u64,
+        size: u64,
+    ) -> Result<Vec<u8>, XunleiDownloadError> {
+        let mut last_err = None;
+
+        for attempt in 0..MAX_BLOCK_RETRIES {
+            match Self::download_http_block(client.clone(), url.clone(), offset, size).await {
+                Ok(data) => return Ok(data),
+                Err(e) => {
+                    tracing::warn!(
+                        url = %url,
+                        offset = offset,
+                        attempt = attempt + 1,
+                        max = MAX_BLOCK_RETRIES,
+                        error = %e,
+                        "HTTP block download attempt failed"
+                    );
+                    last_err = Some(e);
+
+                    if attempt + 1 < MAX_BLOCK_RETRIES {
+                        let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                    }
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            XunleiDownloadError::Http("unknown error after retries".to_string())
+        }))
     }
 
     async fn download_http_block(
