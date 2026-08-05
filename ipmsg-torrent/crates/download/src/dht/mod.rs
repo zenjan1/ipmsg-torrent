@@ -123,16 +123,29 @@ impl DhtManager {
     pub async fn find_peers(&self, info_hash: InfoHash) -> Result<Vec<SocketAddr>, DhtError> {
         tracing::info!("Finding peers for info hash: {}", hex::encode(info_hash));
         
-        // TODO: Implement full DHT peer lookup
-        // For now, return empty list
+        // Get peers from local storage
+        let peers = self.get_peers(&info_hash).await;
+        if !peers.is_empty() {
+            return Ok(peers);
+        }
+        
+        // TODO: Implement full DHT peer lookup via UDP
+        // For now, return empty list - peers will be added via announce_peer messages
         Ok(Vec::new())
     }
 
-    /// Fetch torrent metadata from DHT
+    /// Fetch torrent metadata from DHT peers
     pub async fn fetch_metadata(&self, info_hash: InfoHash) -> Result<Vec<u8>, DhtError> {
         tracing::info!("Fetching metadata for info hash: {}", hex::encode(info_hash));
         
-        // TODO: Implement BEP 0009 metadata exchange via DHT
+        // Get peers that might have the metadata
+        let peers = self.find_peers(info_hash).await?;
+        if peers.is_empty() {
+            return Err(DhtError::NoPeers);
+        }
+        
+        // TODO: Implement BEP 0009 metadata exchange via peer connections
+        // For now, return error - need to implement metadata exchange protocol
         Err(DhtError::NotImplemented)
     }
 
@@ -158,6 +171,8 @@ pub enum DhtError {
     Network(String),
     #[error("protocol error: {0}")]
     Protocol(String),
+    #[error("no peers found")]
+    NoPeers,
 }
 
 #[cfg(test)]

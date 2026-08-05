@@ -131,6 +131,7 @@ pub struct DownloadManager {
     task_info: Arc<Mutex<HashMap<String, TaskInfo>>>,
     task_generation: Arc<Mutex<HashMap<String, u64>>>,
     data_dir: PathBuf,
+    dht: Arc<dht::DhtManager>,
 }
 
 impl DownloadManager {
@@ -141,6 +142,7 @@ impl DownloadManager {
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
             data_dir,
+            dht: Arc::new(dht::DhtManager::new()),
         }
     }
 
@@ -365,6 +367,7 @@ impl DownloadManager {
         let tasks = self.tasks.clone();
         let running = self.running.clone();
         let data_dir = self.data_dir.clone();
+        let dht = self.dht.clone();
         let task_id_clone = task_id.clone();
         let cancel_clone = cancel_token.clone();
         let task_generation = self.task_generation.clone();
@@ -446,21 +449,48 @@ impl DownloadManager {
                     engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
                 }
                 TaskParams::Magnet {
-                    info_hash: _,
+                    info_hash,
                     display_name: _,
                     trackers: _,
                 } => {
                     // Magnet link handling: fetch metadata first, then download as torrent
-                    let _download_dir = data_dir.join("downloads");
+                    let download_dir = data_dir.join("downloads");
                     
-                    // For now, we'll create a placeholder task that waits for metadata
-                    // In a full implementation, this would:
-                    // 1. Connect to DHT/tracker to find peers
-                    // 2. Use BEP 0009 to fetch metadata from peers
-                    // 3. Convert to TorrentMeta and start downloading
+                    // Step 1: Use DHT to find peers
+                    let peers = dht.find_peers(info_hash).await.map_err(|e| e.to_string())?;
                     
-                    // Placeholder: mark as error since full implementation requires DHT
-                    Err("Magnet link support requires DHT implementation (not yet complete)".to_string())
+                    if peers.is_empty() {
+                        return Err("No peers found via DHT".to_string());
+                    }
+                    
+                    // Step 2: Try to fetch metadata from peers (BEP 0009)
+                    match dht.fetch_metadata(info_hash).await {
+                        Ok(metadata_bytes) => {
+                            // Parse metadata as torrent
+                            match torrent::TorrentMeta::from_bytes(&metadata_bytes) {
+                                Ok(meta) => {
+                                    // Update task with actual file info
+                                    {
+                                        let mut t = tasks.lock().await;
+                                        if let Some(task) = t.iter_mut().find(|t| t.id == task_id_clone) {
+                                            task.name = meta.info.name.clone();
+                                            task.size = meta.total_size();
+                                        }
+                                    }
+                                    
+                                    // Start torrent download
+                                    let mut engine = torrent::TorrentEngine::new(meta, download_dir);
+                                    engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                                }
+                                Err(e) => Err(format!("Failed to parse metadata: {}", e)),
+                            }
+                        }
+                        Err(dht::DhtError::NotImplemented) => {
+                            // Metadata exchange not yet implemented
+                            Err("Magnet link metadata exchange not yet implemented. Use .torrent files instead.".to_string())
+                        }
+                        Err(e) => Err(format!("Failed to fetch metadata: {}", e)),
+                    }
                 }
             };
 
@@ -506,6 +536,8 @@ impl DownloadManager {
             if is_still_active {
                 running.lock().await.remove(&task_id_clone);
             }
+            
+            Ok(())
         });
 
         // Spawn speed tracker
