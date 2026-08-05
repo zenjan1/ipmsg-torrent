@@ -55,7 +55,7 @@ impl MetadataFetcher {
         &mut self,
         addr: SocketAddr,
         peer_id: [u8; 20],
-    ) -> Result<TorrentMeta, MetadataError> {
+    ) -> Result<Vec<u8>, MetadataError> {
         tracing::info!(addr = %addr, "Connecting to peer for metadata exchange");
 
         // Connect to peer
@@ -84,8 +84,7 @@ impl MetadataFetcher {
         let metadata_bytes = self.assemble_metadata()?;
         self.verify_metadata(&metadata_bytes)?;
 
-        // Parse into TorrentMeta
-        self.parse_metadata(&metadata_bytes)
+        Ok(metadata_bytes)
     }
 
     /// Perform extended handshake (BEP 0010)

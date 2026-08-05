@@ -253,9 +253,39 @@ impl DhtManager {
             return Err(DhtError::NoPeers);
         }
         
-        // TODO: Implement BEP 0009 metadata exchange via peer connections
-        // For now, return error - need to implement metadata exchange protocol
-        Err(DhtError::NotImplemented)
+        tracing::info!("Found {} peers, attempting metadata exchange", peers.len());
+        
+        // Try to fetch metadata from each peer
+        let mut fetcher = crate::torrent::metadata::MetadataFetcher::new(info_hash);
+        let mut last_error = None;
+        
+        for peer_addr in &peers {
+            tracing::debug!("Trying peer {} for metadata", peer_addr);
+            
+            // Generate a random peer ID for this connection
+            let mut peer_id = [0u8; 20];
+            for byte in peer_id.iter_mut() {
+                *byte = rand::random();
+            }
+            
+            match fetcher.fetch_from_peer(*peer_addr, peer_id).await {
+                Ok(metadata_bytes) => {
+                    tracing::info!("Successfully fetched metadata from {}", peer_addr);
+                    return Ok(metadata_bytes);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch from {}: {}", peer_addr, e);
+                    last_error = Some(e);
+                    continue;
+                }
+            }
+        }
+        
+        Err(DhtError::Protocol(format!(
+            "Failed to fetch metadata from all {} peers: {:?}",
+            peers.len(),
+            last_error
+        )))
     }
 
     async fn send_find_node(&self, addr: SocketAddr, target: NodeId) -> Result<(), DhtError> {
