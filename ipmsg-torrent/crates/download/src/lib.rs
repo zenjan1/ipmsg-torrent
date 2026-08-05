@@ -62,7 +62,9 @@ impl DownloadTask {
             return None;
         }
         let remaining = self.size.saturating_sub(self.downloaded) as f64;
-        Some(remaining / self.speed_bps)
+        // Add 10% safety margin for network fluctuations
+        let eta = (remaining / self.speed_bps) * 1.1;
+        Some(eta)
     }
 
     pub fn state_label(&self) -> &'static str {
@@ -112,9 +114,13 @@ struct RunningTask {
     cancel_token: CancellationToken,
     #[allow(dead_code)]
     params: TaskParams,
+    #[allow(dead_code)]
     started_at: std::time::Instant,
     last_downloaded: u64,
     generation: u64,
+    // Speed tracking with moving average
+    speed_samples: Vec<f64>,
+    last_sample_time: std::time::Instant,
 }
 
 /// Unified download manager
@@ -379,6 +385,8 @@ impl DownloadManager {
                     started_at: std::time::Instant::now(),
                     last_downloaded: 0,
                     generation,
+                    speed_samples: Vec::new(),
+                    last_sample_time: std::time::Instant::now(),
                 },
             );
         }
@@ -503,7 +511,7 @@ impl DownloadManager {
         self.spawn_speed_tracker(task_id);
     }
 
-    /// Periodically update speed for a running task
+    /// Periodically update speed for a running task using moving average
     fn spawn_speed_tracker(&self, task_id: String) {
         let tasks = self.tasks.clone();
         let running = self.running.clone();
@@ -525,11 +533,13 @@ impl DownloadManager {
                     break;
                 }
 
-                // Calculate speed
+                // Calculate speed with moving average
                 let mut r = running.lock().await;
                 if let Some(rt) = r.get_mut(&task_id) {
-                    let elapsed = rt.started_at.elapsed().as_secs_f64();
-                    if elapsed < 0.5 {
+                    let now = std::time::Instant::now();
+                    let dt = now.duration_since(rt.last_sample_time).as_secs_f64();
+                    
+                    if dt < 0.5 {
                         continue;
                     }
 
@@ -542,19 +552,40 @@ impl DownloadManager {
                             .unwrap_or(0)
                     };
 
-                    let dt = elapsed;
                     let dd = current_downloaded.saturating_sub(rt.last_downloaded) as f64;
-                    let speed = dd / dt;
+                    let instant_speed = dd / dt;
+
+                    // Add to samples (keep last 10)
+                    rt.speed_samples.push(instant_speed);
+                    if rt.speed_samples.len() > 10 {
+                        rt.speed_samples.remove(0);
+                    }
+
+                    // Calculate weighted moving average (recent samples have more weight)
+                    let avg_speed = if rt.speed_samples.is_empty() {
+                        0.0
+                    } else {
+                        let weights: Vec<f64> = (1..=rt.speed_samples.len())
+                            .map(|i| i as f64)
+                            .collect();
+                        let total_weight: f64 = weights.iter().sum();
+                        let weighted_sum: f64 = rt.speed_samples
+                            .iter()
+                            .zip(weights.iter())
+                            .map(|(speed, weight)| speed * weight)
+                            .sum();
+                        weighted_sum / total_weight
+                    };
 
                     // Update task speed
                     let mut t = tasks.lock().await;
                     if let Some(task) = t.iter_mut().find(|t| t.id == task_id) {
-                        task.speed_bps = speed;
+                        task.speed_bps = avg_speed;
                         task.updated_at = chrono::Utc::now();
                     }
 
                     rt.last_downloaded = current_downloaded;
-                    rt.started_at = std::time::Instant::now();
+                    rt.last_sample_time = now;
                 } else {
                     break;
                 }

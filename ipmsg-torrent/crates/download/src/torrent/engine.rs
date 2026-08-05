@@ -65,10 +65,85 @@ impl PieceState {
 }
 
 /// Peer state tracking
+#[allow(dead_code)]
 struct PeerState {
     connection: PeerConnection,
     available_pieces: HashSet<u32>,
     requests_sent: HashMap<(u32, u32), tokio::time::Instant>, // (piece, block) -> time
+    
+    // Peer scoring
+    score: f64,
+    downloaded_bytes: u64,
+    uploaded_bytes: u64,
+    response_times: Vec<Duration>,
+    last_activity: tokio::time::Instant,
+    
+    // Choking state
+    am_choking: bool,
+    peer_choking: bool,
+    am_interested: bool,
+    peer_interested: bool,
+}
+
+impl PeerState {
+    fn new(connection: PeerConnection) -> Self {
+        Self {
+            connection,
+            available_pieces: HashSet::new(),
+            requests_sent: HashMap::new(),
+            score: 1.0,
+            downloaded_bytes: 0,
+            uploaded_bytes: 0,
+            response_times: Vec::new(),
+            last_activity: tokio::time::Instant::now(),
+            am_choking: true,
+            peer_choking: true,
+            am_interested: false,
+            peer_interested: false,
+        }
+    }
+    
+    /// Update peer score based on performance
+    fn update_score(&mut self) {
+        // Calculate average response time
+        let avg_response = if self.response_times.is_empty() {
+            Duration::from_secs(1)
+        } else {
+            let total: Duration = self.response_times.iter().sum();
+            total / self.response_times.len() as u32
+        };
+        
+        // Score based on:
+        // 1. Download speed (bytes per second)
+        // 2. Response time (faster is better)
+        // 3. Reliability (fewer timeouts)
+        
+        let elapsed = self.last_activity.elapsed().as_secs_f64();
+        let download_speed = if elapsed > 0.0 {
+            self.downloaded_bytes as f64 / elapsed
+        } else {
+            0.0
+        };
+        
+        // Response time factor (1.0 for <100ms, 0.1 for >10s)
+        let response_factor = (1.0 / (avg_response.as_secs_f64() + 0.1)).min(1.0);
+        
+        // Speed factor (logarithmic scale)
+        let speed_factor = (download_speed / 1024.0 + 1.0).ln();
+        
+        self.score = speed_factor * response_factor;
+        
+        // Keep only last 10 response times
+        if self.response_times.len() > 10 {
+            self.response_times.remove(0);
+        }
+    }
+    
+    /// Record a response time
+    fn record_response(&mut self, duration: Duration) {
+        self.response_times.push(duration);
+        self.last_activity = tokio::time::Instant::now();
+    }
 }
 
 /// Torrent download engine
@@ -225,11 +300,7 @@ impl TorrentEngine {
         // Send interested
         let _ = conn.send(PeerMessage::Interested).await;
 
-        let peer_state = PeerState {
-            connection: conn,
-            available_pieces: HashSet::new(),
-            requests_sent: HashMap::new(),
-        };
+        let peer_state = PeerState::new(conn);
 
         self.peers.insert(addr, peer_state);
         tracing::info!(addr = %addr, "Connected to peer");
@@ -250,6 +321,9 @@ impl TorrentEngine {
             return;
         }
 
+        // Check if we're in endgame mode (less than 5% pieces remaining)
+        let endgame_mode = needed_pieces.len() < (self.pieces.len() / 20).max(1);
+
         // Calculate piece rarity (how many peers have each piece)
         let mut piece_counts: HashMap<u32, usize> = HashMap::new();
         for &piece_idx in &needed_pieces {
@@ -265,8 +339,21 @@ impl TorrentEngine {
         let mut rarest_pieces: Vec<_> = piece_counts.into_iter().collect();
         rarest_pieces.sort_by_key(|(_, count)| *count);
 
-        // Request blocks from available peers
-        for (addr, peer_state) in &mut self.peers {
+        // Sort peers by score (highest first)
+        let mut peer_scores: Vec<_> = self
+            .peers
+            .iter()
+            .map(|(addr, state)| (*addr, state.score))
+            .collect();
+        peer_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Request blocks from best peers first
+        for (addr, _score) in &peer_scores {
+            let peer_state = match self.peers.get_mut(addr) {
+                Some(state) => state,
+                None => continue,
+            };
+
             if peer_state.connection.is_choking() {
                 continue;
             }
@@ -285,12 +372,14 @@ impl TorrentEngine {
 
                 let piece = &self.pieces[*piece_idx as usize];
 
-                // Find blocks we haven't requested yet
+                // In endgame mode, request from multiple peers
+                // In normal mode, only request if not already requested
+                let mut requested = false;
                 for block_idx in 0..piece.blocks_total {
                     let offset = block_idx * BLOCK_SIZE;
 
-                    // Skip if already requested
-                    if peer_state.requests_sent.contains_key(&(*piece_idx, offset)) {
+                    // Skip if already requested (unless in endgame mode)
+                    if !endgame_mode && peer_state.requests_sent.contains_key(&(*piece_idx, offset)) {
                         continue;
                     }
 
@@ -309,6 +398,7 @@ impl TorrentEngine {
                     peer_state
                         .requests_sent
                         .insert((*piece_idx, offset), tokio::time::Instant::now());
+                    requested = true;
 
                     // Stop if we hit the limit
                     if peer_state.requests_sent.len() >= MAX_IN_FLIGHT {
@@ -316,8 +406,10 @@ impl TorrentEngine {
                     }
                 }
 
-                // Only request from one piece per peer per iteration
-                break;
+                // Only request from one piece per peer per iteration (unless endgame)
+                if requested && !endgame_mode {
+                    break;
+                }
             }
         }
     }
@@ -388,14 +480,28 @@ impl TorrentEngine {
                     "Received block"
                 );
 
-                // Add block to piece state
-                if let Some(peer_state) = self.peers.get_mut(&addr) {
-                    peer_state.requests_sent.remove(&(*index, *begin));
-                }
+                // Record response time and update peer score
+                let _response_time = if let Some(peer_state) = self.peers.get_mut(&addr) {
+                    if let Some(request_time) = peer_state.requests_sent.remove(&(*index, *begin)) {
+                        let duration = request_time.elapsed();
+                        peer_state.record_response(duration);
+                        peer_state.downloaded_bytes += data.len() as u64;
+                        duration
+                    } else {
+                        Duration::from_millis(100)
+                    }
+                } else {
+                    Duration::from_millis(100)
+                };
 
                 let piece = &mut self.pieces[*index as usize];
                 piece.add_block(*begin, data.clone());
                 self.downloaded += data.len() as u64;
+
+                // Update peer score
+                if let Some(peer_state) = self.peers.get_mut(&addr) {
+                    peer_state.update_score();
+                }
 
                 // Update tracker stats
                 let left = self.meta.total_size() - self.downloaded;
