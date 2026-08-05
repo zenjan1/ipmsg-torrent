@@ -181,10 +181,10 @@ impl P2PSwarm {
                 libp2p::noise::Config::new,
                 libp2p::yamux::Config::default,
             )
-            .map_err(|e| P2PError::Transport(e.to_string()))?
+            .map_err(|e| P2PError::Transport(format!("tcp setup: {:?}", e)))?
             .with_quic()
             .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)
-            .map_err(|e| P2PError::Transport(e.to_string()))?
+            .map_err(|e| P2PError::Transport(format!("relay_client: {:?}", e)))?
             .with_behaviour(|key, relay_client| {
                 Ok(IpMsgNetBehaviour::new(
                     key,
@@ -193,7 +193,7 @@ impl P2PSwarm {
                     relay_client,
                 ))
             })
-            .map_err(|e| P2PError::Transport(e.to_string()))?
+            .map_err(|e| P2PError::Transport(format!("behaviour: {:?}", e)))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
             .build();
 
@@ -223,7 +223,19 @@ impl P2PSwarm {
         swarm_obj
             .swarm
             .listen_on(tcp_addr)
-            .map_err(|e| P2PError::Transport(e.to_string()))?;
+            .map_err(|e| P2PError::Transport(format!("listen_on tcp: {:?}", e)))?;
+
+        // Listen on TCP IPv6
+        let tcp6_addr = if config.listen_port > 0 {
+            format!("/ip6/::/tcp/{}", config.listen_port)
+                .parse()
+                .unwrap()
+        } else {
+            "/ip6/::/tcp/0".parse().unwrap()
+        };
+        if let Err(e) = swarm_obj.swarm.listen_on(tcp6_addr) {
+            tracing::warn!("Failed to listen on IPv6 TCP: {:?}", e);
+        }
 
         // Listen on QUIC
         let quic_addr = if config.listen_port > 0 {
@@ -236,7 +248,19 @@ impl P2PSwarm {
         swarm_obj
             .swarm
             .listen_on(quic_addr)
-            .map_err(|e| P2PError::Transport(e.to_string()))?;
+            .map_err(|e| P2PError::Transport(format!("listen_on quic: {:?}", e)))?;
+
+        // Listen on QUIC IPv6
+        let quic6_addr = if config.listen_port > 0 {
+            format!("/ip6/::/udp/{}/quic-v1", config.listen_port)
+                .parse()
+                .unwrap()
+        } else {
+            "/ip6/::/udp/0/quic-v1".parse().unwrap()
+        };
+        if let Err(e) = swarm_obj.swarm.listen_on(quic6_addr) {
+            tracing::warn!("Failed to listen on IPv6 QUIC: {:?}", e);
+        }
 
         // Dial bootstrap nodes
         for addr_str in &config.bootstrap_nodes {
@@ -894,8 +918,8 @@ impl futures::Stream for P2PSwarm {
                                 }
                             }
                         }
-                        SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                            tracing::info!("Disconnected from {}", peer_id);
+                        SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
+                            tracing::info!("Disconnected from {}: {:?}", peer_id, cause);
                             let pid_str = peer_id.to_base58();
                             self.peers.remove(&pid_str);
                             events.push(P2PEvent::PeerLeft { peer_id: pid_str });

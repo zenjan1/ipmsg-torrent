@@ -24,8 +24,11 @@ pub struct DownloadTask {
     pub size: u64,
     pub downloaded: u64,
     pub state: DownloadState,
+    pub error: Option<String>,
+    pub speed_bps: f64,
     pub save_path: PathBuf,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,13 +54,63 @@ impl DownloadTask {
         }
         (self.downloaded as f32 / self.size as f32) * 100.0
     }
+
+    pub fn eta_seconds(&self) -> Option<f64> {
+        if self.speed_bps <= 0.0 || self.size == 0 {
+            return None;
+        }
+        let remaining = self.size.saturating_sub(self.downloaded) as f64;
+        Some(remaining / self.speed_bps)
+    }
+
+    pub fn state_label(&self) -> &'static str {
+        match self.state {
+            DownloadState::Queued => "queued",
+            DownloadState::Downloading => "downloading",
+            DownloadState::Paused => "paused",
+            DownloadState::Complete => "complete",
+            DownloadState::Error => "error",
+        }
+    }
+}
+
+/// Parameters needed to restart a paused/failed task
+#[derive(Debug, Clone)]
+enum TaskParams {
+    Torrent { torrent_path: PathBuf },
+    Ed2k {
+        file_hash: ed2k::Ed2kFileHash,
+        file_size: u64,
+        file_name: String,
+        servers: Vec<std::net::SocketAddr>,
+    },
+    Xunlei {
+        file_name: String,
+        file_size: u64,
+        sources: Vec<xunlei::XunleiSource>,
+    },
+}
+
+/// Stored task info for resume
+#[derive(Debug, Clone)]
+struct TaskInfo {
+    params: TaskParams,
+}
+
+/// Internal handle for a running task
+struct RunningTask {
+    cancel_token: CancellationToken,
+    #[allow(dead_code)]
+    params: TaskParams,
+    started_at: std::time::Instant,
+    last_downloaded: u64,
 }
 
 /// Unified download manager
 pub struct DownloadManager {
     tasks: Arc<Mutex<Vec<DownloadTask>>>,
-    /// Cancel tokens for running tasks (keyed by task id)
-    cancel_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    running: Arc<Mutex<HashMap<String, RunningTask>>>,
+    task_info: Arc<Mutex<HashMap<String, TaskInfo>>>,
     data_dir: PathBuf,
 }
 
@@ -65,7 +118,8 @@ impl DownloadManager {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
             tasks: Arc::new(Mutex::new(Vec::new())),
-            cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::new(Mutex::new(HashMap::new())),
+            task_info: Arc::new(Mutex::new(HashMap::new())),
             data_dir,
         }
     }
@@ -80,7 +134,7 @@ impl DownloadManager {
             .map_err(|e| DownloadManagerError::Protocol(e.to_string()))?;
 
         let task_id = uuid::Uuid::new_v4().to_string();
-        let cancel_token = CancellationToken::new();
+        let now = chrono::Utc::now();
 
         let task = DownloadTask {
             id: task_id.clone(),
@@ -89,52 +143,20 @@ impl DownloadManager {
             size: meta.total_size(),
             downloaded: 0,
             state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
             save_path: self.data_dir.join("downloads"),
-            created_at: chrono::Utc::now(),
+            created_at: now,
+            updated_at: now,
         };
 
         self.tasks.lock().await.push(task);
-        self.cancel_tokens
-            .lock()
-            .await
-            .insert(task_id.clone(), cancel_token.clone());
 
-        // Spawn download task
-        let meta_clone = meta;
-        let download_dir = self.data_dir.join("downloads");
-        let tasks = self.tasks.clone();
-        let cancel_tokens = self.cancel_tokens.clone();
-        let task_id_clone = task_id.clone();
+        let params = TaskParams::Torrent {
+            torrent_path: torrent_path.clone(),
+        };
 
-        tokio::spawn(async move {
-            // Update state to downloading
-            {
-                let mut tasks = tasks.lock().await;
-                if let Some(t) = tasks.iter_mut().find(|t| t.id == task_id_clone) {
-                    t.state = DownloadState::Downloading;
-                }
-            }
-
-            let mut engine = torrent::TorrentEngine::new(meta_clone, download_dir);
-            match engine.download(Some(cancel_token)).await {
-                Ok(()) => {
-                    let mut tasks = tasks.lock().await;
-                    if let Some(t) = tasks.iter_mut().find(|t| t.id == task_id_clone) {
-                        t.state = DownloadState::Complete;
-                        t.downloaded = t.size;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(task_id = %task_id_clone, error = %e, "Torrent download failed");
-                    let mut tasks = tasks.lock().await;
-                    if let Some(t) = tasks.iter_mut().find(|t| t.id == task_id_clone) {
-                        t.state = DownloadState::Error;
-                    }
-                }
-            }
-            // Clean up cancel token
-            cancel_tokens.lock().await.remove(&task_id_clone);
-        });
+        self.spawn_task(task_id.clone(), params).await;
 
         Ok(task_id)
     }
@@ -148,7 +170,7 @@ impl DownloadManager {
         servers: Vec<std::net::SocketAddr>,
     ) -> Result<String, DownloadManagerError> {
         let task_id = uuid::Uuid::new_v4().to_string();
-        let cancel_token = CancellationToken::new();
+        let now = chrono::Utc::now();
 
         let task = DownloadTask {
             id: task_id.clone(),
@@ -157,51 +179,23 @@ impl DownloadManager {
             size: file_size,
             downloaded: 0,
             state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
             save_path: self.data_dir.join("downloads"),
-            created_at: chrono::Utc::now(),
+            created_at: now,
+            updated_at: now,
         };
 
         self.tasks.lock().await.push(task);
-        self.cancel_tokens
-            .lock()
-            .await
-            .insert(task_id.clone(), cancel_token.clone());
 
-        // Spawn download task
-        let download_dir = self.data_dir.join("downloads");
-        let tasks = self.tasks.clone();
-        let cancel_tokens = self.cancel_tokens.clone();
-        let task_id_clone = task_id.clone();
-        let file_name_clone = file_name.clone();
+        let params = TaskParams::Ed2k {
+            file_hash,
+            file_size,
+            file_name,
+            servers,
+        };
 
-        tokio::spawn(async move {
-            {
-                let mut tasks = tasks.lock().await;
-                if let Some(t) = tasks.iter_mut().find(|t| t.id == task_id_clone) {
-                    t.state = DownloadState::Downloading;
-                }
-            }
-
-            let mut engine =
-                ed2k::Ed2kEngine::new(file_hash, file_size, file_name_clone, download_dir, servers);
-            match engine.download(Some(cancel_token)).await {
-                Ok(()) => {
-                    let mut tasks = tasks.lock().await;
-                    if let Some(t) = tasks.iter_mut().find(|t| t.id == task_id_clone) {
-                        t.state = DownloadState::Complete;
-                        t.downloaded = t.size;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(task_id = %task_id_clone, error = %e, "ed2k download failed");
-                    let mut tasks = tasks.lock().await;
-                    if let Some(t) = tasks.iter_mut().find(|t| t.id == task_id_clone) {
-                        t.state = DownloadState::Error;
-                    }
-                }
-            }
-            cancel_tokens.lock().await.remove(&task_id_clone);
-        });
+        self.spawn_task(task_id.clone(), params).await;
 
         Ok(task_id)
     }
@@ -214,7 +208,7 @@ impl DownloadManager {
         sources: Vec<xunlei::XunleiSource>,
     ) -> Result<String, DownloadManagerError> {
         let task_id = uuid::Uuid::new_v4().to_string();
-        let cancel_token = CancellationToken::new();
+        let now = chrono::Utc::now();
 
         let task = DownloadTask {
             id: task_id.clone(),
@@ -223,53 +217,250 @@ impl DownloadManager {
             size: file_size,
             downloaded: 0,
             state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
             save_path: self.data_dir.join("downloads"),
-            created_at: chrono::Utc::now(),
+            created_at: now,
+            updated_at: now,
         };
 
         self.tasks.lock().await.push(task);
-        self.cancel_tokens
-            .lock()
-            .await
-            .insert(task_id.clone(), cancel_token.clone());
 
-        // Spawn download task
-        let download_dir = self.data_dir.join("downloads");
-        let tasks = self.tasks.clone();
-        let cancel_tokens = self.cancel_tokens.clone();
-        let task_id_clone = task_id.clone();
-        let file_name_clone = file_name.clone();
+        let params = TaskParams::Xunlei {
+            file_name,
+            file_size,
+            sources,
+        };
 
-        tokio::spawn(async move {
-            {
-                let mut tasks = tasks.lock().await;
-                if let Some(t) = tasks.iter_mut().find(|t| t.id == task_id_clone) {
-                    t.state = DownloadState::Downloading;
-                }
-            }
-
-            let mut engine =
-                xunlei::XunleiEngine::new(file_name_clone, file_size, sources, download_dir);
-            match engine.download(Some(cancel_token)).await {
-                Ok(()) => {
-                    let mut tasks = tasks.lock().await;
-                    if let Some(t) = tasks.iter_mut().find(|t| t.id == task_id_clone) {
-                        t.state = DownloadState::Complete;
-                        t.downloaded = t.size;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(task_id = %task_id_clone, error = %e, "Xunlei download failed");
-                    let mut tasks = tasks.lock().await;
-                    if let Some(t) = tasks.iter_mut().find(|t| t.id == task_id_clone) {
-                        t.state = DownloadState::Error;
-                    }
-                }
-            }
-            cancel_tokens.lock().await.remove(&task_id_clone);
-        });
+        self.spawn_task(task_id.clone(), params).await;
 
         Ok(task_id)
+    }
+
+    /// Add an HTTP/FTP URL download (auto-detects file size via HEAD)
+    pub async fn add_url(&self, url: &str) -> Result<String, DownloadManagerError> {
+        // HEAD request to get file size and name
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| DownloadManagerError::Io(e.to_string()))?;
+
+        let head_resp = client
+            .head(url)
+            .send()
+            .await
+            .map_err(|e| DownloadManagerError::Io(format!("HEAD request failed: {e}")))?;
+
+        if !head_resp.status().is_success() {
+            return Err(DownloadManagerError::Io(format!(
+                "HEAD returned {}",
+                head_resp.status()
+            )));
+        }
+
+        let content_length = head_resp
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        // Extract filename from URL
+        let file_name = url
+            .split('/')
+            .next_back()
+            .unwrap_or("download")
+            .split('?')
+            .next()
+            .unwrap_or("download")
+            .to_string();
+        let file_name = if file_name.is_empty() {
+            "download".to_string()
+        } else {
+            file_name
+        };
+
+        let sources = vec![xunlei::XunleiSource::Http {
+            url: url.to_string(),
+            cookies: None,
+            referer: None,
+        }];
+
+        self.add_xunlei(file_name, content_length, sources).await
+    }
+
+    /// Spawn the actual download task
+    async fn spawn_task(&self, task_id: String, params: TaskParams) {
+        let cancel_token = CancellationToken::new();
+        let tasks = self.tasks.clone();
+        let running = self.running.clone();
+        let data_dir = self.data_dir.clone();
+        let task_id_clone = task_id.clone();
+        let cancel_clone = cancel_token.clone();
+
+        // Store task info for resume
+        {
+            let mut info = self.task_info.lock().await;
+            info.insert(task_id.clone(), TaskInfo { params: params.clone() });
+        }
+
+        // Register running task
+        {
+            let mut r = running.lock().await;
+            r.insert(
+                task_id.clone(),
+                RunningTask {
+                    cancel_token: cancel_token.clone(),
+                    params: params.clone(),
+                    started_at: std::time::Instant::now(),
+                    last_downloaded: 0,
+                },
+            );
+        }
+
+        // Mark as downloading
+        {
+            let mut t = tasks.lock().await;
+            if let Some(task) = t.iter_mut().find(|t| t.id == task_id) {
+                task.state = DownloadState::Downloading;
+                task.updated_at = chrono::Utc::now();
+            }
+        }
+
+        tokio::spawn(async move {
+            let result: Result<(), String> = match params {
+                TaskParams::Torrent { torrent_path } => {
+                    match tokio::fs::read(&torrent_path).await {
+                        Ok(data) => {
+                            match torrent::TorrentMeta::from_bytes(&data) {
+                                Ok(meta) => {
+                                    let download_dir = data_dir.join("downloads");
+                                    let mut engine =
+                                        torrent::TorrentEngine::new(meta, download_dir);
+                                    engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+                TaskParams::Ed2k {
+                    file_hash,
+                    file_size,
+                    file_name,
+                    servers,
+                } => {
+                    let download_dir = data_dir.join("downloads");
+                    let mut engine = ed2k::Ed2kEngine::new(
+                        file_hash,
+                        file_size,
+                        file_name,
+                        download_dir,
+                        servers,
+                    );
+                    engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                }
+                TaskParams::Xunlei {
+                    file_name,
+                    file_size,
+                    sources,
+                } => {
+                    let download_dir = data_dir.join("downloads");
+                    let mut engine =
+                        xunlei::XunleiEngine::new(file_name, file_size, sources, download_dir);
+                    engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                }
+            };
+
+            // Update task state
+            let mut t = tasks.lock().await;
+            if let Some(task) = t.iter_mut().find(|t| t.id == task_id_clone) {
+                match result {
+                    Ok(()) => {
+                        task.state = DownloadState::Complete;
+                        task.downloaded = task.size;
+                        task.speed_bps = 0.0;
+                    }
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        if err_str == "cancelled" {
+                            task.state = DownloadState::Paused;
+                        } else {
+                            task.state = DownloadState::Error;
+                            task.error = Some(err_str);
+                        }
+                        task.speed_bps = 0.0;
+                    }
+                }
+                task.updated_at = chrono::Utc::now();
+            }
+
+            // Remove from running
+            running.lock().await.remove(&task_id_clone);
+        });
+
+        // Spawn speed tracker
+        self.spawn_speed_tracker(task_id);
+    }
+
+    /// Periodically update speed for a running task
+    fn spawn_speed_tracker(&self, task_id: String) {
+        let tasks = self.tasks.clone();
+        let running = self.running.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            loop {
+                interval.tick().await;
+
+                let should_stop = {
+                    let r = running.lock().await;
+                    match r.get(&task_id) {
+                        None => true, // task no longer running
+                        Some(rt) => rt.cancel_token.is_cancelled(),
+                    }
+                };
+
+                if should_stop {
+                    break;
+                }
+
+                // Calculate speed
+                let mut r = running.lock().await;
+                if let Some(rt) = r.get_mut(&task_id) {
+                    let elapsed = rt.started_at.elapsed().as_secs_f64();
+                    if elapsed < 0.5 {
+                        continue;
+                    }
+
+                    // Read current downloaded from tasks
+                    let current_downloaded = {
+                        let t = tasks.lock().await;
+                        t.iter()
+                            .find(|t| t.id == task_id)
+                            .map(|t| t.downloaded)
+                            .unwrap_or(0)
+                    };
+
+                    let dt = elapsed;
+                    let dd = current_downloaded.saturating_sub(rt.last_downloaded) as f64;
+                    let speed = dd / dt;
+
+                    // Update task speed
+                    let mut t = tasks.lock().await;
+                    if let Some(task) = t.iter_mut().find(|t| t.id == task_id) {
+                        task.speed_bps = speed;
+                        task.updated_at = chrono::Utc::now();
+                    }
+
+                    rt.last_downloaded = current_downloaded;
+                    rt.started_at = std::time::Instant::now();
+                } else {
+                    break;
+                }
+            }
+        });
     }
 
     /// List all download tasks
@@ -287,43 +478,83 @@ impl DownloadManager {
             .cloned()
     }
 
-    /// Pause a download task (actually cancels the running task)
+    /// Pause a download task
     pub async fn pause_task(&self, task_id: &str) -> bool {
-        // Cancel the running task
-        if let Some(token) = self.cancel_tokens.lock().await.get(task_id) {
-            token.cancel();
+        let r = self.running.lock().await;
+        if let Some(rt) = r.get(task_id) {
+            rt.cancel_token.cancel();
         }
-        // Update state
+        drop(r);
+
         let mut tasks = self.tasks.lock().await;
-        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id)
-            && task.state == DownloadState::Downloading
-        {
-            task.state = DownloadState::Paused;
-            return true;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            if task.state == DownloadState::Downloading || task.state == DownloadState::Queued {
+                task.state = DownloadState::Paused;
+                task.speed_bps = 0.0;
+                task.updated_at = chrono::Utc::now();
+                return true;
+            }
         }
         false
     }
 
-    /// Resume a paused task
+    /// Resume a paused or failed task by re-spawning the engine
     pub async fn resume_task(&self, task_id: &str) -> bool {
-        let mut tasks = self.tasks.lock().await;
-        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id)
-            && task.state == DownloadState::Paused
+        // Get the task and its params
+        let params = {
+            let tasks = self.tasks.lock().await;
+            let Some(task) = tasks.iter().find(|t| t.id == task_id) else {
+                return false;
+            };
+
+            if task.state != DownloadState::Paused && task.state != DownloadState::Error {
+                return false;
+            }
+
+            // Check if already running (shouldn't be, but guard)
+            let r = self.running.lock().await;
+            let already_running = r.contains_key(task_id);
+            drop(r);
+
+            if already_running {
+                return false;
+            }
+
+            // Get stored params
+            let info = self.task_info.lock().await;
+            let Some(task_info) = info.get(task_id) else {
+                return false;
+            };
+            task_info.params.clone()
+        };
+
+        // Reset state
         {
-            task.state = DownloadState::Downloading;
-            // Note: actual resume requires re-creating the engine
-            // For now, just mark as downloading - the task loop will pick it up
-            return true;
+            let mut tasks = self.tasks.lock().await;
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                task.state = DownloadState::Queued;
+                task.error = None;
+                task.speed_bps = 0.0;
+                task.updated_at = chrono::Utc::now();
+            }
         }
-        false
+        self.spawn_task(task_id.to_string(), params).await;
+        true
     }
 
-    /// Remove a task
+    /// Remove a task (cancels if running)
     pub async fn remove_task(&self, task_id: &str) -> bool {
         // Cancel if running
-        if let Some(token) = self.cancel_tokens.lock().await.remove(task_id) {
-            token.cancel();
+        {
+            let r = self.running.lock().await;
+            if let Some(rt) = r.get(task_id) {
+                rt.cancel_token.cancel();
+            }
         }
+
+        self.running.lock().await.remove(task_id);
+        self.task_info.lock().await.remove(task_id);
+
         let mut tasks = self.tasks.lock().await;
         let len_before = tasks.len();
         tasks.retain(|t| t.id != task_id);

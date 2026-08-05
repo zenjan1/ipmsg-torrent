@@ -950,7 +950,7 @@ async fn handle_command(
                     Ok(task_id) => {
                         s.add_system_message(
                             "main",
-                            format!("Started torrent download: {}", task_id),
+                            format!("Started torrent download: {}", &task_id[..8.min(task_id.len())]),
                         );
                     }
                     Err(e) => {
@@ -964,16 +964,22 @@ async fn handle_command(
                     let name = parts[2].to_string();
                     let size: u64 = parts[3].parse().unwrap_or(0);
                     let hash = parts[4].to_string();
-                    let hash = ipmsg_download::ed2k::Ed2kFileHash::from_hex(&hash).unwrap();
-                    match download_manager.add_ed2k(hash, size, name, vec![]).await {
-                        Ok(task_id) => {
-                            s.add_system_message(
-                                "main",
-                                format!("Started ed2k download: {}", task_id),
-                            );
+                    match ipmsg_download::ed2k::Ed2kFileHash::from_hex(&hash) {
+                        Ok(file_hash) => {
+                            match download_manager.add_ed2k(file_hash, size, name, vec![]).await {
+                                Ok(task_id) => {
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Started ed2k download: {}", &task_id[..8.min(task_id.len())]),
+                                    );
+                                }
+                                Err(e) => {
+                                    s.add_system_message("main", format!("Failed to start ed2k: {}", e));
+                                }
+                            }
                         }
                         Err(e) => {
-                            s.add_system_message("main", format!("Failed to start ed2k: {}", e));
+                            s.add_system_message("main", format!("Invalid hash: {}", e));
                         }
                     }
                 } else {
@@ -983,22 +989,13 @@ async fn handle_command(
                 || target.starts_with("https://")
                 || target.starts_with("ftp://")
             {
-                // HTTP/FTP URL (P2SP)
-                let name = target
-                    .split('/')
-                    .next_back()
-                    .unwrap_or("download")
-                    .to_string();
-                // TODO: Get file size from HEAD request
-                let size = 0u64; // Unknown for now
-                let sources = vec![ipmsg_download::xunlei::XunleiSource::Http {
-                    url: target.clone(),
-                    cookies: None,
-                    referer: None,
-                }];
-                match download_manager.add_xunlei(name, size, sources).await {
+                // HTTP/FTP URL (auto-detect size via HEAD)
+                match download_manager.add_url(&target).await {
                     Ok(task_id) => {
-                        s.add_system_message("main", format!("Started P2SP download: {}", task_id));
+                        s.add_system_message(
+                            "main",
+                            format!("Started P2SP download: {}", &task_id[..8.min(task_id.len())]),
+                        );
                     }
                     Err(e) => {
                         s.add_system_message("main", format!("Failed to start P2SP: {}", e));
@@ -1021,19 +1018,25 @@ async fn handle_command(
                 let mut lines = vec![format!("Download tasks ({}):", tasks.len())];
                 for task in tasks {
                     let progress = task.progress();
-                    let state_str = match task.state {
-                        ipmsg_download::DownloadState::Queued => "queued",
-                        ipmsg_download::DownloadState::Downloading => "downloading",
-                        ipmsg_download::DownloadState::Paused => "paused",
-                        ipmsg_download::DownloadState::Complete => "complete",
-                        ipmsg_download::DownloadState::Error => "error",
+                    let state_str = task.state_label();
+                    let speed_str = if task.speed_bps > 0.0 {
+                        format!(" {:.1} KB/s", task.speed_bps / 1024.0)
+                    } else {
+                        String::new()
                     };
+                    let error_str = task
+                        .error
+                        .as_ref()
+                        .map(|e| format!(" [{}]", e))
+                        .unwrap_or_default();
                     lines.push(format!(
-                        "  {} - {} [{:.1}%] ({})",
+                        "  {} - {} [{:.1}%] ({}){}{}",
                         &task.id[..8.min(task.id.len())],
                         task.name,
                         progress,
-                        state_str
+                        state_str,
+                        speed_str,
+                        error_str
                     ));
                 }
                 s.add_system_message("main", lines.join("\n"));
@@ -1209,6 +1212,7 @@ fn draw(
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(1), // Status bar
                 Constraint::Length(1), // Tabs
                 Constraint::Min(3),    // Messages
                 Constraint::Length(3), // Downloads
@@ -1246,6 +1250,22 @@ fn draw(
             .style(Style::default().fg(Color::Cyan));
         f.render_widget(List::new(peer_items).block(peers_block), chunks[0]);
 
+        // Status bar
+        let peer_count = state.peers.len();
+        let status_icon = if peer_count > 0 { "●" } else { "○" };
+        let status_color = if peer_count > 0 { Color::Green } else { Color::DarkGray };
+        let status_text = format!(
+            " {} {} | Peers: {} | {} ",
+            status_icon,
+            state.username,
+            peer_count,
+            state.status
+        );
+        let status_bar = Paragraph::new(Line::from(vec![
+            Span::styled(status_text, Style::default().fg(status_color).bg(Color::DarkGray)),
+        ]));
+        f.render_widget(status_bar, right_chunks[0]);
+
         // Tabs
         let tab_titles: Vec<Line> = state
             .tabs
@@ -1268,7 +1288,7 @@ fn draw(
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            right_chunks[0],
+            right_chunks[1],
         );
 
         // Messages
@@ -1314,12 +1334,12 @@ fn draw(
         let scroll = tab
             .messages
             .len()
-            .saturating_sub(right_chunks[1].height.saturating_sub(2) as usize);
+            .saturating_sub(right_chunks[2].height.saturating_sub(2) as usize);
         f.render_widget(
             Paragraph::new(msg_lines)
                 .block(messages_block)
                 .scroll((scroll as u16, 0)),
-            right_chunks[1],
+            right_chunks[2],
         );
 
         // Downloads
@@ -1383,7 +1403,7 @@ fn draw(
             .style(Style::default().fg(Color::Magenta));
         f.render_widget(
             Paragraph::new(download_lines).block(downloads_block),
-            right_chunks[2],
+            right_chunks[3],
         );
 
         // Input
@@ -1393,7 +1413,7 @@ fn draw(
             .style(Style::default().fg(Color::White));
         f.render_widget(
             Paragraph::new(format!("> {} ", state.input)).block(input_block),
-            right_chunks[3],
+            right_chunks[4],
         );
     })?;
     Ok(())

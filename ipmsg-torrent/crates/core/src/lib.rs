@@ -1,4 +1,5 @@
 pub mod bloom;
+pub mod config;
 pub mod discovery;
 pub mod file_sharing;
 pub mod file_transfer;
@@ -465,6 +466,22 @@ impl P2PEngine {
                                             // Check blocked peers first
                                             if self.is_blocked(&msg.from) {
                                                 continue;
+                                            }
+                                            // Verify message signature (prevent spoofing)
+                                            if !msg.signature.is_empty() {
+                                                let digest = msg.signing_bytes();
+                                                // Try to verify with peer's public key if available
+                                                if let Some(peer_key) = self.store.get_peer_public_key(&msg.from) {
+                                                    if !Self::verify_message_signature(&peer_key, &digest, &msg.signature) {
+                                                        tracing::warn!(from = %msg.from, id = %msg.id, "Invalid message signature, dropping");
+                                                        self.peer_scores.record_behavior(
+                                                            &msg.from,
+                                                            PeerBehavior::InvalidSignature
+                                                        );
+                                                        continue;
+                                                    }
+                                                }
+                                                // If no known key, accept but log for future verification
                                             }
                                             if self.dedup.is_duplicate(&msg.id) {
                                                 // Record duplicate message behavior
@@ -1488,6 +1505,27 @@ impl P2PEngine {
     /// Get network statistics summary as string
     pub fn stats_summary(&self) -> String {
         self.stats.summary()
+    }
+
+    /// Verify a message signature using a peer's public key
+    fn verify_message_signature(peer_public_key: &[u8], digest: &[u8], signature: &[u8]) -> bool {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        
+        if peer_public_key.len() != 32 || signature.len() != 64 {
+            return false;
+        }
+        
+        let Ok(key_bytes) = peer_public_key.try_into() else {
+            return false;
+        };
+        let Ok(verifying_key) = VerifyingKey::from_bytes(&key_bytes) else {
+            return false;
+        };
+        let Ok(sig) = Signature::from_slice(signature) else {
+            return false;
+        };
+        
+        verifying_key.verify(digest, &sig).is_ok()
     }
 }
 

@@ -26,6 +26,8 @@ serde_json = "1"
 serde_cbor = { workspace = true }
 lz4_flex = { workspace = true }
 sha2 = { workspace = true }
+toml = { workspace = true }
+dirs = "5.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }

@@ -22,6 +22,8 @@ pub enum PeerBehavior {
     DuplicateMessage,
     /// Sent an invalid/malformed message
     InvalidMessage,
+    /// Sent a message with invalid signature
+    InvalidSignature,
     /// Responded to a file transfer request
     ValidResponse,
     /// Failed to respond to a request
@@ -39,6 +41,7 @@ impl PeerBehavior {
             Self::ValidMessage => 1.0,
             Self::DuplicateMessage => -0.5,
             Self::InvalidMessage => -5.0,
+            Self::InvalidSignature => -10.0,
             Self::ValidResponse => 2.0,
             Self::FailedResponse => -2.0,
             Self::UnexpectedDisconnect => -3.0,
@@ -113,6 +116,10 @@ impl PeerScore {
                 self.duplicate_messages += 1;
             }
             PeerBehavior::InvalidMessage => {
+                self.messages_received += 1;
+                self.invalid_messages += 1;
+            }
+            PeerBehavior::InvalidSignature => {
                 self.messages_received += 1;
                 self.invalid_messages += 1;
             }
