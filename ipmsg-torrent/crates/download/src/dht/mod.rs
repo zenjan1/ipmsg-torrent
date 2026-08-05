@@ -10,6 +10,7 @@ pub mod message;
 use std::net::SocketAddr;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
+use tokio::net::UdpSocket;
 use std::sync::Arc;
 
 /// DHT node ID (20 bytes)
@@ -26,6 +27,7 @@ pub struct DhtManager {
     pending_queries: Arc<Mutex<HashMap<NodeId, QueryState>>>,
     peers: Arc<Mutex<HashMap<InfoHash, Vec<SocketAddr>>>>,
     tokens: Arc<Mutex<HashMap<SocketAddr, Vec<u8>>>>,
+    socket: Option<Arc<UdpSocket>>,
 }
 
 #[derive(Debug)]
@@ -55,7 +57,13 @@ impl DhtManager {
             pending_queries: Arc::new(Mutex::new(HashMap::new())),
             peers: Arc::new(Mutex::new(HashMap::new())),
             tokens: Arc::new(Mutex::new(HashMap::new())),
+            socket: None,
         }
+    }
+
+    /// Set the UDP socket for sending messages
+    pub fn set_socket(&mut self, socket: Arc<UdpSocket>) {
+        self.socket = Some(socket);
     }
 
     /// Add a node to the routing table
@@ -129,9 +137,13 @@ impl DhtManager {
             return Ok(peers);
         }
         
+        let socket = self.socket.as_ref().ok_or_else(|| {
+            DhtError::Network("UDP socket not set".to_string())
+        })?;
+        
         // Iterative lookup: query closest nodes and collect their responses
         let mut queried_nodes = std::collections::HashSet::new();
-        let found_peers = Vec::new();
+        let mut found_peers = Vec::new();
         let mut closest_nodes = self.closest_nodes(&info_hash, 8).await;
         
         // Iterative lookup loop (max 3 rounds)
@@ -140,15 +152,73 @@ impl DhtManager {
                 break;
             }
             
-            for (node_id, node_addr) in closest_nodes {
-                if queried_nodes.contains(&node_id) {
+            let mut new_nodes_this_round = Vec::new();
+            
+            for (node_id, node_addr) in &closest_nodes {
+                if queried_nodes.contains(node_id) {
                     continue;
                 }
-                queried_nodes.insert(node_id);
+                queried_nodes.insert(*node_id);
                 
-                // In a real implementation, we would send get_peers query here
-                // For now, we just collect the nodes we know about
-                tracing::debug!("Would query node {} at {}", hex::encode(node_id), node_addr);
+                // Send get_peers query
+                let msg = message::DhtMessage::Query {
+                    transaction_id: rand::random::<u16>().to_be_bytes().to_vec(),
+                    query: message::QueryType::GetPeers {
+                        id: self.node_id,
+                        info_hash,
+                    },
+                };
+                
+                if let Ok(data) = msg.encode() {
+                    if let Err(e) = socket.send_to(&data, node_addr).await {
+                        tracing::debug!("Failed to send get_peers to {}: {}", node_addr, e);
+                        continue;
+                    }
+                    
+                    // Wait for response with timeout
+                    let mut buf = vec![0u8; 65535];
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        socket.recv_from(&mut buf)
+                    ).await {
+                        Ok(Ok((len, _from_addr))) => {
+                            if let Ok(response) = message::DhtMessage::decode(&buf[..len]) {
+                                match response {
+                                    message::DhtMessage::Response { response, .. } => {
+                                        match response {
+                                            message::ResponseType::Peers { values, nodes, .. } => {
+                                                // Store any peers we found
+                                                if let Some(peer_addrs) = values {
+                                                    for peer_addr in peer_addrs {
+                                                        self.add_peer(info_hash, peer_addr).await;
+                                                        found_peers.push(peer_addr);
+                                                    }
+                                                }
+                                                // Add closer nodes for next iteration
+                                                for (closer_id, closer_addr) in nodes {
+                                                    self.add_node(routing::Node {
+                                                        id: closer_id,
+                                                        addr: closer_addr,
+                                                        last_seen: std::time::Instant::now(),
+                                                    }).await;
+                                                    new_nodes_this_round.push((closer_id, closer_addr));
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            tracing::debug!("Failed to receive from {}: {}", node_addr, e);
+                        }
+                        Err(_) => {
+                            tracing::debug!("Timeout waiting for response from {}", node_addr);
+                        }
+                    }
+                }
             }
             
             // Get new closest nodes (excluding already queried)
@@ -170,7 +240,6 @@ impl DhtManager {
             return Ok(found_peers);
         }
         
-        // No peers found yet - in real implementation, would wait for responses
         Ok(Vec::new())
     }
 
@@ -190,8 +259,25 @@ impl DhtManager {
     }
 
     async fn send_find_node(&self, addr: SocketAddr, target: NodeId) -> Result<(), DhtError> {
-        // TODO: Implement UDP message sending
-        tracing::debug!("Would send find_node to {} for target {}", addr, hex::encode(target));
+        let socket = self.socket.as_ref().ok_or_else(|| {
+            DhtError::Network("UDP socket not set".to_string())
+        })?;
+
+        let msg = message::DhtMessage::Query {
+            transaction_id: rand::random::<u16>().to_be_bytes().to_vec(),
+            query: message::QueryType::FindNode {
+                id: self.node_id,
+                target,
+            },
+        };
+
+        let data = msg.encode()
+            .map_err(|e| DhtError::Protocol(format!("Encode error: {:?}", e)))?;
+
+        socket.send_to(&data, addr).await
+            .map_err(|e| DhtError::Network(e.to_string()))?;
+
+        tracing::debug!("Sent find_node to {} for target {}", addr, hex::encode(target));
         Ok(())
     }
 
