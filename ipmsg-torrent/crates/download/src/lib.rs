@@ -9,6 +9,7 @@ pub mod ed2k;
 pub mod magnet;
 pub mod torrent;
 pub mod xunlei;
+pub mod dht;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

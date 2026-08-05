@@ -22,6 +22,8 @@ pub enum BencodeError {
     InvalidBytes,
     #[error("unexpected character: {0}")]
     UnexpectedChar(char),
+    #[error("invalid format")]
+    InvalidFormat,
 }
 
 pub fn decode(input: &[u8]) -> Result<Bencode, BencodeError> {
