@@ -163,8 +163,11 @@ fn test_download_task_progress() {
         size: 1000,
         downloaded: 500,
         state: DownloadState::Downloading,
+        error: None,
+        speed_bps: 0.0,
         save_path: PathBuf::from("/tmp"),
         created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     };
 
     assert_eq!(task.progress(), 50.0);
@@ -181,8 +184,11 @@ fn test_download_task_progress_zero_size() {
         size: 0,
         downloaded: 0,
         state: DownloadState::Queued,
+        error: None,
+        speed_bps: 0.0,
         save_path: PathBuf::from("/tmp"),
         created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     };
 
     assert_eq!(task.progress(), 0.0);

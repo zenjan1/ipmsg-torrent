@@ -29,6 +29,35 @@ pub fn decode(input: &[u8]) -> Result<Bencode, BencodeError> {
     Ok(value)
 }
 
+/// Encode a Bencode value back to bytes
+pub fn encode(value: &Bencode) -> Vec<u8> {
+    match value {
+        Bencode::Integer(n) => format!("i{}e", n).into_bytes(),
+        Bencode::Bytes(b) => {
+            let mut result = format!("{}:", b.len()).into_bytes();
+            result.extend_from_slice(b);
+            result
+        }
+        Bencode::List(items) => {
+            let mut result = vec![b'l'];
+            for item in items {
+                result.extend(encode(item));
+            }
+            result.push(b'e');
+            result
+        }
+        Bencode::Dict(map) => {
+            let mut result = vec![b'd'];
+            for (key, value) in map {
+                result.extend(encode(&Bencode::Bytes(key.as_bytes().to_vec())));
+                result.extend(encode(value));
+            }
+            result.push(b'e');
+            result
+        }
+    }
+}
+
 fn decode_inner(input: &[u8], pos: usize) -> Result<(Bencode, usize), BencodeError> {
     if pos >= input.len() {
         return Err(BencodeError::UnexpectedEof);

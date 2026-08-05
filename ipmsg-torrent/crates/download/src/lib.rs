@@ -6,6 +6,7 @@
 //! - Xunlei P2SP (HTTP/FTP + P2P hybrid)
 
 pub mod ed2k;
+pub mod magnet;
 pub mod torrent;
 pub mod xunlei;
 
@@ -36,6 +37,7 @@ pub enum DownloadProtocol {
     Torrent,
     Ed2k,
     Xunlei,
+    Magnet,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +91,14 @@ enum TaskParams {
         file_size: u64,
         sources: Vec<xunlei::XunleiSource>,
     },
+    Magnet {
+        #[allow(dead_code)]
+        info_hash: [u8; 20],
+        #[allow(dead_code)]
+        display_name: Option<String>,
+        #[allow(dead_code)]
+        trackers: Vec<String>,
+    },
 }
 
 /// Stored task info for resume
@@ -104,6 +114,7 @@ struct RunningTask {
     params: TaskParams,
     started_at: std::time::Instant,
     last_downloaded: u64,
+    generation: u64,
 }
 
 /// Unified download manager
@@ -111,6 +122,7 @@ pub struct DownloadManager {
     tasks: Arc<Mutex<Vec<DownloadTask>>>,
     running: Arc<Mutex<HashMap<String, RunningTask>>>,
     task_info: Arc<Mutex<HashMap<String, TaskInfo>>>,
+    task_generation: Arc<Mutex<HashMap<String, u64>>>,
     data_dir: PathBuf,
 }
 
@@ -120,6 +132,7 @@ impl DownloadManager {
             tasks: Arc::new(Mutex::new(Vec::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
+            task_generation: Arc::new(Mutex::new(HashMap::new())),
             data_dir,
         }
     }
@@ -154,6 +167,48 @@ impl DownloadManager {
 
         let params = TaskParams::Torrent {
             torrent_path: torrent_path.clone(),
+        };
+
+        self.spawn_task(task_id.clone(), params).await;
+
+        Ok(task_id)
+    }
+
+    /// Add a magnet link download task
+    pub async fn add_magnet(&self, magnet_uri: &str) -> Result<String, DownloadManagerError> {
+        use magnet::MagnetLink;
+
+        let magnet = MagnetLink::parse(magnet_uri)
+            .map_err(|e| DownloadManagerError::Protocol(e.to_string()))?;
+
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+
+        let name = magnet.display_name.clone()
+            .unwrap_or_else(|| format!("magnet-{}", hex::encode(&magnet.info_hash[..8])));
+
+        let task = DownloadTask {
+            id: task_id.clone(),
+            name: name.clone(),
+            protocol: DownloadProtocol::Magnet,
+            size: 0, // Unknown until metadata is fetched
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: self.data_dir.join("downloads"),
+            created_at: now,
+            updated_at: now,
+        };
+
+        self.tasks.lock().await.push(task);
+
+        let params = TaskParams::Magnet {
+            info_hash: magnet.info_hash.try_into().map_err(|_| {
+                DownloadManagerError::Protocol("Invalid info hash length".to_string())
+            })?,
+            display_name: magnet.display_name,
+            trackers: magnet.trackers,
         };
 
         self.spawn_task(task_id.clone(), params).await;
@@ -291,12 +346,21 @@ impl DownloadManager {
 
     /// Spawn the actual download task
     async fn spawn_task(&self, task_id: String, params: TaskParams) {
+        // Increment generation to invalidate any old spawned tasks
+        let generation = {
+            let mut gen_map = self.task_generation.lock().await;
+            let g = gen_map.entry(task_id.clone()).or_insert(0);
+            *g += 1;
+            *g
+        };
+        
         let cancel_token = CancellationToken::new();
         let tasks = self.tasks.clone();
         let running = self.running.clone();
         let data_dir = self.data_dir.clone();
         let task_id_clone = task_id.clone();
         let cancel_clone = cancel_token.clone();
+        let task_generation = self.task_generation.clone();
 
         // Store task info for resume
         {
@@ -314,6 +378,7 @@ impl DownloadManager {
                     params: params.clone(),
                     started_at: std::time::Instant::now(),
                     last_downloaded: 0,
+                    generation,
                 },
             );
         }
@@ -371,9 +436,37 @@ impl DownloadManager {
                         xunlei::XunleiEngine::new(file_name, file_size, sources, download_dir);
                     engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
                 }
+                TaskParams::Magnet {
+                    info_hash: _,
+                    display_name: _,
+                    trackers: _,
+                } => {
+                    // Magnet link handling: fetch metadata first, then download as torrent
+                    let _download_dir = data_dir.join("downloads");
+                    
+                    // For now, we'll create a placeholder task that waits for metadata
+                    // In a full implementation, this would:
+                    // 1. Connect to DHT/tracker to find peers
+                    // 2. Use BEP 0009 to fetch metadata from peers
+                    // 3. Convert to TorrentMeta and start downloading
+                    
+                    // Placeholder: mark as error since full implementation requires DHT
+                    Err("Magnet link support requires DHT implementation (not yet complete)".to_string())
+                }
             };
 
-            // Update task state
+            // Update task state only if we're still the active task (same generation)
+            let my_generation = {
+                let gen_map = task_generation.lock().await;
+                gen_map.get(&task_id_clone).copied().unwrap_or(0)
+            };
+            let is_still_active = {
+                let r = running.lock().await;
+                r.get(&task_id_clone)
+                    .map(|rt| rt.generation == my_generation)
+                    .unwrap_or(false)
+            };
+
             let mut t = tasks.lock().await;
             if let Some(task) = t.iter_mut().find(|t| t.id == task_id_clone) {
                 match result {
@@ -385,7 +478,11 @@ impl DownloadManager {
                     Err(e) => {
                         let err_str = e.to_string();
                         if err_str == "cancelled" {
-                            task.state = DownloadState::Paused;
+                            // Only set Paused if we're still the active task
+                            // (not if we were replaced by a resume)
+                            if is_still_active {
+                                task.state = DownloadState::Paused;
+                            }
                         } else {
                             task.state = DownloadState::Error;
                             task.error = Some(err_str);
@@ -396,8 +493,10 @@ impl DownloadManager {
                 task.updated_at = chrono::Utc::now();
             }
 
-            // Remove from running
-            running.lock().await.remove(&task_id_clone);
+            // Remove from running only if we're still the active task
+            if is_still_active {
+                running.lock().await.remove(&task_id_clone);
+            }
         });
 
         // Spawn speed tracker
@@ -480,11 +579,13 @@ impl DownloadManager {
 
     /// Pause a download task
     pub async fn pause_task(&self, task_id: &str) -> bool {
-        let r = self.running.lock().await;
-        if let Some(rt) = r.get(task_id) {
-            rt.cancel_token.cancel();
+        // Cancel and remove from running immediately
+        {
+            let mut r = self.running.lock().await;
+            if let Some(rt) = r.remove(task_id) {
+                rt.cancel_token.cancel();
+            }
         }
-        drop(r);
 
         let mut tasks = self.tasks.lock().await;
         if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
@@ -498,16 +599,24 @@ impl DownloadManager {
         false
     }
 
+    /// Check if a task can be resumed (has stored params)
+    pub async fn can_resume(&self, task_id: &str) -> bool {
+        let info = self.task_info.lock().await;
+        info.contains_key(task_id)
+    }
+
     /// Resume a paused or failed task by re-spawning the engine
     pub async fn resume_task(&self, task_id: &str) -> bool {
         // Get the task and its params
         let params = {
             let tasks = self.tasks.lock().await;
             let Some(task) = tasks.iter().find(|t| t.id == task_id) else {
+                tracing::debug!(task_id, "resume_task: task not found");
                 return false;
             };
 
             if task.state != DownloadState::Paused && task.state != DownloadState::Error {
+                tracing::debug!(task_id, state = ?task.state, "resume_task: wrong state");
                 return false;
             }
 
@@ -517,12 +626,29 @@ impl DownloadManager {
             drop(r);
 
             if already_running {
-                return false;
+                // Wait a bit for the old task to clean up
+                drop(tasks);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let r = self.running.lock().await;
+                if r.contains_key(task_id) {
+                    tracing::debug!(task_id, "resume_task: still running after wait");
+                    return false;
+                }
+                drop(r);
+                // Re-acquire tasks lock
+                let tasks = self.tasks.lock().await;
+                let Some(task) = tasks.iter().find(|t| t.id == task_id) else {
+                    return false;
+                };
+                if task.state != DownloadState::Paused && task.state != DownloadState::Error {
+                    return false;
+                }
             }
 
             // Get stored params
             let info = self.task_info.lock().await;
             let Some(task_info) = info.get(task_id) else {
+                tracing::debug!(task_id, "resume_task: task_info not found");
                 return false;
             };
             task_info.params.clone()

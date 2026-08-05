@@ -68,7 +68,7 @@ impl XunleiEngine {
             .build()
             .expect("Failed to create HTTP client");
 
-        Self {
+        let mut engine = Self {
             file_name,
             file_size,
             file_hash,
@@ -79,7 +79,14 @@ impl XunleiEngine {
             peer_clients: Arc::new(Mutex::new(HashMap::new())),
             downloaded: 0,
             start_time: None,
+        };
+
+        // Try to load existing progress
+        if let Err(e) = engine.load_progress() {
+            tracing::debug!("No existing progress to load: {}", e);
         }
+
+        engine
     }
 
     /// Start the download process
@@ -332,6 +339,14 @@ impl XunleiEngine {
         self.blocks.iter().all(|b| b.downloaded)
     }
 
+    pub fn get_file_size(&self) -> u64 {
+        self.file_size
+    }
+
+    pub fn get_file_name(&self) -> &str {
+        &self.file_name
+    }
+
     pub fn get_progress(&self) -> Option<DownloadProgress> {
         let start_time = self.start_time?;
         let elapsed = start_time.elapsed().as_secs_f64();
@@ -376,6 +391,106 @@ impl XunleiEngine {
             .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
 
         tracing::info!(path = %output_path.display(), "File saved");
+
+        // Save progress
+        self.save_progress()?;
+
+        Ok(())
+    }
+
+    /// Save download progress to disk
+    fn save_progress(&self) -> Result<(), XunleiDownloadError> {
+        let progress_path = self.download_dir.join(format!("{}.progress", self.file_name));
+        
+        // Create bitmap of downloaded blocks
+        let mut bitmap = Vec::new();
+        for block in &self.blocks {
+            bitmap.push(if block.downloaded { 1u8 } else { 0u8 });
+        }
+
+        let progress_data = serde_cbor::Value::Map({
+            let mut map = std::collections::BTreeMap::new();
+            map.insert(
+                serde_cbor::Value::Text("file_name".to_string()),
+                serde_cbor::Value::Text(self.file_name.clone()),
+            );
+            map.insert(
+                serde_cbor::Value::Text("file_size".to_string()),
+                serde_cbor::Value::Integer(self.file_size as i128),
+            );
+            map.insert(
+                serde_cbor::Value::Text("block_size".to_string()),
+                serde_cbor::Value::Integer(BLOCK_SIZE as i128),
+            );
+            map.insert(
+                serde_cbor::Value::Text("bitmap".to_string()),
+                serde_cbor::Value::Array(bitmap.into_iter().map(|b| serde_cbor::Value::Integer(b as i128)).collect()),
+            );
+            map.insert(
+                serde_cbor::Value::Text("downloaded".to_string()),
+                serde_cbor::Value::Integer(self.downloaded as i128),
+            );
+            map
+        });
+
+        let progress_bytes = serde_cbor::to_vec(&progress_data)
+            .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
+
+        std::fs::write(&progress_path, progress_bytes)
+            .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
+
+        tracing::debug!(path = %progress_path.display(), "Progress saved");
+
+        Ok(())
+    }
+
+    /// Load download progress from disk
+    fn load_progress(&mut self) -> Result<(), XunleiDownloadError> {
+        let progress_path = self.download_dir.join(format!("{}.progress", self.file_name));
+
+        if !progress_path.exists() {
+            return Err(XunleiDownloadError::Io("No progress file found".to_string()));
+        }
+
+        let progress_bytes = std::fs::read(&progress_path)
+            .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
+
+        let progress_data: serde_cbor::Value = serde_cbor::from_slice(&progress_bytes)
+            .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
+
+        // Verify file size matches
+        if let serde_cbor::Value::Map(map) = &progress_data {
+            if let Some(serde_cbor::Value::Integer(saved_size)) = map.get(&serde_cbor::Value::Text("file_size".to_string())) {
+                if *saved_size as u64 != self.file_size {
+                    return Err(XunleiDownloadError::Io("File size mismatch".to_string()));
+                }
+            } else {
+                return Err(XunleiDownloadError::Io("Invalid file_size in progress".to_string()));
+            }
+
+            // Restore block bitmap
+            if let Some(serde_cbor::Value::Array(bitmap)) = map.get(&serde_cbor::Value::Text("bitmap".to_string())) {
+                for (i, block) in self.blocks.iter_mut().enumerate() {
+                    if let Some(serde_cbor::Value::Integer(downloaded)) = bitmap.get(i) {
+                        block.downloaded = *downloaded == 1;
+                    }
+                }
+            }
+
+            // Restore downloaded count
+            if let Some(serde_cbor::Value::Integer(downloaded)) = map.get(&serde_cbor::Value::Text("downloaded".to_string())) {
+                self.downloaded = *downloaded as u64;
+            }
+        } else {
+            return Err(XunleiDownloadError::Io("Invalid progress format".to_string()));
+        }
+
+        tracing::info!(
+            file = %self.file_name,
+            downloaded = self.downloaded,
+            total = self.file_size,
+            "Progress restored"
+        );
 
         Ok(())
     }

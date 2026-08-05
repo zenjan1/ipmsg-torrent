@@ -149,6 +149,24 @@ impl PeerConnection {
         Ok(())
     }
 
+    /// Send raw bytes to the peer (for extended protocol messages)
+    pub async fn send_raw(&mut self, data: &[u8]) -> Result<(), PeerError> {
+        // Prefix with length
+        let len_bytes = (data.len() as u32).to_be_bytes();
+        self.stream.write_all(&len_bytes).await?;
+        self.stream.write_all(data).await?;
+        Ok(())
+    }
+
+    /// Read exact bytes from the peer (for extended protocol messages)
+    pub async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), PeerError> {
+        timeout(Duration::from_secs(30), self.stream.read_exact(buf))
+            .await
+            .map_err(|_| PeerError::Timeout)?
+            .map_err(PeerError::Io)?;
+        Ok(())
+    }
+
     /// Receive a message from the peer
     pub async fn recv(&mut self) -> Result<PeerMessage, PeerError> {
         // Read message length (4 bytes)
