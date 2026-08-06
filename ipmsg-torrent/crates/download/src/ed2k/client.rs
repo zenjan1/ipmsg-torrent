@@ -7,6 +7,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+/// Search type for Ed2k search requests
+#[derive(Debug, Clone, Copy)]
+#[repr(u32)]
+#[allow(dead_code)]
+pub enum SearchType {
+    Local = 1,
+    Global = 2,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Ed2kClientError {
     #[error("IO error: {0}")]
@@ -95,6 +104,51 @@ impl Ed2kClient {
     ) -> Result<(), Ed2kClientError> {
         // GetSources packet: [16 bytes file hash]
         self.send(0x19, &file_hash.0).await?;
+        Ok(())
+    }
+
+    /// Search for files on server
+    #[allow(dead_code)]
+    pub async fn search(
+        &mut self,
+        query: &str,
+        search_type: SearchType,
+    ) -> Result<(), Ed2kClientError> {
+        // Search packet: [4 bytes search type][search data...]
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(search_type as u32).to_le_bytes());
+
+        // Search metadata: type=STRING, name=""
+        payload.push(0x02); // String type
+        payload.push(0x00); // Empty name
+        payload.extend_from_slice(&(query.len() as u16).to_le_bytes());
+        payload.extend_from_slice(query.as_bytes());
+
+        self.send(0x16, &payload).await?; // 0x16 = SearchRequest
+        Ok(())
+    }
+
+    /// Request server list from current server
+    #[allow(dead_code)]
+    pub async fn request_server_list(&mut self) -> Result<(), Ed2kClientError> {
+        // ServerListRequest: empty payload
+        self.send(0x14, &[]).await?; // 0x14 = ServerListRequest
+        Ok(())
+    }
+
+    /// Request server statistics
+    #[allow(dead_code)]
+    pub async fn request_stats(&mut self) -> Result<(), Ed2kClientError> {
+        // StatGetRequest: empty payload
+        self.send(0x96, &[]).await?; // 0x96 = StatGetRequest
+        Ok(())
+    }
+
+    /// Disconnect from server
+    #[allow(dead_code)]
+    pub async fn disconnect(&mut self) -> Result<(), Ed2kClientError> {
+        // Disconnect: empty payload
+        self.send(0x05, &[]).await?; // 0x05 = Disconnect
         Ok(())
     }
 
