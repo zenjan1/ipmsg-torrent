@@ -86,6 +86,10 @@ enum Command {
     Dlr {
         task_id: String,
     },
+    /// Set download speed limit (e.g., "100KB/s", "1MB/s", "0" for unlimited)
+    DlSpeed {
+        limit: String,
+    },
     Block {
         peer: String,
     },
@@ -230,6 +234,15 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlr <task_id>".to_string())
             }
         }
+        "dlspeed" | "dl-speed" => {
+            if parts.len() >= 2 {
+                Command::DlSpeed {
+                    limit: parts[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlspeed <limit>".to_string())
+            }
+        }
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -286,6 +299,7 @@ fn command_help() -> String {
         "/dls               - List download tasks",
         "/dlp <task_id>     - Pause a download task",
         "/dlr <task_id>     - Resume a download task",
+        "/dlspeed <limit>   - Set download speed limit (e.g., 100KB/s, 1MB/s, 0=unlimited)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -1093,6 +1107,36 @@ async fn handle_command(
                 );
             }
         }
+        Command::DlSpeed { limit } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            // Parse speed limit string
+            let bytes_per_sec = parse_speed_limit(&limit);
+            let mut s = state.lock().await;
+            match bytes_per_sec {
+                Some(bps) => {
+                    download_manager.set_global_speed_limit(bps).await;
+                    let limit_str = if bps == 0 {
+                        "unlimited".to_string()
+                    } else {
+                        format!("{:.1} KB/s", bps as f64 / 1024.0)
+                    };
+                    s.add_system_message(
+                        "main",
+                        format!("Download speed limit set to {}", limit_str),
+                    );
+                }
+                None => {
+                    s.add_system_message(
+                        "main",
+                        "Invalid speed limit format. Use: 100KB/s, 1MB/s, or 0 for unlimited"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {
                 peer_id: peer.clone(),
@@ -1212,6 +1256,46 @@ fn restore_terminal(mut terminal: Terminal<CrosstermBackend<io::Stdout>>) -> io:
         crossterm::terminal::LeaveAlternateScreen
     )?;
     Ok(())
+}
+
+/// Parse speed limit string like "100KB/s", "1MB/s", "0" into bytes per second
+fn parse_speed_limit(input: &str) -> Option<u64> {
+    let input = input.trim().to_lowercase();
+
+    // Handle "0" or "unlimited"
+    if input == "0" || input == "unlimited" || input == "none" {
+        return Some(0);
+    }
+
+    // Try to parse with unit
+    let (num_str, multiplier) = if input.ends_with("kb/s") || input.ends_with("kbs") {
+        (input.trim_end_matches("/s").trim_end_matches("s"), 1024.0)
+    } else if input.ends_with("mb/s") || input.ends_with("mbs") {
+        (
+            input.trim_end_matches("/s").trim_end_matches("s"),
+            1024.0 * 1024.0,
+        )
+    } else if input.ends_with("gb/s") || input.ends_with("gbs") {
+        (
+            input.trim_end_matches("/s").trim_end_matches("s"),
+            1024.0 * 1024.0 * 1024.0,
+        )
+    } else if input.ends_with("b/s") || input.ends_with("bs") {
+        (input.trim_end_matches("/s").trim_end_matches("s"), 1.0)
+    } else {
+        // Try parsing as raw bytes
+        (input.as_str(), 1.0)
+    };
+
+    // Extract numeric part
+    let num_str = num_str.trim();
+    let num: f64 = num_str.parse().ok()?;
+
+    if num < 0.0 {
+        return None;
+    }
+
+    Some((num * multiplier) as u64)
 }
 
 fn draw(

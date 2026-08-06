@@ -11,6 +11,7 @@ pub mod ed2k;
 pub mod magnet;
 pub mod metadata_cache;
 pub mod progress;
+pub mod rate_limiter;
 pub mod task_queue;
 pub mod torrent;
 pub mod xunlei;
@@ -21,6 +22,8 @@ use std::sync::Arc;
 use task_queue::{load_task_queue, save_task_queue};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+pub use rate_limiter::{DownloadRateController, RateLimiter};
 
 /// Unified download task
 #[derive(Debug, Clone)]
@@ -149,6 +152,8 @@ pub struct DownloadManager {
     dht: Arc<dht::DhtManager>,
     /// Maximum concurrent downloads (0 = unlimited)
     max_concurrent: usize,
+    /// Global download rate limiter
+    rate_limiter: Arc<DownloadRateController>,
 }
 
 impl DownloadManager {
@@ -161,6 +166,7 @@ impl DownloadManager {
             data_dir,
             dht: Arc::new(dht::DhtManager::new()),
             max_concurrent: 0, // 0 = unlimited
+            rate_limiter: Arc::new(DownloadRateController::new(0, 0)),
         }
     }
 
@@ -184,12 +190,29 @@ impl DownloadManager {
             data_dir,
             dht: Arc::new(dht::DhtManager::new()),
             max_concurrent: 0,
+            rate_limiter: Arc::new(DownloadRateController::new(0, 0)),
         }
     }
 
     /// Set maximum concurrent downloads (0 = unlimited)
     pub fn set_max_concurrent(&mut self, max: usize) {
         self.max_concurrent = max;
+    }
+
+    /// Set global download speed limit in bytes/sec (0 = unlimited).
+    /// Shared across all download tasks.
+    pub async fn set_global_speed_limit(&self, bytes_per_sec: u64) {
+        self.rate_limiter.set_global_limit(bytes_per_sec).await;
+    }
+
+    /// Set per-task download speed limit in bytes/sec (0 = unlimited).
+    pub async fn set_task_speed_limit(&self, bytes_per_sec: u64) {
+        self.rate_limiter.set_task_limit(bytes_per_sec).await;
+    }
+
+    /// Get the rate controller handle.
+    pub fn rate_limiter(&self) -> &Arc<DownloadRateController> {
+        &self.rate_limiter
     }
 
     /// Get current running task count
@@ -601,6 +624,7 @@ impl DownloadManager {
         let task_id_clone = task_id.clone();
         let cancel_clone = cancel_token.clone();
         let task_generation = self.task_generation.clone();
+        let rate_limiter = Some(self.rate_limiter.clone());
 
         // Store task info for resume
         {
@@ -647,6 +671,10 @@ impl DownloadManager {
                             Ok(meta) => {
                                 let download_dir = data_dir.join("downloads");
                                 let mut engine = torrent::TorrentEngine::new(meta, download_dir);
+                                // Apply rate limiting
+                                if let Some(ref limiter) = rate_limiter {
+                                    engine.set_rate_limiter(limiter.per_task().clone());
+                                }
                                 engine
                                     .download(Some(cancel_clone))
                                     .await
@@ -671,6 +699,10 @@ impl DownloadManager {
                         download_dir,
                         servers,
                     );
+                    // Apply rate limiting
+                    if let Some(ref limiter) = rate_limiter {
+                        engine.set_rate_limiter(limiter.per_task().clone());
+                    }
                     engine
                         .download(Some(cancel_clone))
                         .await
@@ -684,6 +716,10 @@ impl DownloadManager {
                     let download_dir = data_dir.join("downloads");
                     let mut engine =
                         xunlei::XunleiEngine::new(file_name, file_size, sources, download_dir);
+                    // Apply rate limiting
+                    if let Some(ref limiter) = rate_limiter {
+                        engine.set_rate_limiter(limiter.per_task().clone());
+                    }
                     engine
                         .download(Some(cancel_clone))
                         .await

@@ -2,6 +2,7 @@
 
 use super::peer::PeerClient;
 use super::protocol::{DownloadProgress, P2spBlock, XunleiSource};
+use crate::rate_limiter::RateLimiter;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -34,6 +35,8 @@ pub struct XunleiEngine {
     start_time: Option<std::time::Instant>,
     /// File handle for streaming writes (avoids accumulating all data in memory)
     output_file: Option<tokio::fs::File>,
+    /// Optional rate limiter for speed control
+    rate_limiter: Option<RateLimiter>,
 }
 
 impl XunleiEngine {
@@ -83,6 +86,7 @@ impl XunleiEngine {
             downloaded: 0,
             start_time: None,
             output_file: None,
+            rate_limiter: None,
         };
 
         // Try to load existing progress
@@ -91,6 +95,11 @@ impl XunleiEngine {
         }
 
         engine
+    }
+
+    /// Set rate limiter for speed control
+    pub fn set_rate_limiter(&mut self, limiter: RateLimiter) {
+        self.rate_limiter = Some(limiter);
     }
 
     /// Start the download process
@@ -247,6 +256,11 @@ impl XunleiEngine {
         for (block_idx, task) in tasks {
             match task.await {
                 Ok(Ok(data)) => {
+                    // Apply rate limiting before writing
+                    if let Some(ref limiter) = self.rate_limiter {
+                        limiter.acquire(data.len() as u64).await;
+                    }
+
                     // Write block directly to file at the correct offset
                     if let Some(ref mut file) = self.output_file {
                         use tokio::io::AsyncWriteExt;

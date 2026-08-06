@@ -4,6 +4,7 @@ use super::meta::TorrentMeta;
 use super::peer::{PeerConnection, PeerMessage};
 use super::tracker::{AnnounceEvent, HttpTracker};
 use crate::progress::{self, ProgressSnapshot};
+use crate::rate_limiter::RateLimiter;
 use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -160,6 +161,8 @@ pub struct TorrentEngine {
     uploaded: u64,
     /// Progress snapshot for resume support
     progress: ProgressSnapshot,
+    /// Optional rate limiter for speed control
+    rate_limiter: Option<RateLimiter>,
 }
 
 impl TorrentEngine {
@@ -232,7 +235,13 @@ impl TorrentEngine {
             downloaded,
             uploaded: 0,
             progress,
+            rate_limiter: None,
         }
+    }
+
+    /// Set rate limiter for speed control
+    pub fn set_rate_limiter(&mut self, limiter: RateLimiter) {
+        self.rate_limiter = Some(limiter);
     }
 
     fn generate_peer_id() -> [u8; 20] {
@@ -521,6 +530,11 @@ impl TorrentEngine {
                 }
             }
             PeerMessage::Piece { index, begin, data } => {
+                // Apply rate limiting before processing
+                if let Some(ref limiter) = self.rate_limiter {
+                    limiter.acquire(data.len() as u64).await;
+                }
+
                 tracing::debug!(
                     piece = index,
                     offset = begin,

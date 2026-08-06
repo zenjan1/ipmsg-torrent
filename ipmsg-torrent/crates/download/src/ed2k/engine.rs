@@ -5,6 +5,7 @@ use super::peer_cache;
 use super::protocol::{ED2K_BLOCK_SIZE, ED2K_CHUNK_SIZE, Ed2kFileHash};
 use super::server_cache;
 use crate::progress::{self, ProgressSnapshot};
+use crate::rate_limiter::RateLimiter;
 use md4::{Digest, Md4};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -89,6 +90,8 @@ pub struct Ed2kEngine {
     cached_peers: Vec<SocketAddr>,
     /// Cached servers loaded from disk
     cached_servers: Vec<SocketAddr>,
+    /// Optional rate limiter for speed control
+    rate_limiter: Option<RateLimiter>,
 }
 
 impl Ed2kEngine {
@@ -178,6 +181,7 @@ impl Ed2kEngine {
             progress,
             cached_peers,
             cached_servers,
+            rate_limiter: None,
         }
     }
 
@@ -194,6 +198,11 @@ impl Ed2kEngine {
     /// Whether all chunks have been downloaded
     pub fn is_download_complete(&self) -> bool {
         self.is_complete()
+    }
+
+    /// Set rate limiter for speed control
+    pub fn set_rate_limiter(&mut self, limiter: RateLimiter) {
+        self.rate_limiter = Some(limiter);
     }
 
     /// Update chunk hash from peer's HashSet message
@@ -456,6 +465,12 @@ impl Ed2kEngine {
             match tokio::time::timeout(Duration::from_millis(100), peer.receive_block()).await {
                 Ok(Ok((_hash, offset, data))) => {
                     let block_size = data.len() as u64;
+
+                    // Apply rate limiting before processing
+                    if let Some(ref limiter) = self.rate_limiter {
+                        limiter.acquire(block_size).await;
+                    }
+
                     // Determine which chunk this block belongs to
                     let chunk_idx = (offset / ED2K_CHUNK_SIZE) as u32;
                     let chunk_offset_in_chunk = offset % ED2K_CHUNK_SIZE;
