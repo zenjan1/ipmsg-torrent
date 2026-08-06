@@ -400,8 +400,10 @@ impl XunleiEngine {
 
     /// Save download progress to disk
     fn save_progress(&self) -> Result<(), XunleiDownloadError> {
-        let progress_path = self.download_dir.join(format!("{}.progress", self.file_name));
-        
+        let progress_path = self
+            .download_dir
+            .join(format!("{}.progress", self.file_name));
+
         // Create bitmap of downloaded blocks
         let mut bitmap = Vec::new();
         for block in &self.blocks {
@@ -424,7 +426,12 @@ impl XunleiEngine {
             );
             map.insert(
                 serde_cbor::Value::Text("bitmap".to_string()),
-                serde_cbor::Value::Array(bitmap.into_iter().map(|b| serde_cbor::Value::Integer(b as i128)).collect()),
+                serde_cbor::Value::Array(
+                    bitmap
+                        .into_iter()
+                        .map(|b| serde_cbor::Value::Integer(b as i128))
+                        .collect(),
+                ),
             );
             map.insert(
                 serde_cbor::Value::Text("downloaded".to_string()),
@@ -446,30 +453,40 @@ impl XunleiEngine {
 
     /// Load download progress from disk
     fn load_progress(&mut self) -> Result<(), XunleiDownloadError> {
-        let progress_path = self.download_dir.join(format!("{}.progress", self.file_name));
+        let progress_path = self
+            .download_dir
+            .join(format!("{}.progress", self.file_name));
 
         if !progress_path.exists() {
-            return Err(XunleiDownloadError::Io("No progress file found".to_string()));
+            return Err(XunleiDownloadError::Io(
+                "No progress file found".to_string(),
+            ));
         }
 
-        let progress_bytes = std::fs::read(&progress_path)
-            .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
+        let progress_bytes =
+            std::fs::read(&progress_path).map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
 
         let progress_data: serde_cbor::Value = serde_cbor::from_slice(&progress_bytes)
             .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
 
         // Verify file size matches
         if let serde_cbor::Value::Map(map) = &progress_data {
-            if let Some(serde_cbor::Value::Integer(saved_size)) = map.get(&serde_cbor::Value::Text("file_size".to_string())) {
+            if let Some(serde_cbor::Value::Integer(saved_size)) =
+                map.get(&serde_cbor::Value::Text("file_size".to_string()))
+            {
                 if *saved_size as u64 != self.file_size {
                     return Err(XunleiDownloadError::Io("File size mismatch".to_string()));
                 }
             } else {
-                return Err(XunleiDownloadError::Io("Invalid file_size in progress".to_string()));
+                return Err(XunleiDownloadError::Io(
+                    "Invalid file_size in progress".to_string(),
+                ));
             }
 
             // Restore block bitmap
-            if let Some(serde_cbor::Value::Array(bitmap)) = map.get(&serde_cbor::Value::Text("bitmap".to_string())) {
+            if let Some(serde_cbor::Value::Array(bitmap)) =
+                map.get(&serde_cbor::Value::Text("bitmap".to_string()))
+            {
                 for (i, block) in self.blocks.iter_mut().enumerate() {
                     if let Some(serde_cbor::Value::Integer(downloaded)) = bitmap.get(i) {
                         block.downloaded = *downloaded == 1;
@@ -478,11 +495,15 @@ impl XunleiEngine {
             }
 
             // Restore downloaded count
-            if let Some(serde_cbor::Value::Integer(downloaded)) = map.get(&serde_cbor::Value::Text("downloaded".to_string())) {
+            if let Some(serde_cbor::Value::Integer(downloaded)) =
+                map.get(&serde_cbor::Value::Text("downloaded".to_string()))
+            {
                 self.downloaded = *downloaded as u64;
             }
         } else {
-            return Err(XunleiDownloadError::Io("Invalid progress format".to_string()));
+            return Err(XunleiDownloadError::Io(
+                "Invalid progress format".to_string(),
+            ));
         }
 
         tracing::info!(

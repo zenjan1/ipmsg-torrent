@@ -1,10 +1,10 @@
 //! DHT node implementation
-//! 
+//!
 //! Handles UDP communication and message processing
 
-use super::{DhtError, DhtManager, InfoHash, NodeId};
 use super::message::{DhtMessage, QueryType, ResponseType};
 use super::routing::Node;
+use super::{DhtError, DhtManager, InfoHash, NodeId};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -26,9 +26,9 @@ impl DhtNode {
         let socket = UdpSocket::bind(addr)
             .await
             .map_err(|e| DhtError::Network(e.to_string()))?;
-        
+
         tracing::info!("DHT node bound to {}", socket.local_addr().unwrap());
-        
+
         Ok(Self {
             socket: Arc::new(socket),
             manager,
@@ -51,20 +51,22 @@ impl DhtNode {
 
         tokio::spawn(async move {
             let mut buf = vec![0u8; UDP_BUFFER_SIZE];
-            
+
             loop {
                 let should_stop = {
                     let r = running.lock().await;
                     !*r
                 };
-                
+
                 if should_stop {
                     break;
                 }
 
                 match socket.recv_from(&mut buf).await {
                     Ok((len, addr)) => {
-                        if let Err(e) = Self::handle_message(&manager, &socket, &buf[..len], addr).await {
+                        if let Err(e) =
+                            Self::handle_message(&manager, &socket, &buf[..len], addr).await
+                        {
                             tracing::debug!("Failed to handle message from {}: {}", addr, e);
                         }
                     }
@@ -95,13 +97,23 @@ impl DhtNode {
             .map_err(|e| DhtError::Protocol(format!("Decode error: {:?}", e)))?;
 
         match msg {
-            DhtMessage::Query { transaction_id, query } => {
+            DhtMessage::Query {
+                transaction_id,
+                query,
+            } => {
                 Self::handle_query(manager, socket, &transaction_id, query, from).await?;
             }
-            DhtMessage::Response { transaction_id, response } => {
+            DhtMessage::Response {
+                transaction_id,
+                response,
+            } => {
                 Self::handle_response(manager, &transaction_id, response, from).await?;
             }
-            DhtMessage::Error { transaction_id: _, code, message } => {
+            DhtMessage::Error {
+                transaction_id: _,
+                code,
+                message,
+            } => {
                 tracing::warn!("DHT error from {}: {} (code {})", from, message, code);
             }
         }
@@ -122,24 +134,31 @@ impl DhtNode {
                 // Respond with pong
                 let response = DhtMessage::Response {
                     transaction_id: transaction_id.to_vec(),
-                    response: ResponseType::Pong { id: manager.node_id() },
+                    response: ResponseType::Pong {
+                        id: manager.node_id(),
+                    },
                 };
-                let data = response.encode()
+                let data = response
+                    .encode()
                     .map_err(|e| DhtError::Protocol(format!("Encode error: {:?}", e)))?;
-                socket.send_to(&data, from).await
+                socket
+                    .send_to(&data, from)
+                    .await
                     .map_err(|e| DhtError::Network(e.to_string()))?;
-                
+
                 // Add sender to routing table
-                manager.add_node(Node {
-                    id,
-                    addr: from,
-                    last_seen: std::time::Instant::now(),
-                }).await;
+                manager
+                    .add_node(Node {
+                        id,
+                        addr: from,
+                        last_seen: std::time::Instant::now(),
+                    })
+                    .await;
             }
             QueryType::FindNode { id, target } => {
                 // Find closest nodes to target
                 let closest = manager.closest_nodes(&target, 8).await;
-                
+
                 let response = DhtMessage::Response {
                     transaction_id: transaction_id.to_vec(),
                     response: ResponseType::Nodes {
@@ -147,23 +166,28 @@ impl DhtNode {
                         nodes: closest,
                     },
                 };
-                let data = response.encode()
+                let data = response
+                    .encode()
                     .map_err(|e| DhtError::Protocol(format!("Encode error: {:?}", e)))?;
-                socket.send_to(&data, from).await
+                socket
+                    .send_to(&data, from)
+                    .await
                     .map_err(|e| DhtError::Network(e.to_string()))?;
-                
+
                 // Add sender to routing table
-                manager.add_node(Node {
-                    id,
-                    addr: from,
-                    last_seen: std::time::Instant::now(),
-                }).await;
+                manager
+                    .add_node(Node {
+                        id,
+                        addr: from,
+                        last_seen: std::time::Instant::now(),
+                    })
+                    .await;
             }
             QueryType::GetPeers { id, info_hash } => {
                 // Check if we have peers for this info_hash
                 let peers = manager.get_peers(&info_hash).await;
                 let token = manager.generate_token(from).await;
-                
+
                 let response = if peers.is_empty() {
                     // Return closest nodes instead
                     let closest = manager.closest_nodes(&info_hash, 8).await;
@@ -187,20 +211,31 @@ impl DhtNode {
                         },
                     }
                 };
-                
-                let data = response.encode()
+
+                let data = response
+                    .encode()
                     .map_err(|e| DhtError::Protocol(format!("Encode error: {:?}", e)))?;
-                socket.send_to(&data, from).await
+                socket
+                    .send_to(&data, from)
+                    .await
                     .map_err(|e| DhtError::Network(e.to_string()))?;
-                
+
                 // Add sender to routing table
-                manager.add_node(Node {
-                    id,
-                    addr: from,
-                    last_seen: std::time::Instant::now(),
-                }).await;
+                manager
+                    .add_node(Node {
+                        id,
+                        addr: from,
+                        last_seen: std::time::Instant::now(),
+                    })
+                    .await;
             }
-            QueryType::AnnouncePeer { id, info_hash, port, token, implied_port } => {
+            QueryType::AnnouncePeer {
+                id,
+                info_hash,
+                port,
+                token,
+                implied_port,
+            } => {
                 // Verify token
                 if !manager.verify_token(&token, from).await {
                     let error = DhtMessage::Error {
@@ -208,22 +243,25 @@ impl DhtNode {
                         code: 203,
                         message: "Invalid token".to_string(),
                     };
-                    let data = error.encode()
+                    let data = error
+                        .encode()
                         .map_err(|e| DhtError::Protocol(format!("Encode error: {:?}", e)))?;
-                    socket.send_to(&data, from).await
+                    socket
+                        .send_to(&data, from)
+                        .await
                         .map_err(|e| DhtError::Network(e.to_string()))?;
                     return Ok(());
                 }
-                
+
                 let peer_addr = if implied_port {
                     from
                 } else {
                     SocketAddr::new(from.ip(), port)
                 };
-                
+
                 // Store peer
                 manager.add_peer(info_hash, peer_addr).await;
-                
+
                 // Send success response
                 let response = DhtMessage::Response {
                     transaction_id: transaction_id.to_vec(),
@@ -231,17 +269,22 @@ impl DhtNode {
                         id: manager.node_id(),
                     },
                 };
-                let data = response.encode()
+                let data = response
+                    .encode()
                     .map_err(|e| DhtError::Protocol(format!("Encode error: {:?}", e)))?;
-                socket.send_to(&data, from).await
+                socket
+                    .send_to(&data, from)
+                    .await
                     .map_err(|e| DhtError::Network(e.to_string()))?;
-                
+
                 // Add sender to routing table
-                manager.add_node(Node {
-                    id,
-                    addr: from,
-                    last_seen: std::time::Instant::now(),
-                }).await;
+                manager
+                    .add_node(Node {
+                        id,
+                        addr: from,
+                        last_seen: std::time::Instant::now(),
+                    })
+                    .await;
             }
         }
 
@@ -258,45 +301,60 @@ impl DhtNode {
         match response {
             ResponseType::Pong { id } => {
                 // Add node to routing table
-                manager.add_node(Node {
-                    id,
-                    addr: from,
-                    last_seen: std::time::Instant::now(),
-                }).await;
+                manager
+                    .add_node(Node {
+                        id,
+                        addr: from,
+                        last_seen: std::time::Instant::now(),
+                    })
+                    .await;
             }
             ResponseType::Nodes { id, nodes } => {
                 // Add all nodes to routing table
-                manager.add_node(Node {
-                    id,
-                    addr: from,
-                    last_seen: std::time::Instant::now(),
-                }).await;
-                
-                for (node_id, node_addr) in nodes {
-                    manager.add_node(Node {
-                        id: node_id,
-                        addr: node_addr,
+                manager
+                    .add_node(Node {
+                        id,
+                        addr: from,
                         last_seen: std::time::Instant::now(),
-                    }).await;
+                    })
+                    .await;
+
+                for (node_id, node_addr) in nodes {
+                    manager
+                        .add_node(Node {
+                            id: node_id,
+                            addr: node_addr,
+                            last_seen: std::time::Instant::now(),
+                        })
+                        .await;
                 }
             }
-            ResponseType::Peers { id, token: _, values, nodes } => {
+            ResponseType::Peers {
+                id,
+                token: _,
+                values,
+                nodes,
+            } => {
                 // Add node to routing table
-                manager.add_node(Node {
-                    id,
-                    addr: from,
-                    last_seen: std::time::Instant::now(),
-                }).await;
-                
+                manager
+                    .add_node(Node {
+                        id,
+                        addr: from,
+                        last_seen: std::time::Instant::now(),
+                    })
+                    .await;
+
                 // Add closer nodes
                 for (node_id, node_addr) in nodes {
-                    manager.add_node(Node {
-                        id: node_id,
-                        addr: node_addr,
-                        last_seen: std::time::Instant::now(),
-                    }).await;
+                    manager
+                        .add_node(Node {
+                            id: node_id,
+                            addr: node_addr,
+                            last_seen: std::time::Instant::now(),
+                        })
+                        .await;
                 }
-                
+
                 // Store peers if we got any
                 if let Some(peers) = values {
                     // TODO: Match peers to pending queries
@@ -304,11 +362,13 @@ impl DhtNode {
                 }
             }
             ResponseType::AnnounceSuccess { id } => {
-                manager.add_node(Node {
-                    id,
-                    addr: from,
-                    last_seen: std::time::Instant::now(),
-                }).await;
+                manager
+                    .add_node(Node {
+                        id,
+                        addr: from,
+                        last_seen: std::time::Instant::now(),
+                    })
+                    .await;
             }
         }
 
@@ -323,13 +383,16 @@ impl DhtNode {
                 id: self.manager.node_id(),
             },
         };
-        
-        let data = msg.encode()
+
+        let data = msg
+            .encode()
             .map_err(|e| DhtError::Protocol(format!("Encode error: {:?}", e)))?;
-        
-        self.socket.send_to(&data, addr).await
+
+        self.socket
+            .send_to(&data, addr)
+            .await
             .map_err(|e| DhtError::Network(e.to_string()))?;
-        
+
         Ok(())
     }
 
@@ -342,13 +405,16 @@ impl DhtNode {
                 target,
             },
         };
-        
-        let data = msg.encode()
+
+        let data = msg
+            .encode()
             .map_err(|e| DhtError::Protocol(format!("Encode error: {:?}", e)))?;
-        
-        self.socket.send_to(&data, addr).await
+
+        self.socket
+            .send_to(&data, addr)
+            .await
             .map_err(|e| DhtError::Network(e.to_string()))?;
-        
+
         Ok(())
     }
 
@@ -361,13 +427,16 @@ impl DhtNode {
                 info_hash,
             },
         };
-        
-        let data = msg.encode()
+
+        let data = msg
+            .encode()
             .map_err(|e| DhtError::Protocol(format!("Encode error: {:?}", e)))?;
-        
-        self.socket.send_to(&data, addr).await
+
+        self.socket
+            .send_to(&data, addr)
+            .await
             .map_err(|e| DhtError::Network(e.to_string()))?;
-        
+
         Ok(())
     }
 
@@ -389,13 +458,16 @@ impl DhtNode {
                 implied_port: false,
             },
         };
-        
-        let data = msg.encode()
+
+        let data = msg
+            .encode()
             .map_err(|e| DhtError::Protocol(format!("Encode error: {:?}", e)))?;
-        
-        self.socket.send_to(&data, addr).await
+
+        self.socket
+            .send_to(&data, addr)
+            .await
             .map_err(|e| DhtError::Network(e.to_string()))?;
-        
+
         Ok(())
     }
 }

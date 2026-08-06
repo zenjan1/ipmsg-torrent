@@ -1,17 +1,17 @@
 //! DHT (Distributed Hash Table) implementation for BitTorrent
-//! 
+//!
 //! Implements BEP 0005: DHT Protocol
 //! Allows finding peers and fetching metadata without trackers
 
+pub mod message;
 pub mod node;
 pub mod routing;
-pub mod message;
 
-use std::net::SocketAddr;
 use std::collections::HashMap;
-use tokio::sync::Mutex;
-use tokio::net::UdpSocket;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::net::UdpSocket;
+use tokio::sync::Mutex;
 
 /// DHT node ID (20 bytes)
 pub type NodeId = [u8; 20];
@@ -100,10 +100,10 @@ impl DhtManager {
         for byte in token.iter_mut() {
             *byte = rand::random();
         }
-        
+
         let mut tokens = self.tokens.lock().await;
         tokens.insert(addr, token.clone());
-        
+
         token
     }
 
@@ -116,7 +116,7 @@ impl DhtManager {
     /// Bootstrap the DHT by contacting known nodes
     pub async fn bootstrap(&self, bootstrap_nodes: &[SocketAddr]) -> Result<(), DhtError> {
         tracing::info!("Bootstrapping DHT with {} nodes", bootstrap_nodes.len());
-        
+
         // Send find_node queries to bootstrap nodes
         for addr in bootstrap_nodes {
             if let Err(e) = self.send_find_node(*addr, self.node_id).await {
@@ -130,36 +130,37 @@ impl DhtManager {
     /// Find peers for a given info hash using iterative lookup
     pub async fn find_peers(&self, info_hash: InfoHash) -> Result<Vec<SocketAddr>, DhtError> {
         tracing::info!("Finding peers for info hash: {}", hex::encode(info_hash));
-        
+
         // Get peers from local storage
         let peers = self.get_peers(&info_hash).await;
         if !peers.is_empty() {
             return Ok(peers);
         }
-        
-        let socket = self.socket.as_ref().ok_or_else(|| {
-            DhtError::Network("UDP socket not set".to_string())
-        })?;
-        
+
+        let socket = self
+            .socket
+            .as_ref()
+            .ok_or_else(|| DhtError::Network("UDP socket not set".to_string()))?;
+
         // Iterative lookup: query closest nodes and collect their responses
         let mut queried_nodes = std::collections::HashSet::new();
         let mut found_peers = Vec::new();
         let mut closest_nodes = self.closest_nodes(&info_hash, 8).await;
-        
+
         // Iterative lookup loop (max 3 rounds)
         for _round in 0..3 {
             if closest_nodes.is_empty() {
                 break;
             }
-            
+
             let mut new_nodes_this_round = Vec::new();
-            
+
             for (node_id, node_addr) in &closest_nodes {
                 if queried_nodes.contains(node_id) {
                     continue;
                 }
                 queried_nodes.insert(*node_id);
-                
+
                 // Send get_peers query
                 let msg = message::DhtMessage::Query {
                     transaction_id: rand::random::<u16>().to_be_bytes().to_vec(),
@@ -168,25 +169,29 @@ impl DhtManager {
                         info_hash,
                     },
                 };
-                
+
                 if let Ok(data) = msg.encode() {
                     if let Err(e) = socket.send_to(&data, node_addr).await {
                         tracing::debug!("Failed to send get_peers to {}: {}", node_addr, e);
                         continue;
                     }
-                    
+
                     // Wait for response with timeout
                     let mut buf = vec![0u8; 65535];
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(2),
-                        socket.recv_from(&mut buf)
-                    ).await {
+                        socket.recv_from(&mut buf),
+                    )
+                    .await
+                    {
                         Ok(Ok((len, _from_addr))) => {
                             if let Ok(response) = message::DhtMessage::decode(&buf[..len]) {
                                 match response {
                                     message::DhtMessage::Response { response, .. } => {
                                         match response {
-                                            message::ResponseType::Peers { values, nodes, .. } => {
+                                            message::ResponseType::Peers {
+                                                values, nodes, ..
+                                            } => {
                                                 // Store any peers we found
                                                 if let Some(peer_addrs) = values {
                                                     for peer_addr in peer_addrs {
@@ -200,8 +205,10 @@ impl DhtManager {
                                                         id: closer_id,
                                                         addr: closer_addr,
                                                         last_seen: std::time::Instant::now(),
-                                                    }).await;
-                                                    new_nodes_this_round.push((closer_id, closer_addr));
+                                                    })
+                                                    .await;
+                                                    new_nodes_this_round
+                                                        .push((closer_id, closer_addr));
                                                 }
                                             }
                                             _ => {}
@@ -220,7 +227,7 @@ impl DhtManager {
                     }
                 }
             }
-            
+
             // Get new closest nodes (excluding already queried)
             let all_closest = self.closest_nodes(&info_hash, 16).await;
             let new_nodes: Vec<_> = all_closest
@@ -228,46 +235,49 @@ impl DhtManager {
                 .filter(|(id, _)| !queried_nodes.contains(id))
                 .take(8)
                 .collect();
-            
+
             if new_nodes.is_empty() {
                 break;
             }
             closest_nodes = new_nodes;
         }
-        
+
         // Return any peers we found
         if !found_peers.is_empty() {
             return Ok(found_peers);
         }
-        
+
         Ok(Vec::new())
     }
 
     /// Fetch torrent metadata from DHT peers
     pub async fn fetch_metadata(&self, info_hash: InfoHash) -> Result<Vec<u8>, DhtError> {
-        tracing::info!("Fetching metadata for info hash: {}", hex::encode(info_hash));
-        
+        tracing::info!(
+            "Fetching metadata for info hash: {}",
+            hex::encode(info_hash)
+        );
+
         // Get peers that might have the metadata
         let peers = self.find_peers(info_hash).await?;
         if peers.is_empty() {
             return Err(DhtError::NoPeers);
         }
-        
+
         tracing::info!("Found {} peers, attempting metadata exchange", peers.len());
-        
+
         // Try to fetch metadata from each peer
         let mut fetcher = crate::torrent::metadata::MetadataFetcher::new(info_hash);
         let mut last_error = None;
-        
+
         for peer_addr in &peers {
             tracing::debug!("Trying peer {} for metadata", peer_addr);
-            
+
             // Generate a random peer ID for this connection
             let mut peer_id = [0u8; 20];
             for byte in peer_id.iter_mut() {
                 *byte = rand::random();
             }
-            
+
             match fetcher.fetch_from_peer(*peer_addr, peer_id).await {
                 Ok(metadata_bytes) => {
                     tracing::info!("Successfully fetched metadata from {}", peer_addr);
@@ -280,7 +290,7 @@ impl DhtManager {
                 }
             }
         }
-        
+
         Err(DhtError::Protocol(format!(
             "Failed to fetch metadata from all {} peers: {:?}",
             peers.len(),
@@ -289,9 +299,10 @@ impl DhtManager {
     }
 
     async fn send_find_node(&self, addr: SocketAddr, target: NodeId) -> Result<(), DhtError> {
-        let socket = self.socket.as_ref().ok_or_else(|| {
-            DhtError::Network("UDP socket not set".to_string())
-        })?;
+        let socket = self
+            .socket
+            .as_ref()
+            .ok_or_else(|| DhtError::Network("UDP socket not set".to_string()))?;
 
         let msg = message::DhtMessage::Query {
             transaction_id: rand::random::<u16>().to_be_bytes().to_vec(),
@@ -301,13 +312,20 @@ impl DhtManager {
             },
         };
 
-        let data = msg.encode()
+        let data = msg
+            .encode()
             .map_err(|e| DhtError::Protocol(format!("Encode error: {:?}", e)))?;
 
-        socket.send_to(&data, addr).await
+        socket
+            .send_to(&data, addr)
+            .await
             .map_err(|e| DhtError::Network(e.to_string()))?;
 
-        tracing::debug!("Sent find_node to {} for target {}", addr, hex::encode(target));
+        tracing::debug!(
+            "Sent find_node to {} for target {}",
+            addr,
+            hex::encode(target)
+        );
         Ok(())
     }
 

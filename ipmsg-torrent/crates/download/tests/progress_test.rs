@@ -18,9 +18,17 @@ async fn test_progress_save_and_load() {
     let file_size = 5 * 1024 * 1024; // 5MB = 5 blocks of 1MB
 
     // Create engine and verify no progress file exists yet
-    let engine = XunleiEngine::new(file_name.clone(), file_size, sources.clone(), download_dir.clone());
+    let engine = XunleiEngine::new(
+        file_name.clone(),
+        file_size,
+        sources.clone(),
+        download_dir.clone(),
+    );
     let progress_path = download_dir.join(format!("{}.progress", file_name));
-    assert!(!progress_path.exists(), "Progress file should not exist initially");
+    assert!(
+        !progress_path.exists(),
+        "Progress file should not exist initially"
+    );
 
     // Manually create some progress by directly saving
     // We need to test the save/load cycle
@@ -29,7 +37,12 @@ async fn test_progress_save_and_load() {
     drop(engine);
 
     // Create a new engine - should load without error even with no progress file
-    let engine2 = XunleiEngine::new(file_name.clone(), file_size, sources.clone(), download_dir.clone());
+    let engine2 = XunleiEngine::new(
+        file_name.clone(),
+        file_size,
+        sources.clone(),
+        download_dir.clone(),
+    );
     // Engine should be created successfully
     assert_eq!(engine2.get_file_size(), file_size);
     assert_eq!(engine2.get_file_name(), file_name);

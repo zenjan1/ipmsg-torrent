@@ -1,12 +1,12 @@
 //! BEP 0009: Extension for Peers to Send Metadata Files
-//! 
+//!
 //! This module implements the metadata exchange protocol that allows
 //! downloading torrent metadata from peers, enabling magnet link support.
 
 use super::bencode::{Bencode, encode};
 use super::peer::{PeerConnection, PeerError};
 
-use sha1::{Sha1, Digest};
+use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -99,29 +99,29 @@ impl MetadataFetcher {
                 "m".to_string(),
                 Bencode::Dict(std::collections::BTreeMap::new()),
             );
-            map.insert("v".to_string(), Bencode::Bytes("IPMsg-Torrent/1.0".as_bytes().to_vec()));
+            map.insert(
+                "v".to_string(),
+                Bencode::Bytes("IPMsg-Torrent/1.0".as_bytes().to_vec()),
+            );
             map.insert("reqq".to_string(), Bencode::Integer(256));
         }
 
         let handshake_bytes = encode(&handshake);
-        
+
         // Extended message format: msg_id=20, ext_id=0, payload
         let mut ext_msg = vec![0u8; 6];
         ext_msg[0] = 20; // Extended message ID
-        ext_msg[1] = 0;  // Extended handshake
+        ext_msg[1] = 0; // Extended handshake
         ext_msg[2..6].copy_from_slice(&(handshake_bytes.len() as u32).to_be_bytes());
         ext_msg.extend_from_slice(&handshake_bytes);
 
         conn.send_raw(&ext_msg).await?;
 
         // Receive extended handshake response
-        let response = timeout(
-            Duration::from_secs(5),
-            self.recv_extended_message(conn),
-        )
-        .await
-        .map_err(|_| MetadataError::Timeout)?
-        .map_err(MetadataError::Peer)?;
+        let response = timeout(Duration::from_secs(5), self.recv_extended_message(conn))
+            .await
+            .map_err(|_| MetadataError::Timeout)?
+            .map_err(MetadataError::Peer)?;
 
         // Parse response to find ut_metadata extension ID
         if response.len() < 2 || response[0] != 20 || response[1] != 0 {
@@ -129,8 +129,8 @@ impl MetadataFetcher {
         }
 
         let payload = &response[6..];
-        let bencode = super::bencode::decode(payload)
-            .map_err(|e| MetadataError::Bencode(e.to_string()))?;
+        let bencode =
+            super::bencode::decode(payload).map_err(|e| MetadataError::Bencode(e.to_string()))?;
 
         if let Bencode::Dict(map) = bencode {
             if let Some(Bencode::Dict(extensions)) = map.get("m") {
@@ -161,7 +161,7 @@ impl MetadataFetcher {
             }
 
             let request_bytes = encode(&request);
-            
+
             // Metadata message format: msg_id=20, ext_id=ut_metadata_id, payload
             let mut ext_msg = vec![0u8; 6];
             ext_msg[0] = 20;
@@ -172,26 +172,24 @@ impl MetadataFetcher {
             conn.send_raw(&ext_msg).await?;
 
             // Receive response
-            let response = timeout(
-                Duration::from_secs(5),
-                self.recv_extended_message(conn),
-            )
-            .await
-            .map_err(|_| MetadataError::Timeout)?
-            .map_err(MetadataError::Peer)?;
+            let response = timeout(Duration::from_secs(5), self.recv_extended_message(conn))
+                .await
+                .map_err(|_| MetadataError::Timeout)?
+                .map_err(MetadataError::Peer)?;
 
             if response.len() < 6 || response[0] != 20 || response[1] != ut_metadata_id {
                 continue;
             }
 
             let payload = &response[6..];
-            
+
             // Parse message
             let bencode = super::bencode::decode(payload)
                 .map_err(|e| MetadataError::Bencode(e.to_string()))?;
 
             if let Bencode::Dict(map) = bencode {
-                let msg_type = map.get("msg_type")
+                let msg_type = map
+                    .get("msg_type")
                     .and_then(|v| v.as_integer())
                     .ok_or_else(|| MetadataError::Bencode("missing msg_type".to_string()))?;
 
@@ -202,7 +200,8 @@ impl MetadataFetcher {
                     }
                     1 => {
                         // Data
-                        let total_size = map.get("total_size")
+                        let total_size = map
+                            .get("total_size")
                             .and_then(|v| v.as_integer())
                             .map(|v| v as usize);
 
@@ -213,7 +212,7 @@ impl MetadataFetcher {
                         // Find where the bencode ends and binary data begins
                         let bencode_str = encode(&Bencode::Dict(map));
                         let data_start = bencode_str.len();
-                        
+
                         if data_start < payload.len() {
                             let piece_data = payload[data_start..].to_vec();
                             self.metadata_pieces.insert(piece_index, piece_data);
@@ -222,10 +221,9 @@ impl MetadataFetcher {
 
                         // Check if we have all pieces
                         if let Some(total) = self.total_size {
-                            let received_size: usize = self.metadata_pieces.values()
-                                .map(|v| v.len())
-                                .sum();
-                            
+                            let received_size: usize =
+                                self.metadata_pieces.values().map(|v| v.len()).sum();
+
                             if received_size >= total {
                                 return Ok(());
                             }
@@ -238,15 +236,18 @@ impl MetadataFetcher {
                         // Reject
                         tracing::warn!(piece = piece_index, "Peer rejected metadata request");
                         consecutive_rejects += 1;
-                        
+
                         if consecutive_rejects > 3 {
                             return Err(MetadataError::Incomplete);
                         }
-                        
+
                         piece_index += 1;
                     }
                     _ => {
-                        return Err(MetadataError::Bencode(format!("unknown msg_type: {}", msg_type)));
+                        return Err(MetadataError::Bencode(format!(
+                            "unknown msg_type: {}",
+                            msg_type
+                        )));
                     }
                 }
             }
@@ -254,10 +255,7 @@ impl MetadataFetcher {
     }
 
     /// Receive an extended message from peer
-    async fn recv_extended_message(
-        &self,
-        conn: &mut PeerConnection,
-    ) -> Result<Vec<u8>, PeerError> {
+    async fn recv_extended_message(&self, conn: &mut PeerConnection) -> Result<Vec<u8>, PeerError> {
         // Read message length (4 bytes)
         let mut len_buf = [0u8; 4];
         conn.read_exact(&mut len_buf).await?;
@@ -276,11 +274,10 @@ impl MetadataFetcher {
 
     /// Assemble metadata pieces into complete metadata
     fn assemble_metadata(&self) -> Result<Vec<u8>, MetadataError> {
-        let total_size = self.total_size
-            .ok_or(MetadataError::Incomplete)?;
+        let total_size = self.total_size.ok_or(MetadataError::Incomplete)?;
 
         let mut metadata = Vec::with_capacity(total_size);
-        
+
         for i in 0.. {
             if let Some(piece) = self.metadata_pieces.get(&i) {
                 metadata.extend_from_slice(piece);
@@ -318,7 +315,6 @@ impl MetadataFetcher {
         tracing::info!("Metadata verified successfully");
         Ok(())
     }
-
 }
 
 #[cfg(test)]

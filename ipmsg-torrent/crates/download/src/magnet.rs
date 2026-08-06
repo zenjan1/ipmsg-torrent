@@ -1,5 +1,5 @@
 //! Magnet link parser and metadata exchange
-//! 
+//!
 //! Implements BEP 0009: Extension for Peers to Send Metadata Files
 //! Magnet URI format: magnet:?xt=urn:btih:<info-hash>&dn=<name>&tr=<tracker-url>
 
@@ -85,7 +85,7 @@ impl MagnetLink {
     fn parse_info_hash(hash_str: &str, is_v2: bool) -> Result<Vec<u8>, MagnetError> {
         // Try hex first (40 chars for v1, 64 chars for v2)
         let expected_len = if is_v2 { 64 } else { 40 };
-        
+
         if hash_str.len() == expected_len {
             // Hex encoded
             hex::decode(hash_str)
@@ -106,7 +106,7 @@ impl MagnetLink {
     /// Decode base32 string to bytes
     fn decode_base32(input: &str) -> Result<Vec<u8>, MagnetError> {
         const BASE32_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-        
+
         let input = input.to_uppercase();
         let mut output = Vec::new();
         let mut buffer = 0u64;
@@ -116,12 +116,12 @@ impl MagnetLink {
             if c == '=' {
                 break; // Padding
             }
-            
+
             let value = BASE32_CHARS
                 .iter()
                 .position(|&b| b == c as u8)
                 .ok_or_else(|| MagnetError::InvalidFormat(format!("Invalid base32 char: {}", c)))?;
-            
+
             buffer = (buffer << 5) | value as u64;
             bits_left += 5;
 
@@ -138,12 +138,12 @@ impl MagnetLink {
     /// Convert to a magnet URI string
     pub fn to_uri(&self) -> String {
         let mut uri = String::from("magnet:?");
-        
+
         // Add xt parameter
         let xt_prefix = if self.is_v2 { "urn:btmh:" } else { "urn:btih:" };
         uri.push_str("xt=");
         uri.push_str(xt_prefix);
-        
+
         if self.is_v2 {
             uri.push_str(&hex::encode(&self.info_hash));
         } else {
@@ -188,7 +188,7 @@ mod tests {
     fn test_parse_magnet_v1_hex() {
         let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test&tr=http://tracker.example.com/announce";
         let magnet = MagnetLink::parse(uri).unwrap();
-        
+
         assert_eq!(magnet.info_hash.len(), 20);
         assert_eq!(magnet.display_name, Some("test".to_string()));
         assert_eq!(magnet.trackers.len(), 1);
@@ -201,7 +201,7 @@ mod tests {
         // 32-char base32 = 20 bytes (160 bits)
         let uri = "magnet:?xt=urn:btih:GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
         let magnet = MagnetLink::parse(uri).unwrap();
-        
+
         assert_eq!(magnet.info_hash.len(), 20);
         assert!(!magnet.is_v2);
     }
@@ -210,7 +210,7 @@ mod tests {
     fn test_parse_magnet_multiple_trackers() {
         let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&tr=http://tracker1.com&tr=http://tracker2.com";
         let magnet = MagnetLink::parse(uri).unwrap();
-        
+
         assert_eq!(magnet.trackers.len(), 2);
     }
 
@@ -218,7 +218,7 @@ mod tests {
     fn test_parse_magnet_with_peers() {
         let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&x.pe=192.168.1.1:6881&x.pe=192.168.1.2:6881";
         let magnet = MagnetLink::parse(uri).unwrap();
-        
+
         assert_eq!(magnet.peers.len(), 2);
         assert_eq!(magnet.peers[0], "192.168.1.1:6881");
     }
@@ -226,7 +226,10 @@ mod tests {
     #[test]
     fn test_to_uri() {
         let magnet = MagnetLink {
-            info_hash: vec![0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d, 0x32, 0x55, 0xbf, 0xef, 0x95, 0x60, 0x18, 0x90, 0xaf, 0xd8, 0x07, 0x09],
+            info_hash: vec![
+                0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d, 0x32, 0x55, 0xbf, 0xef, 0x95, 0x60,
+                0x18, 0x90, 0xaf, 0xd8, 0x07, 0x09,
+            ],
             display_name: Some("test file".to_string()),
             trackers: vec!["http://tracker.example.com/announce".to_string()],
             peers: vec![],

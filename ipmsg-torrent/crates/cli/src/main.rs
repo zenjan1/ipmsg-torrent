@@ -950,7 +950,10 @@ async fn handle_command(
                     Ok(task_id) => {
                         s.add_system_message(
                             "main",
-                            format!("Started torrent download: {}", &task_id[..8.min(task_id.len())]),
+                            format!(
+                                "Started torrent download: {}",
+                                &task_id[..8.min(task_id.len())]
+                            ),
                         );
                     }
                     Err(e) => {
@@ -966,15 +969,24 @@ async fn handle_command(
                     let hash = parts[4].to_string();
                     match ipmsg_download::ed2k::Ed2kFileHash::from_hex(&hash) {
                         Ok(file_hash) => {
-                            match download_manager.add_ed2k(file_hash, size, name, vec![]).await {
+                            match download_manager
+                                .add_ed2k(file_hash, size, name, vec![])
+                                .await
+                            {
                                 Ok(task_id) => {
                                     s.add_system_message(
                                         "main",
-                                        format!("Started ed2k download: {}", &task_id[..8.min(task_id.len())]),
+                                        format!(
+                                            "Started ed2k download: {}",
+                                            &task_id[..8.min(task_id.len())]
+                                        ),
                                     );
                                 }
                                 Err(e) => {
-                                    s.add_system_message("main", format!("Failed to start ed2k: {}", e));
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Failed to start ed2k: {}", e),
+                                    );
                                 }
                             }
                         }
@@ -994,7 +1006,10 @@ async fn handle_command(
                     Ok(task_id) => {
                         s.add_system_message(
                             "main",
-                            format!("Started P2SP download: {}", &task_id[..8.min(task_id.len())]),
+                            format!(
+                                "Started P2SP download: {}",
+                                &task_id[..8.min(task_id.len())]
+                            ),
                         );
                     }
                     Err(e) => {
@@ -1253,17 +1268,19 @@ fn draw(
         // Status bar
         let peer_count = state.peers.len();
         let status_icon = if peer_count > 0 { "●" } else { "○" };
-        let status_color = if peer_count > 0 { Color::Green } else { Color::DarkGray };
+        let status_color = if peer_count > 0 {
+            Color::Green
+        } else {
+            Color::DarkGray
+        };
         let status_text = format!(
             " {} {} | Peers: {} | {} ",
-            status_icon,
-            state.username,
-            peer_count,
-            state.status
+            status_icon, state.username, peer_count, state.status
         );
-        let status_bar = Paragraph::new(Line::from(vec![
-            Span::styled(status_text, Style::default().fg(status_color).bg(Color::DarkGray)),
-        ]));
+        let status_bar = Paragraph::new(Line::from(vec![Span::styled(
+            status_text,
+            Style::default().fg(status_color).bg(Color::DarkGray),
+        )]));
         f.render_widget(status_bar, right_chunks[0]);
 
         // Tabs

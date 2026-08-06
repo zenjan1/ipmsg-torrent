@@ -70,14 +70,14 @@ struct PeerState {
     connection: PeerConnection,
     available_pieces: HashSet<u32>,
     requests_sent: HashMap<(u32, u32), tokio::time::Instant>, // (piece, block) -> time
-    
+
     // Peer scoring
     score: f64,
     downloaded_bytes: u64,
     uploaded_bytes: u64,
     response_times: Vec<Duration>,
     last_activity: tokio::time::Instant,
-    
+
     // Choking state
     am_choking: bool,
     peer_choking: bool,
@@ -102,7 +102,7 @@ impl PeerState {
             peer_interested: false,
         }
     }
-    
+
     /// Update peer score based on performance
     fn update_score(&mut self) {
         // Calculate average response time
@@ -112,33 +112,33 @@ impl PeerState {
             let total: Duration = self.response_times.iter().sum();
             total / self.response_times.len() as u32
         };
-        
+
         // Score based on:
         // 1. Download speed (bytes per second)
         // 2. Response time (faster is better)
         // 3. Reliability (fewer timeouts)
-        
+
         let elapsed = self.last_activity.elapsed().as_secs_f64();
         let download_speed = if elapsed > 0.0 {
             self.downloaded_bytes as f64 / elapsed
         } else {
             0.0
         };
-        
+
         // Response time factor (1.0 for <100ms, 0.1 for >10s)
         let response_factor = (1.0 / (avg_response.as_secs_f64() + 0.1)).min(1.0);
-        
+
         // Speed factor (logarithmic scale)
         let speed_factor = (download_speed / 1024.0 + 1.0).ln();
-        
+
         self.score = speed_factor * response_factor;
-        
+
         // Keep only last 10 response times
         if self.response_times.len() > 10 {
             self.response_times.remove(0);
         }
     }
-    
+
     /// Record a response time
     fn record_response(&mut self, duration: Duration) {
         self.response_times.push(duration);
@@ -379,7 +379,8 @@ impl TorrentEngine {
                     let offset = block_idx * BLOCK_SIZE;
 
                     // Skip if already requested (unless in endgame mode)
-                    if !endgame_mode && peer_state.requests_sent.contains_key(&(*piece_idx, offset)) {
+                    if !endgame_mode && peer_state.requests_sent.contains_key(&(*piece_idx, offset))
+                    {
                         continue;
                     }
 

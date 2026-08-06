@@ -5,11 +5,11 @@
 //! - eDonkey/eMule (ed2k links)
 //! - Xunlei P2SP (HTTP/FTP + P2P hybrid)
 
+pub mod dht;
 pub mod ed2k;
 pub mod magnet;
 pub mod torrent;
 pub mod xunlei;
-pub mod dht;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -82,7 +82,9 @@ impl DownloadTask {
 /// Parameters needed to restart a paused/failed task
 #[derive(Debug, Clone)]
 enum TaskParams {
-    Torrent { torrent_path: PathBuf },
+    Torrent {
+        torrent_path: PathBuf,
+    },
     Ed2k {
         file_hash: ed2k::Ed2kFileHash,
         file_size: u64,
@@ -193,7 +195,9 @@ impl DownloadManager {
         let task_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
 
-        let name = magnet.display_name.clone()
+        let name = magnet
+            .display_name
+            .clone()
             .unwrap_or_else(|| format!("magnet-{}", hex::encode(&magnet.info_hash[..8])));
 
         let task = DownloadTask {
@@ -362,7 +366,7 @@ impl DownloadManager {
             *g += 1;
             *g
         };
-        
+
         let cancel_token = CancellationToken::new();
         let tasks = self.tasks.clone();
         let running = self.running.clone();
@@ -375,7 +379,12 @@ impl DownloadManager {
         // Store task info for resume
         {
             let mut info = self.task_info.lock().await;
-            info.insert(task_id.clone(), TaskInfo { params: params.clone() });
+            info.insert(
+                task_id.clone(),
+                TaskInfo {
+                    params: params.clone(),
+                },
+            );
         }
 
         // Register running task
@@ -408,17 +417,17 @@ impl DownloadManager {
             let result: Result<(), String> = match params {
                 TaskParams::Torrent { torrent_path } => {
                     match tokio::fs::read(&torrent_path).await {
-                        Ok(data) => {
-                            match torrent::TorrentMeta::from_bytes(&data) {
-                                Ok(meta) => {
-                                    let download_dir = data_dir.join("downloads");
-                                    let mut engine =
-                                        torrent::TorrentEngine::new(meta, download_dir);
-                                    engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
-                                }
-                                Err(e) => Err(e.to_string()),
+                        Ok(data) => match torrent::TorrentMeta::from_bytes(&data) {
+                            Ok(meta) => {
+                                let download_dir = data_dir.join("downloads");
+                                let mut engine = torrent::TorrentEngine::new(meta, download_dir);
+                                engine
+                                    .download(Some(cancel_clone))
+                                    .await
+                                    .map_err(|e| e.to_string())
                             }
-                        }
+                            Err(e) => Err(e.to_string()),
+                        },
                         Err(e) => Err(e.to_string()),
                     }
                 }
@@ -436,7 +445,10 @@ impl DownloadManager {
                         download_dir,
                         servers,
                     );
-                    engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                    engine
+                        .download(Some(cancel_clone))
+                        .await
+                        .map_err(|e| e.to_string())
                 }
                 TaskParams::Xunlei {
                     file_name,
@@ -446,7 +458,10 @@ impl DownloadManager {
                     let download_dir = data_dir.join("downloads");
                     let mut engine =
                         xunlei::XunleiEngine::new(file_name, file_size, sources, download_dir);
-                    engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                    engine
+                        .download(Some(cancel_clone))
+                        .await
+                        .map_err(|e| e.to_string())
                 }
                 TaskParams::Magnet {
                     info_hash,
@@ -455,14 +470,14 @@ impl DownloadManager {
                 } => {
                     // Magnet link handling: fetch metadata first, then download as torrent
                     let download_dir = data_dir.join("downloads");
-                    
+
                     // Step 1: Use DHT to find peers
                     let peers = dht.find_peers(info_hash).await.map_err(|e| e.to_string())?;
-                    
+
                     if peers.is_empty() {
                         return Err("No peers found via DHT".to_string());
                     }
-                    
+
                     // Step 2: Try to fetch metadata from peers (BEP 0009)
                     match dht.fetch_metadata(info_hash).await {
                         Ok(metadata_bytes) => {
@@ -472,15 +487,21 @@ impl DownloadManager {
                                     // Update task with actual file info
                                     {
                                         let mut t = tasks.lock().await;
-                                        if let Some(task) = t.iter_mut().find(|t| t.id == task_id_clone) {
+                                        if let Some(task) =
+                                            t.iter_mut().find(|t| t.id == task_id_clone)
+                                        {
                                             task.name = meta.info.name.clone();
                                             task.size = meta.total_size();
                                         }
                                     }
-                                    
+
                                     // Start torrent download
-                                    let mut engine = torrent::TorrentEngine::new(meta, download_dir);
-                                    engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                                    let mut engine =
+                                        torrent::TorrentEngine::new(meta, download_dir);
+                                    engine
+                                        .download(Some(cancel_clone))
+                                        .await
+                                        .map_err(|e| e.to_string())
                                 }
                                 Err(e) => Err(format!("Failed to parse metadata: {}", e)),
                             }
@@ -536,7 +557,7 @@ impl DownloadManager {
             if is_still_active {
                 running.lock().await.remove(&task_id_clone);
             }
-            
+
             Ok(())
         });
 
@@ -571,7 +592,7 @@ impl DownloadManager {
                 if let Some(rt) = r.get_mut(&task_id) {
                     let now = std::time::Instant::now();
                     let dt = now.duration_since(rt.last_sample_time).as_secs_f64();
-                    
+
                     if dt < 0.5 {
                         continue;
                     }
@@ -598,11 +619,11 @@ impl DownloadManager {
                     let avg_speed = if rt.speed_samples.is_empty() {
                         0.0
                     } else {
-                        let weights: Vec<f64> = (1..=rt.speed_samples.len())
-                            .map(|i| i as f64)
-                            .collect();
+                        let weights: Vec<f64> =
+                            (1..=rt.speed_samples.len()).map(|i| i as f64).collect();
                         let total_weight: f64 = weights.iter().sum();
-                        let weighted_sum: f64 = rt.speed_samples
+                        let weighted_sum: f64 = rt
+                            .speed_samples
                             .iter()
                             .zip(weights.iter())
                             .map(|(speed, weight)| speed * weight)

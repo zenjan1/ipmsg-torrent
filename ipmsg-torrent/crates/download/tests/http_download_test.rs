@@ -28,12 +28,20 @@ async fn test_http_download_small_file() {
 
     // Verify file exists and has correct content
     let output_path = download_dir.join(&file_name);
-    assert!(output_path.exists(), "Output file not found: {}", output_path.display());
+    assert!(
+        output_path.exists(),
+        "Output file not found: {}",
+        output_path.display()
+    );
 
     let actual = tokio::fs::read_to_string(&output_path).await.unwrap();
     assert_eq!(actual, expected, "File content mismatch");
 
-    println!("✓ Downloaded {} bytes to {}", file_size, output_path.display());
+    println!(
+        "✓ Downloaded {} bytes to {}",
+        file_size,
+        output_path.display()
+    );
 }
 
 #[tokio::test]
@@ -60,7 +68,10 @@ async fn test_download_manager_add_url() {
         match task.state {
             ipmsg_download::DownloadState::Complete => break,
             ipmsg_download::DownloadState::Error => {
-                panic!("Download failed: {}", task.error.as_deref().unwrap_or("unknown"));
+                panic!(
+                    "Download failed: {}",
+                    task.error.as_deref().unwrap_or("unknown")
+                );
             }
             _ => {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -73,7 +84,11 @@ async fn test_download_manager_add_url() {
     assert!(output_path.exists(), "Downloaded file not found");
 
     let content = tokio::fs::read_to_string(&output_path).await.unwrap();
-    assert!(content.contains("User-agent"), "Unexpected content: {}", content);
+    assert!(
+        content.contains("User-agent"),
+        "Unexpected content: {}",
+        content
+    );
 
     println!("✓ DownloadManager::add_url succeeded, task state: complete");
 }
@@ -125,7 +140,10 @@ async fn test_download_manager_pause_resume() {
         match task.state {
             ipmsg_download::DownloadState::Complete => break,
             ipmsg_download::DownloadState::Error => {
-                panic!("Download failed after resume: {}", task.error.as_deref().unwrap_or("unknown"));
+                panic!(
+                    "Download failed after resume: {}",
+                    task.error.as_deref().unwrap_or("unknown")
+                );
             }
             _ => {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;

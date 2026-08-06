@@ -1,5 +1,5 @@
 //! DHT routing table implementation
-//! 
+//!
 //! Implements Kademlia-style routing with k-buckets
 
 use super::NodeId;
@@ -94,7 +94,7 @@ impl RoutingTable {
     /// Calculate the bucket index for a given node ID
     fn bucket_index(&self, id: &NodeId) -> usize {
         let distance = xor_distance(&self.our_id, id);
-        
+
         // Find the highest bit set
         for (i, byte) in distance.iter().enumerate() {
             if *byte != 0 {
@@ -102,7 +102,7 @@ impl RoutingTable {
                 return (i * 8) + bit_pos;
             }
         }
-        
+
         // Same ID (shouldn't happen in practice)
         0
     }
@@ -195,7 +195,7 @@ mod tests {
         for i in 0..5 {
             let mut node_id = [0u8; 20];
             node_id[0] = i;
-            
+
             let node = Node {
                 id: node_id,
                 addr: format!("127.0.0.1:{}", 6881u16 + i as u16).parse().unwrap(),

@@ -1510,11 +1510,11 @@ impl P2PEngine {
     /// Verify a message signature using a peer's public key
     fn verify_message_signature(peer_public_key: &[u8], digest: &[u8], signature: &[u8]) -> bool {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-        
+
         if peer_public_key.len() != 32 || signature.len() != 64 {
             return false;
         }
-        
+
         let Ok(key_bytes) = peer_public_key.try_into() else {
             return false;
         };
@@ -1524,7 +1524,7 @@ impl P2PEngine {
         let Ok(sig) = Signature::from_slice(signature) else {
             return false;
         };
-        
+
         verifying_key.verify(digest, &sig).is_ok()
     }
 }
