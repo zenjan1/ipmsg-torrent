@@ -90,6 +90,11 @@ enum Command {
     DlSpeed {
         limit: String,
     },
+    /// Set download timeout and auto-retry (e.g., "30s", "5m", "0" to disable)
+    DlTimeout {
+        timeout: String,
+        max_retries: u32,
+    },
     Block {
         peer: String,
     },
@@ -241,6 +246,17 @@ fn parse_command(input: &str) -> Command {
                 }
             } else {
                 Command::Unknown("/dlspeed <limit>".to_string())
+            }
+        }
+        "dltimeout" | "dl-timeout" => {
+            if parts.len() >= 2 {
+                let max_retries = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
+                Command::DlTimeout {
+                    timeout: parts[1].to_string(),
+                    max_retries,
+                }
+            } else {
+                Command::Unknown("/dltimeout <timeout> [max_retries]".to_string())
             }
         }
         "block" => {
@@ -1137,6 +1153,43 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlTimeout {
+            timeout,
+            max_retries,
+        } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            // Parse timeout string (e.g., "30s", "5m", "0" to disable)
+            let timeout_secs = parse_timeout(&timeout);
+            match timeout_secs {
+                Some(secs) => {
+                    download_manager.set_timeout_secs(secs);
+                    download_manager.set_max_retries(max_retries);
+                    let timeout_str = if secs == 0 {
+                        "disabled".to_string()
+                    } else {
+                        format!("{}s", secs)
+                    };
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "Download timeout set to {} (max retries: {})",
+                            timeout_str, max_retries
+                        ),
+                    );
+                }
+                None => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Invalid timeout format. Use: 30s, 5m, or 0 to disable".to_string(),
+                    );
+                }
+            }
+        }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {
                 peer_id: peer.clone(),
@@ -1296,6 +1349,38 @@ fn parse_speed_limit(input: &str) -> Option<u64> {
     }
 
     Some((num * multiplier) as u64)
+}
+
+/// Parse timeout string like "30s", "5m", "1h", or "0" to disable
+fn parse_timeout(input: &str) -> Option<u64> {
+    let input = input.trim().to_lowercase();
+
+    // Handle "0" or "off" or "disable"
+    if input == "0" || input == "off" || input == "disable" || input == "none" {
+        return Some(0);
+    }
+
+    // Try to parse with unit
+    let (num_str, multiplier) = if input.ends_with('s') {
+        (input.trim_end_matches('s'), 1)
+    } else if input.ends_with('m') {
+        (input.trim_end_matches('m'), 60)
+    } else if input.ends_with('h') {
+        (input.trim_end_matches('h'), 3600)
+    } else {
+        // Try parsing as raw seconds
+        (input.as_str(), 1)
+    };
+
+    // Extract numeric part
+    let num_str = num_str.trim();
+    let num: f64 = num_str.parse().ok()?;
+
+    if num < 0.0 {
+        return None;
+    }
+
+    Some((num * multiplier as f64) as u64)
 }
 
 fn draw(

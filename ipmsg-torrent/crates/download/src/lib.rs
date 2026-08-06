@@ -19,6 +19,7 @@ pub mod xunlei;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use task_queue::{load_task_queue, save_task_queue};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -140,6 +141,9 @@ struct RunningTask {
     // Speed tracking with moving average
     speed_samples: Vec<f64>,
     last_sample_time: std::time::Instant,
+    // Timeout tracking
+    last_progress_time: std::time::Instant,
+    retry_count: u32,
 }
 
 /// Unified download manager
@@ -154,6 +158,10 @@ pub struct DownloadManager {
     max_concurrent: usize,
     /// Global download rate limiter
     rate_limiter: Arc<DownloadRateController>,
+    /// Timeout in seconds for stalled downloads (0 = disabled)
+    timeout_secs: Arc<AtomicU64>,
+    /// Maximum retry attempts for timed-out downloads
+    max_retries: Arc<AtomicU32>,
 }
 
 impl DownloadManager {
@@ -167,6 +175,8 @@ impl DownloadManager {
             dht: Arc::new(dht::DhtManager::new()),
             max_concurrent: 0, // 0 = unlimited
             rate_limiter: Arc::new(DownloadRateController::new(0, 0)),
+            timeout_secs: Arc::new(AtomicU64::new(0)),
+            max_retries: Arc::new(AtomicU32::new(3)),
         }
     }
 
@@ -191,6 +201,8 @@ impl DownloadManager {
             dht: Arc::new(dht::DhtManager::new()),
             max_concurrent: 0,
             rate_limiter: Arc::new(DownloadRateController::new(0, 0)),
+            timeout_secs: Arc::new(AtomicU64::new(0)),
+            max_retries: Arc::new(AtomicU32::new(3)),
         }
     }
 
@@ -213,6 +225,17 @@ impl DownloadManager {
     /// Get the rate controller handle.
     pub fn rate_limiter(&self) -> &Arc<DownloadRateController> {
         &self.rate_limiter
+    }
+
+    /// Set download timeout in seconds (0 = disabled).
+    /// When a download makes no progress for this duration, it will be retried.
+    pub fn set_timeout_secs(&self, secs: u64) {
+        self.timeout_secs.store(secs, Ordering::Relaxed);
+    }
+
+    /// Set maximum retry attempts for timed-out downloads.
+    pub fn set_max_retries(&self, retries: u32) {
+        self.max_retries.store(retries, Ordering::Relaxed);
     }
 
     /// Get current running task count
@@ -457,6 +480,8 @@ impl DownloadManager {
                     generation,
                     speed_samples: Vec::new(),
                     last_sample_time: std::time::Instant::now(),
+                    last_progress_time: std::time::Instant::now(),
+                    retry_count: 0,
                 },
             );
         }
@@ -650,6 +675,8 @@ impl DownloadManager {
                     generation,
                     speed_samples: Vec::new(),
                     last_sample_time: std::time::Instant::now(),
+                    last_progress_time: std::time::Instant::now(),
+                    retry_count: 0,
                 },
             );
         }
@@ -861,6 +888,13 @@ impl DownloadManager {
     fn spawn_speed_tracker(&self, task_id: String) {
         let tasks = self.tasks.clone();
         let running = self.running.clone();
+        let task_info = self.task_info.clone();
+        let task_generation = self.task_generation.clone();
+        let data_dir = self.data_dir.clone();
+        let dht = self.dht.clone();
+        let rate_limiter = self.rate_limiter.clone();
+        let timeout_secs = self.timeout_secs.load(Ordering::Relaxed);
+        let max_retries = self.max_retries.load(Ordering::Relaxed);
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -901,6 +935,11 @@ impl DownloadManager {
                     let dd = current_downloaded.saturating_sub(rt.last_downloaded) as f64;
                     let instant_speed = dd / dt;
 
+                    // Track progress for timeout detection
+                    if dd > 0.0 {
+                        rt.last_progress_time = now;
+                    }
+
                     // Add to samples (keep last 10)
                     rt.speed_samples.push(instant_speed);
                     if rt.speed_samples.len() > 10 {
@@ -932,6 +971,303 @@ impl DownloadManager {
 
                     rt.last_downloaded = current_downloaded;
                     rt.last_sample_time = now;
+
+                    // Check for timeout (only if enabled and task has started downloading)
+                    if timeout_secs > 0 && current_downloaded > 0 {
+                        let elapsed = now.duration_since(rt.last_progress_time).as_secs();
+                        if elapsed >= timeout_secs && rt.retry_count < max_retries {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                elapsed_secs = elapsed,
+                                retry_count = rt.retry_count,
+                                "Download stalled, retrying..."
+                            );
+
+                            // Cancel current task
+                            rt.cancel_token.cancel();
+                            rt.retry_count += 1;
+
+                            // Mark task as paused
+                            if let Some(task) =
+                                tasks.lock().await.iter_mut().find(|t| t.id == task_id)
+                            {
+                                task.state = DownloadState::Paused;
+                                task.speed_bps = 0.0;
+                                task.error =
+                                    Some(format!("Timeout: no progress for {} seconds", elapsed));
+                                task.updated_at = chrono::Utc::now();
+                            }
+
+                            // Save retry count before dropping the lock
+                            let current_retry_count = rt.retry_count;
+
+                            // Remove from running
+                            drop(r);
+                            running.lock().await.remove(&task_id);
+
+                            // Re-spawn task after a short delay
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                            // Get stored params
+                            let params = {
+                                let info = task_info.lock().await;
+                                info.get(&task_id).map(|ti| ti.params.clone())
+                            };
+
+                            if let Some(params) = params {
+                                // Increment generation
+                                let generation = {
+                                    let mut gen_map = task_generation.lock().await;
+                                    let g = gen_map.entry(task_id.clone()).or_insert(0);
+                                    *g += 1;
+                                    *g
+                                };
+
+                                let cancel_token = CancellationToken::new();
+                                let cancel_clone = cancel_token.clone();
+
+                                // Register new running task
+                                {
+                                    let mut r = running.lock().await;
+                                    r.insert(
+                                        task_id.clone(),
+                                        RunningTask {
+                                            cancel_token: cancel_token.clone(),
+                                            params: params.clone(),
+                                            started_at: std::time::Instant::now(),
+                                            last_downloaded: 0,
+                                            generation,
+                                            speed_samples: Vec::new(),
+                                            last_sample_time: std::time::Instant::now(),
+                                            last_progress_time: std::time::Instant::now(),
+                                            retry_count: current_retry_count,
+                                        },
+                                    );
+                                }
+
+                                // Mark as downloading
+                                {
+                                    let mut t = tasks.lock().await;
+                                    if let Some(task) = t.iter_mut().find(|t| t.id == task_id) {
+                                        task.state = DownloadState::Downloading;
+                                        task.error = None;
+                                        task.updated_at = chrono::Utc::now();
+                                    }
+                                }
+
+                                // Spawn the actual download
+                                let tasks_clone = tasks.clone();
+                                let running_clone = running.clone();
+                                let task_generation_clone = task_generation.clone();
+                                let data_dir_clone = data_dir.clone();
+                                let dht_clone = dht.clone();
+                                let rate_limiter_clone = rate_limiter.clone();
+                                let task_id_clone = task_id.clone();
+
+                                tokio::spawn(async move {
+                                    let result: Result<(), String> = match params {
+                                        TaskParams::Torrent { torrent_path } => {
+                                            match tokio::fs::read(&torrent_path).await {
+                                                Ok(data) => {
+                                                    match torrent::TorrentMeta::from_bytes(&data) {
+                                                        Ok(meta) => {
+                                                            let download_dir =
+                                                                data_dir_clone.join("downloads");
+                                                            let mut engine =
+                                                                torrent::TorrentEngine::new(
+                                                                    meta,
+                                                                    download_dir,
+                                                                );
+                                                            engine.set_rate_limiter(
+                                                                rate_limiter_clone
+                                                                    .per_task()
+                                                                    .clone(),
+                                                            );
+                                                            engine
+                                                                .download(Some(cancel_clone))
+                                                                .await
+                                                                .map_err(|e| e.to_string())
+                                                        }
+                                                        Err(e) => Err(e.to_string()),
+                                                    }
+                                                }
+                                                Err(e) => Err(e.to_string()),
+                                            }
+                                        }
+                                        TaskParams::Ed2k {
+                                            file_hash,
+                                            file_size,
+                                            file_name,
+                                            servers,
+                                        } => {
+                                            let download_dir = data_dir_clone.join("downloads");
+                                            let mut engine = ed2k::Ed2kEngine::new(
+                                                file_hash,
+                                                file_size,
+                                                file_name,
+                                                download_dir,
+                                                servers,
+                                            );
+                                            engine.set_rate_limiter(
+                                                rate_limiter_clone.per_task().clone(),
+                                            );
+                                            engine
+                                                .download(Some(cancel_clone))
+                                                .await
+                                                .map_err(|e| e.to_string())
+                                        }
+                                        TaskParams::Xunlei {
+                                            file_name,
+                                            file_size,
+                                            sources,
+                                        } => {
+                                            let download_dir = data_dir_clone.join("downloads");
+                                            let mut engine = xunlei::XunleiEngine::new(
+                                                file_name,
+                                                file_size,
+                                                sources,
+                                                download_dir,
+                                            );
+                                            engine.set_rate_limiter(
+                                                rate_limiter_clone.per_task().clone(),
+                                            );
+                                            engine
+                                                .download(Some(cancel_clone))
+                                                .await
+                                                .map_err(|e| e.to_string())
+                                        }
+                                        TaskParams::Magnet {
+                                            info_hash,
+                                            display_name,
+                                            trackers,
+                                        } => {
+                                            let download_dir = data_dir_clone.join("downloads");
+                                            let cache = metadata_cache::cache_dir();
+                                            let metadata_bytes = match metadata_cache::load_metadata(
+                                                &cache, &info_hash,
+                                            ) {
+                                                Ok(cached) => cached,
+                                                Err(metadata_cache::CacheError::NotFound) => {
+                                                    let peers = dht_clone
+                                                        .find_peers(info_hash)
+                                                        .await
+                                                        .map_err(|e| e.to_string())?;
+                                                    if peers.is_empty() {
+                                                        return Err(
+                                                            "No peers found via DHT".to_string()
+                                                        );
+                                                    }
+                                                    let bytes = match dht_clone
+                                                        .fetch_metadata(info_hash)
+                                                        .await
+                                                    {
+                                                        Ok(b) => b,
+                                                        Err(dht::DhtError::NotImplemented) => {
+                                                            return Err("Magnet link metadata exchange not yet implemented".to_string());
+                                                        }
+                                                        Err(e) => {
+                                                            return Err(format!(
+                                                                "Failed to fetch metadata: {}",
+                                                                e
+                                                            ));
+                                                        }
+                                                    };
+                                                    if let Err(e) = metadata_cache::save_metadata(
+                                                        &cache,
+                                                        &info_hash,
+                                                        &bytes,
+                                                        display_name.as_deref(),
+                                                        &trackers,
+                                                    ) {
+                                                        tracing::warn!(error = %e, "Failed to cache metadata");
+                                                    }
+                                                    bytes
+                                                }
+                                                Err(e) => return Err(format!("Cache error: {e}")),
+                                            };
+                                            match torrent::TorrentMeta::from_bytes(&metadata_bytes)
+                                            {
+                                                Ok(meta) => {
+                                                    {
+                                                        let mut t = tasks_clone.lock().await;
+                                                        if let Some(task) = t
+                                                            .iter_mut()
+                                                            .find(|t| t.id == task_id_clone)
+                                                        {
+                                                            task.name = meta.info.name.clone();
+                                                            task.size = meta.total_size();
+                                                        }
+                                                    }
+                                                    let mut engine = torrent::TorrentEngine::new(
+                                                        meta,
+                                                        download_dir,
+                                                    );
+                                                    engine.set_rate_limiter(
+                                                        rate_limiter_clone.per_task().clone(),
+                                                    );
+                                                    engine
+                                                        .download(Some(cancel_clone))
+                                                        .await
+                                                        .map_err(|e| e.to_string())
+                                                }
+                                                Err(e) => {
+                                                    Err(format!("Failed to parse metadata: {}", e))
+                                                }
+                                            }
+                                        }
+                                        TaskParams::P2P { .. } => {
+                                            Err("P2P resume not yet supported".to_string())
+                                        }
+                                    };
+
+                                    // Update task state
+                                    let my_generation = {
+                                        let gen_map = task_generation_clone.lock().await;
+                                        gen_map.get(&task_id_clone).copied().unwrap_or(0)
+                                    };
+                                    let is_still_active = {
+                                        let r = running_clone.lock().await;
+                                        r.get(&task_id_clone)
+                                            .map(|rt| rt.generation == my_generation)
+                                            .unwrap_or(false)
+                                    };
+
+                                    let mut t = tasks_clone.lock().await;
+                                    if let Some(task) = t.iter_mut().find(|t| t.id == task_id_clone)
+                                    {
+                                        match result {
+                                            Ok(()) => {
+                                                task.state = DownloadState::Complete;
+                                                task.downloaded = task.size;
+                                                task.speed_bps = 0.0;
+                                            }
+                                            Err(e) => {
+                                                let err_str = e.to_string();
+                                                if err_str == "cancelled" {
+                                                    if is_still_active {
+                                                        task.state = DownloadState::Paused;
+                                                    }
+                                                } else {
+                                                    task.state = DownloadState::Error;
+                                                    task.error = Some(err_str);
+                                                }
+                                                task.speed_bps = 0.0;
+                                            }
+                                        }
+                                        task.updated_at = chrono::Utc::now();
+                                    }
+
+                                    if is_still_active {
+                                        running_clone.lock().await.remove(&task_id_clone);
+                                    }
+
+                                    Ok(())
+                                });
+                            }
+
+                            break; // Exit the speed tracker loop
+                        }
+                    }
                 } else {
                     break;
                 }
@@ -1090,4 +1426,51 @@ pub enum DownloadManagerError {
     Protocol(String),
     #[error("task not found: {0}")]
     TaskNotFound(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_timeout_default_disabled() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test"));
+        assert_eq!(dm.timeout_secs.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_set_timeout_secs() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test"));
+        dm.set_timeout_secs(30);
+        assert_eq!(dm.timeout_secs.load(Ordering::Relaxed), 30);
+    }
+
+    #[test]
+    fn test_set_max_retries() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test"));
+        assert_eq!(dm.max_retries.load(Ordering::Relaxed), 3);
+        dm.set_max_retries(5);
+        assert_eq!(dm.max_retries.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn test_running_task_has_timeout_fields() {
+        let rt = RunningTask {
+            cancel_token: CancellationToken::new(),
+            params: TaskParams::P2P {
+                file_hash: String::new(),
+                file_name: String::new(),
+                file_size: 0,
+                from_peer: String::new(),
+            },
+            started_at: std::time::Instant::now(),
+            last_downloaded: 0,
+            generation: 1,
+            speed_samples: Vec::new(),
+            last_sample_time: std::time::Instant::now(),
+            last_progress_time: std::time::Instant::now(),
+            retry_count: 0,
+        };
+        assert_eq!(rt.retry_count, 0);
+    }
 }
