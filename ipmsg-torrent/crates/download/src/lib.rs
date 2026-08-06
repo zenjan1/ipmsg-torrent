@@ -144,6 +144,8 @@ pub struct DownloadManager {
     task_generation: Arc<Mutex<HashMap<String, u64>>>,
     data_dir: PathBuf,
     dht: Arc<dht::DhtManager>,
+    /// Maximum concurrent downloads (0 = unlimited)
+    max_concurrent: usize,
 }
 
 impl DownloadManager {
@@ -155,7 +157,26 @@ impl DownloadManager {
             task_generation: Arc::new(Mutex::new(HashMap::new())),
             data_dir,
             dht: Arc::new(dht::DhtManager::new()),
+            max_concurrent: 0, // 0 = unlimited
         }
+    }
+
+    /// Set maximum concurrent downloads (0 = unlimited)
+    pub fn set_max_concurrent(&mut self, max: usize) {
+        self.max_concurrent = max;
+    }
+
+    /// Get current running task count
+    pub async fn running_count(&self) -> usize {
+        self.running.lock().await.len()
+    }
+
+    /// Check if we can start a new task
+    pub async fn can_start_task(&self) -> bool {
+        if self.max_concurrent == 0 {
+            return true;
+        }
+        self.running_count().await < self.max_concurrent
     }
 
     /// Add a torrent download task
@@ -522,6 +543,17 @@ impl DownloadManager {
 
     /// Spawn the actual download task
     async fn spawn_task(&self, task_id: String, params: TaskParams) {
+        // Check if we can start a new task
+        if !self.can_start_task().await {
+            // Mark as queued
+            let mut tasks = self.tasks.lock().await;
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                task.state = DownloadState::Queued;
+                task.updated_at = chrono::Utc::now();
+            }
+            return;
+        }
+
         // Increment generation to invalidate any old spawned tasks
         let generation = {
             let mut gen_map = self.task_generation.lock().await;
