@@ -11,12 +11,14 @@ pub mod ed2k;
 pub mod magnet;
 pub mod metadata_cache;
 pub mod progress;
+pub mod task_queue;
 pub mod torrent;
 pub mod xunlei;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use task_queue::{load_task_queue, save_task_queue};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -162,6 +164,29 @@ impl DownloadManager {
         }
     }
 
+    /// Create a DownloadManager and restore tasks from disk
+    pub async fn new_with_restore(data_dir: PathBuf) -> Self {
+        let tasks = load_task_queue(&data_dir).unwrap_or_default();
+        // Reset any "downloading" tasks to "paused" since they aren't actually running
+        let mut tasks = tasks;
+        for task in &mut tasks {
+            if task.state == DownloadState::Downloading {
+                task.state = DownloadState::Paused;
+                task.speed_bps = 0.0;
+            }
+        }
+
+        Self {
+            tasks: Arc::new(Mutex::new(tasks)),
+            running: Arc::new(Mutex::new(HashMap::new())),
+            task_info: Arc::new(Mutex::new(HashMap::new())),
+            task_generation: Arc::new(Mutex::new(HashMap::new())),
+            data_dir,
+            dht: Arc::new(dht::DhtManager::new()),
+            max_concurrent: 0,
+        }
+    }
+
     /// Set maximum concurrent downloads (0 = unlimited)
     pub fn set_max_concurrent(&mut self, max: usize) {
         self.max_concurrent = max;
@@ -207,6 +232,7 @@ impl DownloadManager {
         };
 
         self.tasks.lock().await.push(task);
+        self.persist_tasks().await;
 
         let params = TaskParams::Torrent {
             torrent_path: torrent_path.clone(),
@@ -247,6 +273,7 @@ impl DownloadManager {
         };
 
         self.tasks.lock().await.push(task);
+        self.persist_tasks().await;
 
         let params = TaskParams::Magnet {
             info_hash: magnet.info_hash.try_into().map_err(|_| {
@@ -287,6 +314,7 @@ impl DownloadManager {
         };
 
         self.tasks.lock().await.push(task);
+        self.persist_tasks().await;
 
         let params = TaskParams::Ed2k {
             file_hash,
@@ -325,6 +353,7 @@ impl DownloadManager {
         };
 
         self.tasks.lock().await.push(task);
+        self.persist_tasks().await;
 
         let params = TaskParams::Xunlei {
             file_name,
@@ -363,6 +392,7 @@ impl DownloadManager {
         };
 
         self.tasks.lock().await.push(task);
+        self.persist_tasks().await;
 
         // Store task params for potential resume
         {
@@ -995,7 +1025,24 @@ impl DownloadManager {
         let mut tasks = self.tasks.lock().await;
         let len_before = tasks.len();
         tasks.retain(|t| t.id != task_id);
-        tasks.len() < len_before
+        let removed = tasks.len() < len_before;
+        drop(tasks);
+        if removed {
+            self.persist_tasks().await;
+        }
+        removed
+    }
+
+    /// Persist current task list to disk (fire-and-forget)
+    async fn persist_tasks(&self) {
+        let tasks = self.tasks.lock().await.clone();
+        let data_dir = self.data_dir.clone();
+        // Spawn to avoid blocking the caller on disk I/O
+        tokio::spawn(async move {
+            if let Err(e) = save_task_queue(&tasks, &data_dir) {
+                tracing::warn!(error = %e, "Failed to persist task queue");
+            }
+        });
     }
 }
 
