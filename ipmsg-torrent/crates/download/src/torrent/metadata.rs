@@ -5,7 +5,7 @@
 
 use super::bencode::{Bencode, encode};
 use super::peer::{PeerConnection, PeerError};
-use super::meta::{TorrentMeta, TorrentInfo};
+
 use sha1::{Sha1, Digest};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -319,139 +319,6 @@ impl MetadataFetcher {
         Ok(())
     }
 
-    /// Parse metadata bytes into TorrentMeta
-    fn parse_metadata(&self, metadata: &[u8]) -> Result<TorrentMeta, MetadataError> {
-        let bencode = super::bencode::decode(metadata)
-            .map_err(|e| MetadataError::Bencode(e.to_string()))?;
-
-        let dict = bencode.as_dict()
-            .ok_or_else(|| MetadataError::Bencode("metadata is not a dict".to_string()))?;
-
-        // Extract info dictionary
-        let info_dict = dict.get("info")
-            .ok_or_else(|| MetadataError::Bencode("missing info field".to_string()))?;
-
-        let info = Self::parse_info_dict(info_dict)?;
-
-        // Extract optional fields
-        let announce = dict.get("announce")
-            .and_then(|v| v.as_string())
-            .map(|s| s.to_string());
-
-        let announce_list = dict.get("announce-list")
-            .and_then(|v| v.as_list())
-            .map(|list| {
-                list.iter()
-                    .filter_map(|tier| {
-                        tier.as_list().map(|urls| {
-                            urls.iter()
-                                .filter_map(|u| u.as_string().map(|s| s.to_string()))
-                                .collect::<Vec<_>>()
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        let creation_date = dict.get("creation date")
-            .and_then(|v| v.as_integer());
-
-        let comment = dict.get("comment")
-            .and_then(|v| v.as_string())
-            .map(|s| s.to_string());
-
-        let created_by = dict.get("created by")
-            .and_then(|v| v.as_string())
-            .map(|s| s.to_string());
-
-        Ok(TorrentMeta {
-            info_hash: self.info_hash,
-            announce_list,
-            announce,
-            creation_date,
-            comment,
-            created_by,
-            info,
-        })
-    }
-
-    /// Parse info dictionary
-    fn parse_info_dict(info: &Bencode) -> Result<TorrentInfo, MetadataError> {
-        let dict = info.as_dict()
-            .ok_or_else(|| MetadataError::Bencode("info is not a dict".to_string()))?;
-
-        let name = dict.get("name")
-            .and_then(|v| v.as_string())
-            .ok_or_else(|| MetadataError::Bencode("missing name".to_string()))?
-            .to_string();
-
-        let piece_length = dict.get("piece length")
-            .and_then(|v| v.as_integer())
-            .ok_or_else(|| MetadataError::Bencode("missing piece length".to_string()))? as u64;
-
-        let pieces_bytes = dict.get("pieces")
-            .and_then(|v| v.as_bytes())
-            .ok_or_else(|| MetadataError::Bencode("missing pieces".to_string()))?;
-
-        // Parse pieces (each is 20 bytes SHA-1 hash)
-        let mut pieces = Vec::new();
-        for chunk in pieces_bytes.chunks(20) {
-            if chunk.len() == 20 {
-                let mut piece_hash = [0u8; 20];
-                piece_hash.copy_from_slice(chunk);
-                pieces.push(piece_hash);
-            }
-        }
-
-        // Check for single-file vs multi-file mode
-        let (length, files) = if let Some(file_length) = dict.get("length").and_then(|v| v.as_integer()) {
-            // Single-file mode
-            (Some(file_length as u64), Vec::new())
-        } else if let Some(file_list) = dict.get("files").and_then(|v| v.as_list()) {
-            // Multi-file mode
-            let mut files = Vec::new();
-            let mut total_length = 0u64;
-
-            for file_entry in file_list {
-                if let Some(file_dict) = file_entry.as_dict() {
-                    let file_length = file_dict
-                        .get("length")
-                        .and_then(|v| v.as_integer())
-                        .ok_or_else(|| MetadataError::Bencode("missing file length".to_string()))? as u64;
-
-                    let path_list = file_dict
-                        .get("path")
-                        .and_then(|v| v.as_list())
-                        .ok_or_else(|| MetadataError::Bencode("missing file path".to_string()))?;
-
-                    let path: Vec<String> = path_list
-                        .iter()
-                        .filter_map(|v| v.as_string().map(|s| s.to_string()))
-                        .collect();
-
-                    let path_str = path.join("/");
-                    files.push(super::meta::TorrentFile {
-                        path: path_str,
-                        length: file_length,
-                    });
-
-                    total_length += file_length;
-                }
-            }
-
-            (Some(total_length), files)
-        } else {
-            (None, Vec::new())
-        };
-
-        Ok(TorrentInfo {
-            length,
-            piece_length,
-            pieces,
-            name,
-            files,
-        })
-    }
 }
 
 #[cfg(test)]
