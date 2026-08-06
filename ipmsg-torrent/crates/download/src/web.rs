@@ -1,0 +1,307 @@
+//! Web UI for download management
+//!
+//! Provides a REST API and simple HTML frontend for managing downloads.
+
+use crate::{DownloadManager, DownloadState, DownloadTask};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+};
+use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Web server state
+pub struct WebState {
+    pub manager: Arc<DownloadManager>,
+    pub server_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl WebState {
+    pub fn new(manager: Arc<DownloadManager>) -> Self {
+        Self {
+            manager,
+            server_handle: Mutex::new(None),
+        }
+    }
+}
+
+/// Task info for API responses
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskInfo {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub size: u64,
+    pub downloaded: u64,
+    pub progress: f32,
+    pub speed_bps: f64,
+    pub state: String,
+    pub error: Option<String>,
+}
+
+impl From<DownloadTask> for TaskInfo {
+    fn from(task: DownloadTask) -> Self {
+        let progress = task.progress();
+        let state = task.state_label().to_string();
+        Self {
+            id: task.id,
+            name: task.name,
+            protocol: format!("{:?}", task.protocol),
+            size: task.size,
+            downloaded: task.downloaded,
+            progress,
+            speed_bps: task.speed_bps,
+            state,
+            error: task.error,
+        }
+    }
+}
+
+/// Request to add a download
+#[derive(Debug, Deserialize)]
+pub struct AddDownloadRequest {
+    pub url: String,
+}
+
+/// Response for task operations
+#[derive(Debug, Serialize)]
+pub struct TaskResponse {
+    pub success: bool,
+    pub task_id: Option<String>,
+    pub message: String,
+}
+
+/// Create the web router
+pub fn create_router(state: Arc<WebState>) -> Router {
+    Router::new()
+        .route("/api/tasks", get(list_tasks))
+        .route("/api/tasks/:id", get(get_task))
+        .route("/api/tasks/:id/pause", post(pause_task))
+        .route("/api/tasks/:id/resume", post(resume_task))
+        .route("/api/tasks/:id/remove", post(remove_task))
+        .route("/api/download", post(add_download))
+        .route("/api/status", get(get_status))
+        .route("/", get(index_html))
+        .with_state(state)
+}
+
+/// List all download tasks
+async fn list_tasks(State(state): State<Arc<WebState>>) -> Json<Vec<TaskInfo>> {
+    let tasks = state.manager.list_tasks().await;
+    Json(tasks.into_iter().map(TaskInfo::from).collect())
+}
+
+/// Get a specific task by ID
+async fn get_task(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<TaskInfo>, StatusCode> {
+    state
+        .manager
+        .get_task(&id)
+        .await
+        .map(|t| Json(TaskInfo::from(t)))
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// Pause a task
+async fn pause_task(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<TaskResponse> {
+    let success = state.manager.pause_task(&id).await;
+    Json(TaskResponse {
+        success,
+        task_id: Some(id),
+        message: if success {
+            "Task paused".to_string()
+        } else {
+            "Failed to pause task".to_string()
+        },
+    })
+}
+
+/// Resume a task
+async fn resume_task(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<TaskResponse> {
+    let success = state.manager.resume_task(&id).await;
+    Json(TaskResponse {
+        success,
+        task_id: Some(id),
+        message: if success {
+            "Task resumed".to_string()
+        } else {
+            "Failed to resume task".to_string()
+        },
+    })
+}
+
+/// Remove a task
+async fn remove_task(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<TaskResponse> {
+    let success = state.manager.remove_task(&id).await;
+    Json(TaskResponse {
+        success,
+        task_id: Some(id),
+        message: if success {
+            "Task removed".to_string()
+        } else {
+            "Failed to remove task".to_string()
+        },
+    })
+}
+
+/// Add a new download
+async fn add_download(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AddDownloadRequest>,
+) -> Result<Json<TaskResponse>, StatusCode> {
+    let result = if req.url.starts_with("magnet:") {
+        state.manager.add_magnet(&req.url).await
+    } else if req.url.starts_with("ed2k://") {
+        // Parse ed2k link (simplified)
+        return Err(StatusCode::NOT_IMPLEMENTED);
+    } else if req.url.ends_with(".torrent") {
+        // Download torrent file first, then add
+        return Err(StatusCode::NOT_IMPLEMENTED);
+    } else {
+        state.manager.add_url(&req.url).await
+    };
+
+    match result {
+        Ok(task_id) => Ok(Json(TaskResponse {
+            success: true,
+            task_id: Some(task_id),
+            message: "Download added".to_string(),
+        })),
+        Err(e) => Ok(Json(TaskResponse {
+            success: false,
+            task_id: None,
+            message: format!("Failed to add download: {}", e),
+        })),
+    }
+}
+
+/// Get server status
+async fn get_status(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let tasks = state.manager.list_tasks().await;
+    let running = tasks
+        .iter()
+        .filter(|t| t.state == DownloadState::Downloading)
+        .count();
+    let total_speed: f64 = tasks.iter().map(|t| t.speed_bps).sum();
+
+    Json(serde_json::json!({
+        "total_tasks": tasks.len(),
+        "running_tasks": running,
+        "total_speed_bps": total_speed,
+    }))
+}
+
+/// Serve the index HTML page
+async fn index_html() -> &'static str {
+    include_str!("web/index.html")
+}
+
+/// Start the web server
+pub async fn start_server(
+    state: Arc<WebState>,
+    addr: SocketAddr,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let app = create_router(state.clone());
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("Web UI started at http://{}", addr);
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_state() -> Arc<WebState> {
+        let manager = Arc::new(DownloadManager::new(std::path::PathBuf::from("/tmp/test")));
+        Arc::new(WebState::new(manager))
+    }
+
+    #[tokio::test]
+    async fn test_list_tasks_empty() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_status() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_index_html() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent_task() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}

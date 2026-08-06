@@ -15,6 +15,7 @@ pub mod progress;
 pub mod rate_limiter;
 pub mod task_queue;
 pub mod torrent;
+pub mod web;
 pub mod xunlei;
 
 use std::collections::HashMap;

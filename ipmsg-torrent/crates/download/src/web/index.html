@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IPMsg-Torrent Downloads</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        h1 { color: #00d4ff; margin-bottom: 20px; }
+        .status-bar { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 30px; }
+        .status-item { display: flex; flex-direction: column; }
+        .status-label { font-size: 12px; color: #888; }
+        .status-value { font-size: 20px; font-weight: bold; color: #00d4ff; }
+        .add-form { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 10px; }
+        .add-form input { flex: 1; padding: 10px; border: 1px solid #333; border-radius: 4px; background: #0f3460; color: #eee; font-size: 14px; }
+        .add-form button { padding: 10px 20px; border: none; border-radius: 4px; background: #00d4ff; color: #1a1a2e; font-weight: bold; cursor: pointer; }
+        .add-form button:hover { background: #00b8d4; }
+        .task-list { display: flex; flex-direction: column; gap: 10px; }
+        .task { background: #16213e; padding: 15px; border-radius: 8px; }
+        .task-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .task-name { font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 500px; }
+        .task-state { padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
+        .state-downloading { background: #0f3460; color: #00d4ff; }
+        .state-paused { background: #533a1b; color: #ffa500; }
+        .state-complete { background: #1b4332; color: #40c057; }
+        .state-error { background: #5c1a1a; color: #ff6b6b; }
+        .state-queued { background: #333; color: #aaa; }
+        .progress-bar { height: 8px; background: #0f3460; border-radius: 4px; overflow: hidden; margin-bottom: 8px; }
+        .progress-fill { height: 100%; background: linear-gradient(90deg, #00d4ff, #00ff88); transition: width 0.3s; }
+        .task-info { display: flex; justify-content: space-between; font-size: 13px; color: #888; }
+        .task-actions { display: flex; gap: 8px; }
+        .task-actions button { padding: 5px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+        .btn-pause { background: #533a1b; color: #ffa500; }
+        .btn-resume { background: #1b4332; color: #40c057; }
+        .btn-remove { background: #5c1a1a; color: #ff6b6b; }
+        .empty { text-align: center; padding: 40px; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📥 IPMsg-Torrent Downloads</h1>
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="status-label">Total Tasks</span>
+                <span class="status-value" id="total-tasks">0</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Running</span>
+                <span class="status-value" id="running-tasks">0</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Total Speed</span>
+                <span class="status-value" id="total-speed">0 B/s</span>
+            </div>
+        </div>
+        <div class="add-form">
+            <input type="text" id="url-input" placeholder="Enter URL, magnet link, or torrent path...">
+            <button onclick="addDownload()">Add Download</button>
+        </div>
+        <div class="task-list" id="task-list">
+            <div class="empty">No downloads yet</div>
+        </div>
+    </div>
+
+    <script>
+        function formatSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function formatSpeed(bps) {
+            return formatSize(bps) + '/s';
+        }
+
+        function stateClass(state) {
+            return 'state-' + state.toLowerCase();
+        }
+
+        async function fetchTasks() {
+            const resp = await fetch('/api/tasks');
+            return await resp.json();
+        }
+
+        async function fetchStatus() {
+            const resp = await fetch('/api/status');
+            return await resp.json();
+        }
+
+        async function renderTasks() {
+            const tasks = await fetchTasks();
+            const status = await fetchStatus();
+            
+            document.getElementById('total-tasks').textContent = status.total_tasks;
+            document.getElementById('running-tasks').textContent = status.running_tasks;
+            document.getElementById('total-speed').textContent = formatSpeed(status.total_speed_bps);
+
+            const list = document.getElementById('task-list');
+            if (tasks.length === 0) {
+                list.innerHTML = '<div class="empty">No downloads yet</div>';
+                return;
+            }
+
+            list.innerHTML = tasks.map(task => `
+                <div class="task">
+                    <div class="task-header">
+                        <span class="task-name" title="${task.name}">${task.name}</span>
+                        <span class="task-state ${stateClass(task.state)}">${task.state}</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${task.progress}%"></div>
+                    </div>
+                    <div class="task-info">
+                        <span>${formatSize(task.downloaded)} / ${formatSize(task.size)} (${task.progress.toFixed(1)}%)</span>
+                        <span>${formatSpeed(task.speed_bps)}</span>
+                        <div class="task-actions">
+                            ${task.state === 'downloading' ? `<button class="btn-pause" onclick="pauseTask('${task.id}')">Pause</button>` : ''}
+                            ${task.state === 'paused' || task.state === 'error' ? `<button class="btn-resume" onclick="resumeTask('${task.id}')">Resume</button>` : ''}
+                            <button class="btn-remove" onclick="removeTask('${task.id}')">Remove</button>
+                        </div>
+                    </div>
+                    ${task.error ? `<div style="color: #ff6b6b; font-size: 12px; margin-top: 5px;">${task.error}</div>` : ''}
+                </div>
+            `).join('');
+        }
+
+        async function addDownload() {
+            const input = document.getElementById('url-input');
+            const url = input.value.trim();
+            if (!url) return;
+
+            await fetch('/api/download', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url })
+            });
+
+            input.value = '';
+            renderTasks();
+        }
+
+        async function pauseTask(id) {
+            await fetch(`/api/tasks/${id}/pause`, { method: 'POST' });
+            renderTasks();
+        }
+
+        async function resumeTask(id) {
+            await fetch(`/api/tasks/${id}/resume`, { method: 'POST' });
+            renderTasks();
+        }
+
+        async function removeTask(id) {
+            if (!confirm('Remove this task?')) return;
+            await fetch(`/api/tasks/${id}/remove`, { method: 'POST' });
+            renderTasks();
+        }
+
+        // Initial render and auto-refresh every 2 seconds
+        renderTasks();
+        setInterval(renderTasks, 2000);
+    </script>
+</body>
+</html>
