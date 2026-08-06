@@ -5,6 +5,7 @@
 //! - eDonkey/eMule (ed2k links)
 //! - Xunlei P2SP (HTTP/FTP + P2P hybrid)
 
+pub mod connection_pool;
 pub mod dht;
 pub mod ed2k;
 pub mod magnet;
