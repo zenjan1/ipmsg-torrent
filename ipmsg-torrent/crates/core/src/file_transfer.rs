@@ -37,11 +37,17 @@ pub enum FileTransferRequest {
 pub enum FileTransferResponse {
     /// File metadata response
     Info { file_ref: FileRef, available: bool },
-    /// Chunk data response
+    /// Single chunk data response
     Chunk {
         file_hash: String,
         chunk_index: u32,
         data: Vec<u8>,
+    },
+    /// Multiple chunks response (from batch GetChunks request)
+    Chunks {
+        file_hash: String,
+        /// Each entry is (chunk_index, chunk_data)
+        chunks: Vec<(u32, Vec<u8>)>,
     },
     /// Error response
     Error { message: String },
@@ -455,10 +461,10 @@ impl FileTransferManager {
         let mut downloads = self.downloads.lock().await;
         let result = downloads.remove(file_hash);
         // Clean up progress file for completed download
-        if result.is_some() {
-            if let Err(e) = p2p_progress::remove_progress(&self.progress_dir, file_hash) {
-                tracing::warn!(hash = %file_hash, error = %e, "Failed to remove P2P progress file");
-            }
+        if result.is_some()
+            && let Err(e) = p2p_progress::remove_progress(&self.progress_dir, file_hash)
+        {
+            tracing::warn!(hash = %file_hash, error = %e, "Failed to remove P2P progress file");
         }
         result
     }
@@ -506,17 +512,14 @@ impl FileTransferManager {
                 file_hash,
                 chunk_indices,
             } => {
-                // Batch request: return all requested chunks concatenated
-                // Each chunk is prefixed with its index (4 bytes) and length (4 bytes)
-                let mut combined_data = Vec::new();
+                // Batch request: return all requested chunks as structured data
+                let mut chunks = Vec::with_capacity(chunk_indices.len());
                 let mut errors = Vec::new();
 
                 for &chunk_index in &chunk_indices {
                     match file_sharing.read_chunk(&file_hash, chunk_index).await {
                         Ok(data) => {
-                            combined_data.extend_from_slice(&chunk_index.to_be_bytes());
-                            combined_data.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                            combined_data.extend_from_slice(&data);
+                            chunks.push((chunk_index, data));
                         }
                         Err(e) => {
                             errors.push(format!("chunk {}: {}", chunk_index, e));
@@ -524,16 +527,12 @@ impl FileTransferManager {
                     }
                 }
 
-                if combined_data.is_empty() && !errors.is_empty() {
+                if chunks.is_empty() && !errors.is_empty() {
                     FileTransferResponse::Error {
                         message: format!("Failed to read chunks: {}", errors.join("; ")),
                     }
                 } else {
-                    FileTransferResponse::Chunk {
-                        file_hash,
-                        chunk_index: chunk_indices.first().copied().unwrap_or(0),
-                        data: combined_data,
-                    }
+                    FileTransferResponse::Chunks { file_hash, chunks }
                 }
             }
         }
@@ -567,6 +566,7 @@ pub fn create_file_transfer_behaviour() -> request_response::Behaviour<FileTrans
 mod tests {
     use super::*;
     use ipmsg_protocol::message::FileRef;
+    use tempfile::TempDir;
 
     #[test]
     fn test_file_download_progress() {
@@ -598,5 +598,117 @@ mod tests {
         assert_eq!(download.progress(), 100.0);
         assert!(download.is_complete());
         assert!(download.reassemble().is_some());
+    }
+
+    #[test]
+    fn test_file_download_next_missing_chunks() {
+        let file_ref = FileRef {
+            hash: "test".to_string(),
+            name: "test.txt".to_string(),
+            size: 1000,
+            mime_type: "text/plain".to_string(),
+            chunks: 4,
+            chunk_size: 250,
+            thumbnail: None,
+        };
+        let mut download = FileDownload::new(file_ref, "peer1".to_string());
+
+        // Initially all chunks are missing
+        let batch = download.next_missing_chunks(2);
+        assert_eq!(batch, vec![0, 1]);
+
+        // Receive chunk 0
+        download.received_chunks.insert(0, vec![0; 250]);
+        download.missing_chunks.retain(|&i| i != 0);
+
+        // Next batch should skip chunk 0
+        let batch = download.next_missing_chunks(2);
+        assert_eq!(batch, vec![1, 2]);
+
+        // Request more than available
+        download.received_chunks.insert(1, vec![0; 250]);
+        download.missing_chunks.retain(|&i| i != 1);
+        download.received_chunks.insert(2, vec![0; 250]);
+        download.missing_chunks.retain(|&i| i != 2);
+
+        let batch = download.next_missing_chunks(10);
+        assert_eq!(batch, vec![3]);
+    }
+
+    #[test]
+    fn test_file_download_to_snapshot() {
+        let file_ref = FileRef {
+            hash: "hash123".to_string(),
+            name: "video.mp4".to_string(),
+            size: 1024,
+            mime_type: "video/mp4".to_string(),
+            chunks: 4,
+            chunk_size: 256,
+            thumbnail: None,
+        };
+        let mut download = FileDownload::new(file_ref, "peer_abc".to_string());
+
+        // Receive some chunks
+        download.received_chunks.insert(0, vec![0xAA; 256]);
+        download.missing_chunks.retain(|&i| i != 0);
+        download.bytes_received += 256;
+        download.received_chunks.insert(2, vec![0xCC; 256]);
+        download.missing_chunks.retain(|&i| i != 2);
+        download.bytes_received += 256;
+
+        let snapshot = download.to_snapshot();
+        assert_eq!(snapshot.file_hash, "hash123");
+        assert_eq!(snapshot.file_name, "video.mp4");
+        assert_eq!(snapshot.file_size, 1024);
+        assert_eq!(snapshot.chunk_size, 256);
+        assert_eq!(snapshot.total_chunks, 4);
+        assert_eq!(snapshot.received_chunks.len(), 2);
+        assert!(snapshot.received_chunks.contains(&0));
+        assert!(snapshot.received_chunks.contains(&2));
+        assert_eq!(snapshot.bytes_received, 512);
+        assert_eq!(snapshot.owner, "peer_abc");
+    }
+
+    #[tokio::test]
+    async fn test_file_transfer_manager_batch_record() {
+        let temp_dir = TempDir::new().unwrap();
+        let progress_dir = temp_dir.path().join("p2p_progress");
+        let sharing_dir = temp_dir.path().join("shared");
+
+        let file_ref = FileRef {
+            hash: "batch_test".to_string(),
+            name: "batch.bin".to_string(),
+            size: 1024,
+            mime_type: "application/octet-stream".to_string(),
+            chunks: 4,
+            chunk_size: 256,
+            thumbnail: None,
+        };
+        let file_hash = file_ref.hash.clone();
+
+        let sharing = Arc::new(Mutex::new(FileSharingManager::new(sharing_dir)));
+        let manager = FileTransferManager::new(sharing, progress_dir);
+
+        manager
+            .start_download(file_ref.clone(), "peer1".to_string())
+            .await;
+
+        // Record chunks in batch (simulating batch response)
+        let chunk0 = vec![0xAA; 256];
+        let chunk1 = vec![0xBB; 256];
+        let complete = manager.record_chunk(&file_hash, 0, chunk0).await;
+        assert!(!complete);
+        let complete = manager.record_chunk(&file_hash, 1, chunk1).await;
+        assert!(!complete);
+
+        // Check progress
+        let progress = manager.get_progress(&file_hash).await.unwrap();
+        assert!(progress > 40.0 && progress < 60.0); // ~50%
+
+        // Get missing chunks
+        let missing = manager.get_missing_chunks(&file_hash, 10).await;
+        assert_eq!(missing.len(), 2);
+        assert!(missing.contains(&2));
+        assert!(missing.contains(&3));
     }
 }

@@ -41,6 +41,8 @@ use tokio::sync::Mutex;
 
 /// Maximum tracked message IDs for dedup
 const MAX_DEDUP_CACHE: usize = 4096;
+/// Number of chunks to request in a single batch for P2P file downloads
+const FILE_DOWNLOAD_BATCH_SIZE: usize = 4;
 /// ACK timeout in seconds
 const ACK_TIMEOUT_SECS: u64 = 30;
 /// Max retries before giving up
@@ -1358,6 +1360,38 @@ impl P2PEngine {
         Ok(())
     }
 
+    /// Request multiple chunks from a peer in a single batch request
+    pub async fn request_chunks_batch(
+        &mut self,
+        file_hash: &str,
+        chunk_indices: &[u32],
+        from_peer: &str,
+    ) -> Result<(), P2PError> {
+        if chunk_indices.is_empty() {
+            return Ok(());
+        }
+
+        let peer_id: PeerId = from_peer
+            .parse()
+            .map_err(|e| P2PError::PeerNotFound(format!("Invalid peer ID: {}", e)))?;
+
+        let req = FileTransferRequest::GetChunks {
+            file_hash: file_hash.to_string(),
+            chunk_indices: chunk_indices.to_vec(),
+        };
+
+        if let Some(swarm) = &mut self.swarm {
+            swarm.send_file_request(&peer_id, req)?;
+        }
+
+        tracing::debug!(
+            file_hash = %file_hash,
+            count = chunk_indices.len(),
+            "Batch chunk request sent"
+        );
+        Ok(())
+    }
+
     /// Process file transfer requests and send responses
     pub async fn process_file_transfer_requests(&mut self) -> Result<(), P2PError> {
         let file_transfer = self.file_transfer.clone();
@@ -1390,9 +1424,9 @@ impl P2PEngine {
                 available,
             } => {
                 if available {
-                    tracing::info!(file_hash = %file_ref.hash, "File info received, starting download");
+                    tracing::info!(file_hash = %file_ref.hash, chunks = %file_ref.chunks, "File info received, starting download");
 
-                    // Start download tracking
+                    // Start download tracking (auto-restores progress if available)
                     let file_transfer = self.file_transfer.clone();
                     file_transfer
                         .lock()
@@ -1400,8 +1434,22 @@ impl P2PEngine {
                         .start_download(file_ref.clone(), peer_id.to_string())
                         .await;
 
-                    // Request first chunk
-                    self.request_chunk(&file_ref.hash, 0, peer_id).await?;
+                    // Request first batch of missing chunks in parallel
+                    let batch_size =
+                        std::cmp::min(FILE_DOWNLOAD_BATCH_SIZE, file_ref.chunks as usize);
+                    let missing = file_transfer
+                        .lock()
+                        .await
+                        .get_missing_chunks(&file_ref.hash, batch_size)
+                        .await;
+
+                    if missing.is_empty() {
+                        // All chunks already restored from progress
+                        self.complete_file_download(&file_ref.hash).await?;
+                    } else {
+                        self.request_chunks_batch(&file_ref.hash, &missing, peer_id)
+                            .await?;
+                    }
                 } else {
                     tracing::warn!("File not available from peer");
                 }
@@ -1421,32 +1469,54 @@ impl P2PEngine {
                     .await;
 
                 if is_complete {
-                    tracing::info!(file_hash = %file_hash, "File download complete");
-
-                    // Assemble file
-                    if let Some(file_data) =
-                        file_transfer.lock().await.try_assemble(&file_hash).await
-                    {
-                        // Save to disk
-                        let file_info =
-                            file_transfer.lock().await.finish_download(&file_hash).await;
-                        if let Some(info) = file_info {
-                            let output_path =
-                                self.data_dir.join("downloads").join(&info.file_ref.name);
-                            std::fs::create_dir_all(output_path.parent().unwrap())?;
-                            std::fs::write(&output_path, &file_data)?;
-                            tracing::info!(path = %output_path.display(), "File saved");
-
-                            let _ = self.event_tx.send(P2PEvent::Status(format!(
-                                "Downloaded file: {}",
-                                info.file_ref.name
-                            )));
-                        }
-                    }
+                    self.complete_file_download(&file_hash).await?;
                 } else {
-                    // Request next chunk
-                    let next_chunk = chunk_index + 1;
-                    self.request_chunk(&file_hash, next_chunk, peer_id).await?;
+                    // Request next single chunk (fallback for single-chunk responses)
+                    let next_chunks = file_transfer
+                        .lock()
+                        .await
+                        .get_missing_chunks(&file_hash, 1)
+                        .await;
+                    if let Some(next) = next_chunks.first() {
+                        self.request_chunk(&file_hash, *next, peer_id).await?;
+                    }
+                }
+            }
+            FileTransferResponse::Chunks { file_hash, chunks } => {
+                let count = chunks.len();
+                tracing::info!(
+                    file_hash = %file_hash,
+                    chunks_received = count,
+                    "Batch chunks received"
+                );
+
+                let file_transfer = self.file_transfer.clone();
+                let mut is_complete = false;
+                for (chunk_index, data) in chunks {
+                    is_complete = file_transfer
+                        .lock()
+                        .await
+                        .record_chunk(&file_hash, chunk_index, data)
+                        .await;
+                    if is_complete {
+                        break;
+                    }
+                }
+
+                if is_complete {
+                    self.complete_file_download(&file_hash).await?;
+                } else {
+                    // Request next batch of missing chunks
+                    let batch_size = FILE_DOWNLOAD_BATCH_SIZE;
+                    let missing = file_transfer
+                        .lock()
+                        .await
+                        .get_missing_chunks(&file_hash, batch_size)
+                        .await;
+                    if !missing.is_empty() {
+                        self.request_chunks_batch(&file_hash, &missing, peer_id)
+                            .await?;
+                    }
                 }
             }
             FileTransferResponse::Error { message } => {
@@ -1454,6 +1524,28 @@ impl P2PEngine {
                 let _ = self.event_tx.send(P2PEvent::Status(format!(
                     "File transfer error: {}",
                     message
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Assemble and save a completed P2P file download, cleaning up progress files
+    async fn complete_file_download(&mut self, file_hash: &str) -> Result<(), P2PError> {
+        let file_transfer = self.file_transfer.clone();
+
+        if let Some(file_data) = file_transfer.lock().await.try_assemble(file_hash).await {
+            let file_info = file_transfer.lock().await.finish_download(file_hash).await;
+            if let Some(info) = file_info {
+                let output_path = self.data_dir.join("downloads").join(&info.file_ref.name);
+                std::fs::create_dir_all(output_path.parent().unwrap())?;
+                std::fs::write(&output_path, &file_data)?;
+                tracing::info!(path = %output_path.display(), "File saved");
+
+                let _ = self.event_tx.send(P2PEvent::Status(format!(
+                    "Downloaded file: {}",
+                    info.file_ref.name
                 )));
             }
         }

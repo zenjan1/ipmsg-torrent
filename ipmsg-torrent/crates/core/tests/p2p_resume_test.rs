@@ -121,7 +121,11 @@ async fn test_p2p_progress_cleanup_on_finish() {
 
     // Progress file should exist before finish
     let progress_files = p2p_progress::list_progress(&progress_dir);
-    assert_eq!(progress_files.len(), 1, "One progress file should exist before finish");
+    assert_eq!(
+        progress_files.len(),
+        1,
+        "One progress file should exist before finish"
+    );
 
     // Finish download
     let result = manager.finish_download(&file_hash).await;
@@ -129,7 +133,11 @@ async fn test_p2p_progress_cleanup_on_finish() {
 
     // Progress file should be cleaned up
     let progress_files = p2p_progress::list_progress(&progress_dir);
-    assert_eq!(progress_files.len(), 0, "Progress file should be removed after finish");
+    assert_eq!(
+        progress_files.len(),
+        0,
+        "Progress file should be removed after finish"
+    );
 }
 
 #[tokio::test]
