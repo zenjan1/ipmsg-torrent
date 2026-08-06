@@ -3,6 +3,7 @@
 use super::client::Ed2kClient;
 use super::peer_cache;
 use super::protocol::{ED2K_BLOCK_SIZE, ED2K_CHUNK_SIZE, Ed2kFileHash};
+use super::server_cache;
 use crate::progress::{self, ProgressSnapshot};
 use md4::{Digest, Md4};
 use std::collections::{HashMap, HashSet};
@@ -86,6 +87,8 @@ pub struct Ed2kEngine {
     progress: ProgressSnapshot,
     /// Cached peers loaded from disk
     cached_peers: Vec<SocketAddr>,
+    /// Cached servers loaded from disk
+    cached_servers: Vec<SocketAddr>,
 }
 
 impl Ed2kEngine {
@@ -156,6 +159,12 @@ impl Ed2kEngine {
             tracing::info!(count = cached_peers.len(), "Loaded cached ed2k peers");
         }
 
+        // Load cached servers from disk
+        let cached_servers = server_cache::load_servers(&download_dir).unwrap_or_default();
+        if !cached_servers.is_empty() {
+            tracing::info!(count = cached_servers.len(), "Loaded cached ed2k servers");
+        }
+
         Self {
             file_hash,
             file_size,
@@ -168,6 +177,7 @@ impl Ed2kEngine {
             downloaded,
             progress,
             cached_peers,
+            cached_servers,
         }
     }
 
@@ -213,12 +223,25 @@ impl Ed2kEngine {
             }
         }
 
+        // Combine configured servers with cached servers
+        let mut all_servers = self.servers.clone();
+        let cached_servers = std::mem::take(&mut self.cached_servers);
+        for server in cached_servers {
+            if !all_servers.contains(&server) {
+                all_servers.push(server);
+            }
+        }
+
         // Connect to servers and request sources
-        let servers = self.servers.clone();
-        for server_addr in servers {
+        for server_addr in all_servers {
             if let Err(e) = self.connect_server(server_addr).await {
                 tracing::warn!(addr = %server_addr, error = %e, "Failed to connect to server");
             }
+        }
+
+        // Save server list to cache
+        if let Err(e) = server_cache::save_servers(&self.download_dir, &self.servers) {
+            tracing::warn!(error = %e, "Failed to save server cache");
         }
 
         // Main download loop
