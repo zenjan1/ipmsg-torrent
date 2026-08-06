@@ -36,6 +36,9 @@
         .btn-resume { background: #1b4332; color: #40c057; }
         .btn-remove { background: #5c1a1a; color: #ff6b6b; }
         .empty { text-align: center; padding: 40px; color: #666; }
+        .ws-status { font-size: 11px; color: #666; margin-top: 8px; }
+        .ws-connected { color: #40c057; }
+        .ws-disconnected { color: #ff6b6b; }
     </style>
 </head>
 <body>
@@ -62,9 +65,18 @@
         <div class="task-list" id="task-list">
             <div class="empty">No downloads yet</div>
         </div>
+        <div class="ws-status">
+            WebSocket: <span id="ws-status" class="ws-disconnected">disconnected</span>
+        </div>
     </div>
 
     <script>
+        // --- State ---
+        let tasks = {};  // id -> task object
+        let ws = null;
+        let wsReconnectTimer = null;
+
+        // --- Formatting helpers ---
         function formatSize(bytes) {
             if (bytes === 0) return '0 B';
             const k = 1024;
@@ -81,31 +93,22 @@
             return 'state-' + state.toLowerCase();
         }
 
-        async function fetchTasks() {
-            const resp = await fetch('/api/tasks');
-            return await resp.json();
-        }
-
-        async function fetchStatus() {
-            const resp = await fetch('/api/status');
-            return await resp.json();
-        }
-
-        async function renderTasks() {
-            const tasks = await fetchTasks();
-            const status = await fetchStatus();
-            
-            document.getElementById('total-tasks').textContent = status.total_tasks;
-            document.getElementById('running-tasks').textContent = status.running_tasks;
-            document.getElementById('total-speed').textContent = formatSpeed(status.total_speed_bps);
-
+        // --- Rendering ---
+        function renderTasks() {
             const list = document.getElementById('task-list');
-            if (tasks.length === 0) {
+            const taskArr = Object.values(tasks);
+
+            if (taskArr.length === 0) {
                 list.innerHTML = '<div class="empty">No downloads yet</div>';
+                updateStatus(0, 0, 0);
                 return;
             }
 
-            list.innerHTML = tasks.map(task => `
+            const running = taskArr.filter(t => t.state === 'downloading').length;
+            const totalSpeed = taskArr.reduce((sum, t) => sum + (t.speed_bps || 0), 0);
+            updateStatus(taskArr.length, running, totalSpeed);
+
+            list.innerHTML = taskArr.map(task => `
                 <div class="task">
                     <div class="task-header">
                         <span class="task-name" title="${task.name}">${task.name}</span>
@@ -128,6 +131,85 @@
             `).join('');
         }
 
+        function updateStatus(total, running, speed) {
+            document.getElementById('total-tasks').textContent = total;
+            document.getElementById('running-tasks').textContent = running;
+            document.getElementById('total-speed').textContent = formatSpeed(speed);
+        }
+
+        // --- WebSocket ---
+        function connectWebSocket() {
+            if (ws && ws.readyState === WebSocket.OPEN) return;
+
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${proto}//${location.host}/api/ws`);
+
+            ws.onopen = () => {
+                document.getElementById('ws-status').textContent = 'connected';
+                document.getElementById('ws-status').className = 'ws-connected';
+                if (wsReconnectTimer) {
+                    clearTimeout(wsReconnectTimer);
+                    wsReconnectTimer = null;
+                }
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleWsMessage(data);
+                } catch (e) {
+                    console.warn('Failed to parse WS message:', e);
+                }
+            };
+
+            ws.onclose = () => {
+                document.getElementById('ws-status').textContent = 'disconnected';
+                document.getElementById('ws-status').className = 'ws-disconnected';
+                // Auto-reconnect after 3 seconds
+                wsReconnectTimer = setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = () => {
+                ws.close();
+            };
+        }
+
+        function handleWsMessage(data) {
+            // Initial snapshot: array of tasks
+            if (Array.isArray(data)) {
+                tasks = {};
+                data.forEach(t => { tasks[t.id] = t; });
+                renderTasks();
+                return;
+            }
+
+            // Event messages
+            switch (data.type) {
+                case 'task_added':
+                    if (data.task) {
+                        tasks[data.task.id] = data.task;
+                        renderTasks();
+                    }
+                    break;
+                case 'task_updated':
+                    if (data.task) {
+                        tasks[data.task.id] = data.task;
+                        renderTasks();
+                    }
+                    break;
+                case 'task_removed':
+                    if (data.task_id) {
+                        delete tasks[data.task_id];
+                        renderTasks();
+                    }
+                    break;
+                case 'status':
+                    updateStatus(data.total_tasks, data.running_tasks, data.total_speed_bps);
+                    break;
+            }
+        }
+
+        // --- API actions ---
         async function addDownload() {
             const input = document.getElementById('url-input');
             const url = input.value.trim();
@@ -140,28 +222,46 @@
             });
 
             input.value = '';
-            renderTasks();
+            // WebSocket will deliver the task_added event
         }
 
         async function pauseTask(id) {
             await fetch(`/api/tasks/${id}/pause`, { method: 'POST' });
-            renderTasks();
         }
 
         async function resumeTask(id) {
             await fetch(`/api/tasks/${id}/resume`, { method: 'POST' });
-            renderTasks();
         }
 
         async function removeTask(id) {
             if (!confirm('Remove this task?')) return;
             await fetch(`/api/tasks/${id}/remove`, { method: 'POST' });
-            renderTasks();
         }
 
-        // Initial render and auto-refresh every 2 seconds
-        renderTasks();
-        setInterval(renderTasks, 2000);
+        // --- Init ---
+        // Try WebSocket first, fall back to polling
+        if ('WebSocket' in window) {
+            connectWebSocket();
+        } else {
+            // Fallback: polling every 2 seconds
+            async function pollRender() {
+                const resp = await fetch('/api/tasks');
+                const taskArr = await resp.json();
+                tasks = {};
+                taskArr.forEach(t => { tasks[t.id] = t; });
+                const statusResp = await fetch('/api/status');
+                const status = await statusResp.json();
+                updateStatus(status.total_tasks, status.running_tasks, status.total_speed_bps);
+                renderTasks();
+            }
+            pollRender();
+            setInterval(pollRender, 2000);
+        }
+
+        // Enter key to add download
+        document.getElementById('url-input').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') addDownload();
+        });
     </script>
 </body>
 </html>

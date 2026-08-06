@@ -23,10 +23,63 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use task_queue::{load_task_queue, save_task_queue};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 pub use rate_limiter::{DownloadRateController, RateLimiter};
+
+/// Events emitted when download tasks change state.
+/// WebSocket clients receive these for real-time UI updates.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type")]
+pub enum TaskEvent {
+    /// A new task was added
+    #[serde(rename = "task_added")]
+    Added { task: TaskInfoEvent },
+    /// A task's progress, speed, or state changed
+    #[serde(rename = "task_updated")]
+    Updated { task: TaskInfoEvent },
+    /// A task was removed
+    #[serde(rename = "task_removed")]
+    Removed { task_id: String },
+    /// Global status update (aggregated stats)
+    #[serde(rename = "status")]
+    Status {
+        total_tasks: usize,
+        running_tasks: usize,
+        total_speed_bps: f64,
+    },
+}
+
+/// Snapshot of a task sent over WebSocket events.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TaskInfoEvent {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub size: u64,
+    pub downloaded: u64,
+    pub progress: f32,
+    pub speed_bps: f64,
+    pub state: String,
+    pub error: Option<String>,
+}
+
+impl TaskInfoEvent {
+    fn from_task(task: &DownloadTask) -> Self {
+        Self {
+            id: task.id.clone(),
+            name: task.name.clone(),
+            protocol: format!("{:?}", task.protocol),
+            size: task.size,
+            downloaded: task.downloaded,
+            progress: task.progress(),
+            speed_bps: task.speed_bps,
+            state: task.state_label().to_string(),
+            error: task.error.clone(),
+        }
+    }
+}
 
 /// Unified download task
 #[derive(Debug, Clone)]
@@ -164,6 +217,8 @@ pub struct DownloadManager {
     timeout_secs: Arc<AtomicU64>,
     /// Maximum retry attempts for timed-out downloads
     max_retries: Arc<AtomicU32>,
+    /// Broadcast channel for task change events (WebSocket push)
+    event_tx: broadcast::Sender<TaskEvent>,
 }
 
 impl DownloadManager {
@@ -179,7 +234,19 @@ impl DownloadManager {
             rate_limiter: Arc::new(DownloadRateController::new(0, 0)),
             timeout_secs: Arc::new(AtomicU64::new(0)),
             max_retries: Arc::new(AtomicU32::new(3)),
+            event_tx: broadcast::channel(128).0,
         }
+    }
+
+    /// Subscribe to task change events for real-time updates.
+    pub fn subscribe(&self) -> broadcast::Receiver<TaskEvent> {
+        self.event_tx.subscribe()
+    }
+
+    /// Broadcast a task event to all subscribers (best-effort).
+    fn emit_event(&self, event: TaskEvent) {
+        // Ignore send errors (no active receivers)
+        let _ = self.event_tx.send(event);
     }
 
     /// Create a DownloadManager and restore tasks from disk
@@ -205,6 +272,7 @@ impl DownloadManager {
             rate_limiter: Arc::new(DownloadRateController::new(0, 0)),
             timeout_secs: Arc::new(AtomicU64::new(0)),
             max_retries: Arc::new(AtomicU32::new(3)),
+            event_tx: broadcast::channel(128).0,
         }
     }
 
@@ -279,8 +347,11 @@ impl DownloadManager {
             updated_at: now,
         };
 
-        self.tasks.lock().await.push(task);
+        self.tasks.lock().await.push(task.clone());
         self.persist_tasks().await;
+        self.emit_event(TaskEvent::Added {
+            task: TaskInfoEvent::from_task(&task),
+        });
 
         let params = TaskParams::Torrent {
             torrent_path: torrent_path.clone(),
@@ -320,8 +391,11 @@ impl DownloadManager {
             updated_at: now,
         };
 
-        self.tasks.lock().await.push(task);
+        self.tasks.lock().await.push(task.clone());
         self.persist_tasks().await;
+        self.emit_event(TaskEvent::Added {
+            task: TaskInfoEvent::from_task(&task),
+        });
 
         let params = TaskParams::Magnet {
             info_hash: magnet.info_hash.try_into().map_err(|_| {
@@ -361,8 +435,11 @@ impl DownloadManager {
             updated_at: now,
         };
 
-        self.tasks.lock().await.push(task);
+        self.tasks.lock().await.push(task.clone());
         self.persist_tasks().await;
+        self.emit_event(TaskEvent::Added {
+            task: TaskInfoEvent::from_task(&task),
+        });
 
         let params = TaskParams::Ed2k {
             file_hash,
@@ -400,8 +477,11 @@ impl DownloadManager {
             updated_at: now,
         };
 
-        self.tasks.lock().await.push(task);
+        self.tasks.lock().await.push(task.clone());
         self.persist_tasks().await;
+        self.emit_event(TaskEvent::Added {
+            task: TaskInfoEvent::from_task(&task),
+        });
 
         let params = TaskParams::Xunlei {
             file_name,
@@ -439,8 +519,11 @@ impl DownloadManager {
             updated_at: now,
         };
 
-        self.tasks.lock().await.push(task);
+        self.tasks.lock().await.push(task.clone());
         self.persist_tasks().await;
+        self.emit_event(TaskEvent::Added {
+            task: TaskInfoEvent::from_task(&task),
+        });
 
         // Store task params for potential resume
         {
@@ -1309,6 +1392,9 @@ impl DownloadManager {
             task.state = DownloadState::Paused;
             task.speed_bps = 0.0;
             task.updated_at = chrono::Utc::now();
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(task),
+            });
             return true;
         }
         false
@@ -1377,6 +1463,9 @@ impl DownloadManager {
                 task.error = None;
                 task.speed_bps = 0.0;
                 task.updated_at = chrono::Utc::now();
+                self.emit_event(TaskEvent::Updated {
+                    task: TaskInfoEvent::from_task(task),
+                });
             }
         }
         self.spawn_task(task_id.to_string(), params).await;
@@ -1403,8 +1492,17 @@ impl DownloadManager {
         drop(tasks);
         if removed {
             self.persist_tasks().await;
+            self.emit_event(TaskEvent::Removed {
+                task_id: task_id.to_string(),
+            });
         }
         removed
+    }
+
+    /// Emit a task event (public for testing only).
+    #[cfg(test)]
+    pub(crate) fn emit_event_for_test(&self, event: TaskEvent) {
+        self.emit_event(event);
     }
 
     /// Persist current task list to disk (fire-and-forget)

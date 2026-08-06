@@ -1,14 +1,19 @@
 //! Web UI for download management
 //!
-//! Provides a REST API and simple HTML frontend for managing downloads.
+//! Provides a REST API, WebSocket real-time updates, and HTML frontend.
 
 use crate::{DownloadManager, DownloadState, DownloadTask};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{
+        State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
 };
+use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -85,6 +90,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/tasks/:id/remove", post(remove_task))
         .route("/api/download", post(add_download))
         .route("/api/status", get(get_status))
+        .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
 }
@@ -206,6 +212,54 @@ async fn get_status(State(state): State<Arc<WebState>>) -> Json<serde_json::Valu
     }))
 }
 
+/// WebSocket upgrade handler
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(socket, state))
+}
+
+/// Handle a WebSocket connection.
+///
+/// Spawns two tasks:
+/// 1. Forward broadcast events from DownloadManager to the WebSocket client
+/// 2. Receive client messages (ping/pong or commands) and keep connection alive
+async fn handle_ws(socket: WebSocket, state: Arc<WebState>) {
+    let (mut sender, mut receiver) = socket.split();
+
+    // Subscribe to task events
+    let mut event_rx = state.manager.subscribe();
+
+    // Send initial snapshot of all tasks
+    let tasks = state.manager.list_tasks().await;
+    let snapshot: Vec<TaskInfo> = tasks.into_iter().map(TaskInfo::from).collect();
+    if let Ok(json) = serde_json::to_string(&snapshot) {
+        let _ = sender.send(Message::Text(json)).await;
+    }
+
+    // Forward broadcast events to WebSocket
+    let send_task = tokio::spawn(async move {
+        while let Ok(event) = event_rx.recv().await {
+            if let Ok(json) = serde_json::to_string(&event)
+                && sender.send(Message::Text(json)).await.is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    // Drain client messages (we don't expect any, but need to keep connection alive)
+    let recv_task = tokio::spawn(async move {
+        while let Some(Ok(_)) = receiver.next().await {
+            // Client messages are ignored for now
+        }
+    });
+
+    // Wait for either task to finish (client disconnect or broadcast closed)
+    tokio::select! {
+        _ = send_task => {},
+        _ = recv_task => {},
+    }
+}
+
 /// Serve the index HTML page
 async fn index_html() -> &'static str {
     include_str!("web/index.html")
@@ -229,6 +283,7 @@ pub async fn start_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{TaskEvent, TaskInfoEvent};
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -303,5 +358,46 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_task_event_serialization() {
+        let event = TaskEvent::Added {
+            task: TaskInfoEvent {
+                id: "abc".into(),
+                name: "test.txt".into(),
+                protocol: "Torrent".into(),
+                size: 1024,
+                downloaded: 512,
+                progress: 50.0,
+                speed_bps: 1000.0,
+                state: "downloading".into(),
+                error: None,
+            },
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"task_added\""));
+        assert!(json.contains("\"id\":\"abc\""));
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_receives_events() {
+        let manager = Arc::new(DownloadManager::new(std::path::PathBuf::from(
+            "/tmp/test_ws",
+        )));
+        let mut rx = manager.subscribe();
+
+        // Adding a URL will fail (no real server), but we just want to verify
+        // the event system doesn't panic. We test subscribe() returns a valid receiver.
+        // Direct event emission test:
+        manager.emit_event_for_test(TaskEvent::Removed {
+            task_id: "test-id".into(),
+        });
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            TaskEvent::Removed { task_id } => assert_eq!(task_id, "test-id"),
+            _ => panic!("Expected Removed event"),
+        }
     }
 }
