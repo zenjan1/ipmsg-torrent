@@ -9,6 +9,7 @@ pub mod identity;
 pub mod ipmsg_compat;
 pub mod messaging;
 pub mod noise;
+pub mod p2p_progress;
 pub mod scoring;
 pub mod stats;
 pub mod store;
@@ -98,6 +99,12 @@ pub enum P2PEvent {
     FileShareAnnounce {
         from: String,
         shares: Vec<ipmsg_protocol::message::FileShareInfo>,
+    },
+    /// File search query received from a peer
+    FileSearchQuery {
+        from: String,
+        query: String,
+        tags: Vec<String>,
     },
     /// File search response received
     FileSearchResponse {
@@ -362,10 +369,12 @@ impl P2PEngine {
 
         // Initialize file sharing manager
         let files_dir = data_dir.join("shared_files");
-        let file_sharing = FileSharingManager::new(files_dir);
-        let file_transfer = Arc::new(Mutex::new(FileTransferManager::new(Arc::new(Mutex::new(
-            file_sharing.clone(),
-        )))));
+        let file_sharing = FileSharingManager::new(files_dir.clone());
+        let p2p_progress_dir = files_dir.join("p2p_progress");
+        let file_transfer = Arc::new(Mutex::new(FileTransferManager::new(
+            Arc::new(Mutex::new(file_sharing.clone())),
+            p2p_progress_dir,
+        )));
 
         // Initialize download manager
         let download_manager = Arc::new(ipmsg_download::DownloadManager::new(data_dir.clone()));
@@ -549,6 +558,35 @@ impl P2PEngine {
                                         }
                                         P2PEvent::PeerAddressesDiscovered { peer_id, addrs } => {
                                             let _ = self.store.save_peer_addresses(peer_id, addrs);
+                                            evt
+                                        }
+                                        P2PEvent::FileShareAnnounce { from: _, shares } => {
+                                            // Process file share announcements from peers
+                                            self.file_sharing.process_announce(shares).await;
+                                            evt
+                                        }
+                                        P2PEvent::FileSearchQuery { from: _, query, tags } => {
+                                            // Respond to file search queries from peers
+                                            let results = self.file_sharing.search(query, tags).await;
+                                            if !results.is_empty() {
+                                                let response_msg = ipmsg_protocol::message::ChatMessage::new_file_share_response(
+                                                    self.peer_id_str(),
+                                                    results,
+                                                );
+                                                let response_bytes = ipmsg_protocol::codec::encode_message(&response_msg);
+                                                if let Some(s) = self.swarm.as_mut() {
+                                                    let _ = s.publish_to_topic(
+                                                        crate::messaging::FILE_TOPIC,
+                                                        response_bytes,
+                                                    );
+                                                }
+                                            }
+                                            // Don't forward search queries to the UI
+                                            continue;
+                                        }
+                                        P2PEvent::FileSearchResponse { from: _, results } => {
+                                            // Store discovered files from search responses
+                                            self.file_sharing.process_announce(results).await;
                                             evt
                                         }
                                         _ => evt,

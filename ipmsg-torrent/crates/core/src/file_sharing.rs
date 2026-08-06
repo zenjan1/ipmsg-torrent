@@ -158,37 +158,34 @@ impl FileSharingManager {
     }
 
     fn matches_query(&self, info: &FileShareInfo, query_lower: &str, tags: &[String]) -> bool {
-        // Match by filename
-        if info.file_ref.name.to_lowercase().contains(query_lower) {
-            return true;
-        }
+        let query_matches = if query_lower.is_empty() {
+            true
+        } else {
+            // Match by filename
+            info.file_ref.name.to_lowercase().contains(query_lower)
+                // Match by description
+                || info
+                    .description
+                    .as_ref()
+                    .map(|desc| desc.to_lowercase().contains(query_lower))
+                    .unwrap_or(false)
+        };
 
-        // Match by description
-        if let Some(desc) = &info.description
-            && desc.to_lowercase().contains(query_lower)
-        {
-            return true;
-        }
-
-        // Match by tags
-        if !tags.is_empty() {
-            for tag in tags {
-                if info
-                    .tags
+        let tags_match = if tags.is_empty() {
+            true
+        } else {
+            // Match by tags (case-insensitive)
+            tags.iter().any(|tag| {
+                info.tags
                     .iter()
                     .any(|t| t.to_lowercase() == tag.to_lowercase())
-                {
-                    return true;
-                }
-            }
-        }
+            })
+        };
 
-        // If query is empty and tags is empty, match everything
-        if query_lower.is_empty() && tags.is_empty() {
-            return true;
-        }
-
-        false
+        // If both query and tags are provided, both must match (AND logic)
+        // If only one is provided, that one must match
+        // If neither is provided, match everything
+        query_matches && tags_match
     }
 
     /// List all discovered files from other peers

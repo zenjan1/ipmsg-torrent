@@ -2,12 +2,14 @@
 //! Implements torrent-style chunked file transfer
 
 use crate::file_sharing::FileSharingManager;
+use crate::p2p_progress::{self, P2pDownloadSnapshot};
 use ipmsg_protocol::message::FileRef;
 use libp2p::StreamProtocol;
 use libp2p::request_response::{self, Codec, ProtocolSupport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -229,6 +231,78 @@ impl FileDownload {
             .unwrap_or_default()
             > timeout
     }
+
+    /// Convert current download state to a snapshot for persistence
+    pub fn to_snapshot(&self) -> P2pDownloadSnapshot {
+        let mut snapshot = P2pDownloadSnapshot::new(
+            self.file_ref.hash.clone(),
+            self.file_ref.name.clone(),
+            self.file_ref.size,
+            self.file_ref.chunk_size,
+            self.file_ref.chunks,
+            self.owner.clone(),
+        );
+        snapshot.received_chunks = self.received_chunks.keys().copied().collect();
+        snapshot.bytes_received = self.bytes_received;
+        snapshot.last_activity = self.last_activity;
+        snapshot
+    }
+
+    /// Restore download state from a persisted snapshot
+    /// Chunk data is loaded from disk files
+    pub fn from_snapshot(
+        file_ref: FileRef,
+        owner: String,
+        snapshot: P2pDownloadSnapshot,
+        progress_dir: &std::path::Path,
+    ) -> Self {
+        // Load chunk data from persisted files
+        let mut received_chunks: HashMap<u32, Vec<u8>> = HashMap::new();
+        for &chunk_idx in &snapshot.received_chunks {
+            let chunk_path = chunk_data_path(progress_dir, &snapshot.file_hash, chunk_idx);
+            if let Ok(data) = std::fs::read(&chunk_path) {
+                received_chunks.insert(chunk_idx, data);
+            } else {
+                tracing::warn!(
+                    hash = %snapshot.file_hash,
+                    chunk = %chunk_idx,
+                    "Chunk data file missing, will re-download"
+                );
+            }
+        }
+
+        let received_indices: std::collections::HashSet<u32> =
+            received_chunks.keys().copied().collect();
+        let missing_chunks: Vec<u32> = (0..file_ref.chunks)
+            .filter(|i| !received_indices.contains(i))
+            .collect();
+
+        Self {
+            file_ref,
+            received_chunks,
+            missing_chunks,
+            owner,
+            started_at: chrono::Utc::now(),
+            bytes_received: snapshot.bytes_received,
+            resumable: true,
+            last_activity: snapshot.last_activity,
+        }
+    }
+}
+
+/// Get the file path for a specific chunk's persisted data
+fn chunk_data_path(
+    progress_dir: &std::path::Path,
+    file_hash: &str,
+    chunk_index: u32,
+) -> std::path::PathBuf {
+    let safe_hash: String = file_hash
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    progress_dir
+        .join("chunks")
+        .join(format!("{}_{}", safe_hash, chunk_index))
 }
 
 /// File transfer manager handles download/upload state
@@ -239,31 +313,66 @@ pub struct FileTransferManager {
     file_sharing: Arc<Mutex<FileSharingManager>>,
     /// Pending requests to send
     pending_requests: Arc<Mutex<Vec<(String, FileTransferRequest)>>>,
+    /// Directory for persisting download progress
+    progress_dir: PathBuf,
 }
 
 impl FileTransferManager {
-    pub fn new(file_sharing: Arc<Mutex<FileSharingManager>>) -> Self {
+    pub fn new(file_sharing: Arc<Mutex<FileSharingManager>>, progress_dir: PathBuf) -> Self {
         Self {
             downloads: Arc::new(Mutex::new(HashMap::new())),
             file_sharing,
             pending_requests: Arc::new(Mutex::new(Vec::new())),
+            progress_dir,
         }
     }
 
     /// Start downloading a file from a peer
+    /// Tries to restore progress from disk first (断点续传)
     pub async fn start_download(&self, file_ref: FileRef, owner: String) -> String {
         let file_hash = file_ref.hash.clone();
-        let download = FileDownload::new(file_ref, owner);
+
+        // Try to restore from persisted progress
+        let download = match p2p_progress::load_progress(&self.progress_dir, &file_hash) {
+            Ok(snapshot) => {
+                tracing::info!(
+                    hash = %file_hash,
+                    progress = %format!("{:.1}%", snapshot.progress()),
+                    "Restored P2P download progress"
+                );
+                FileDownload::from_snapshot(file_ref, owner, snapshot, &self.progress_dir)
+            }
+            Err(_) => {
+                // No saved progress, start fresh
+                FileDownload::new(file_ref, owner)
+            }
+        };
+
         let mut downloads = self.downloads.lock().await;
         downloads.insert(file_hash.clone(), download);
         file_hash
     }
 
-    /// Record a received chunk with progress tracking
+    /// Record a received chunk with progress tracking and persistence
     pub async fn record_chunk(&self, file_hash: &str, chunk_index: u32, data: Vec<u8>) -> bool {
         let mut downloads = self.downloads.lock().await;
         if let Some(download) = downloads.get_mut(file_hash) {
             let chunk_size = data.len() as u64;
+
+            // Persist chunk data to disk for resume support
+            let chunk_path = chunk_data_path(&self.progress_dir, file_hash, chunk_index);
+            if let Some(parent) = chunk_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(&chunk_path, &data) {
+                tracing::warn!(
+                    hash = %file_hash,
+                    chunk = %chunk_index,
+                    error = %e,
+                    "Failed to persist chunk data"
+                );
+            }
+
             download.received_chunks.insert(chunk_index, data);
             download.missing_chunks.retain(|&i| i != chunk_index);
             download.bytes_received += chunk_size;
@@ -280,7 +389,16 @@ impl FileTransferManager {
                 "Chunk received"
             );
 
-            return download.is_complete();
+            let is_complete = download.is_complete();
+
+            // Persist progress metadata to disk (even if complete, so we can track it)
+            let snapshot = download.to_snapshot();
+            drop(downloads); // Release lock before I/O
+            if let Err(e) = p2p_progress::save_progress(&self.progress_dir, &snapshot) {
+                tracing::warn!(hash = %file_hash, error = %e, "Failed to save P2P progress");
+            }
+
+            return is_complete;
         }
         false
     }
@@ -332,10 +450,17 @@ impl FileTransferManager {
         None
     }
 
-    /// Remove a completed download
+    /// Remove a completed download and clean up progress file
     pub async fn finish_download(&self, file_hash: &str) -> Option<FileDownload> {
         let mut downloads = self.downloads.lock().await;
-        downloads.remove(file_hash)
+        let result = downloads.remove(file_hash);
+        // Clean up progress file for completed download
+        if result.is_some() {
+            if let Err(e) = p2p_progress::remove_progress(&self.progress_dir, file_hash) {
+                tracing::warn!(hash = %file_hash, error = %e, "Failed to remove P2P progress file");
+            }
+        }
+        result
     }
 
     /// Handle an incoming file transfer request

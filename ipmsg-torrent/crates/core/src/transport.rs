@@ -424,7 +424,11 @@ impl P2PSwarm {
             "Received gossipsub message"
         );
 
-        if topic != CHAT_TOPIC && topic != PRESENCE_TOPIC && topic != FRAGMENT_TOPIC {
+        if topic != CHAT_TOPIC
+            && topic != PRESENCE_TOPIC
+            && topic != FRAGMENT_TOPIC
+            && topic != FILE_TOPIC
+        {
             return events;
         }
 
@@ -457,6 +461,34 @@ impl P2PSwarm {
                     {
                         // Store fragment for later processing by fragment manager
                         events.push(P2PEvent::FragmentReceived { fragment });
+                    }
+                } else if topic == FILE_TOPIC {
+                    // Handle file sharing messages
+                    match &chat_msg.kind {
+                        ipmsg_protocol::message::MessageType::FileShareAnnounce { shares } => {
+                            events.push(P2PEvent::FileShareAnnounce {
+                                from: chat_msg.from.clone(),
+                                shares: shares.clone(),
+                            });
+                        }
+                        ipmsg_protocol::message::MessageType::FileShareQuery { query, tags } => {
+                            events.push(P2PEvent::FileSearchQuery {
+                                from: chat_msg.from.clone(),
+                                query: query.clone(),
+                                tags: tags.clone(),
+                            });
+                        }
+                        ipmsg_protocol::message::MessageType::FileShareResponse {
+                            results, ..
+                        } => {
+                            events.push(P2PEvent::FileSearchResponse {
+                                from: chat_msg.from.clone(),
+                                results: results.clone(),
+                            });
+                        }
+                        _ => {
+                            // Other message types on FILE_TOPIC are ignored
+                        }
                     }
                 } else {
                     let _ = self.store.save_message(&chat_msg);
