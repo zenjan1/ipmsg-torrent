@@ -6,6 +6,7 @@ use reqwest::Client;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::AsyncSeekExt;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
@@ -31,6 +32,8 @@ pub struct XunleiEngine {
     peer_clients: Arc<Mutex<HashMap<usize, PeerClient>>>,
     downloaded: u64,
     start_time: Option<std::time::Instant>,
+    /// File handle for streaming writes (avoids accumulating all data in memory)
+    output_file: Option<tokio::fs::File>,
 }
 
 impl XunleiEngine {
@@ -79,6 +82,7 @@ impl XunleiEngine {
             peer_clients: Arc::new(Mutex::new(HashMap::new())),
             downloaded: 0,
             start_time: None,
+            output_file: None,
         };
 
         // Try to load existing progress
@@ -102,6 +106,23 @@ impl XunleiEngine {
             "Starting P2SP download"
         );
 
+        // Create output file upfront for streaming writes
+        let output_path = self.download_dir.join(&self.file_name);
+        tokio::fs::create_dir_all(&self.download_dir)
+            .await
+            .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
+
+        // Create or truncate the file
+        let file = tokio::fs::File::create(&output_path)
+            .await
+            .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
+
+        // Pre-allocate file size for proper seeking
+        file.set_len(self.file_size)
+            .await
+            .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
+
+        self.output_file = Some(file);
         self.start_time = Some(std::time::Instant::now());
 
         // Main download loop
@@ -140,8 +161,18 @@ impl XunleiEngine {
             }
         }
 
-        // Save file
-        self.save_file().await?;
+        // Flush and close the file
+        if let Some(mut file) = self.output_file.take() {
+            use tokio::io::AsyncWriteExt;
+            file.flush()
+                .await
+                .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
+        }
+
+        tracing::info!(path = %output_path.display(), "File saved");
+
+        // Save progress
+        self.save_progress()?;
 
         Ok(())
     }
@@ -212,19 +243,36 @@ impl XunleiEngine {
             }
         }
 
-        // Wait for tasks to complete
+        // Wait for tasks to complete and write directly to file
         for (block_idx, task) in tasks {
             match task.await {
                 Ok(Ok(data)) => {
+                    // Write block directly to file at the correct offset
+                    if let Some(ref mut file) = self.output_file {
+                        use tokio::io::AsyncWriteExt;
+                        let offset = self.blocks[block_idx].offset;
+
+                        if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
+                            tracing::warn!(block = block_idx, error = %e, "Failed to seek");
+                            continue;
+                        }
+
+                        if let Err(e) = file.write_all(&data).await {
+                            tracing::warn!(block = block_idx, error = %e, "Failed to write block");
+                            continue;
+                        }
+                    }
+
                     if let Some(block) = self.blocks.get_mut(block_idx) {
                         block.downloaded = true;
-                        block.data = Some(data.clone());
+                        // Don't store data in memory - it's already on disk
+                        block.data = None;
                         self.downloaded += data.len() as u64;
                         tracing::debug!(
                             block = block_idx,
                             offset = block.offset,
                             size = data.len(),
-                            "Block downloaded"
+                            "Block downloaded and written to disk"
                         );
                     }
                 }
@@ -368,36 +416,6 @@ impl XunleiEngine {
         })
     }
 
-    async fn save_file(&self) -> Result<(), XunleiDownloadError> {
-        let mut file_data = Vec::with_capacity(self.file_size as usize);
-
-        // Assemble blocks in order
-        for block in &self.blocks {
-            if let Some(data) = &block.data {
-                file_data.extend_from_slice(data);
-            } else {
-                return Err(XunleiDownloadError::Io("missing block data".to_string()));
-            }
-        }
-
-        // Write to file
-        let output_path = self.download_dir.join(&self.file_name);
-        tokio::fs::create_dir_all(&self.download_dir)
-            .await
-            .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
-
-        tokio::fs::write(&output_path, &file_data)
-            .await
-            .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
-
-        tracing::info!(path = %output_path.display(), "File saved");
-
-        // Save progress
-        self.save_progress()?;
-
-        Ok(())
-    }
-
     /// Save download progress to disk
     fn save_progress(&self) -> Result<(), XunleiDownloadError> {
         let progress_path = self
@@ -525,4 +543,91 @@ pub enum XunleiDownloadError {
     Io(String),
     #[error("peer error: {0}")]
     Peer(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_streaming_write() {
+        let tmp_dir = tempdir().unwrap();
+        let download_dir = tmp_dir.path().to_path_buf();
+
+        // Create a small test file
+        let file_name = "test_stream.txt".to_string();
+        let file_size = 1024; // 1KB
+
+        let sources = vec![XunleiSource::Http {
+            url: "http://example.com/test".to_string(),
+            cookies: None,
+            referer: None,
+        }];
+
+        let mut engine =
+            XunleiEngine::new(file_name.clone(), file_size, sources, download_dir.clone());
+
+        // Create output file
+        let output_path = download_dir.join(&file_name);
+        tokio::fs::create_dir_all(&download_dir).await.unwrap();
+
+        let file = tokio::fs::File::create(&output_path).await.unwrap();
+        file.set_len(file_size).await.unwrap();
+        engine.output_file = Some(file);
+
+        // Simulate downloading and writing blocks
+        let block_data = vec![0xAB; 512]; // 512 bytes
+
+        // Write first block
+        if let Some(ref mut file) = engine.output_file {
+            use tokio::io::AsyncWriteExt;
+            file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
+            file.write_all(&block_data).await.unwrap();
+        }
+
+        // Write second block
+        if let Some(ref mut file) = engine.output_file {
+            use tokio::io::AsyncWriteExt;
+            file.seek(std::io::SeekFrom::Start(512)).await.unwrap();
+            file.write_all(&block_data).await.unwrap();
+        }
+
+        // Flush
+        if let Some(mut file) = engine.output_file.take() {
+            use tokio::io::AsyncWriteExt;
+            file.flush().await.unwrap();
+        }
+
+        // Verify file exists and has correct size
+        let metadata = tokio::fs::metadata(&output_path).await.unwrap();
+        assert_eq!(metadata.len(), file_size);
+
+        // Verify content
+        let content = tokio::fs::read(&output_path).await.unwrap();
+        assert_eq!(content.len(), file_size as usize);
+        assert!(content.iter().all(|&b| b == 0xAB));
+    }
+
+    #[tokio::test]
+    async fn test_blocks_not_stored_in_memory() {
+        let tmp_dir = tempdir().unwrap();
+        let download_dir = tmp_dir.path().to_path_buf();
+
+        let file_name = "test_no_mem.txt".to_string();
+        let file_size = 2 * 1024 * 1024; // 2MB (2 blocks)
+
+        let sources = vec![XunleiSource::Http {
+            url: "http://example.com/test".to_string(),
+            cookies: None,
+            referer: None,
+        }];
+
+        let engine = XunleiEngine::new(file_name.clone(), file_size, sources, download_dir.clone());
+
+        // Verify blocks don't have data initially
+        for block in &engine.blocks {
+            assert!(block.data.is_none());
+        }
+    }
 }

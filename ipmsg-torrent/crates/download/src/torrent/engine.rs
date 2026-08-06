@@ -598,24 +598,29 @@ impl TorrentEngine {
     }
 
     async fn save_file(&self) -> Result<(), DownloadError> {
-        let mut file_data = Vec::with_capacity(self.meta.total_size() as usize);
-
-        // Assemble all pieces in order
-        for piece in &self.pieces {
-            if let Some(data) = piece.assemble() {
-                file_data.extend_from_slice(&data);
-            } else {
-                return Err(DownloadError::Io("incomplete piece".to_string()));
-            }
-        }
-
-        // Write to file
         let output_path = self.download_dir.join(&self.meta.info.name);
         tokio::fs::create_dir_all(&self.download_dir)
             .await
             .map_err(|e| DownloadError::Io(e.to_string()))?;
 
-        tokio::fs::write(&output_path, &file_data)
+        // Create output file
+        let mut file = tokio::fs::File::create(&output_path)
+            .await
+            .map_err(|e| DownloadError::Io(e.to_string()))?;
+
+        // Stream pieces to file instead of accumulating in memory
+        use tokio::io::AsyncWriteExt;
+        for piece in &self.pieces {
+            if let Some(data) = piece.assemble() {
+                file.write_all(&data)
+                    .await
+                    .map_err(|e| DownloadError::Io(e.to_string()))?;
+            } else {
+                return Err(DownloadError::Io("incomplete piece".to_string()));
+            }
+        }
+
+        file.flush()
             .await
             .map_err(|e| DownloadError::Io(e.to_string()))?;
 
