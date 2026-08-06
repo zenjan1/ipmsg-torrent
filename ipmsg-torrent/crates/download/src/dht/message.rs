@@ -284,14 +284,14 @@ impl DhtMessage {
                     let values = r_dict.get("values").and_then(|v| v.as_list()).map(|list| {
                         list.iter()
                             .filter_map(|v| v.as_bytes())
-                            .filter_map(|b| decode_addr(b))
+                            .filter_map(decode_addr)
                             .collect()
                     });
 
                     let nodes = r_dict
                         .get("nodes")
                         .and_then(|v| v.as_bytes())
-                        .map(|b| decode_nodes(b))
+                        .map(decode_nodes)
                         .unwrap_or_default();
 
                     ResponseType::Peers {

@@ -132,12 +132,11 @@ impl MetadataFetcher {
         let bencode =
             super::bencode::decode(payload).map_err(|e| MetadataError::Bencode(e.to_string()))?;
 
-        if let Bencode::Dict(map) = bencode {
-            if let Some(Bencode::Dict(extensions)) = map.get("m") {
-                if let Some(Bencode::Integer(id)) = extensions.get("ut_metadata") {
-                    return Ok(Some(*id as u8));
-                }
-            }
+        if let Bencode::Dict(map) = bencode
+            && let Some(Bencode::Dict(extensions)) = map.get("m")
+            && let Some(Bencode::Integer(id)) = extensions.get("ut_metadata")
+        {
+            return Ok(Some(*id as u8));
         }
 
         Ok(None)

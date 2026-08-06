@@ -8,6 +8,7 @@
 pub mod dht;
 pub mod ed2k;
 pub mod magnet;
+pub mod metadata_cache;
 pub mod progress;
 pub mod torrent;
 pub mod xunlei;
@@ -466,52 +467,76 @@ impl DownloadManager {
                 }
                 TaskParams::Magnet {
                     info_hash,
-                    display_name: _,
-                    trackers: _,
+                    display_name,
+                    trackers,
                 } => {
                     // Magnet link handling: fetch metadata first, then download as torrent
                     let download_dir = data_dir.join("downloads");
 
-                    // Step 1: Use DHT to find peers
-                    let peers = dht.find_peers(info_hash).await.map_err(|e| e.to_string())?;
+                    // Step 1: Check metadata cache
+                    let cache = metadata_cache::cache_dir();
+                    let metadata_bytes = match metadata_cache::load_metadata(&cache, &info_hash) {
+                        Ok(cached) => {
+                            tracing::info!("Using cached metadata for magnet link");
+                            cached
+                        }
+                        Err(metadata_cache::CacheError::NotFound) => {
+                            // Step 2: Cache miss — fetch from peers via DHT
+                            let peers =
+                                dht.find_peers(info_hash).await.map_err(|e| e.to_string())?;
 
-                    if peers.is_empty() {
-                        return Err("No peers found via DHT".to_string());
-                    }
-
-                    // Step 2: Try to fetch metadata from peers (BEP 0009)
-                    match dht.fetch_metadata(info_hash).await {
-                        Ok(metadata_bytes) => {
-                            // Parse metadata as torrent
-                            match torrent::TorrentMeta::from_bytes(&metadata_bytes) {
-                                Ok(meta) => {
-                                    // Update task with actual file info
-                                    {
-                                        let mut t = tasks.lock().await;
-                                        if let Some(task) =
-                                            t.iter_mut().find(|t| t.id == task_id_clone)
-                                        {
-                                            task.name = meta.info.name.clone();
-                                            task.size = meta.total_size();
-                                        }
-                                    }
-
-                                    // Start torrent download
-                                    let mut engine =
-                                        torrent::TorrentEngine::new(meta, download_dir);
-                                    engine
-                                        .download(Some(cancel_clone))
-                                        .await
-                                        .map_err(|e| e.to_string())
-                                }
-                                Err(e) => Err(format!("Failed to parse metadata: {}", e)),
+                            if peers.is_empty() {
+                                return Err("No peers found via DHT".to_string());
                             }
+
+                            // Step 3: Try to fetch metadata from peers (BEP 0009)
+                            let bytes = match dht.fetch_metadata(info_hash).await {
+                                Ok(b) => b,
+                                Err(dht::DhtError::NotImplemented) => {
+                                    return Err("Magnet link metadata exchange not yet implemented. Use .torrent files instead.".to_string());
+                                }
+                                Err(e) => return Err(format!("Failed to fetch metadata: {}", e)),
+                            };
+
+                            // Step 4: Cache the fetched metadata
+                            if let Err(e) = metadata_cache::save_metadata(
+                                &cache,
+                                &info_hash,
+                                &bytes,
+                                display_name.as_deref(),
+                                &trackers,
+                            ) {
+                                tracing::warn!(error = %e, "Failed to cache metadata");
+                            }
+
+                            bytes
                         }
-                        Err(dht::DhtError::NotImplemented) => {
-                            // Metadata exchange not yet implemented
-                            Err("Magnet link metadata exchange not yet implemented. Use .torrent files instead.".to_string())
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to load cached metadata");
+                            return Err(format!("Cache error: {e}"));
                         }
-                        Err(e) => Err(format!("Failed to fetch metadata: {}", e)),
+                    };
+
+                    // Parse metadata as torrent
+                    match torrent::TorrentMeta::from_bytes(&metadata_bytes) {
+                        Ok(meta) => {
+                            // Update task with actual file info
+                            {
+                                let mut t = tasks.lock().await;
+                                if let Some(task) = t.iter_mut().find(|t| t.id == task_id_clone) {
+                                    task.name = meta.info.name.clone();
+                                    task.size = meta.total_size();
+                                }
+                            }
+
+                            // Start torrent download
+                            let mut engine = torrent::TorrentEngine::new(meta, download_dir);
+                            engine
+                                .download(Some(cancel_clone))
+                                .await
+                                .map_err(|e| e.to_string())
+                        }
+                        Err(e) => Err(format!("Failed to parse metadata: {}", e)),
                     }
                 }
             };
@@ -674,13 +699,13 @@ impl DownloadManager {
         }
 
         let mut tasks = self.tasks.lock().await;
-        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
-            if task.state == DownloadState::Downloading || task.state == DownloadState::Queued {
-                task.state = DownloadState::Paused;
-                task.speed_bps = 0.0;
-                task.updated_at = chrono::Utc::now();
-                return true;
-            }
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id)
+            && (task.state == DownloadState::Downloading || task.state == DownloadState::Queued)
+        {
+            task.state = DownloadState::Paused;
+            task.speed_bps = 0.0;
+            task.updated_at = chrono::Utc::now();
+            return true;
         }
         false
     }

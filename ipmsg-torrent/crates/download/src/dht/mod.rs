@@ -45,6 +45,7 @@ enum QueryState {
 
 impl DhtManager {
     /// Create a new DHT manager with random node ID
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let mut node_id = [0u8; 20];
         for byte in node_id.iter_mut() {
@@ -185,36 +186,26 @@ impl DhtManager {
                     .await
                     {
                         Ok(Ok((len, _from_addr))) => {
-                            if let Ok(response) = message::DhtMessage::decode(&buf[..len]) {
-                                match response {
-                                    message::DhtMessage::Response { response, .. } => {
-                                        match response {
-                                            message::ResponseType::Peers {
-                                                values, nodes, ..
-                                            } => {
-                                                // Store any peers we found
-                                                if let Some(peer_addrs) = values {
-                                                    for peer_addr in peer_addrs {
-                                                        self.add_peer(info_hash, peer_addr).await;
-                                                        found_peers.push(peer_addr);
-                                                    }
-                                                }
-                                                // Add closer nodes for next iteration
-                                                for (closer_id, closer_addr) in nodes {
-                                                    self.add_node(routing::Node {
-                                                        id: closer_id,
-                                                        addr: closer_addr,
-                                                        last_seen: std::time::Instant::now(),
-                                                    })
-                                                    .await;
-                                                    new_nodes_this_round
-                                                        .push((closer_id, closer_addr));
-                                                }
-                                            }
-                                            _ => {}
-                                        }
+                            if let Ok(message::DhtMessage::Response { response, .. }) =
+                                message::DhtMessage::decode(&buf[..len])
+                                && let message::ResponseType::Peers { values, nodes, .. } = response
+                            {
+                                // Store any peers we found
+                                if let Some(peer_addrs) = values {
+                                    for peer_addr in peer_addrs {
+                                        self.add_peer(info_hash, peer_addr).await;
+                                        found_peers.push(peer_addr);
                                     }
-                                    _ => {}
+                                }
+                                // Add closer nodes for next iteration
+                                for (closer_id, closer_addr) in nodes {
+                                    self.add_node(routing::Node {
+                                        id: closer_id,
+                                        addr: closer_addr,
+                                        last_seen: std::time::Instant::now(),
+                                    })
+                                    .await;
+                                    new_nodes_this_round.push((closer_id, closer_addr));
                                 }
                             }
                         }

@@ -25,6 +25,8 @@ url = "2"
 hex = "0.4"
 urlencoding = "2"
 bitvec = "1"
+serde_json = "1"
+dirs = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
