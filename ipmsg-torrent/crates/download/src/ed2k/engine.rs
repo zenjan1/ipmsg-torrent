@@ -1,6 +1,7 @@
 //! eDonkey download engine
 
 use super::client::Ed2kClient;
+use super::peer_cache;
 use super::protocol::{ED2K_BLOCK_SIZE, ED2K_CHUNK_SIZE, Ed2kFileHash};
 use crate::progress::{self, ProgressSnapshot};
 use md4::{Digest, Md4};
@@ -83,6 +84,8 @@ pub struct Ed2kEngine {
     downloaded: u64,
     /// Progress snapshot for resume support
     progress: ProgressSnapshot,
+    /// Cached peers loaded from disk
+    cached_peers: Vec<SocketAddr>,
 }
 
 impl Ed2kEngine {
@@ -147,6 +150,12 @@ impl Ed2kEngine {
             }
         }
 
+        // Load cached peers from disk
+        let cached_peers = peer_cache::load_peers(&download_dir, &file_hash.0).unwrap_or_default();
+        if !cached_peers.is_empty() {
+            tracing::info!(count = cached_peers.len(), "Loaded cached ed2k peers");
+        }
+
         Self {
             file_hash,
             file_size,
@@ -158,6 +167,7 @@ impl Ed2kEngine {
             downloaded_chunks,
             downloaded,
             progress,
+            cached_peers,
         }
     }
 
@@ -194,6 +204,14 @@ impl Ed2kEngine {
             chunks = self.chunks.len(),
             "Starting ed2k download"
         );
+
+        // Try cached peers first
+        let cached = std::mem::take(&mut self.cached_peers);
+        for peer_addr in cached {
+            if let Err(e) = self.add_peer(peer_addr).await {
+                tracing::debug!(addr = %peer_addr, error = %e, "Cached peer unavailable");
+            }
+        }
 
         // Connect to servers and request sources
         let servers = self.servers.clone();
@@ -311,6 +329,9 @@ impl Ed2kEngine {
                                     if let Err(e) = self.add_peer(peer_addr).await {
                                         tracing::warn!(peer = %peer_addr, error = %e, "Failed to connect to peer");
                                     }
+
+                                    // Save to peer cache
+                                    self.save_peer_cache();
 
                                     offset += 6;
                                 }
@@ -462,6 +483,14 @@ impl Ed2kEngine {
         }
     }
 
+    /// Save current peer list to cache
+    fn save_peer_cache(&self) {
+        let peers: Vec<SocketAddr> = self.peers.keys().copied().collect();
+        if let Err(e) = peer_cache::save_peers(&self.download_dir, &self.file_hash.0, &peers) {
+            tracing::warn!(error = %e, "Failed to save peer cache");
+        }
+    }
+
     fn is_complete(&self) -> bool {
         self.downloaded_chunks.len() == self.chunks.len()
     }
@@ -490,12 +519,15 @@ impl Ed2kEngine {
 
         tracing::info!(path = %output_path.display(), "File saved");
 
-        // Remove progress file after successful completion
+        // Remove progress file and peer cache after successful completion
         let progress_path = progress::progress_path(&self.download_dir, &self.file_name);
         if progress_path.exists()
             && let Err(e) = std::fs::remove_file(&progress_path)
         {
             tracing::warn!(error = %e, "Failed to remove progress file");
+        }
+        if let Err(e) = peer_cache::remove_peer_cache(&self.download_dir, &self.file_hash.0) {
+            tracing::warn!(error = %e, "Failed to remove peer cache");
         }
 
         Ok(())
