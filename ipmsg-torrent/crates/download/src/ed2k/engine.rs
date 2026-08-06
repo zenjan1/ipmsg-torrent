@@ -2,6 +2,7 @@
 
 use super::client::Ed2kClient;
 use super::protocol::{ED2K_BLOCK_SIZE, ED2K_CHUNK_SIZE, Ed2kFileHash};
+use crate::progress::{self, ProgressSnapshot};
 use md4::{Digest, Md4};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -80,6 +81,8 @@ pub struct Ed2kEngine {
     peers: HashMap<SocketAddr, Ed2kClient>,
     downloaded_chunks: HashSet<u32>,
     downloaded: u64,
+    /// Progress snapshot for resume support
+    progress: ProgressSnapshot,
 }
 
 impl Ed2kEngine {
@@ -103,6 +106,47 @@ impl Ed2kEngine {
             chunks.push(ChunkState::new(i, chunk_size, chunk_hash));
         }
 
+        // Build progress hash: pad MD4 (16 bytes) to 20 bytes with zeros
+        let mut progress_hash = [0u8; 20];
+        progress_hash[..16].copy_from_slice(&file_hash.0);
+
+        // Build initial progress snapshot
+        let mut progress =
+            ProgressSnapshot::new(progress_hash, file_size, ED2K_CHUNK_SIZE, chunk_count);
+
+        // Try to load existing progress for resume
+        if let Ok(saved) =
+            progress::load_progress(&download_dir, &file_name, &progress_hash, file_size)
+        {
+            tracing::info!(
+                completed = saved.completed_pieces.len(),
+                total = saved.total_pieces,
+                "Resuming ed2k download from saved progress"
+            );
+            progress = saved;
+        }
+
+        // Restore downloaded_chunks set and compute downloaded bytes
+        let downloaded_chunks: HashSet<u32> = progress.completed_pieces.iter().copied().collect();
+        let downloaded: u64 = chunks
+            .iter()
+            .filter(|c| downloaded_chunks.contains(&c.index))
+            .map(|c| c.size)
+            .sum();
+
+        // Mark chunk states as already complete for resumed chunks
+        for &idx in &downloaded_chunks {
+            if let Some(chunk) = chunks.get_mut(idx as usize) {
+                // Fill with dummy data so assemble() works
+                for b in 0..chunk.blocks_total {
+                    let offset = b * ED2K_BLOCK_SIZE;
+                    let block_len = std::cmp::min(ED2K_BLOCK_SIZE, chunk.size - offset) as usize;
+                    chunk.blocks_received.insert(offset, vec![0u8; block_len]);
+                }
+                chunk.complete = true;
+            }
+        }
+
         Self {
             file_hash,
             file_size,
@@ -111,9 +155,25 @@ impl Ed2kEngine {
             chunks,
             servers,
             peers: HashMap::new(),
-            downloaded_chunks: HashSet::new(),
-            downloaded: 0,
+            downloaded_chunks,
+            downloaded,
+            progress,
         }
+    }
+
+    /// Number of downloaded (completed) chunks
+    pub fn downloaded_chunks_count(&self) -> usize {
+        self.downloaded_chunks.len()
+    }
+
+    /// Total bytes downloaded so far
+    pub fn downloaded_bytes(&self) -> u64 {
+        self.downloaded
+    }
+
+    /// Whether all chunks have been downloaded
+    pub fn is_download_complete(&self) -> bool {
+        self.is_complete()
     }
 
     /// Update chunk hash from peer's HashSet message
@@ -366,6 +426,16 @@ impl Ed2kEngine {
                             if chunk.verify(&assembled) {
                                 tracing::info!(chunk = chunk_idx, "Chunk verified");
                                 self.downloaded_chunks.insert(chunk_idx);
+                                self.progress.mark_complete(chunk_idx);
+                                self.progress.downloaded = self.downloaded;
+                                // Persist progress after each chunk
+                                if let Err(e) = progress::save_progress(
+                                    &self.download_dir,
+                                    &self.file_name,
+                                    &self.progress,
+                                ) {
+                                    tracing::warn!(error = %e, "Failed to save ed2k progress");
+                                }
                             } else {
                                 tracing::warn!(chunk = chunk_idx, "Chunk verification failed");
                                 // Reset chunk state
@@ -419,6 +489,14 @@ impl Ed2kEngine {
             .map_err(|e| Ed2kDownloadError::Io(e.to_string()))?;
 
         tracing::info!(path = %output_path.display(), "File saved");
+
+        // Remove progress file after successful completion
+        let progress_path = progress::progress_path(&self.download_dir, &self.file_name);
+        if progress_path.exists()
+            && let Err(e) = std::fs::remove_file(&progress_path)
+        {
+            tracing::warn!(error = %e, "Failed to remove progress file");
+        }
 
         Ok(())
     }
