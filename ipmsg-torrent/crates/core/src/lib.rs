@@ -356,6 +356,8 @@ pub struct P2PEngine {
     bootstrap_counter: u64,
     /// Multi-protocol download manager
     download_manager: Arc<ipmsg_download::DownloadManager>,
+    /// Mapping from file_hash to DownloadManager task_id for P2P downloads
+    p2p_task_mapping: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl P2PEngine {
@@ -387,6 +389,7 @@ impl P2PEngine {
             data_dir: data_dir.clone(),
             username: String::new(),
             platforms: vec!["rust".to_string()],
+            p2p_task_mapping: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
             event_rx: Some(event_rx),
             command_rx: Some(command_rx),
@@ -1426,6 +1429,26 @@ impl P2PEngine {
                 if available {
                     tracing::info!(file_hash = %file_ref.hash, chunks = %file_ref.chunks, "File info received, starting download");
 
+                    // Register in unified DownloadManager for task tracking
+                    let p2p_task_id = self
+                        .download_manager
+                        .add_p2p(
+                            file_ref.hash.clone(),
+                            file_ref.name.clone(),
+                            file_ref.size,
+                            peer_id.to_string(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            P2PError::Transport(format!("Failed to register P2P download: {}", e))
+                        })?;
+
+                    // Store task_id mapping for later completion
+                    {
+                        let mut mapping = self.p2p_task_mapping.lock().await;
+                        mapping.insert(file_ref.hash.clone(), p2p_task_id);
+                    }
+
                     // Start download tracking (auto-restores progress if available)
                     let file_transfer = self.file_transfer.clone();
                     file_transfer
@@ -1538,15 +1561,50 @@ impl P2PEngine {
         if let Some(file_data) = file_transfer.lock().await.try_assemble(file_hash).await {
             let file_info = file_transfer.lock().await.finish_download(file_hash).await;
             if let Some(info) = file_info {
-                let output_path = self.data_dir.join("downloads").join(&info.file_ref.name);
-                std::fs::create_dir_all(output_path.parent().unwrap())?;
-                std::fs::write(&output_path, &file_data)?;
-                tracing::info!(path = %output_path.display(), "File saved");
+                // Complete the task in DownloadManager if it was registered
+                let task_id = {
+                    let mut mapping = self.p2p_task_mapping.lock().await;
+                    mapping.remove(file_hash)
+                };
 
-                let _ = self.event_tx.send(P2PEvent::Status(format!(
-                    "Downloaded file: {}",
-                    info.file_ref.name
-                )));
+                if let Some(task_id) = task_id {
+                    match self
+                        .download_manager
+                        .complete_p2p_download(&task_id, file_data.clone())
+                        .await
+                    {
+                        Ok(path) => {
+                            tracing::info!(path = %path.display(), "File saved via DownloadManager");
+                            let _ = self.event_tx.send(P2PEvent::Status(format!(
+                                "Downloaded file: {}",
+                                info.file_ref.name
+                            )));
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to complete P2P download in DownloadManager");
+                            // Fallback: save directly
+                            let output_path =
+                                self.data_dir.join("downloads").join(&info.file_ref.name);
+                            std::fs::create_dir_all(output_path.parent().unwrap())?;
+                            std::fs::write(&output_path, &file_data)?;
+                            let _ = self.event_tx.send(P2PEvent::Status(format!(
+                                "Downloaded file: {}",
+                                info.file_ref.name
+                            )));
+                        }
+                    }
+                } else {
+                    // No DownloadManager task, save directly (legacy path)
+                    let output_path = self.data_dir.join("downloads").join(&info.file_ref.name);
+                    std::fs::create_dir_all(output_path.parent().unwrap())?;
+                    std::fs::write(&output_path, &file_data)?;
+                    tracing::info!(path = %output_path.display(), "File saved (legacy path)");
+
+                    let _ = self.event_tx.send(P2PEvent::Status(format!(
+                        "Downloaded file: {}",
+                        info.file_ref.name
+                    )));
+                }
             }
         }
 

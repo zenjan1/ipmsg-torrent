@@ -41,6 +41,7 @@ pub enum DownloadProtocol {
     Ed2k,
     Xunlei,
     Magnet,
+    P2P,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +106,13 @@ enum TaskParams {
         display_name: Option<String>,
         #[allow(dead_code)]
         trackers: Vec<String>,
+    },
+    #[allow(dead_code)]
+    P2P {
+        file_hash: String,
+        file_name: String,
+        file_size: u64,
+        from_peer: String,
     },
 }
 
@@ -305,6 +313,159 @@ impl DownloadManager {
         self.spawn_task(task_id.clone(), params).await;
 
         Ok(task_id)
+    }
+
+    /// Add a P2P file download task (downloaded from another peer)
+    pub async fn add_p2p(
+        &self,
+        file_hash: String,
+        file_name: String,
+        file_size: u64,
+        from_peer: String,
+    ) -> Result<String, DownloadManagerError> {
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+
+        let task = DownloadTask {
+            id: task_id.clone(),
+            name: file_name.clone(),
+            protocol: DownloadProtocol::P2P,
+            size: file_size,
+            downloaded: 0,
+            state: DownloadState::Downloading,
+            error: None,
+            speed_bps: 0.0,
+            save_path: self.data_dir.join("downloads"),
+            created_at: now,
+            updated_at: now,
+        };
+
+        self.tasks.lock().await.push(task);
+
+        // Store task params for potential resume
+        {
+            let mut info = self.task_info.lock().await;
+            info.insert(
+                task_id.clone(),
+                TaskInfo {
+                    params: TaskParams::P2P {
+                        file_hash,
+                        file_name,
+                        file_size,
+                        from_peer,
+                    },
+                },
+            );
+        }
+
+        // Register as running (P2P downloads are managed externally via FileTransferManager)
+        {
+            let mut r = self.running.lock().await;
+            let generation = {
+                let mut gen_map = self.task_generation.lock().await;
+                let g = gen_map.entry(task_id.clone()).or_insert(0);
+                *g += 1;
+                *g
+            };
+            r.insert(
+                task_id.clone(),
+                RunningTask {
+                    cancel_token: CancellationToken::new(),
+                    params: TaskParams::P2P {
+                        file_hash: String::new(),
+                        file_name: String::new(),
+                        file_size: 0,
+                        from_peer: String::new(),
+                    },
+                    started_at: std::time::Instant::now(),
+                    last_downloaded: 0,
+                    generation,
+                    speed_samples: Vec::new(),
+                    last_sample_time: std::time::Instant::now(),
+                },
+            );
+        }
+
+        Ok(task_id)
+    }
+
+    /// Update P2P download progress (called by P2P engine when chunks arrive)
+    pub async fn update_p2p_progress(
+        &self,
+        task_id: &str,
+        downloaded: u64,
+        speed_bps: f64,
+    ) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            task.downloaded = downloaded;
+            task.speed_bps = speed_bps;
+            task.updated_at = chrono::Utc::now();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Mark a P2P download as complete and save the assembled file
+    pub async fn complete_p2p_download(
+        &self,
+        task_id: &str,
+        data: Vec<u8>,
+    ) -> Result<PathBuf, DownloadManagerError> {
+        let save_path = {
+            let tasks = self.tasks.lock().await;
+            tasks
+                .iter()
+                .find(|t| t.id == task_id)
+                .map(|t| t.save_path.clone())
+                .ok_or_else(|| DownloadManagerError::TaskNotFound(task_id.to_string()))?
+        };
+
+        // Ensure save directory exists
+        tokio::fs::create_dir_all(&save_path)
+            .await
+            .map_err(|e| DownloadManagerError::Io(e.to_string()))?;
+
+        // Get file name from task
+        let file_name = {
+            let tasks = self.tasks.lock().await;
+            tasks
+                .iter()
+                .find(|t| t.id == task_id)
+                .map(|t| t.name.clone())
+                .ok_or_else(|| DownloadManagerError::TaskNotFound(task_id.to_string()))?
+        };
+
+        let file_path = save_path.join(&file_name);
+
+        // Write assembled file
+        tokio::fs::write(&file_path, &data)
+            .await
+            .map_err(|e| DownloadManagerError::Io(e.to_string()))?;
+
+        // Update task state
+        {
+            let mut tasks = self.tasks.lock().await;
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                task.state = DownloadState::Complete;
+                task.downloaded = task.size;
+                task.speed_bps = 0.0;
+                task.updated_at = chrono::Utc::now();
+            }
+        }
+
+        // Remove from running
+        self.running.lock().await.remove(task_id);
+
+        tracing::info!(
+            task_id = %task_id,
+            path = %file_path.display(),
+            size = %data.len(),
+            "P2P download complete, file saved"
+        );
+
+        Ok(file_path)
     }
 
     /// Add an HTTP/FTP URL download (auto-detects file size via HEAD)
@@ -538,6 +699,12 @@ impl DownloadManager {
                         }
                         Err(e) => Err(format!("Failed to parse metadata: {}", e)),
                     }
+                }
+                TaskParams::P2P { .. } => {
+                    // P2P downloads are managed externally by FileTransferManager.
+                    // This branch is only reached if resume_task is called on a P2P task,
+                    // which is not yet supported (P2P resume requires peer reconnection).
+                    Err("P2P resume not yet supported via DownloadManager".to_string())
                 }
             };
 
