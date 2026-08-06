@@ -8,6 +8,7 @@
 pub mod dht;
 pub mod ed2k;
 pub mod magnet;
+pub mod progress;
 pub mod torrent;
 pub mod xunlei;
 

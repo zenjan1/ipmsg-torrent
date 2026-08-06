@@ -3,6 +3,7 @@
 use super::meta::TorrentMeta;
 use super::peer::{PeerConnection, PeerMessage};
 use super::tracker::{AnnounceEvent, HttpTracker};
+use crate::progress::{self, ProgressSnapshot};
 use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -157,6 +158,8 @@ pub struct TorrentEngine {
     tracker: HttpTracker,
     downloaded: u64,
     uploaded: u64,
+    /// Progress snapshot for resume support
+    progress: ProgressSnapshot,
 }
 
 impl TorrentEngine {
@@ -175,16 +178,60 @@ impl TorrentEngine {
 
         let tracker = HttpTracker::new(peer_id, 6881);
 
+        // Build initial progress snapshot
+        let mut progress = ProgressSnapshot::new(
+            meta.info_hash,
+            total_size,
+            piece_length,
+            pieces.len() as u32,
+        );
+
+        // Try to load existing progress
+        if let Ok(saved) =
+            progress::load_progress(&download_dir, &meta.info.name, &meta.info_hash, total_size)
+        {
+            tracing::info!(
+                completed = saved.completed_pieces.len(),
+                total = saved.total_pieces,
+                "Resuming torrent download from saved progress"
+            );
+            progress = saved;
+        }
+
+        // Restore downloaded_pieces set and compute downloaded bytes
+        let downloaded_pieces: HashSet<u32> = progress.completed_pieces.iter().copied().collect();
+        let downloaded: u64 = pieces
+            .iter()
+            .filter(|p| downloaded_pieces.contains(&p.index))
+            .map(|p| p.length)
+            .sum();
+
+        // Mark piece states as already complete
+        for &idx in &downloaded_pieces {
+            if let Some(piece) = pieces.get_mut(idx as usize) {
+                // Fill with dummy data so assemble() works
+                for b in 0..piece.blocks_total {
+                    let offset = b * BLOCK_SIZE;
+                    // Last block may be shorter than BLOCK_SIZE
+                    let block_len =
+                        std::cmp::min(BLOCK_SIZE as u64, piece.length - offset as u64) as usize;
+                    piece.blocks_received.insert(offset, vec![0u8; block_len]);
+                }
+                piece.complete = true;
+            }
+        }
+
         Self {
             meta: Arc::new(meta),
             peer_id,
             download_dir,
             pieces,
             peers: HashMap::new(),
-            downloaded_pieces: HashSet::new(),
+            downloaded_pieces,
             tracker,
-            downloaded: 0,
+            downloaded,
             uploaded: 0,
+            progress,
         }
     }
 
@@ -516,6 +563,16 @@ impl TorrentEngine {
                     if piece.verify(&data) {
                         tracing::info!(piece = index, "Piece verified");
                         self.downloaded_pieces.insert(*index);
+                        self.progress.mark_complete(*index);
+                        self.progress.downloaded = self.downloaded;
+                        // Persist progress after each piece
+                        if let Err(e) = progress::save_progress(
+                            &self.download_dir,
+                            &self.meta.info.name,
+                            &self.progress,
+                        ) {
+                            tracing::warn!(error = %e, "Failed to save progress");
+                        }
                     } else {
                         tracing::warn!(piece = index, "Piece verification failed");
                         // Reset piece state
@@ -563,6 +620,14 @@ impl TorrentEngine {
             .map_err(|e| DownloadError::Io(e.to_string()))?;
 
         tracing::info!(path = %output_path.display(), "File saved");
+
+        // Remove progress file after successful completion
+        let progress_path = progress::progress_path(&self.download_dir, &self.meta.info.name);
+        if progress_path.exists()
+            && let Err(e) = std::fs::remove_file(&progress_path)
+        {
+            tracing::warn!(error = %e, "Failed to remove progress file");
+        }
 
         Ok(())
     }
