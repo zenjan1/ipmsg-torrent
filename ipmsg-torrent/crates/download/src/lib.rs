@@ -8,6 +8,7 @@
 pub mod checksum;
 pub mod connection_pool;
 pub mod dht;
+pub mod disk_monitor;
 pub mod download_history;
 pub mod ed2k;
 pub mod magnet;

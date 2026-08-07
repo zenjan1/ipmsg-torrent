@@ -2700,6 +2700,7 @@ dependencies = [
  "futures",
  "hex",
  "ipmsg-protocol",
+ "libc",
  "md-5",
  "md4",
  "rand 0.8.7",
