@@ -92,7 +92,7 @@ pub struct BatchImportResponse {
 }
 
 /// Response for task operations
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TaskResponse {
     pub success: bool,
     pub task_id: Option<String>,
@@ -119,6 +119,9 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/batch/remove-failed", post(remove_failed))
         .route("/api/batch-import", post(batch_import))
         .route("/api/bandwidth", get(get_bandwidth))
+        .route("/api/proxy", get(get_proxy))
+        .route("/api/proxy", post(set_proxy))
+        .route("/api/proxy/disable", post(disable_proxy))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -341,6 +344,48 @@ async fn remove_failed(State(state): State<Arc<WebState>>) -> Json<TaskResponse>
     })
 }
 
+/// Request to set proxy configuration
+#[derive(Debug, Deserialize)]
+pub struct SetProxyRequest {
+    /// Proxy URL (e.g., "socks5://127.0.0.1:1080" or "http://user:pass@proxy:8080")
+    /// Set to empty string or null to disable proxy
+    pub url: String,
+}
+
+/// Response for proxy status
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProxyStatusResponse {
+    pub enabled: bool,
+    pub proxy_type: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub has_auth: bool,
+    pub url: Option<String>,
+}
+
+impl From<Option<crate::proxy::ProxyConfig>> for ProxyStatusResponse {
+    fn from(config: Option<crate::proxy::ProxyConfig>) -> Self {
+        match config {
+            Some(cfg) => Self {
+                enabled: true,
+                proxy_type: Some(cfg.proxy_type.label().to_string()),
+                host: Some(cfg.host.clone()),
+                port: Some(cfg.port),
+                has_auth: cfg.auth.is_some(),
+                url: Some(cfg.to_url()),
+            },
+            None => Self {
+                enabled: false,
+                proxy_type: None,
+                host: None,
+                port: None,
+                has_auth: false,
+                url: None,
+            },
+        }
+    }
+}
+
 /// Request to update tags
 #[derive(Debug, Deserialize)]
 pub struct UpdateTagsRequest {
@@ -386,6 +431,55 @@ async fn remove_tags(
 /// List all unique tags
 async fn list_all_tags(State(state): State<Arc<WebState>>) -> Json<Vec<String>> {
     Json(state.manager.list_all_tags().await)
+}
+
+/// Get current proxy configuration
+async fn get_proxy(State(state): State<Arc<WebState>>) -> Json<ProxyStatusResponse> {
+    let config = state.manager.get_proxy().await;
+    Json(ProxyStatusResponse::from(config))
+}
+
+/// Set proxy configuration
+async fn set_proxy(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SetProxyRequest>,
+) -> Json<TaskResponse> {
+    if req.url.is_empty() {
+        // Disable proxy
+        state.manager.set_proxy(None).await;
+        Json(TaskResponse {
+            success: true,
+            task_id: None,
+            message: "Proxy disabled".to_string(),
+        })
+    } else {
+        // Parse and set proxy
+        match crate::proxy::ProxyConfig::parse(&req.url) {
+            Ok(config) => {
+                state.manager.set_proxy(Some(config)).await;
+                Json(TaskResponse {
+                    success: true,
+                    task_id: None,
+                    message: "Proxy configured".to_string(),
+                })
+            }
+            Err(e) => Json(TaskResponse {
+                success: false,
+                task_id: None,
+                message: format!("Invalid proxy URL: {}", e),
+            }),
+        }
+    }
+}
+
+/// Disable proxy configuration
+async fn disable_proxy(State(state): State<Arc<WebState>>) -> Json<TaskResponse> {
+    state.manager.set_proxy(None).await;
+    Json(TaskResponse {
+        success: true,
+        task_id: None,
+        message: "Proxy disabled".to_string(),
+    })
 }
 
 /// WebSocket upgrade handler
@@ -728,5 +822,188 @@ mod tests {
         let resp: BatchImportResponse = serde_json::from_slice(&body).unwrap();
         // Both should fail since we can't actually connect
         assert_eq!(resp.total, 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_proxy_empty() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/proxy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: ProxyStatusResponse = serde_json::from_slice(&body).unwrap();
+        assert!(!resp.enabled);
+        assert!(resp.url.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_proxy_valid() {
+        let state = test_state();
+        let app = create_router(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/proxy")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"url":"socks5://127.0.0.1:1080"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: TaskResponse = serde_json::from_slice(&body).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.message, "Proxy configured");
+
+        // Verify proxy was set
+        let proxy = state.manager.get_proxy().await;
+        assert!(proxy.is_some());
+        let cfg = proxy.unwrap();
+        assert_eq!(cfg.host, "127.0.0.1");
+        assert_eq!(cfg.port, 1080);
+    }
+
+    #[tokio::test]
+    async fn test_set_proxy_invalid() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/proxy")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"url":"invalid-url"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: TaskResponse = serde_json::from_slice(&body).unwrap();
+        assert!(!resp.success);
+        assert!(resp.message.contains("Invalid proxy URL"));
+    }
+
+    #[tokio::test]
+    async fn test_disable_proxy() {
+        let state = test_state();
+
+        // Set proxy first
+        state
+            .manager
+            .set_proxy(Some(crate::proxy::ProxyConfig::new(
+                crate::proxy::ProxyType::Socks5,
+                "127.0.0.1".into(),
+                1080,
+            )))
+            .await;
+
+        let app = create_router(state.clone());
+
+        // Disable it
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/proxy/disable")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: TaskResponse = serde_json::from_slice(&body).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.message, "Proxy disabled");
+
+        // Verify proxy was disabled
+        let proxy = state.manager.get_proxy().await;
+        assert!(proxy.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_proxy_empty_url_disables() {
+        let state = test_state();
+
+        // Set proxy first
+        state
+            .manager
+            .set_proxy(Some(crate::proxy::ProxyConfig::new(
+                crate::proxy::ProxyType::Http,
+                "proxy.example.com".into(),
+                8080,
+            )))
+            .await;
+
+        let app = create_router(state.clone());
+
+        // Set empty URL should disable
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/proxy")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"url":""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: TaskResponse = serde_json::from_slice(&body).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.message, "Proxy disabled");
+
+        let proxy = state.manager.get_proxy().await;
+        assert!(proxy.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_proxy_status_response_format() {
+        let config = crate::proxy::ProxyConfig::with_auth(
+            crate::proxy::ProxyType::Socks5,
+            "127.0.0.1".into(),
+            1080,
+            "user".into(),
+            "pass".into(),
+        );
+        let resp = ProxyStatusResponse::from(Some(config));
+        assert!(resp.enabled);
+        assert_eq!(resp.proxy_type, Some("socks5".into()));
+        assert_eq!(resp.host, Some("127.0.0.1".into()));
+        assert_eq!(resp.port, Some(1080));
+        assert!(resp.has_auth);
+        assert!(resp.url.is_some());
     }
 }
