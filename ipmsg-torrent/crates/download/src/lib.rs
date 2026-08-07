@@ -42,7 +42,7 @@ use notification::{NotificationContext, NotificationDispatcher};
 
 pub use bandwidth_monitor::{
     BandwidthDashboard, BandwidthMonitor as BandwidthMonitorType, BandwidthSample, BandwidthStats,
-    TaskBandwidth,
+    BandwidthTrendSummary, MovingAvgPoint, TaskBandwidth, TrendDirection, TrendStats, WindowTrend,
 };
 pub use notification::{
     NotificationChannel, NotificationConfig, NotificationError, NotificationEvent,

@@ -74,6 +74,76 @@ pub struct BandwidthDashboard {
     pub history: Vec<BandwidthSample>,
 }
 
+/// Trend analysis summary for bandwidth data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BandwidthTrendSummary {
+    /// Overall statistics
+    pub overall: TrendStats,
+    /// Per-window breakdowns
+    pub windows: Vec<WindowTrend>,
+    /// Moving average data points (smoothed trend line)
+    pub moving_avg: Vec<MovingAvgPoint>,
+    /// Trend direction (rising/falling/stable)
+    pub trend_direction: TrendDirection,
+    /// Time range covered (seconds)
+    pub time_range_secs: u64,
+    /// Total samples analyzed
+    pub sample_count: usize,
+}
+
+/// Statistics for a trend analysis
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TrendStats {
+    /// Average download speed (bytes/sec)
+    pub avg_download_bps: f64,
+    /// Maximum download speed (bytes/sec)
+    pub max_download_bps: f64,
+    /// Minimum download speed (bytes/sec)
+    pub min_download_bps: f64,
+    /// Standard deviation of speed
+    pub stddev_bps: f64,
+    /// Total bytes transferred
+    pub total_bytes: u64,
+    /// Duration in seconds
+    pub duration_secs: u64,
+}
+
+/// Trend data for a specific time window
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowTrend {
+    /// Window label (e.g., "5min", "15min", "1h")
+    pub label: String,
+    /// Window duration in seconds
+    pub window_secs: u64,
+    /// Statistics for this window
+    pub stats: BandwidthStats,
+    /// Trend direction within this window
+    pub direction: TrendDirection,
+}
+
+/// A single moving average data point
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MovingAvgPoint {
+    /// Timestamp (seconds since epoch)
+    pub timestamp: u64,
+    /// Moving average download speed
+    pub avg_bps: f64,
+}
+
+/// Trend direction indicator
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TrendDirection {
+    /// Speed is increasing
+    Rising,
+    /// Speed is decreasing
+    Falling,
+    /// Speed is relatively stable
+    Stable,
+    /// Not enough data to determine
+    Unknown,
+}
+
 /// Monitors bandwidth usage over time with a rolling window
 pub struct BandwidthMonitor {
     /// Rolling history of bandwidth samples
@@ -260,6 +330,235 @@ impl BandwidthMonitor {
     /// Get raw history samples
     pub async fn history(&self) -> Vec<BandwidthSample> {
         self.history.read().await.iter().cloned().collect()
+    }
+
+    /// Compute a comprehensive trend summary
+    pub async fn compute_trend_summary(&self) -> BandwidthTrendSummary {
+        let history = self.history.read().await;
+        let samples: Vec<BandwidthSample> = history.iter().cloned().collect();
+
+        if samples.is_empty() {
+            return BandwidthTrendSummary {
+                overall: TrendStats::default(),
+                windows: vec![],
+                moving_avg: vec![],
+                trend_direction: TrendDirection::Unknown,
+                time_range_secs: 0,
+                sample_count: 0,
+            };
+        }
+
+        // Overall statistics
+        let overall = Self::compute_trend_stats(&samples);
+
+        // Per-window trends
+        let windows = vec![
+            Self::compute_window_trend(&samples, "5min", 300),
+            Self::compute_window_trend(&samples, "15min", 900),
+            Self::compute_window_trend(&samples, "1h", 3600),
+        ];
+
+        // Moving average (window of 5 samples)
+        let moving_avg = Self::compute_moving_average(&samples, 5);
+
+        // Overall trend direction
+        let trend_direction = Self::detect_trend(&samples);
+
+        let time_range = if samples.len() >= 2 {
+            samples.last().unwrap().timestamp - samples.first().unwrap().timestamp
+        } else {
+            0
+        };
+
+        BandwidthTrendSummary {
+            overall,
+            windows,
+            moving_avg,
+            trend_direction,
+            time_range_secs: time_range,
+            sample_count: samples.len(),
+        }
+    }
+
+    /// Compute trend statistics for a set of samples
+    fn compute_trend_stats(samples: &[BandwidthSample]) -> TrendStats {
+        if samples.is_empty() {
+            return TrendStats::default();
+        }
+
+        let speeds: Vec<f64> = samples.iter().map(|s| s.download_bps).collect();
+        let count = speeds.len();
+        let sum: f64 = speeds.iter().sum();
+        let avg = sum / count as f64;
+        let max = speeds.iter().cloned().fold(0.0f64, f64::max);
+        let min = speeds.iter().cloned().fold(f64::MAX, f64::min);
+
+        // Standard deviation
+        let variance: f64 = speeds.iter().map(|s| (s - avg).powi(2)).sum::<f64>() / count as f64;
+        let stddev = variance.sqrt();
+
+        // Total bytes: sum of (speed * interval)
+        let mut total_bytes: u64 = 0;
+        for i in 1..samples.len() {
+            let interval = samples[i]
+                .timestamp
+                .saturating_sub(samples[i - 1].timestamp);
+            // Use average of two consecutive samples for better estimate
+            let avg_speed = (samples[i - 1].download_bps + samples[i].download_bps) / 2.0;
+            total_bytes += (avg_speed * interval as f64 / 8.0) as u64;
+        }
+
+        let duration = if samples.len() >= 2 {
+            samples.last().unwrap().timestamp - samples.first().unwrap().timestamp
+        } else {
+            0
+        };
+
+        TrendStats {
+            avg_download_bps: avg,
+            max_download_bps: max,
+            min_download_bps: min,
+            stddev_bps: stddev,
+            total_bytes,
+            duration_secs: duration,
+        }
+    }
+
+    /// Compute trend for a specific time window
+    fn compute_window_trend(
+        samples: &[BandwidthSample],
+        label: &str,
+        window_secs: u64,
+    ) -> WindowTrend {
+        let now = samples.last().map(|s| s.timestamp).unwrap_or(0);
+        let cutoff = now.saturating_sub(window_secs);
+
+        let window_samples: Vec<_> = samples.iter().filter(|s| s.timestamp >= cutoff).collect();
+
+        let stats = if window_samples.is_empty() {
+            BandwidthStats::default()
+        } else {
+            let count = window_samples.len();
+            let mut total_dl = 0.0f64;
+            let mut peak_dl = 0.0f64;
+
+            for s in &window_samples {
+                total_dl += s.download_bps;
+                peak_dl = peak_dl.max(s.download_bps);
+            }
+
+            let avg_dl = total_dl / count as f64;
+            let actual_window = if count > 1 {
+                window_samples.last().unwrap().timestamp - window_samples.first().unwrap().timestamp
+            } else {
+                0
+            };
+
+            BandwidthStats {
+                avg_download_bps: avg_dl,
+                peak_download_bps: peak_dl,
+                avg_upload_bps: 0.0,
+                peak_upload_bps: 0.0,
+                total_downloaded: (avg_dl * actual_window as f64 / 8.0) as u64,
+                total_uploaded: 0,
+                sample_count: count,
+                window_secs: actual_window,
+            }
+        };
+
+        // Detect trend direction within window
+        let direction = Self::detect_trend_from_refs(&window_samples);
+
+        WindowTrend {
+            label: label.to_string(),
+            window_secs,
+            stats,
+            direction,
+        }
+    }
+
+    /// Compute moving average with given window size
+    fn compute_moving_average(samples: &[BandwidthSample], window: usize) -> Vec<MovingAvgPoint> {
+        if window == 0 || samples.len() < window {
+            return vec![];
+        }
+
+        let mut result = Vec::with_capacity(samples.len() - window + 1);
+        for i in (window - 1)..samples.len() {
+            let start = i + 1 - window;
+            let sum: f64 = samples[start..=i].iter().map(|s| s.download_bps).sum();
+            let avg = sum / window as f64;
+            result.push(MovingAvgPoint {
+                timestamp: samples[i].timestamp,
+                avg_bps: avg,
+            });
+        }
+        result
+    }
+
+    /// Detect overall trend direction from samples
+    fn detect_trend(samples: &[BandwidthSample]) -> TrendDirection {
+        if samples.len() < 3 {
+            return TrendDirection::Unknown;
+        }
+
+        // Compare first third average vs last third average
+        let third = samples.len() / 3;
+        let first_third: f64 =
+            samples[..third].iter().map(|s| s.download_bps).sum::<f64>() / third as f64;
+        let last_third: f64 = samples[samples.len() - third..]
+            .iter()
+            .map(|s| s.download_bps)
+            .sum::<f64>()
+            / third as f64;
+
+        let change_ratio = if first_third > 0.0 {
+            (last_third - first_third) / first_third
+        } else if last_third > 0.0 {
+            1.0 // Went from 0 to something
+        } else {
+            0.0 // Both zero
+        };
+
+        if change_ratio > 0.15 {
+            TrendDirection::Rising
+        } else if change_ratio < -0.15 {
+            TrendDirection::Falling
+        } else {
+            TrendDirection::Stable
+        }
+    }
+
+    /// Detect trend from a slice of references
+    fn detect_trend_from_refs(samples: &[&BandwidthSample]) -> TrendDirection {
+        if samples.len() < 3 {
+            return TrendDirection::Unknown;
+        }
+
+        let third = samples.len() / 3;
+        let first_third: f64 =
+            samples[..third].iter().map(|s| s.download_bps).sum::<f64>() / third as f64;
+        let last_third: f64 = samples[samples.len() - third..]
+            .iter()
+            .map(|s| s.download_bps)
+            .sum::<f64>()
+            / third as f64;
+
+        let change_ratio = if first_third > 0.0 {
+            (last_third - first_third) / first_third
+        } else if last_third > 0.0 {
+            1.0
+        } else {
+            0.0
+        };
+
+        if change_ratio > 0.15 {
+            TrendDirection::Rising
+        } else if change_ratio < -0.15 {
+            TrendDirection::Falling
+        } else {
+            TrendDirection::Stable
+        }
     }
 
     /// Clear all history
@@ -462,5 +761,175 @@ mod tests {
         let deserialized: BandwidthSample = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.timestamp, 1700000000);
         assert!((deserialized.download_bps - 1024.5).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn test_trend_summary_empty() {
+        let monitor = BandwidthMonitor::new();
+        let summary = monitor.compute_trend_summary().await;
+        assert_eq!(summary.sample_count, 0);
+        assert_eq!(summary.trend_direction, TrendDirection::Unknown);
+        assert_eq!(summary.time_range_secs, 0);
+    }
+
+    #[tokio::test]
+    async fn test_trend_summary_with_samples() {
+        let monitor = BandwidthMonitor::with_config(100, Duration::from_secs(3600));
+        {
+            let mut history = monitor.history.write().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            // 10 samples, 10 seconds apart
+            for i in 0..10 {
+                history.push_back(BandwidthSample {
+                    timestamp: now - (9 - i) * 10,
+                    download_bps: 1000.0 * (i + 1) as f64,
+                    upload_bps: 0.0,
+                });
+            }
+        }
+        let summary = monitor.compute_trend_summary().await;
+        assert_eq!(summary.sample_count, 10);
+        assert_eq!(summary.time_range_secs, 90);
+        // Speed is increasing (1000, 2000, ..., 10000)
+        assert_eq!(summary.trend_direction, TrendDirection::Rising);
+        // Overall stats
+        assert!(summary.overall.avg_download_bps > 0.0);
+        assert!((summary.overall.max_download_bps - 10000.0).abs() < 0.1);
+        assert!((summary.overall.min_download_bps - 1000.0).abs() < 0.1);
+        // Windows
+        assert_eq!(summary.windows.len(), 3);
+        assert_eq!(summary.windows[0].label, "5min");
+        // Moving average
+        assert!(!summary.moving_avg.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_trend_direction_falling() {
+        let monitor = BandwidthMonitor::with_config(100, Duration::from_secs(3600));
+        {
+            let mut history = monitor.history.write().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            // Decreasing speeds
+            for i in 0..10 {
+                history.push_back(BandwidthSample {
+                    timestamp: now - (9 - i) * 10,
+                    download_bps: 10000.0 - 1000.0 * i as f64,
+                    upload_bps: 0.0,
+                });
+            }
+        }
+        let summary = monitor.compute_trend_summary().await;
+        assert_eq!(summary.trend_direction, TrendDirection::Falling);
+    }
+
+    #[tokio::test]
+    async fn test_trend_direction_stable() {
+        let monitor = BandwidthMonitor::with_config(100, Duration::from_secs(3600));
+        {
+            let mut history = monitor.history.write().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            // Constant speed
+            for i in 0..10 {
+                history.push_back(BandwidthSample {
+                    timestamp: now - (9 - i) * 10,
+                    download_bps: 5000.0,
+                    upload_bps: 0.0,
+                });
+            }
+        }
+        let summary = monitor.compute_trend_summary().await;
+        assert_eq!(summary.trend_direction, TrendDirection::Stable);
+    }
+
+    #[tokio::test]
+    async fn test_moving_average_calculation() {
+        let samples = vec![
+            BandwidthSample {
+                timestamp: 100,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 110,
+                download_bps: 200.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 120,
+                download_bps: 300.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 130,
+                download_bps: 400.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 140,
+                download_bps: 500.0,
+                upload_bps: 0.0,
+            },
+        ];
+        let ma = BandwidthMonitor::compute_moving_average(&samples, 3);
+        assert_eq!(ma.len(), 3); // 5 - 3 + 1 = 3 points
+        // First point: avg(100, 200, 300) = 200
+        assert!((ma[0].avg_bps - 200.0).abs() < 0.1);
+        // Second point: avg(200, 300, 400) = 300
+        assert!((ma[1].avg_bps - 300.0).abs() < 0.1);
+        // Third point: avg(300, 400, 500) = 400
+        assert!((ma[2].avg_bps - 400.0).abs() < 0.1);
+    }
+
+    #[tokio::test]
+    async fn test_trend_stats_total_bytes() {
+        let samples = vec![
+            BandwidthSample {
+                timestamp: 100,
+                download_bps: 8000.0, // 8000 bps = 1000 B/s
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 110, // 10 seconds later
+                download_bps: 8000.0,
+                upload_bps: 0.0,
+            },
+        ];
+        let stats = BandwidthMonitor::compute_trend_stats(&samples);
+        // 8000 bps * 10s / 8 = 10000 bytes
+        assert_eq!(stats.total_bytes, 10000);
+        assert_eq!(stats.duration_secs, 10);
+    }
+
+    #[tokio::test]
+    async fn test_trend_summary_serialization() {
+        let summary = BandwidthTrendSummary {
+            overall: TrendStats {
+                avg_download_bps: 1000.0,
+                max_download_bps: 2000.0,
+                min_download_bps: 500.0,
+                stddev_bps: 100.0,
+                total_bytes: 100000,
+                duration_secs: 300,
+            },
+            windows: vec![],
+            moving_avg: vec![],
+            trend_direction: TrendDirection::Rising,
+            time_range_secs: 300,
+            sample_count: 30,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: BandwidthTrendSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.trend_direction, TrendDirection::Rising);
+        assert_eq!(deserialized.sample_count, 30);
+        assert!((deserialized.overall.avg_download_bps - 1000.0).abs() < 0.1);
     }
 }

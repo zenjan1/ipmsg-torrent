@@ -123,6 +123,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/batch-import", post(batch_import))
         .route("/api/bandwidth", get(get_bandwidth))
         .route("/api/bandwidth/history", get(get_bandwidth_history))
+        .route("/api/bandwidth/summary", get(get_bandwidth_summary))
         .route("/api/deps", get(get_deps))
         .route("/api/proxy", get(get_proxy))
         .route("/api/proxy", post(set_proxy))
@@ -325,6 +326,18 @@ pub struct BandwidthHistoryResponse {
     pub samples: Vec<crate::BandwidthSample>,
     pub window_secs: u64,
     pub sample_count: usize,
+}
+
+/// Get bandwidth trend summary
+async fn get_bandwidth_summary(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::BandwidthTrendSummary> {
+    let summary = state
+        .manager
+        .bandwidth_monitor()
+        .compute_trend_summary()
+        .await;
+    Json(summary)
 }
 
 /// Get bandwidth history samples for charting

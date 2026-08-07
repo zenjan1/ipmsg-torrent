@@ -79,6 +79,11 @@
         #speed-chart { width: 100%; height: 200px; background: #0f3460; border-radius: 4px; }
         .chart-stats { font-size: 12px; color: #888; margin-top: 8px; display: flex; gap: 20px; flex-wrap: wrap; }
         .chart-stats span { color: #00d4ff; }
+        .chart-trend { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+        .chart-trend.rising { background: #1b4332; color: #40c057; }
+        .chart-trend.falling { background: #5c1a1a; color: #ff6b6b; }
+        .chart-trend.stable { background: #333; color: #aaa; }
+        .chart-trend.unknown { background: #1a1a2e; color: #666; }
         .dep-panel { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
         .dep-panel summary { cursor: pointer; color: #00d4ff; font-weight: bold; margin-bottom: 10px; }
         .dep-graph { position: relative; overflow-x: auto; padding: 10px 0; }
@@ -626,6 +631,19 @@
                 return sum + (s.download_bps * 10 / 8);
             }, 0);
 
+            // Compute moving average (window of 5)
+            const maWindow = 5;
+            const movingAvg = [];
+            if (chartData.length >= maWindow) {
+                for (let i = maWindow - 1; i < chartData.length; i++) {
+                    const sum = speeds.slice(i - maWindow + 1, i + 1).reduce((a, b) => a + b, 0);
+                    movingAvg.push({ timestamp: chartData[i].timestamp, avg: sum / maWindow });
+                }
+            }
+
+            // Detect trend direction
+            const trend = detectTrend(speeds);
+
             // Draw chart
             const padding = { top: 20, right: 20, bottom: 30, left: 60 };
             const chartWidth = canvas.width - padding.left - padding.right;
@@ -673,6 +691,22 @@
             ctx.closePath();
             ctx.fill();
 
+            // Draw moving average line (orange)
+            if (movingAvg.length >= 2) {
+                ctx.strokeStyle = '#ffa500';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([4, 2]);
+                ctx.beginPath();
+                movingAvg.forEach((point, i) => {
+                    const x = padding.left + (chartWidth * (point.timestamp - chartData[0].timestamp) / timeRange);
+                    const y = padding.top + chartHeight * (1 - point.avg / maxSpeed);
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
             // X-axis time labels
             ctx.fillStyle = '#888';
             ctx.font = '11px sans-serif';
@@ -682,13 +716,27 @@
             ctx.fillText(formatTime(startTime), padding.left, canvas.height - 8);
             ctx.fillText(formatTime(endTime), canvas.width - padding.right, canvas.height - 8);
 
-            // Update stats
+            // Update stats with trend indicator
+            const trendClass = trend.toLowerCase();
+            const trendSymbol = trend === 'Rising' ? '↑' : trend === 'Falling' ? '↓' : trend === 'Stable' ? '→' : '?';
             statsEl.innerHTML = `
                 <div>Avg: <span>${formatSpeed(avgSpeed)}</span></div>
                 <div>Peak: <span>${formatSpeed(maxSpeed)}</span></div>
                 <div>Samples: <span>${chartData.length}</span></div>
                 <div>Est. Total: <span>${formatSize(totalBytes)}</span></div>
+                <div class="chart-trend ${trendClass}">${trendSymbol} ${trend}</div>
             `;
+        }
+
+        function detectTrend(speeds) {
+            if (speeds.length < 3) return 'Unknown';
+            const third = Math.floor(speeds.length / 3);
+            const firstThird = speeds.slice(0, third).reduce((a, b) => a + b, 0) / third;
+            const lastThird = speeds.slice(-third).reduce((a, b) => a + b, 0) / third;
+            const changeRatio = firstThird > 0 ? (lastThird - firstThird) / firstThird : (lastThird > 0 ? 1 : 0);
+            if (changeRatio > 0.15) return 'Rising';
+            if (changeRatio < -0.15) return 'Falling';
+            return 'Stable';
         }
 
         function formatTime(date) {
