@@ -552,6 +552,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: "normal".into(),
                 bandwidth_weight: 1,
+                depends_on: Vec::new(),
                 queue_position: None,
             },
         };

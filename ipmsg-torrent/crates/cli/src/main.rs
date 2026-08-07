@@ -164,6 +164,13 @@ enum Command {
         /// Direction: "up", "down", "top", "bottom"
         direction: String,
     },
+    /// Set download task dependencies
+    DlDeps {
+        /// Task ID to set dependencies for
+        task_id: String,
+        /// Comma-separated list of task IDs this task depends on, or "none" to clear
+        deps: String,
+    },
     /// Batch import URLs from a file or inline list
     DlBatch {
         /// File path containing URLs (one per line), or inline URLs separated by spaces
@@ -472,6 +479,18 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlqmove <task_id> <up|down|top|bottom>".to_string())
             }
         }
+        "dlddeps" | "dl-deps" | "dld" => {
+            // /dlddeps <task_id> <dep1,dep2,dep3|none>
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 3 {
+                Command::DlDeps {
+                    task_id: args[1].to_string(),
+                    deps: args[2].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlddeps <task_id> <dep1,dep2,dep3|none>".to_string())
+            }
+        }
         "dlbatch" | "dl-import" => {
             // /dlbatch <file_path> - Import URLs from a file (one per line)
             let args: Vec<&str> = input.split_whitespace().collect();
@@ -565,6 +584,7 @@ fn command_help() -> String {
         "/dlbw <id> <1-10>    - Set bandwidth weight (higher = more bandwidth)",
         "/dlbwmon           - Show bandwidth monitoring dashboard",
         "/dlqmove <id> <up|down|top|bottom> - Move task in queue",
+        "/dlddeps <id> <dep1,dep2,...|none> - Set task dependencies",
         "/dlautoshutdown <disabled|exit|shell:<cmd>> - Auto-shutdown when all downloads complete",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/block <peer>  - Block a peer",
@@ -2010,6 +2030,51 @@ async fn handle_command(
                         "Task {} not found or cannot be moved {}",
                         &task_id[..8.min(task_id.len())],
                         direction
+                    ),
+                );
+            }
+        }
+        Command::DlDeps { task_id, deps } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let dep_list: Vec<String> = if deps.to_lowercase() == "none" {
+                Vec::new()
+            } else {
+                deps.split(',').map(|s| s.trim().to_string()).collect()
+            };
+
+            let success = download_manager
+                .set_dependencies(&task_id, dep_list.clone())
+                .await;
+
+            let mut s = state.lock().await;
+            if success {
+                if dep_list.is_empty() {
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "🔗 Task {} dependencies cleared",
+                            &task_id[..8.min(task_id.len())]
+                        ),
+                    );
+                } else {
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "🔗 Task {} now depends on {} task(s)",
+                            &task_id[..8.min(task_id.len())],
+                            dep_list.len()
+                        ),
+                    );
+                }
+            } else {
+                s.add_system_message(
+                    "main",
+                    format!(
+                        "❌ Failed to set dependencies for task {} (task not found, dependency not found, or cycle detected)",
+                        &task_id[..8.min(task_id.len())]
                     ),
                 );
             }

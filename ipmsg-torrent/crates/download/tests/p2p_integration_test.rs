@@ -158,6 +158,7 @@ async fn test_p2p_download_progress_calculation() {
         priority: DownloadPriority::Normal,
         schedule: None,
         queue_position: None,
+        depends_on: Vec::new(),
         bandwidth_weight: 1,
     };
 

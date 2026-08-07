@@ -117,6 +117,8 @@ pub struct TaskInfoEvent {
     pub priority: String,
     pub bandwidth_weight: u8,
     pub queue_position: Option<u32>,
+    /// Task IDs this task depends on (for WebSocket UI display)
+    pub depends_on: Vec<String>,
 }
 
 impl TaskInfoEvent {
@@ -135,6 +137,7 @@ impl TaskInfoEvent {
             priority: task.priority.label().to_string(),
             bandwidth_weight: task.bandwidth_weight,
             queue_position: task.queue_position,
+            depends_on: task.depends_on.clone(),
         }
     }
 }
@@ -221,6 +224,8 @@ pub struct DownloadTask {
     /// Explicit queue position within the same priority level.
     /// Lower values come first. `None` means use creation time as tiebreaker.
     pub queue_position: Option<u32>,
+    /// Task IDs this task depends on. All dependencies must be Complete before this task starts.
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -691,13 +696,32 @@ impl DownloadManager {
                 };
 
                 if can_start {
-                    // Find the highest-priority queued task
+                    // Find the highest-priority queued task with all dependencies satisfied
                     let next_task_id = {
                         let tasks_lock = tasks.lock().await;
+                        let completed_ids: std::collections::HashSet<&str> = tasks_lock
+                            .iter()
+                            .filter(|t| t.state == DownloadState::Complete)
+                            .map(|t| t.id.as_str())
+                            .collect();
                         tasks_lock
                             .iter()
-                            .filter(|t| t.state == DownloadState::Queued)
-                            .max_by_key(|t| t.priority)
+                            .filter(|t| {
+                                t.state == DownloadState::Queued
+                                    && t.depends_on
+                                        .iter()
+                                        .all(|dep| completed_ids.contains(dep.as_str()))
+                            })
+                            .max_by(|a, b| {
+                                a.priority.cmp(&b.priority).then_with(|| {
+                                    match (a.queue_position, b.queue_position) {
+                                        (Some(pa), Some(pb)) => pb.cmp(&pa),
+                                        (Some(_), None) => std::cmp::Ordering::Greater,
+                                        (None, Some(_)) => std::cmp::Ordering::Less,
+                                        (None, None) => a.created_at.cmp(&b.created_at),
+                                    }
+                                })
+                            })
                             .map(|t| t.id.clone())
                     };
 
@@ -1214,6 +1238,7 @@ impl DownloadManager {
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
+            depends_on: Vec::new(),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1263,6 +1288,7 @@ impl DownloadManager {
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
+            depends_on: Vec::new(),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1312,6 +1338,7 @@ impl DownloadManager {
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
+            depends_on: Vec::new(),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1359,6 +1386,7 @@ impl DownloadManager {
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
+            depends_on: Vec::new(),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1406,6 +1434,7 @@ impl DownloadManager {
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
+            depends_on: Vec::new(),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -2729,6 +2758,109 @@ impl DownloadManager {
             .map(|t| t.queue_position)
     }
 
+    /// Set dependencies for a task. Returns false if task not found or if adding would create a cycle.
+    pub async fn set_dependencies(&self, task_id: &str, deps: Vec<String>) -> bool {
+        // Check for self-dependency
+        if deps.iter().any(|d| d == task_id) {
+            return false;
+        }
+
+        let tasks = self.tasks.lock().await;
+
+        // Check task exists
+        if !tasks.iter().any(|t| t.id == task_id) {
+            return false;
+        }
+
+        // Check all deps exist
+        if !deps.iter().all(|d| tasks.iter().any(|t| t.id == *d)) {
+            return false;
+        }
+
+        // Check for cycles: can't add dep if any dep transitively depends on us
+        if self.would_create_cycle(&tasks, task_id, &deps) {
+            return false;
+        }
+
+        drop(tasks);
+
+        let mut tasks = self.tasks.lock().await;
+        let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) else {
+            return false;
+        };
+
+        task.depends_on = deps;
+        task.updated_at = chrono::Utc::now();
+        self.emit_event(TaskEvent::Updated {
+            task: TaskInfoEvent::from_task(task),
+        });
+        drop(tasks);
+        self.persist_tasks().await;
+        true
+    }
+
+    /// Get the dependencies for a task.
+    pub async fn get_dependencies(&self, task_id: &str) -> Option<Vec<String>> {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .map(|t| t.depends_on.clone())
+    }
+
+    /// Check if a task's dependencies are all satisfied (all Complete).
+    pub async fn are_dependencies_met(&self, task_id: &str) -> Option<bool> {
+        let tasks = self.tasks.lock().await;
+        let task = tasks.iter().find(|t| t.id == task_id)?;
+        if task.depends_on.is_empty() {
+            return Some(true);
+        }
+        let completed: std::collections::HashSet<&str> = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Complete)
+            .map(|t| t.id.as_str())
+            .collect();
+        Some(
+            task.depends_on
+                .iter()
+                .all(|d| completed.contains(d.as_str())),
+        )
+    }
+
+    /// Detect cycles: would setting these deps on task_id create a cycle?
+    fn would_create_cycle(
+        &self,
+        tasks: &[DownloadTask],
+        task_id: &str,
+        new_deps: &[String],
+    ) -> bool {
+        // Build adjacency: task -> its depends_on
+        let mut visited = std::collections::HashSet::new();
+        let mut stack = vec![task_id.to_string()];
+
+        // For each new dep, check if following its dependency chain leads back to task_id
+        for dep in new_deps {
+            visited.clear();
+            stack.clear();
+            stack.push(dep.clone());
+
+            while let Some(current) = stack.pop() {
+                if current == task_id {
+                    return true; // cycle found
+                }
+                if !visited.insert(current.clone()) {
+                    continue;
+                }
+                if let Some(t) = tasks.iter().find(|t| t.id == current) {
+                    for d in &t.depends_on {
+                        stack.push(d.clone());
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Move a task up in the queue (decrease position by 1).
     /// Returns true if task was moved.
     pub async fn move_task_up(&self, task_id: &str) -> bool {
@@ -2863,17 +2995,28 @@ impl DownloadManager {
     }
 
     /// Try to start the next queued task if a slot is available.
-    /// Picks the highest-priority queued task (FIFO within same priority, queue_position as tiebreaker).
+    /// Picks the highest-priority queued task whose dependencies are all satisfied (FIFO within same priority, queue_position as tiebreaker).
     pub async fn try_start_next_queued(&self) -> Option<String> {
         if !self.can_start_task().await {
             return None;
         }
 
-        // Find the highest-priority queued task
+        // Find the highest-priority queued task with all dependencies satisfied
         let tasks = self.tasks.lock().await;
+        let completed_ids: std::collections::HashSet<&str> = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Complete)
+            .map(|t| t.id.as_str())
+            .collect();
+
         let next = tasks
             .iter()
-            .filter(|t| t.state == DownloadState::Queued)
+            .filter(|t| {
+                t.state == DownloadState::Queued
+                    && t.depends_on
+                        .iter()
+                        .all(|dep| completed_ids.contains(dep.as_str()))
+            })
             .max_by(|a, b| {
                 a.priority.cmp(&b.priority).then_with(|| {
                     // Lower queue_position comes first
@@ -3068,6 +3211,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3086,6 +3230,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3104,6 +3249,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -3214,6 +3360,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -3259,6 +3406,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -3297,6 +3445,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3315,6 +3464,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3333,6 +3483,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -3374,6 +3525,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3392,6 +3544,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -3423,6 +3576,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -3454,6 +3608,7 @@ mod tests {
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
+            depends_on: Vec::new(),
         };
         assert!(task.tags.is_empty());
     }
@@ -3479,6 +3634,7 @@ mod tests {
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
+            depends_on: Vec::new(),
         };
 
         // Query match (case-insensitive)
@@ -3521,6 +3677,7 @@ mod tests {
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
+            depends_on: Vec::new(),
         };
 
         let filter = TaskFilter {
@@ -3555,6 +3712,7 @@ mod tests {
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
+            depends_on: Vec::new(),
         };
 
         let filter = TaskFilter {
@@ -3589,6 +3747,7 @@ mod tests {
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
+            depends_on: Vec::new(),
         };
 
         let filter = TaskFilter {
@@ -3623,6 +3782,7 @@ mod tests {
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
+            depends_on: Vec::new(),
         };
 
         // All criteria match
@@ -3664,6 +3824,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             },
             DownloadTask {
                 id: "s2".into(),
@@ -3682,6 +3843,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             },
             DownloadTask {
                 id: "s3".into(),
@@ -3700,6 +3862,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             },
         ];
 
@@ -3733,6 +3896,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             },
             DownloadTask {
                 id: "s2".into(),
@@ -3751,6 +3915,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             },
             DownloadTask {
                 id: "s3".into(),
@@ -3769,6 +3934,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             },
         ];
 
@@ -3798,6 +3964,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             },
             DownloadTask {
                 id: "p2".into(),
@@ -3816,6 +3983,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             },
             DownloadTask {
                 id: "p3".into(),
@@ -3834,6 +4002,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             },
         ];
 
@@ -3865,6 +4034,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3883,6 +4053,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -3912,6 +4083,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3930,6 +4102,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3948,6 +4121,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -3982,6 +4156,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4000,6 +4175,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4018,6 +4194,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -4128,6 +4305,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -4166,6 +4344,7 @@ mod tests {
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
+            depends_on: Vec::new(),
         };
 
         let event = TaskInfoEvent::from_task(&task);
@@ -4299,6 +4478,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -4354,6 +4534,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -4390,6 +4571,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "prop-2".into(),
@@ -4408,6 +4590,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 2,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "prop-3".into(),
@@ -4426,6 +4609,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 3,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -4488,6 +4672,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -4523,6 +4708,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -4555,6 +4741,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -4619,6 +4806,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: None,
+                depends_on: Vec::new(),
             });
         }
 
@@ -4660,6 +4848,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: Some(10),
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -4678,6 +4867,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: Some(20),
+                depends_on: Vec::new(),
             });
         }
 
@@ -4713,6 +4903,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: Some(10),
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -4731,6 +4922,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: Some(20),
+                depends_on: Vec::new(),
             });
         }
 
@@ -4766,6 +4958,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: Some(10),
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -4784,6 +4977,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: Some(20),
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -4802,6 +4996,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: Some(30),
+                depends_on: Vec::new(),
             });
         }
 
@@ -4835,6 +5030,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: Some(10),
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -4853,6 +5049,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: Some(20),
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -4871,6 +5068,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: Some(30),
+                depends_on: Vec::new(),
             });
         }
 
@@ -4905,6 +5103,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: Some(30),
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -4923,6 +5122,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: Some(10),
+                depends_on: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -4941,6 +5141,7 @@ mod tests {
                 schedule: None,
                 bandwidth_weight: 1,
                 queue_position: Some(20),
+                depends_on: Vec::new(),
             });
         }
 
@@ -5144,5 +5345,235 @@ mod tests {
             dm.get_auto_shutdown().await.action,
             auto_shutdown::AutoShutdownAction::Disabled
         );
+    }
+
+    // Phase 26: Task dependency tests
+    #[tokio::test]
+    async fn test_set_dependencies_success() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_success"));
+        let id1 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+        let id2 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+
+        // Set dependency: id2 depends on id1
+        assert!(dm.set_dependencies(&id2, vec![id1.clone()]).await);
+
+        // Verify dependency was set
+        let deps = dm.get_dependencies(&id2).await.unwrap();
+        assert_eq!(deps, vec![id1]);
+    }
+
+    #[tokio::test]
+    async fn test_set_dependencies_self_reference() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_self"));
+        let id1 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+
+        // Try to set self-dependency
+        assert!(!dm.set_dependencies(&id1, vec![id1.clone()]).await);
+    }
+
+    #[tokio::test]
+    async fn test_set_dependencies_nonexistent_task() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_nonexist"));
+        let id1 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+
+        // Try to set dependency on non-existent task
+        assert!(
+            !dm.set_dependencies(&id1, vec!["nonexistent-id".to_string()])
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_dependencies_cycle_detection() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_cycle"));
+        let id1 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+        let id2 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+
+        // Set id2 depends on id1
+        assert!(dm.set_dependencies(&id2, vec![id1.clone()]).await);
+
+        // Try to create cycle: id1 depends on id2
+        assert!(!dm.set_dependencies(&id1, vec![id2.clone()]).await);
+    }
+
+    #[tokio::test]
+    async fn test_are_dependencies_met_no_deps() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_met_none"));
+        let id1 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+
+        // No dependencies, should be met
+        assert_eq!(dm.are_dependencies_met(&id1).await, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_are_dependencies_met_unmet() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_met_unmet"));
+        let id1 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+        let id2 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+
+        // Set dependency
+        dm.set_dependencies(&id2, vec![id1.clone()]).await;
+
+        // id1 is Queued, not Complete, so dependencies not met
+        assert_eq!(dm.are_dependencies_met(&id2).await, Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_are_dependencies_met_completed() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_met_completed"));
+        let id1 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+        let id2 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+
+        // Set dependency
+        dm.set_dependencies(&id2, vec![id1.clone()]).await;
+
+        // Mark id1 as complete
+        {
+            let mut tasks = dm.tasks.lock().await;
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == id1) {
+                task.state = DownloadState::Complete;
+            }
+        }
+
+        // Now dependencies should be met
+        assert_eq!(dm.are_dependencies_met(&id2).await, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_set_dependencies_rejects_self_dependency() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_self2"));
+        let id = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+
+        // Self-dependency should be rejected
+        assert!(!dm.set_dependencies(&id, vec![id.clone()]).await);
+    }
+
+    #[tokio::test]
+    async fn test_set_dependencies_rejects_nonexistent() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_nonexist2"));
+        let id = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+
+        // Non-existent dependency should be rejected
+        assert!(
+            !dm.set_dependencies(&id, vec!["nonexistent-id".to_string()])
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_dependencies_rejects_cycle() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_cycle2"));
+        let id1 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=File1")
+            .await
+            .unwrap();
+        let id2 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=File2")
+            .await
+            .unwrap();
+
+        // id1 depends on id2
+        assert!(dm.set_dependencies(&id1, vec![id2.clone()]).await);
+
+        // id2 depends on id1 should create cycle
+        assert!(!dm.set_dependencies(&id2, vec![id1.clone()]).await);
+    }
+
+    #[tokio::test]
+    async fn test_are_dependencies_met_not_met() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_not_met"));
+        let id1 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=File1")
+            .await
+            .unwrap();
+        let id2 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=File2")
+            .await
+            .unwrap();
+
+        // id2 depends on id1
+        dm.set_dependencies(&id2, vec![id1.clone()]).await;
+
+        // id1 is still Queued, so deps not met
+        assert_eq!(dm.are_dependencies_met(&id2).await, Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_get_dependencies() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_get_deps"));
+        let id1 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=File1")
+            .await
+            .unwrap();
+        let id2 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=File2")
+            .await
+            .unwrap();
+
+        // Set dependencies
+        assert!(dm.set_dependencies(&id2, vec![id1.clone()]).await);
+
+        // Get dependencies
+        let deps = dm.get_dependencies(&id2).await.unwrap();
+        assert_eq!(deps, vec![id1]);
+    }
+
+    #[tokio::test]
+    async fn test_clear_dependencies() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_clear_deps"));
+        let id1 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=File1")
+            .await
+            .unwrap();
+        let id2 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=File2")
+            .await
+            .unwrap();
+
+        // Set then clear dependencies
+        assert!(dm.set_dependencies(&id2, vec![id1]).await);
+        assert!(dm.set_dependencies(&id2, vec![]).await);
+
+        let deps = dm.get_dependencies(&id2).await.unwrap();
+        assert!(deps.is_empty());
     }
 }

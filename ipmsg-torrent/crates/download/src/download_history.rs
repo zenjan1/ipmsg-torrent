@@ -241,6 +241,7 @@ mod tests {
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
+            depends_on: Vec::new(),
         }
     }
 
