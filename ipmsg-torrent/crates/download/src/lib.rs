@@ -127,6 +127,8 @@ pub struct TaskInfoEvent {
     pub notes: Option<String>,
     /// User-defined group for organizing downloads (optional)
     pub group: Option<String>,
+    /// Per-task speed limit in bytes/sec (None = use global per-task limit)
+    pub speed_limit_bps: Option<u64>,
 }
 
 impl TaskInfoEvent {
@@ -148,6 +150,7 @@ impl TaskInfoEvent {
             depends_on: task.depends_on.clone(),
             notes: task.notes.clone(),
             group: task.group.clone(),
+            speed_limit_bps: task.speed_limit_bps,
         }
     }
 }
@@ -240,6 +243,8 @@ pub struct DownloadTask {
     pub notes: Option<String>,
     /// User-defined group for organizing downloads (optional)
     pub group: Option<String>,
+    /// Per-task speed limit in bytes/sec (None = use global per-task limit)
+    pub speed_limit_bps: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -530,6 +535,8 @@ pub struct DownloadManager {
     save_path_manager: Arc<SavePathManager>,
     /// Proxy configuration for HTTP/HTTPS downloads
     proxy_config: Arc<tokio::sync::RwLock<Option<proxy::ProxyConfig>>>,
+    /// Per-task rate limiters (task_id -> RateLimiter)
+    task_rate_limiters: Arc<Mutex<HashMap<String, RateLimiter>>>,
 }
 
 impl DownloadManager {
@@ -553,6 +560,7 @@ impl DownloadManager {
             auto_shutdown: Arc::new(tokio::sync::RwLock::new(AutoShutdownConfig::default())),
             save_path_manager: Arc::new(SavePathManager::new(save_path)),
             proxy_config: Arc::new(tokio::sync::RwLock::new(None)),
+            task_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
         };
         dm.start_scheduler();
         dm
@@ -647,6 +655,7 @@ impl DownloadManager {
             auto_shutdown: Arc::new(tokio::sync::RwLock::new(AutoShutdownConfig::default())),
             save_path_manager: Arc::new(SavePathManager::new(save_path)),
             proxy_config: Arc::new(tokio::sync::RwLock::new(None)),
+            task_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
         };
         // Restore proxy configuration from disk
         if let Ok(Some(proxy_cfg)) = proxy::load_proxy_config(&dm.data_dir) {
@@ -679,6 +688,7 @@ impl DownloadManager {
         let notifier = self.notifier.clone();
         let auto_shutdown_config = self.auto_shutdown.clone();
         let proxy_config = self.proxy_config.clone();
+        let task_rate_limiters = self.task_rate_limiters.clone();
 
         // Spawn schedule checker (runs every 60 seconds)
         let schedule_check_tasks = self.tasks.clone();
@@ -842,11 +852,19 @@ impl DownloadManager {
                             let task_generation_clone = task_generation.clone();
                             let data_dir_clone = data_dir.clone();
                             let dht_clone = dht.clone();
-                            let rate_limiter_clone = rate_limiter.clone();
                             let notify_clone = notify.clone();
                             let task_id_clone = task_id.clone();
                             let notifier_clone = notifier.clone();
                             let proxy_config_clone = proxy_config.read().await.clone();
+                            let task_rate_limiters_clone = task_rate_limiters.clone();
+                            // Resolve per-task limiter: use task-specific if set, else global per-task.
+                            let task_rate_limiter: RateLimiter = {
+                                let limiters = task_rate_limiters_clone.lock().await;
+                                limiters
+                                    .get(&task_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| rate_limiter.per_task().clone())
+                            };
 
                             tokio::spawn(async move {
                                 let result: Result<(), String> = match params {
@@ -863,7 +881,7 @@ impl DownloadManager {
                                                                 download_dir,
                                                             );
                                                         engine.set_rate_limiter(
-                                                            rate_limiter_clone.per_task().clone(),
+                                                            task_rate_limiter.clone(),
                                                         );
                                                         engine.set_proxy_config(proxy_config_clone);
                                                         engine
@@ -891,9 +909,7 @@ impl DownloadManager {
                                             download_dir,
                                             servers,
                                         );
-                                        engine.set_rate_limiter(
-                                            rate_limiter_clone.per_task().clone(),
-                                        );
+                                        engine.set_rate_limiter(task_rate_limiter.clone());
                                         engine.set_proxy_config(proxy_config_clone);
                                         engine
                                             .download(Some(cancel_clone))
@@ -912,9 +928,7 @@ impl DownloadManager {
                                             sources,
                                             download_dir,
                                         );
-                                        engine.set_rate_limiter(
-                                            rate_limiter_clone.per_task().clone(),
-                                        );
+                                        engine.set_rate_limiter(task_rate_limiter.clone());
                                         engine
                                             .download(Some(cancel_clone))
                                             .await
@@ -982,9 +996,7 @@ impl DownloadManager {
                                                 }
                                                 let mut engine =
                                                     torrent::TorrentEngine::new(meta, download_dir);
-                                                engine.set_rate_limiter(
-                                                    rate_limiter_clone.per_task().clone(),
-                                                );
+                                                engine.set_rate_limiter(task_rate_limiter.clone());
                                                 engine.set_proxy_config(proxy_config_clone);
                                                 engine
                                                     .download(Some(cancel_clone))
@@ -1075,8 +1087,61 @@ impl DownloadManager {
     }
 
     /// Set per-task download speed limit in bytes/sec (0 = unlimited).
+    /// This is the global per-task limit applied to all tasks that don't have
+    /// an individual limit set via `set_task_speed_limit_per_task()`.
     pub async fn set_task_speed_limit(&self, bytes_per_sec: u64) {
         self.rate_limiter.set_task_limit(bytes_per_sec).await;
+    }
+
+    /// Set a per-task speed limit in bytes/sec (0 or None = use global per-task limit).
+    ///
+    /// Creates a dedicated RateLimiter for the task. If the task is currently
+    /// running, the new limiter will be used on the next engine spawn (pause+resume).
+    pub async fn set_task_speed_limit_per_task(&self, task_id: &str, bytes_per_sec: Option<u64>) {
+        // Normalize: Some(0) means "clear the limit" (same as None)
+        let normalized = bytes_per_sec.and_then(|v| if v == 0 { None } else { Some(v) });
+
+        // Update the task record
+        {
+            let mut tasks = self.tasks.lock().await;
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                task.speed_limit_bps = normalized;
+                task.updated_at = chrono::Utc::now();
+            } else {
+                return;
+            }
+        }
+
+        // Manage the per-task limiter map
+        {
+            let mut limiters = self.task_rate_limiters.lock().await;
+            match normalized {
+                None => {
+                    limiters.remove(task_id);
+                }
+                Some(limit) => {
+                    limiters.insert(task_id.to_string(), RateLimiter::new(limit));
+                }
+            }
+        }
+
+        // Persist and emit event
+        self.persist_tasks().await;
+        if let Some(task) = self.get_task(task_id).await {
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(&task),
+            });
+        }
+    }
+
+    /// Get the per-task speed limit for a specific task.
+    /// Returns None if no individual limit is set (uses global per-task limit).
+    pub async fn get_task_speed_limit(&self, task_id: &str) -> Option<u64> {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .and_then(|t| t.speed_limit_bps)
     }
 
     /// Get the rate controller handle.
@@ -1357,6 +1422,7 @@ impl DownloadManager {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1409,6 +1475,7 @@ impl DownloadManager {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1461,6 +1528,7 @@ impl DownloadManager {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1511,6 +1579,7 @@ impl DownloadManager {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1561,6 +1630,7 @@ impl DownloadManager {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -2122,6 +2192,7 @@ impl DownloadManager {
         let notifier = self.notifier.clone();
         let bandwidth_monitor = self.bandwidth_monitor.clone();
         let proxy_config = self.proxy_config.clone();
+        let task_rate_limiters = self.task_rate_limiters.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -2302,9 +2373,17 @@ impl DownloadManager {
                                 let task_generation_clone = task_generation.clone();
                                 let data_dir_clone = data_dir.clone();
                                 let dht_clone = dht.clone();
-                                let rate_limiter_clone = rate_limiter.clone();
                                 let task_id_clone = task_id.clone();
                                 let proxy_config_clone = proxy_config.read().await.clone();
+                                let task_rate_limiters_clone = task_rate_limiters.clone();
+                                // Resolve per-task limiter: use task-specific if set, else global per-task.
+                                let task_rate_limiter: RateLimiter = {
+                                    let limiters = task_rate_limiters_clone.lock().await;
+                                    limiters
+                                        .get(&task_id)
+                                        .cloned()
+                                        .unwrap_or_else(|| rate_limiter.per_task().clone())
+                                };
 
                                 tokio::spawn(async move {
                                     let result: Result<(), String> = match params {
@@ -2321,9 +2400,7 @@ impl DownloadManager {
                                                                     download_dir,
                                                                 );
                                                             engine.set_rate_limiter(
-                                                                rate_limiter_clone
-                                                                    .per_task()
-                                                                    .clone(),
+                                                                task_rate_limiter.clone(),
                                                             );
                                                             engine.set_proxy_config(
                                                                 proxy_config_clone,
@@ -2353,9 +2430,7 @@ impl DownloadManager {
                                                 download_dir,
                                                 servers,
                                             );
-                                            engine.set_rate_limiter(
-                                                rate_limiter_clone.per_task().clone(),
-                                            );
+                                            engine.set_rate_limiter(task_rate_limiter.clone());
                                             engine.set_proxy_config(proxy_config_clone);
                                             engine
                                                 .download(Some(cancel_clone))
@@ -2374,9 +2449,7 @@ impl DownloadManager {
                                                 sources,
                                                 download_dir,
                                             );
-                                            engine.set_rate_limiter(
-                                                rate_limiter_clone.per_task().clone(),
-                                            );
+                                            engine.set_rate_limiter(task_rate_limiter.clone());
                                             engine
                                                 .download(Some(cancel_clone))
                                                 .await
@@ -2449,7 +2522,7 @@ impl DownloadManager {
                                                         download_dir,
                                                     );
                                                     engine.set_rate_limiter(
-                                                        rate_limiter_clone.per_task().clone(),
+                                                        task_rate_limiter.clone(),
                                                     );
                                                     engine.set_proxy_config(proxy_config_clone);
                                                     engine
@@ -3468,6 +3541,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3489,6 +3563,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3510,6 +3585,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -3623,6 +3699,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -3671,6 +3748,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -3712,6 +3790,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3733,6 +3812,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3754,6 +3834,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -3798,6 +3879,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3819,6 +3901,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -3853,6 +3936,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -3887,6 +3971,7 @@ mod tests {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
         assert!(task.tags.is_empty());
     }
@@ -3915,6 +4000,7 @@ mod tests {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
 
         // Query match (case-insensitive)
@@ -3960,6 +4046,7 @@ mod tests {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
 
         let filter = TaskFilter {
@@ -3997,6 +4084,7 @@ mod tests {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
 
         let filter = TaskFilter {
@@ -4034,6 +4122,7 @@ mod tests {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
 
         let filter = TaskFilter {
@@ -4071,6 +4160,7 @@ mod tests {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
 
         // All criteria match
@@ -4115,6 +4205,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -4136,6 +4227,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -4157,6 +4249,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             },
         ];
 
@@ -4193,6 +4286,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -4214,6 +4308,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -4235,6 +4330,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             },
         ];
 
@@ -4267,6 +4363,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             },
             DownloadTask {
                 id: "p2".into(),
@@ -4288,6 +4385,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             },
             DownloadTask {
                 id: "p3".into(),
@@ -4309,6 +4407,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             },
         ];
 
@@ -4343,6 +4442,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4364,6 +4464,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -4396,6 +4497,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4417,6 +4519,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4438,6 +4541,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -4475,6 +4579,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4496,6 +4601,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4517,6 +4623,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -4630,6 +4737,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -4671,6 +4779,7 @@ mod tests {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
 
         let event = TaskInfoEvent::from_task(&task);
@@ -4807,6 +4916,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -4865,6 +4975,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -4904,6 +5015,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-2".into(),
@@ -4925,6 +5037,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-3".into(),
@@ -4946,6 +5059,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -5011,6 +5125,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -5049,6 +5164,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -5084,6 +5200,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -5151,6 +5268,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -5195,6 +5313,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5216,6 +5335,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -5254,6 +5374,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5275,6 +5396,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -5313,6 +5435,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5334,6 +5457,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -5355,6 +5479,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -5391,6 +5516,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5412,6 +5538,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -5433,6 +5560,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -5470,6 +5598,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5491,6 +5620,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -5512,6 +5642,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             });
         }
 
@@ -6125,5 +6256,111 @@ mod tests {
         // nonexistent group should have 0 tasks
         let other_tasks = dm.list_tasks_by_group("other").await;
         assert_eq!(other_tasks.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_set_task_speed_limit_per_task() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_speed_limit"));
+        let id = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test")
+            .await
+            .unwrap();
+
+        // Initially no per-task limit
+        assert!(dm.get_task_speed_limit(&id).await.is_none());
+
+        // Set a per-task limit
+        dm.set_task_speed_limit_per_task(&id, Some(102400)).await;
+        assert_eq!(dm.get_task_speed_limit(&id).await, Some(102400));
+
+        // Verify the limiter was created
+        let limiters = dm.task_rate_limiters.lock().await;
+        assert!(limiters.contains_key(&id));
+        drop(limiters);
+
+        // Clear the limit (set to None)
+        dm.set_task_speed_limit_per_task(&id, None).await;
+        assert!(dm.get_task_speed_limit(&id).await.is_none());
+
+        // Verify the limiter was removed
+        let limiters = dm.task_rate_limiters.lock().await;
+        assert!(!limiters.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn test_set_task_speed_limit_zero_clears() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_speed_zero"));
+        let id = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test")
+            .await
+            .unwrap();
+
+        // Set a limit
+        dm.set_task_speed_limit_per_task(&id, Some(51200)).await;
+        assert_eq!(dm.get_task_speed_limit(&id).await, Some(51200));
+
+        // Setting to 0 should clear it (treat 0 as None)
+        dm.set_task_speed_limit_per_task(&id, Some(0)).await;
+        assert!(dm.get_task_speed_limit(&id).await.is_none());
+
+        let limiters = dm.task_rate_limiters.lock().await;
+        assert!(!limiters.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn test_set_task_speed_limit_nonexistent_task() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_speed_nonexist"));
+
+        // Should not panic, just silently fail
+        dm.set_task_speed_limit_per_task("nonexistent", Some(102400))
+            .await;
+
+        // Getting limit for nonexistent task should return None
+        assert!(dm.get_task_speed_limit("nonexistent").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_multiple_tasks_independent_speed_limits() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_speed_multi"));
+
+        let id1 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=file1")
+            .await
+            .unwrap();
+        let id2 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80710&dn=file2")
+            .await
+            .unwrap();
+        let id3 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80711&dn=file3")
+            .await
+            .unwrap();
+
+        // Set different limits for each task
+        dm.set_task_speed_limit_per_task(&id1, Some(102400)).await; // 100 KB/s
+        dm.set_task_speed_limit_per_task(&id2, Some(512000)).await; // 500 KB/s
+        // id3 remains unlimited
+
+        assert_eq!(dm.get_task_speed_limit(&id1).await, Some(102400));
+        assert_eq!(dm.get_task_speed_limit(&id2).await, Some(512000));
+        assert!(dm.get_task_speed_limit(&id3).await.is_none());
+
+        // Verify all limiters exist
+        let limiters = dm.task_rate_limiters.lock().await;
+        assert_eq!(limiters.len(), 2);
+        assert!(limiters.contains_key(&id1));
+        assert!(limiters.contains_key(&id2));
+        assert!(!limiters.contains_key(&id3));
+        drop(limiters);
+
+        // Clear one limit
+        dm.set_task_speed_limit_per_task(&id1, None).await;
+        assert!(dm.get_task_speed_limit(&id1).await.is_none());
+        assert_eq!(dm.get_task_speed_limit(&id2).await, Some(512000));
+
+        let limiters = dm.task_rate_limiters.lock().await;
+        assert_eq!(limiters.len(), 1);
+        assert!(!limiters.contains_key(&id1));
+        assert!(limiters.contains_key(&id2));
     }
 }

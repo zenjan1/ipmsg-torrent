@@ -91,6 +91,11 @@ enum Command {
     DlSpeed {
         limit: String,
     },
+    /// Set per-task download speed limit (e.g., "/dltaskspeed <task_id> 100KB/s")
+    DlTaskSpeed {
+        task_id: String,
+        limit: String,
+    },
     /// Set download timeout and auto-retry (e.g., "30s", "5m", "0" to disable)
     DlTimeout {
         timeout: String,
@@ -390,6 +395,16 @@ fn parse_command(input: &str) -> Command {
                 }
             } else {
                 Command::Unknown("/dlspeed <limit>".to_string())
+            }
+        }
+        "dltaskspeed" | "dl-task-speed" => {
+            if parts.len() >= 3 {
+                Command::DlTaskSpeed {
+                    task_id: parts[1].to_string(),
+                    limit: parts[2].to_string(),
+                }
+            } else {
+                Command::Unknown("/dltaskspeed <task_id> <limit>".to_string())
             }
         }
         "dltimeout" | "dl-timeout" => {
@@ -750,7 +765,8 @@ fn command_help() -> String {
         "/dls               - List download tasks",
         "/dlp <task_id>     - Pause a download task",
         "/dlr <task_id>     - Resume a download task",
-        "/dlspeed <limit>   - Set download speed limit (e.g., 100KB/s, 1MB/s, 0=unlimited)",
+        "/dlspeed <limit>   - Set global download speed limit (e.g., 100KB/s, 1MB/s, 0=unlimited)",
+        "/dltaskspeed <id> <limit> - Set per-task speed limit (0=use global default)",
         "/dltimeout <timeout> [max_retries] - Set download timeout (e.g., 30s, 5m, 0=disable)",
         "/dlpauseall      - Pause all running downloads",
         "/dlresumeall     - Resume all paused downloads",
@@ -1603,6 +1619,38 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         format!("Download speed limit set to {}", limit_str),
+                    );
+                }
+                None => {
+                    s.add_system_message(
+                        "main",
+                        "Invalid speed limit format. Use: 100KB/s, 1MB/s, or 0 for unlimited"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlTaskSpeed { task_id, limit } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let bytes_per_sec = parse_speed_limit(&limit);
+            let mut s = state.lock().await;
+            match bytes_per_sec {
+                Some(bps) => {
+                    let limit_opt = if bps == 0 { None } else { Some(bps) };
+                    download_manager
+                        .set_task_speed_limit_per_task(&task_id, limit_opt)
+                        .await;
+                    let limit_str = if bps == 0 {
+                        "unlimited (global default)".to_string()
+                    } else {
+                        format!("{:.1} KB/s", bps as f64 / 1024.0)
+                    };
+                    s.add_system_message(
+                        "main",
+                        format!("Task {} speed limit set to {}", task_id, limit_str),
                     );
                 }
                 None => {

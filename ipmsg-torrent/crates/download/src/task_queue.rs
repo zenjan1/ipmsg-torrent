@@ -35,6 +35,8 @@ pub struct PersistedTask {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub group: Option<String>,
+    #[serde(default)]
+    pub speed_limit_bps: Option<u64>,
 }
 
 fn default_bandwidth_weight() -> u8 {
@@ -128,6 +130,7 @@ impl From<DownloadTask> for PersistedTask {
             queue_position: t.queue_position,
             depends_on: t.depends_on,
             group: t.group,
+            speed_limit_bps: t.speed_limit_bps,
         }
     }
 }
@@ -154,6 +157,7 @@ impl From<PersistedTask> for DownloadTask {
             depends_on: t.depends_on,
             notes: None,
             group: t.group,
+            speed_limit_bps: t.speed_limit_bps,
         }
     }
 }
@@ -259,6 +263,7 @@ mod tests {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -317,6 +322,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -338,6 +344,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 group: None,
+                speed_limit_bps: None,
             },
         ];
 
@@ -388,6 +395,7 @@ mod tests {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();

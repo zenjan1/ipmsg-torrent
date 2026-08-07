@@ -244,6 +244,7 @@ mod tests {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         }
     }
 

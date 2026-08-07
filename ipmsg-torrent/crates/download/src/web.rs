@@ -130,6 +130,8 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/proxy/disable", post(disable_proxy))
         .route("/api/proxy/test", post(test_proxy))
         .route("/api/notifications/history", get(get_notification_history))
+        .route("/api/task-speed", get(get_task_speed))
+        .route("/api/task-speed", post(set_task_speed))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -629,6 +631,62 @@ async fn get_notification_history(State(state): State<Arc<WebState>>) -> Json<se
     }))
 }
 
+/// GET /api/task-speed?task_id=xxx
+/// Returns the per-task speed limit for a specific task.
+async fn get_task_speed(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let task_id = match params.get("task_id") {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "task_id parameter required"})),
+            );
+        }
+    };
+    let limit = state.manager.get_task_speed_limit(task_id).await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"task_id": task_id, "speed_limit_bps": limit})),
+    )
+}
+
+/// POST /api/task-speed
+/// Set per-task speed limit. Body: {"task_id": "xxx", "speed_limit_bps": 102400}
+async fn set_task_speed(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let task_id = match body.get("task_id").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "task_id required"})),
+            );
+        }
+    };
+    let speed_limit = body
+        .get("speed_limit_bps")
+        .and_then(|v| v.as_u64())
+        .map(|v| if v == 0 { None } else { Some(v) })
+        .flatten();
+    state
+        .manager
+        .set_task_speed_limit_per_task(&task_id, speed_limit)
+        .await;
+    let limit_str = match speed_limit {
+        Some(bps) => format!("{:.1} KB/s", bps as f64 / 1024.0),
+        None => "unlimited (global default)".to_string(),
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"success": true, "task_id": task_id, "speed_limit": limit_str})),
+    )
+}
+
 /// WebSocket upgrade handler
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<WebState>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state))
@@ -797,6 +855,7 @@ mod tests {
                 notes: None,
                 queue_position: None,
                 group: None,
+                speed_limit_bps: None,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -1273,6 +1332,7 @@ mod tests {
             depends_on: vec!["task-0".into()],
             notes: None,
             group: None,
+            speed_limit_bps: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

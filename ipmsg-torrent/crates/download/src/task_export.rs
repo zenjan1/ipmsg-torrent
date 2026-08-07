@@ -133,6 +133,7 @@ impl ExportedTask {
             depends_on: self.depends_on,
             notes: None,
             group: self.group,
+            speed_limit_bps: None,
         }
     }
 }
@@ -249,6 +250,7 @@ mod tests {
             depends_on: Vec::new(),
             notes: None,
             group: None,
+            speed_limit_bps: None,
         }
     }
 
