@@ -121,12 +121,17 @@ impl XunleiEngine {
             .await
             .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
 
-        // Create or truncate the file
-        let file = tokio::fs::File::create(&output_path)
+        // Open file: use OpenOptions to avoid truncating on resume.
+        // If progress was restored from a .progress file, we must preserve
+        // the existing file content (blocks already written at their offsets).
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&output_path)
             .await
             .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
 
-        // Pre-allocate file size for proper seeking
+        // Pre-allocate file size for proper seeking (only grows, never shrinks)
         file.set_len(self.file_size)
             .await
             .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;

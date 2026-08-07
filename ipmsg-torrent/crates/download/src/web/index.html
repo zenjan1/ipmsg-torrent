@@ -100,6 +100,23 @@
         .dep-edge-item { padding: 3px 0; }
         .dep-edge-item .arrow { color: #00d4ff; margin: 0 4px; }
         .dep-empty { color: #666; font-size: 13px; padding: 10px 0; }
+        .notif-panel { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        .notif-panel summary { cursor: pointer; color: #00d4ff; font-weight: bold; margin-bottom: 10px; }
+        .notif-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .notif-count { font-size: 12px; color: #888; }
+        .notif-list { display: flex; flex-direction: column; gap: 6px; max-height: 400px; overflow-y: auto; }
+        .notif-entry { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #0f3460; border-radius: 6px; font-size: 13px; }
+        .notif-icon { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+        .notif-icon.complete { background: #1b4332; }
+        .notif-icon.failed { background: #5c1a1a; }
+        .notif-icon.queue { background: #333; }
+        .notif-body { flex: 1; min-width: 0; }
+        .notif-title { font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .notif-meta { font-size: 11px; color: #888; margin-top: 2px; display: flex; gap: 12px; flex-wrap: wrap; }
+        .notif-time { color: #aaa; font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+        .notif-empty { color: #666; font-size: 13px; padding: 10px 0; }
+        .notif-refresh { padding: 4px 10px; border: 1px solid #333; border-radius: 4px; background: #0f3460; color: #eee; cursor: pointer; font-size: 11px; }
+        .notif-refresh:hover { background: #1a4a80; }
     </style>
 </head>
 <body>
@@ -168,6 +185,14 @@
         <details class="dep-panel" id="dep-panel">
             <summary>🔗 Dependency Graph</summary>
             <div id="dep-content"><div class="dep-empty">Loading...</div></div>
+        </details>
+        <details class="notif-panel" id="notif-panel">
+            <summary>🔔 Notification History</summary>
+            <div class="notif-header">
+                <span class="notif-count" id="notif-count">Loading...</span>
+                <button class="notif-refresh" onclick="loadNotifHistory()">↻ Refresh</button>
+            </div>
+            <div class="notif-list" id="notif-list"><div class="notif-empty">Loading...</div></div>
         </details>
         <details class="batch-import">
             <summary>📋 Batch Import (paste multiple URLs)</summary>
@@ -558,6 +583,65 @@
         loadDeps();
         setInterval(loadDeps, 5000);
 
+        // --- Notification History ---
+        async function loadNotifHistory() {
+            try {
+                const resp = await fetch('/api/notifications/history');
+                const data = await resp.json();
+                renderNotifHistory(data);
+            } catch (e) {
+                document.getElementById('notif-list').innerHTML = '<div class="notif-empty">Failed to load</div>';
+                document.getElementById('notif-count').textContent = 'Error';
+            }
+        }
+
+        function renderNotifHistory(data) {
+            const list = document.getElementById('notif-list');
+            const countEl = document.getElementById('notif-count');
+            const entries = data.entries || [];
+            countEl.textContent = data.count + ' event' + (data.count !== 1 ? 's' : '');
+
+            if (entries.length === 0) {
+                list.innerHTML = '<div class="notif-empty">No notification events yet</div>';
+                return;
+            }
+
+            list.innerHTML = entries.map(entry => {
+                const evt = entry.event;
+                let iconCls = 'queue', icon = '📋', title = 'Queue Event';
+                if (evt === 'DownloadComplete' || evt === 'download_complete') {
+                    iconCls = 'complete'; icon = '✅'; title = 'Download Complete';
+                } else if (evt === 'DownloadFailed' || evt === 'download_failed') {
+                    iconCls = 'failed'; icon = '❌'; title = 'Download Failed';
+                } else {
+                    iconCls = 'queue'; icon = '📋'; title = 'Queue Empty';
+                }
+                const ts = new Date(entry.timestamp).toLocaleString('zh-CN', {
+                    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit'
+                });
+                const sizeStr = formatSize(entry.size || 0);
+                const tags = (entry.tags && entry.tags.length > 0) ? entry.tags.join(', ') : '';
+                return `<div class="notif-entry">
+                    <div class="notif-icon ${iconCls}">${icon}</div>
+                    <div class="notif-body">
+                        <div class="notif-title" title="${entry.name || ''}">${entry.name || title}</div>
+                        <div class="notif-meta">
+                            <span>${title}</span>
+                            <span>${entry.protocol || ''}</span>
+                            <span>${sizeStr}</span>
+                            ${tags ? '<span>🏷 ' + tags + '</span>' : ''}
+                            ${entry.error ? '<span style="color:#ff6b6b">⚠ ' + entry.error + '</span>' : ''}
+                        </div>
+                    </div>
+                    <span class="notif-time">${ts}</span>
+                </div>`;
+            }).join('');
+        }
+
+        // Load notification history on init and refresh periodically
+        loadNotifHistory();
+        setInterval(loadNotifHistory, 15000);
+
         // --- Batch operations ---
         async function batchPauseAll() {
             await fetch('/api/batch/pause-all', { method: 'POST' });
@@ -746,6 +830,7 @@
         // Load chart on init and refresh periodically
         loadSpeedChart();
         setInterval(loadSpeedChart, 10000);
+
     </script>
 </body>
 </html>

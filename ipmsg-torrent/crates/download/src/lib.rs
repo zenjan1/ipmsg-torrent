@@ -1814,6 +1814,10 @@ impl DownloadManager {
         };
 
         let cancel_token = CancellationToken::new();
+        eprintln!(
+            "[DEBUG] spawn_task: created new cancel_token for task_id={}, generation={}",
+            task_id, generation
+        );
         let tasks = self.tasks.clone();
         let running = self.running.clone();
         let data_dir = self.data_dir.clone();
@@ -2026,6 +2030,18 @@ impl DownloadManager {
                     .unwrap_or(false)
             };
 
+            // Only update task state if we're still the active generation.
+            // This prevents stale tasks (cancelled by pause/resume) from
+            // overwriting the state of a newly spawned replacement.
+            eprintln!(
+                "[DEBUG] spawn_task completion: task_id={}, generation={}, is_still_active={}, result={:?}",
+                task_id_clone, my_generation, is_still_active, result
+            );
+            if !is_still_active {
+                eprintln!("[DEBUG] Stale task exiting, not updating task state");
+                return Ok(());
+            }
+
             let mut t = tasks.lock().await;
             if let Some(task) = t.iter_mut().find(|t| t.id == task_id_clone) {
                 match result {
@@ -2037,12 +2053,18 @@ impl DownloadManager {
                     }
                     Err(e) => {
                         let err_str = e.to_string();
-                        if err_str == "cancelled" {
-                            // Only set Paused if we're still the active task
-                            // (not if we were replaced by a resume)
-                            if is_still_active {
-                                task.state = DownloadState::Paused;
-                            }
+                        // Check the cancel token directly instead of string matching,
+                        // because thiserror wraps the inner message ("IO error: cancelled").
+                        // We must check the token BEFORE removing from running.
+                        let was_cancelled = {
+                            let r = running.lock().await;
+                            r.get(&task_id_clone)
+                                .map(|rt| rt.cancel_token.is_cancelled())
+                                .unwrap_or(true) // removed from running = cancelled
+                        };
+
+                        if was_cancelled {
+                            task.state = DownloadState::Paused;
                         } else {
                             task.state = DownloadState::Error;
                             task.error = Some(err_str);
