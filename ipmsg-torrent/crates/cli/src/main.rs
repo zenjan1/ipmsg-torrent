@@ -95,6 +95,16 @@ enum Command {
         timeout: String,
         max_retries: u32,
     },
+    /// Pause all running downloads
+    DlPauseAll,
+    /// Resume all paused downloads
+    DlResumeAll,
+    /// Remove all completed downloads
+    DlRmCompleted,
+    /// Remove all failed downloads
+    DlRmFailed,
+    /// Show download statistics
+    DlStats,
     Block {
         peer: String,
     },
@@ -259,6 +269,11 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dltimeout <timeout> [max_retries]".to_string())
             }
         }
+        "dlpauseall" | "dl-pause-all" => Command::DlPauseAll,
+        "dlresumeall" | "dl-resume-all" => Command::DlResumeAll,
+        "dlrmcompleted" | "dl-rm-completed" => Command::DlRmCompleted,
+        "dlrmfailed" | "dl-rm-failed" => Command::DlRmFailed,
+        "dlstats" | "dl-stats" => Command::DlStats,
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -316,6 +331,12 @@ fn command_help() -> String {
         "/dlp <task_id>     - Pause a download task",
         "/dlr <task_id>     - Resume a download task",
         "/dlspeed <limit>   - Set download speed limit (e.g., 100KB/s, 1MB/s, 0=unlimited)",
+        "/dltimeout <timeout> [max_retries] - Set download timeout (e.g., 30s, 5m, 0=disable)",
+        "/dlpauseall      - Pause all running downloads",
+        "/dlresumeall     - Resume all paused downloads",
+        "/dlrmcompleted   - Remove all completed downloads",
+        "/dlrmfailed      - Remove all failed downloads",
+        "/dlstats         - Show download statistics",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -1190,6 +1211,69 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlPauseAll => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            let count = download_manager.pause_all().await;
+            let mut s = state.lock().await;
+            s.add_system_message("main", format!("Paused {} download(s)", count));
+        }
+        Command::DlResumeAll => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            let count = download_manager.resume_all().await;
+            let mut s = state.lock().await;
+            s.add_system_message("main", format!("Resumed {} download(s)", count));
+        }
+        Command::DlRmCompleted => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            let count = download_manager.remove_completed().await;
+            let mut s = state.lock().await;
+            s.add_system_message("main", format!("Removed {} completed download(s)", count));
+        }
+        Command::DlRmFailed => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            let count = download_manager.remove_failed().await;
+            let mut s = state.lock().await;
+            s.add_system_message("main", format!("Removed {} failed download(s)", count));
+        }
+        Command::DlStats => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            let stats = download_manager.get_stats().await;
+            let speed_str = format_speed(stats.total_speed_bps);
+            let size_str = format_size(stats.total_downloaded);
+            let total_size_str = format_size(stats.total_size);
+            let msg = format!(
+                "Download Statistics:\n\
+                 Total: {} | Running: {} | Paused: {} | Completed: {} | Queued: {} | Error: {}\n\
+                 Speed: {} | Downloaded: {} / {}\n\
+                 Protocols: Torrent={} Ed2k={} Xunlei={} Magnet={} P2P={}",
+                stats.total_tasks,
+                stats.running,
+                stats.paused,
+                stats.completed,
+                stats.queued,
+                stats.errored,
+                speed_str,
+                size_str,
+                total_size_str,
+                stats.by_protocol.torrent,
+                stats.by_protocol.ed2k,
+                stats.by_protocol.xunlei,
+                stats.by_protocol.magnet,
+                stats.by_protocol.p2p,
+            );
+            let mut s = state.lock().await;
+            s.add_system_message("main", msg);
+        }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {
                 peer_id: peer.clone(),
@@ -1381,6 +1465,36 @@ fn parse_timeout(input: &str) -> Option<u64> {
     }
 
     Some((num * multiplier as f64) as u64)
+}
+
+/// Format bytes/sec into human-readable speed string
+fn format_speed(bps: f64) -> String {
+    if bps <= 0.0 {
+        return "0 B/s".to_string();
+    }
+    let units = ["B/s", "KB/s", "MB/s", "GB/s"];
+    let mut val = bps;
+    let mut idx = 0;
+    while val >= 1024.0 && idx < units.len() - 1 {
+        val /= 1024.0;
+        idx += 1;
+    }
+    format!("{:.1} {}", val, units[idx])
+}
+
+/// Format bytes into human-readable size string
+fn format_size(bytes: u64) -> String {
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+    let units = ["B", "KB", "MB", "GB", "TB"];
+    let mut val = bytes as f64;
+    let mut idx = 0;
+    while val >= 1024.0 && idx < units.len() - 1 {
+        val /= 1024.0;
+        idx += 1;
+    }
+    format!("{:.1} {}", val, units[idx])
 }
 
 fn draw(
@@ -1603,4 +1717,72 @@ fn draw(
         );
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_batch_commands() {
+        assert!(matches!(parse_command("/dlpauseall"), Command::DlPauseAll));
+        assert!(matches!(
+            parse_command("/dl-pause-all"),
+            Command::DlPauseAll
+        ));
+        assert!(matches!(
+            parse_command("/dlresumeall"),
+            Command::DlResumeAll
+        ));
+        assert!(matches!(
+            parse_command("/dl-resume-all"),
+            Command::DlResumeAll
+        ));
+        assert!(matches!(
+            parse_command("/dlrmcompleted"),
+            Command::DlRmCompleted
+        ));
+        assert!(matches!(
+            parse_command("/dl-rm-completed"),
+            Command::DlRmCompleted
+        ));
+        assert!(matches!(parse_command("/dlrmfailed"), Command::DlRmFailed));
+        assert!(matches!(
+            parse_command("/dl-rm-failed"),
+            Command::DlRmFailed
+        ));
+        assert!(matches!(parse_command("/dlstats"), Command::DlStats));
+        assert!(matches!(parse_command("/dl-stats"), Command::DlStats));
+    }
+
+    #[test]
+    fn test_format_speed() {
+        assert_eq!(format_speed(0.0), "0 B/s");
+        assert_eq!(format_speed(500.0), "500.0 B/s");
+        assert_eq!(format_speed(1024.0), "1.0 KB/s");
+        assert_eq!(format_speed(1536.0), "1.5 KB/s");
+        assert_eq!(format_speed(1048576.0), "1.0 MB/s");
+        assert_eq!(format_speed(1073741824.0), "1.0 GB/s");
+    }
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512.0 B");
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1536), "1.5 KB");
+        assert_eq!(format_size(1048576), "1.0 MB");
+        assert_eq!(format_size(1073741824), "1.0 GB");
+        assert_eq!(format_size(1099511627776), "1.0 TB");
+    }
+
+    #[test]
+    fn test_help_contains_batch_commands() {
+        let help = command_help();
+        assert!(help.contains("/dlpauseall"));
+        assert!(help.contains("/dlresumeall"));
+        assert!(help.contains("/dlrmcompleted"));
+        assert!(help.contains("/dlrmfailed"));
+        assert!(help.contains("/dlstats"));
+    }
 }
