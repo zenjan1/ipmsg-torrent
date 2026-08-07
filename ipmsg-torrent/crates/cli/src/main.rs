@@ -158,6 +158,12 @@ enum Command {
     },
     /// Show bandwidth monitoring dashboard
     DlBandwidthMon,
+    /// Move a task up/down in the queue or to top/bottom
+    DlQueueMove {
+        task_id: String,
+        /// Direction: "up", "down", "top", "bottom"
+        direction: String,
+    },
     Block {
         peer: String,
     },
@@ -439,6 +445,23 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dlbwmon" | "dl-bandwidth-mon" | "dlbwm" => Command::DlBandwidthMon,
+        "dlqmove" | "dl-queue-move" | "dlqm" => {
+            // /dlqmove <task_id> <up|down|top|bottom>
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 3 {
+                let dir = args[2].to_lowercase();
+                if ["up", "down", "top", "bottom"].contains(&dir.as_str()) {
+                    Command::DlQueueMove {
+                        task_id: args[1].to_string(),
+                        direction: dir,
+                    }
+                } else {
+                    Command::Unknown("/dlqmove <task_id> <up|down|top|bottom>".to_string())
+                }
+            } else {
+                Command::Unknown("/dlqmove <task_id> <up|down|top|bottom>".to_string())
+            }
+        }
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -509,6 +532,7 @@ fn command_help() -> String {
         "/dlpriority <id> <high|normal|low> - Set download task priority",
         "/dlbw <id> <1-10>    - Set bandwidth weight (higher = more bandwidth)",
         "/dlbwmon           - Show bandwidth monitoring dashboard",
+        "/dlqmove <id> <up|down|top|bottom> - Move task in queue",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
@@ -1922,6 +1946,40 @@ async fn handle_command(
 
             let mut s = state.lock().await;
             s.add_system_message("main", lines.join("\n"));
+        }
+        Command::DlQueueMove { task_id, direction } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let success = match direction.as_str() {
+                "up" => download_manager.move_task_up(&task_id).await,
+                "down" => download_manager.move_task_down(&task_id).await,
+                "top" => download_manager.move_task_to_top(&task_id).await,
+                "bottom" => download_manager.move_task_to_bottom(&task_id).await,
+                _ => false,
+            };
+
+            let mut s = state.lock().await;
+            if success {
+                s.add_system_message(
+                    "main",
+                    format!(
+                        "📋 Task {} moved {} in queue",
+                        &task_id[..8.min(task_id.len())],
+                        direction
+                    ),
+                );
+            } else {
+                s.add_system_message(
+                    "main",
+                    format!(
+                        "Task {} not found or cannot be moved {}",
+                        &task_id[..8.min(task_id.len())],
+                        direction
+                    ),
+                );
+            }
         }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {

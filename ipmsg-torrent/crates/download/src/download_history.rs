@@ -240,6 +240,7 @@ mod tests {
             priority: DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         }
     }
 

@@ -60,7 +60,7 @@ pub fn get_available_space(path: &Path) -> Result<u64, DiskSpaceError> {
         let stat = unsafe { stat.assume_init() };
         // f_bavail is available blocks for non-privileged users
         // f_frsize is the fundamental filesystem block size
-        Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+        Ok(stat.f_bavail * stat.f_frsize)
     }
 
     #[cfg(not(unix))]

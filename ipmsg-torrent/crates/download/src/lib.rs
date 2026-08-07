@@ -114,6 +114,7 @@ pub struct TaskInfoEvent {
     pub tags: Vec<String>,
     pub priority: String,
     pub bandwidth_weight: u8,
+    pub queue_position: Option<u32>,
 }
 
 impl TaskInfoEvent {
@@ -131,6 +132,7 @@ impl TaskInfoEvent {
             tags: task.tags.clone(),
             priority: task.priority.label().to_string(),
             bandwidth_weight: task.bandwidth_weight,
+            queue_position: task.queue_position,
         }
     }
 }
@@ -214,6 +216,9 @@ pub struct DownloadTask {
     /// Bandwidth weight for proportional allocation (1-10, default 1).
     /// Higher weights get proportionally more bandwidth when global limit is active.
     pub bandwidth_weight: u8,
+    /// Explicit queue position within the same priority level.
+    /// Lower values come first. `None` means use creation time as tiebreaker.
+    pub queue_position: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1127,6 +1132,7 @@ impl DownloadManager {
             priority: DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1175,6 +1181,7 @@ impl DownloadManager {
             priority: DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1223,6 +1230,7 @@ impl DownloadManager {
             priority: DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1269,6 +1277,7 @@ impl DownloadManager {
             priority: DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1315,6 +1324,7 @@ impl DownloadManager {
             priority: DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -2548,8 +2558,168 @@ impl DownloadManager {
         }
     }
 
+    /// Set explicit queue position for a task (lower values come first within same priority).
+    /// Returns true if task was found and updated.
+    pub async fn set_queue_position(&self, task_id: &str, position: Option<u32>) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            task.queue_position = position;
+            task.updated_at = chrono::Utc::now();
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(task),
+            });
+            drop(tasks);
+            self.persist_tasks().await;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the queue position of a task.
+    pub async fn get_queue_position(&self, task_id: &str) -> Option<Option<u32>> {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .map(|t| t.queue_position)
+    }
+
+    /// Move a task up in the queue (decrease position by 1).
+    /// Returns true if task was moved.
+    pub async fn move_task_up(&self, task_id: &str) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        let idx = tasks.iter().position(|t| t.id == task_id);
+        let Some(idx) = idx else {
+            return false;
+        };
+
+        // Find the previous queued task
+        let prev_queued = tasks[..idx]
+            .iter()
+            .rposition(|t| t.state == DownloadState::Queued);
+        let Some(prev_idx) = prev_queued else {
+            return false;
+        };
+
+        // Swap positions
+        let current_pos = tasks[idx].queue_position;
+        let prev_pos = tasks[prev_idx].queue_position;
+        tasks[idx].queue_position = prev_pos;
+        tasks[prev_idx].queue_position = current_pos;
+        tasks[idx].updated_at = chrono::Utc::now();
+        tasks[prev_idx].updated_at = chrono::Utc::now();
+
+        self.emit_event(TaskEvent::Updated {
+            task: TaskInfoEvent::from_task(&tasks[idx]),
+        });
+        self.emit_event(TaskEvent::Updated {
+            task: TaskInfoEvent::from_task(&tasks[prev_idx]),
+        });
+
+        drop(tasks);
+        self.persist_tasks().await;
+        true
+    }
+
+    /// Move a task down in the queue (increase position by 1).
+    /// Returns true if task was moved.
+    pub async fn move_task_down(&self, task_id: &str) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        let idx = tasks.iter().position(|t| t.id == task_id);
+        let Some(idx) = idx else {
+            return false;
+        };
+
+        // Find the next queued task
+        let next_queued = tasks[idx + 1..]
+            .iter()
+            .position(|t| t.state == DownloadState::Queued);
+        let Some(next_idx) = next_queued else {
+            return false;
+        };
+        let next_idx = idx + 1 + next_idx;
+
+        // Swap positions
+        let current_pos = tasks[idx].queue_position;
+        let next_pos = tasks[next_idx].queue_position;
+        tasks[idx].queue_position = next_pos;
+        tasks[next_idx].queue_position = current_pos;
+        tasks[idx].updated_at = chrono::Utc::now();
+        tasks[next_idx].updated_at = chrono::Utc::now();
+
+        self.emit_event(TaskEvent::Updated {
+            task: TaskInfoEvent::from_task(&tasks[idx]),
+        });
+        self.emit_event(TaskEvent::Updated {
+            task: TaskInfoEvent::from_task(&tasks[next_idx]),
+        });
+
+        drop(tasks);
+        self.persist_tasks().await;
+        true
+    }
+
+    /// Move a task to the top of the queue (lowest position value).
+    /// Returns true if task was moved.
+    pub async fn move_task_to_top(&self, task_id: &str) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        let idx = tasks.iter().position(|t| t.id == task_id);
+        let Some(idx) = idx else {
+            return false;
+        };
+
+        // Find the minimum queue_position among queued tasks
+        let min_pos = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Queued)
+            .filter_map(|t| t.queue_position)
+            .min();
+
+        let new_pos = min_pos.map(|p| p.saturating_sub(1)).or(Some(0));
+        tasks[idx].queue_position = new_pos;
+        tasks[idx].updated_at = chrono::Utc::now();
+
+        self.emit_event(TaskEvent::Updated {
+            task: TaskInfoEvent::from_task(&tasks[idx]),
+        });
+
+        drop(tasks);
+        self.persist_tasks().await;
+        true
+    }
+
+    /// Move a task to the bottom of the queue (highest position value).
+    /// Returns true if task was moved.
+    pub async fn move_task_to_bottom(&self, task_id: &str) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        let idx = tasks.iter().position(|t| t.id == task_id);
+        let Some(idx) = idx else {
+            return false;
+        };
+
+        // Find the maximum queue_position among queued tasks
+        let max_pos = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Queued)
+            .filter_map(|t| t.queue_position)
+            .max();
+
+        let new_pos = max_pos.map(|p| p + 1).or(Some(0));
+        tasks[idx].queue_position = new_pos;
+        tasks[idx].updated_at = chrono::Utc::now();
+
+        self.emit_event(TaskEvent::Updated {
+            task: TaskInfoEvent::from_task(&tasks[idx]),
+        });
+
+        drop(tasks);
+        self.persist_tasks().await;
+        true
+    }
+
     /// Try to start the next queued task if a slot is available.
-    /// Picks the highest-priority queued task (FIFO within same priority).
+    /// Picks the highest-priority queued task (FIFO within same priority, queue_position as tiebreaker).
     pub async fn try_start_next_queued(&self) -> Option<String> {
         if !self.can_start_task().await {
             return None;
@@ -2560,7 +2730,17 @@ impl DownloadManager {
         let next = tasks
             .iter()
             .filter(|t| t.state == DownloadState::Queued)
-            .max_by_key(|t| t.priority)
+            .max_by(|a, b| {
+                a.priority.cmp(&b.priority).then_with(|| {
+                    // Lower queue_position comes first
+                    match (a.queue_position, b.queue_position) {
+                        (Some(pa), Some(pb)) => pb.cmp(&pa),
+                        (Some(_), None) => std::cmp::Ordering::Greater,
+                        (None, Some(_)) => std::cmp::Ordering::Less,
+                        (None, None) => a.created_at.cmp(&b.created_at),
+                    }
+                })
+            })
             .map(|t| t.id.clone());
         drop(tasks);
 
@@ -2684,6 +2864,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2701,6 +2882,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -2718,6 +2900,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -2827,6 +3010,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -2871,6 +3055,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -2908,6 +3093,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2925,6 +3111,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -2942,6 +3129,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -2982,6 +3170,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2999,6 +3188,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -3029,6 +3219,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -3059,6 +3250,7 @@ mod tests {
             priority: DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
         assert!(task.tags.is_empty());
     }
@@ -3083,6 +3275,7 @@ mod tests {
             priority: DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
 
         // Query match (case-insensitive)
@@ -3124,6 +3317,7 @@ mod tests {
             priority: DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
 
         let filter = TaskFilter {
@@ -3157,6 +3351,7 @@ mod tests {
             priority: DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
 
         let filter = TaskFilter {
@@ -3190,6 +3385,7 @@ mod tests {
             priority: DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
 
         let filter = TaskFilter {
@@ -3223,6 +3419,7 @@ mod tests {
             priority: DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
 
         // All criteria match
@@ -3263,6 +3460,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -3280,6 +3478,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -3297,6 +3496,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             },
         ];
 
@@ -3329,6 +3529,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -3346,6 +3547,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -3363,6 +3565,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             },
         ];
 
@@ -3391,6 +3594,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             },
             DownloadTask {
                 id: "p2".into(),
@@ -3408,6 +3612,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             },
             DownloadTask {
                 id: "p3".into(),
@@ -3425,6 +3630,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             },
         ];
 
@@ -3455,6 +3661,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3472,6 +3679,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -3500,6 +3708,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3517,6 +3726,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3534,6 +3744,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -3567,6 +3778,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3584,6 +3796,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3601,6 +3814,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -3710,6 +3924,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -3747,6 +3962,7 @@ mod tests {
             priority: DownloadPriority::High,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
 
         let event = TaskInfoEvent::from_task(&task);
@@ -3879,6 +4095,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -3933,6 +4150,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -3968,6 +4186,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-2".into(),
@@ -3985,6 +4204,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 2,
+                queue_position: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-3".into(),
@@ -4002,6 +4222,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 3,
+                queue_position: None,
             });
         }
 
@@ -4063,6 +4284,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -4097,6 +4319,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -4128,6 +4351,7 @@ mod tests {
                 priority: DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             });
         }
 
@@ -4168,5 +4392,373 @@ mod tests {
         let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_get_schedule_nonexist"));
         let schedule = dm.get_schedule("nonexistent").await;
         assert!(schedule.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_queue_position() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_queue_position"));
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "q-1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: None,
+            });
+        }
+
+        // Set queue position
+        let success = dm.set_queue_position("q-1", Some(5)).await;
+        assert!(success);
+
+        // Get queue position
+        let pos = dm.get_queue_position("q-1").await;
+        assert_eq!(pos, Some(Some(5)));
+
+        // Clear queue position
+        let success = dm.set_queue_position("q-1", None).await;
+        assert!(success);
+
+        let pos = dm.get_queue_position("q-1").await;
+        assert_eq!(pos, Some(None));
+    }
+
+    #[tokio::test]
+    async fn test_move_task_up() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_move_up"));
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "q-1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(10),
+            });
+            tasks.push(DownloadTask {
+                id: "q-2".into(),
+                name: "file2.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(20),
+            });
+        }
+
+        // Move q-2 up (should swap with q-1)
+        let success = dm.move_task_up("q-2").await;
+        assert!(success);
+
+        let pos1 = dm.get_queue_position("q-1").await.unwrap();
+        let pos2 = dm.get_queue_position("q-2").await.unwrap();
+        assert_eq!(pos1, Some(20));
+        assert_eq!(pos2, Some(10));
+    }
+
+    #[tokio::test]
+    async fn test_move_task_down() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_move_down"));
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "q-1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(10),
+            });
+            tasks.push(DownloadTask {
+                id: "q-2".into(),
+                name: "file2.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(20),
+            });
+        }
+
+        // Move q-1 down (should swap with q-2)
+        let success = dm.move_task_down("q-1").await;
+        assert!(success);
+
+        let pos1 = dm.get_queue_position("q-1").await.unwrap();
+        let pos2 = dm.get_queue_position("q-2").await.unwrap();
+        assert_eq!(pos1, Some(20));
+        assert_eq!(pos2, Some(10));
+    }
+
+    #[tokio::test]
+    async fn test_move_task_to_top() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_move_top"));
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "q-1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(10),
+            });
+            tasks.push(DownloadTask {
+                id: "q-2".into(),
+                name: "file2.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(20),
+            });
+            tasks.push(DownloadTask {
+                id: "q-3".into(),
+                name: "file3.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(30),
+            });
+        }
+
+        // Move q-3 to top
+        let success = dm.move_task_to_top("q-3").await;
+        assert!(success);
+
+        let pos3 = dm.get_queue_position("q-3").await.unwrap();
+        assert_eq!(pos3, Some(9)); // Should be min(10,20,30) - 1 = 9
+    }
+
+    #[tokio::test]
+    async fn test_move_task_to_bottom() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_move_bottom"));
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "q-1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(10),
+            });
+            tasks.push(DownloadTask {
+                id: "q-2".into(),
+                name: "file2.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(20),
+            });
+            tasks.push(DownloadTask {
+                id: "q-3".into(),
+                name: "file3.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(30),
+            });
+        }
+
+        // Move q-1 to bottom
+        let success = dm.move_task_to_bottom("q-1").await;
+        assert!(success);
+
+        let pos1 = dm.get_queue_position("q-1").await.unwrap();
+        assert_eq!(pos1, Some(31)); // Should be max(10,20,30) + 1 = 31
+    }
+
+    #[tokio::test]
+    async fn test_queue_ordering_by_position() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_queue_order"));
+
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "q-1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(30),
+            });
+            tasks.push(DownloadTask {
+                id: "q-2".into(),
+                name: "file2.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(10),
+            });
+            tasks.push(DownloadTask {
+                id: "q-3".into(),
+                name: "file3.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(20),
+            });
+        }
+
+        // Verify ordering: q-2 (pos=10) < q-3 (pos=20) < q-1 (pos=30)
+        let tasks = dm.tasks.lock().await;
+        let mut queued: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Queued)
+            .collect();
+        queued.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| match (a.queue_position, b.queue_position) {
+                    (Some(pa), Some(pb)) => pa.cmp(&pb),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => a.created_at.cmp(&b.created_at),
+                })
+        });
+        assert_eq!(queued[0].id, "q-2");
+        assert_eq!(queued[1].id, "q-3");
+        assert_eq!(queued[2].id, "q-1");
     }
 }

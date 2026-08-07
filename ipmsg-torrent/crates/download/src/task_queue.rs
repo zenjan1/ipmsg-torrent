@@ -29,6 +29,8 @@ pub struct PersistedTask {
     pub schedule: Option<TimeWindow>,
     #[serde(default = "default_bandwidth_weight")]
     pub bandwidth_weight: u8,
+    #[serde(default)]
+    pub queue_position: Option<u32>,
 }
 
 fn default_bandwidth_weight() -> u8 {
@@ -119,6 +121,7 @@ impl From<DownloadTask> for PersistedTask {
             priority: t.priority,
             schedule: t.schedule,
             bandwidth_weight: t.bandwidth_weight,
+            queue_position: t.queue_position,
         }
     }
 }
@@ -141,6 +144,7 @@ impl From<PersistedTask> for DownloadTask {
             priority: t.priority,
             schedule: t.schedule,
             bandwidth_weight: t.bandwidth_weight,
+            queue_position: t.queue_position,
         }
     }
 }
@@ -242,6 +246,7 @@ mod tests {
             priority: crate::DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -296,6 +301,7 @@ mod tests {
                 priority: crate::DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -313,6 +319,7 @@ mod tests {
                 priority: crate::DownloadPriority::Normal,
                 schedule: None,
                 bandwidth_weight: 1,
+                queue_position: None,
             },
         ];
 
@@ -359,6 +366,7 @@ mod tests {
             priority: crate::DownloadPriority::Normal,
             schedule: None,
             bandwidth_weight: 1,
+            queue_position: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();

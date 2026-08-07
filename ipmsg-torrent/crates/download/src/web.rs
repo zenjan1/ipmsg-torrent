@@ -497,6 +497,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: "normal".into(),
                 bandwidth_weight: 1,
+                queue_position: None,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
