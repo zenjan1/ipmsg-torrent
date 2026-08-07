@@ -39,7 +39,7 @@ fn default_bandwidth_weight() -> u8 {
     1
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PersistedProtocol {
     Torrent,
     Ed2k,
@@ -48,7 +48,7 @@ pub enum PersistedProtocol {
     P2P,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PersistedState {
     Queued,
     Downloading,

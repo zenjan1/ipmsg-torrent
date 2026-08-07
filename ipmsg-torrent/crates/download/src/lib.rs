@@ -20,6 +20,7 @@ pub mod progress;
 pub mod proxy;
 pub mod rate_limiter;
 pub mod save_path_manager;
+pub mod task_export;
 pub mod task_queue;
 pub mod torrent;
 pub mod web;

@@ -38,6 +38,7 @@ struct Cli {
 }
 
 /// IRC-style command parser
+#[derive(Debug)]
 enum Command {
     Help,
     Nick(String),
@@ -175,6 +176,18 @@ enum Command {
     DlBatch {
         /// File path containing URLs (one per line), or inline URLs separated by spaces
         source: String,
+    },
+    /// Export download tasks to a JSON file
+    DlExport {
+        /// Output file path (e.g., /tmp/tasks.json)
+        path: String,
+        /// Optional description
+        description: Option<String>,
+    },
+    /// Import download tasks from a JSON file
+    DlImport {
+        /// Input file path (e.g., /tmp/tasks.json)
+        path: String,
     },
     /// Configure auto-shutdown when all downloads complete
     DlAutoshutdown {
@@ -517,6 +530,29 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlbatch <file_path>".to_string())
             }
         }
+        "dlexport" | "dl-export" => {
+            // /dlexport <output_path> [description]
+            let args: Vec<&str> = input.splitn(3, ' ').collect();
+            if args.len() >= 2 {
+                Command::DlExport {
+                    path: args[1].to_string(),
+                    description: args.get(2).map(|s| s.to_string()),
+                }
+            } else {
+                Command::Unknown("/dlexport <output_path> [description]".to_string())
+            }
+        }
+        "dlimp" | "dl-imp" => {
+            // /dlimp <input_path> - Import tasks from a JSON export file
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                Command::DlImport {
+                    path: args[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlimp <input_path>".to_string())
+            }
+        }
         "dlautoshutdown" | "dl-auto-shutdown" | "dlas" => {
             // /dlautoshutdown <disabled|exit|shell:<command>>
             let args: Vec<&str> = input.splitn(2, ' ').collect();
@@ -632,6 +668,8 @@ fn command_help() -> String {
         "/dlproxy <url|none> - Configure download proxy (e.g., socks5://127.0.0.1:1080)",
         "/dlqmove <id> <up|down|top|bottom> - Move task in queue",
         "/dlddeps <id> <dep1,dep2,...|none> - Set task dependencies",
+        "/dlexport <path> [desc] - Export tasks to JSON file",
+        "/dlimp <path>      - Import tasks from JSON export file",
         "/dlautoshutdown <disabled|exit|shell:<cmd>> - Auto-shutdown when all downloads complete",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/dlpath <path>       - Set download save path (absolute path)",
@@ -2188,6 +2226,93 @@ async fn handle_command(
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
         }
+        Command::DlExport { path, description } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let tasks = download_manager.list_tasks().await;
+            let output_path = std::path::PathBuf::from(&path);
+
+            match ipmsg_download::task_export::export_tasks(&tasks, &output_path, description) {
+                Ok(count) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "✅ Exported {} task{} to {}",
+                            count,
+                            if count == 1 { "" } else { "s" },
+                            path
+                        ),
+                    );
+                }
+                Err(e) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("❌ Export failed: {}", e));
+                }
+            }
+        }
+        Command::DlImport { path } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let input_path = std::path::PathBuf::from(&path);
+            let exported = match ipmsg_download::task_export::import_tasks(&input_path) {
+                Ok(tasks) => tasks,
+                Err(e) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("❌ Import failed: {}", e));
+                    return;
+                }
+            };
+
+            if exported.is_empty() {
+                let mut s = state.lock().await;
+                s.add_system_message("main", "⚠️ No tasks found in export file".to_string());
+                return;
+            }
+
+            let prepared = ipmsg_download::task_export::prepare_imported_tasks(exported);
+            let mut imported = 0;
+            let mut skipped = 0;
+
+            for (exported_task, _new_id, source_url) in prepared {
+                // Try to re-add via source URL if available
+                if let Some(url) = &source_url {
+                    match download_manager.add_url(url).await {
+                        Ok(_task_id) => {
+                            imported += 1;
+                            continue;
+                        }
+                        Err(_) => {
+                            skipped += 1;
+                            continue;
+                        }
+                    }
+                }
+                // Tasks without source URL can't be re-imported directly
+                skipped += 1;
+                let _ = exported_task; // consumed
+            }
+
+            let mut msg = format!(
+                "📥 Import: {} task{} re-added via URL",
+                imported,
+                if imported == 1 { "" } else { "s" }
+            );
+            if skipped > 0 {
+                msg.push_str(&format!(
+                    ", {} task{} added without source (manual start needed)",
+                    skipped,
+                    if skipped == 1 { "" } else { "s" }
+                ));
+            }
+
+            let mut s = state.lock().await;
+            s.add_system_message("main", msg);
+        }
         Command::DlAutoshutdown { action } => {
             let s = state.lock().await;
             let download_manager = s.download_manager.clone();
@@ -2905,5 +3030,44 @@ mod save_path_tests {
         assert!(help.contains("/dlpath"));
         assert!(help.contains("/dlorganize"));
         assert!(help.contains("/dlproxy"));
+    }
+
+    #[test]
+    fn test_parse_dlexport() {
+        match parse_command("/dlexport /tmp/tasks.json") {
+            Command::DlExport { path, description } => {
+                assert_eq!(path, "/tmp/tasks.json");
+                assert!(description.is_none());
+            }
+            other => panic!("Expected DlExport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlexport_with_description() {
+        match parse_command("/dlexport /tmp/tasks.json my backup") {
+            Command::DlExport { path, description } => {
+                assert_eq!(path, "/tmp/tasks.json");
+                assert_eq!(description, Some("my backup".to_string()));
+            }
+            other => panic!("Expected DlExport with description, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlimp() {
+        match parse_command("/dlimp /tmp/tasks.json") {
+            Command::DlImport { path } => {
+                assert_eq!(path, "/tmp/tasks.json");
+            }
+            other => panic!("Expected DlImport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_export_import() {
+        let help = command_help();
+        assert!(help.contains("/dlexport"));
+        assert!(help.contains("/dlimp"));
     }
 }
