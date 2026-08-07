@@ -163,6 +163,8 @@ pub struct TorrentEngine {
     progress: ProgressSnapshot,
     /// Optional rate limiter for speed control
     rate_limiter: Option<RateLimiter>,
+    /// Optional proxy configuration for peer connections
+    proxy_config: Option<crate::proxy::ProxyConfig>,
 }
 
 impl TorrentEngine {
@@ -236,12 +238,18 @@ impl TorrentEngine {
             uploaded: 0,
             progress,
             rate_limiter: None,
+            proxy_config: None,
         }
     }
 
     /// Set rate limiter for speed control
     pub fn set_rate_limiter(&mut self, limiter: RateLimiter) {
         self.rate_limiter = Some(limiter);
+    }
+
+    /// Set proxy configuration for peer connections
+    pub fn set_proxy_config(&mut self, config: Option<crate::proxy::ProxyConfig>) {
+        self.proxy_config = config;
     }
 
     fn generate_peer_id() -> [u8; 20] {
@@ -345,9 +353,15 @@ impl TorrentEngine {
             return Ok(());
         }
 
-        let conn = PeerConnection::connect(addr, self.meta.info_hash, self.peer_id)
-            .await
-            .map_err(|e| DownloadError::Peer(e.to_string()))?;
+        let conn = if let Some(ref proxy_cfg) = self.proxy_config {
+            PeerConnection::connect_with_proxy(addr, self.meta.info_hash, self.peer_id, proxy_cfg)
+                .await
+                .map_err(|e| DownloadError::Peer(e.to_string()))?
+        } else {
+            PeerConnection::connect(addr, self.meta.info_hash, self.peer_id)
+                .await
+                .map_err(|e| DownloadError::Peer(e.to_string()))?
+        };
 
         // Send bitfield (we have nothing initially)
         let mut conn = conn;

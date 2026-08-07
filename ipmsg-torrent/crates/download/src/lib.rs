@@ -659,6 +659,7 @@ impl DownloadManager {
         let max_concurrent = self.max_concurrent;
         let notifier = self.notifier.clone();
         let auto_shutdown_config = self.auto_shutdown.clone();
+        let proxy_config = self.proxy_config.clone();
 
         // Spawn schedule checker (runs every 60 seconds)
         let schedule_check_tasks = self.tasks.clone();
@@ -826,6 +827,7 @@ impl DownloadManager {
                             let notify_clone = notify.clone();
                             let task_id_clone = task_id.clone();
                             let notifier_clone = notifier.clone();
+                            let proxy_config_clone = proxy_config.read().await.clone();
 
                             tokio::spawn(async move {
                                 let result: Result<(), String> = match params {
@@ -844,6 +846,7 @@ impl DownloadManager {
                                                         engine.set_rate_limiter(
                                                             rate_limiter_clone.per_task().clone(),
                                                         );
+                                                        engine.set_proxy_config(proxy_config_clone);
                                                         engine
                                                             .download(Some(cancel_clone))
                                                             .await
@@ -962,6 +965,7 @@ impl DownloadManager {
                                                 engine.set_rate_limiter(
                                                     rate_limiter_clone.per_task().clone(),
                                                 );
+                                                engine.set_proxy_config(proxy_config_clone);
                                                 engine
                                                     .download(Some(cancel_clone))
                                                     .await
@@ -1789,6 +1793,7 @@ impl DownloadManager {
         let rate_limiter = Some(self.rate_limiter.clone());
         let task_complete_notify = self.task_complete_notify.clone();
         let notifier = self.notifier.clone();
+        let proxy_config = self.proxy_config.clone();
 
         // Store task info for resume
         {
@@ -1829,6 +1834,8 @@ impl DownloadManager {
             }
         }
 
+        let proxy_config_for_spawn = proxy_config.read().await.clone();
+
         tokio::spawn(async move {
             let result: Result<(), String> = match params {
                 TaskParams::Torrent { torrent_path } => {
@@ -1841,6 +1848,7 @@ impl DownloadManager {
                                 if let Some(ref limiter) = rate_limiter {
                                     engine.set_rate_limiter(limiter.per_task().clone());
                                 }
+                                engine.set_proxy_config(proxy_config_for_spawn);
                                 engine
                                     .download(Some(cancel_clone))
                                     .await
@@ -1957,6 +1965,7 @@ impl DownloadManager {
 
                             // Start torrent download
                             let mut engine = torrent::TorrentEngine::new(meta, download_dir);
+                            engine.set_proxy_config(proxy_config.read().await.clone());
                             engine
                                 .download(Some(cancel_clone))
                                 .await
@@ -2041,6 +2050,7 @@ impl DownloadManager {
         let max_retries = self.max_retries.load(Ordering::Relaxed);
         let notifier = self.notifier.clone();
         let bandwidth_monitor = self.bandwidth_monitor.clone();
+        let proxy_config = self.proxy_config.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -2223,6 +2233,7 @@ impl DownloadManager {
                                 let dht_clone = dht.clone();
                                 let rate_limiter_clone = rate_limiter.clone();
                                 let task_id_clone = task_id.clone();
+                                let proxy_config_clone = proxy_config.read().await.clone();
 
                                 tokio::spawn(async move {
                                     let result: Result<(), String> = match params {
@@ -2242,6 +2253,9 @@ impl DownloadManager {
                                                                 rate_limiter_clone
                                                                     .per_task()
                                                                     .clone(),
+                                                            );
+                                                            engine.set_proxy_config(
+                                                                proxy_config_clone,
                                                             );
                                                             engine
                                                                 .download(Some(cancel_clone))
@@ -2365,6 +2379,7 @@ impl DownloadManager {
                                                     engine.set_rate_limiter(
                                                         rate_limiter_clone.per_task().clone(),
                                                     );
+                                                    engine.set_proxy_config(proxy_config_clone);
                                                     engine
                                                         .download(Some(cancel_clone))
                                                         .await

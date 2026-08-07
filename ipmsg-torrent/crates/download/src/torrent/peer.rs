@@ -1,8 +1,9 @@
 //! BitTorrent peer protocol implementation
 
+use crate::proxy::{ProxyConfig, ProxyType};
 use std::io;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
@@ -50,11 +51,20 @@ pub enum PeerError {
     #[error("peer disconnected")]
     #[allow(dead_code)]
     Disconnected,
+    #[error("proxy error: {0}")]
+    Proxy(String),
 }
+
+/// A stream that implements both AsyncRead and AsyncWrite.
+trait ReadWriteStream: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + Sync> ReadWriteStream for T {}
+
+/// Type alias for the underlying stream (direct TCP or proxied).
+type PeerStream = Box<dyn ReadWriteStream>;
 
 /// BitTorrent peer connection
 pub struct PeerConnection {
-    stream: TcpStream,
+    stream: PeerStream,
     #[allow(dead_code)]
     peer_id: [u8; 20],
     info_hash: [u8; 20],
@@ -68,7 +78,7 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
-    /// Connect to a peer and perform handshake
+    /// Connect to a peer directly (no proxy) and perform handshake
     pub async fn connect(
         addr: std::net::SocketAddr,
         info_hash: [u8; 20],
@@ -78,6 +88,68 @@ impl PeerConnection {
             .await
             .map_err(|_| PeerError::Timeout)?
             .map_err(PeerError::Io)?;
+
+        let mut conn = Self {
+            stream: Box::new(stream),
+            peer_id: [0u8; 20],
+            info_hash,
+            am_choking: true,
+            am_interested: false,
+            peer_choking: true,
+            peer_interested: false,
+            peer_bitfield: Vec::new(),
+        };
+
+        // Perform handshake
+        conn.handshake(peer_id).await?;
+
+        Ok(conn)
+    }
+
+    /// Connect to a peer through a proxy and perform handshake.
+    ///
+    /// SOCKS5 proxies are supported natively; HTTP CONNECT proxies
+    /// are not supported for raw TCP (BitTorrent) connections and
+    /// will return an error.
+    pub async fn connect_with_proxy(
+        addr: std::net::SocketAddr,
+        info_hash: [u8; 20],
+        peer_id: [u8; 20],
+        proxy: &ProxyConfig,
+    ) -> Result<Self, PeerError> {
+        let stream = match proxy.proxy_type {
+            ProxyType::Socks5 => {
+                let proxy_addr = format!("{}:{}", proxy.host, proxy.port);
+                let target = tokio_socks::TargetAddr::Ip(addr);
+
+                let socks_stream = if let Some(ref auth) = proxy.auth {
+                    let fut = tokio_socks::tcp::Socks5Stream::connect_with_password(
+                        proxy_addr.as_str(),
+                        target,
+                        auth.username.as_str(),
+                        auth.password.as_str(),
+                    );
+                    timeout(Duration::from_secs(15), fut)
+                        .await
+                        .map_err(|_| PeerError::Timeout)?
+                        .map_err(|e| PeerError::Proxy(e.to_string()))?
+                } else {
+                    let fut = tokio_socks::tcp::Socks5Stream::connect(proxy_addr.as_str(), target);
+                    timeout(Duration::from_secs(15), fut)
+                        .await
+                        .map_err(|_| PeerError::Timeout)?
+                        .map_err(|e| PeerError::Proxy(e.to_string()))?
+                };
+
+                Box::new(socks_stream) as PeerStream
+            }
+            ProxyType::Http => {
+                return Err(PeerError::Proxy(
+                    "HTTP CONNECT proxies are not supported for BitTorrent peer connections"
+                        .to_string(),
+                ));
+            }
+        };
 
         let mut conn = Self {
             stream,
@@ -90,7 +162,6 @@ impl PeerConnection {
             peer_bitfield: Vec::new(),
         };
 
-        // Perform handshake
         conn.handshake(peer_id).await?;
 
         Ok(conn)
@@ -375,6 +446,77 @@ impl PeerConnection {
             (self.peer_bitfield[byte_index] & (1 << bit_index)) != 0
         } else {
             false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy::{ProxyConfig, ProxyType};
+    use std::net::SocketAddr;
+
+    #[tokio::test]
+    async fn test_connect_with_http_proxy_rejected() {
+        // HTTP CONNECT proxies should be rejected for BitTorrent peer connections
+        let proxy = ProxyConfig::new(ProxyType::Http, "127.0.0.1".into(), 8080);
+        let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+        let info_hash = [0u8; 20];
+        let peer_id = [0u8; 20];
+
+        let result = PeerConnection::connect_with_proxy(addr, info_hash, peer_id, &proxy).await;
+        assert!(result.is_err());
+        if let Err(e) = result {
+            match e {
+                PeerError::Proxy(msg) => {
+                    assert!(msg.contains("HTTP CONNECT"));
+                }
+                _ => panic!("Expected PeerError::Proxy"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connect_with_socks5_proxy_timeout() {
+        // SOCKS5 proxy connection should timeout if proxy is unreachable
+        let proxy = ProxyConfig::new(ProxyType::Socks5, "127.0.0.1".into(), 9999);
+        let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+        let info_hash = [0u8; 20];
+        let peer_id = [0u8; 20];
+
+        let result = PeerConnection::connect_with_proxy(addr, info_hash, peer_id, &proxy).await;
+        assert!(result.is_err());
+        // Should be either Timeout or Proxy error depending on system state
+        if let Err(e) = result {
+            match e {
+                PeerError::Timeout | PeerError::Proxy(_) => {}
+                _ => panic!("Expected Timeout or Proxy error"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connect_with_socks5_proxy_with_auth() {
+        // SOCKS5 proxy with authentication should attempt connection
+        let proxy = ProxyConfig::with_auth(
+            ProxyType::Socks5,
+            "127.0.0.1".into(),
+            9999,
+            "user".into(),
+            "pass".into(),
+        );
+        let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+        let info_hash = [0u8; 20];
+        let peer_id = [0u8; 20];
+
+        let result = PeerConnection::connect_with_proxy(addr, info_hash, peer_id, &proxy).await;
+        assert!(result.is_err());
+        // Should fail to connect (no proxy running), but should not panic
+        if let Err(e) = result {
+            match e {
+                PeerError::Timeout | PeerError::Proxy(_) | PeerError::Io(_) => {}
+                _ => panic!("Expected connection error"),
+            }
         }
     }
 }
