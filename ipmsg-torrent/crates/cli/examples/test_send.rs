@@ -12,11 +12,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bootstrap node
     let bootstrap = vec![
-        "/ip4/140.83.57.37/tcp/43363/p2p/12D3KooWSa5Rn51bVUTSGE8HanAaiQcLBeFQkkGhJXoF5eFNdBfg".to_string(),
+        "/ip4/140.83.57.37/tcp/43363/p2p/12D3KooWSa5Rn51bVUTSGE8HanAaiQcLBeFQkkGhJXoF5eFNdBfg"
+            .to_string(),
     ];
 
     // Start engine with username, bootstrap nodes, and listen port
-    let peer_id = engine.start("test-sender".to_string(), bootstrap, 0).await?;
+    let peer_id = engine
+        .start("test-sender".to_string(), bootstrap, 0)
+        .await?;
     println!("Started with peer_id: {}", peer_id);
 
     // Wait for connection

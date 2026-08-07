@@ -239,6 +239,7 @@ mod tests {
             tags: vec!["linux".into()],
             priority: DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         }
     }
 

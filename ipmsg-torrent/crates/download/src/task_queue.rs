@@ -27,6 +27,12 @@ pub struct PersistedTask {
     pub priority: DownloadPriority,
     #[serde(default)]
     pub schedule: Option<TimeWindow>,
+    #[serde(default = "default_bandwidth_weight")]
+    pub bandwidth_weight: u8,
+}
+
+fn default_bandwidth_weight() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -112,6 +118,7 @@ impl From<DownloadTask> for PersistedTask {
             tags: t.tags,
             priority: t.priority,
             schedule: t.schedule,
+            bandwidth_weight: t.bandwidth_weight,
         }
     }
 }
@@ -133,6 +140,7 @@ impl From<PersistedTask> for DownloadTask {
             tags: t.tags,
             priority: t.priority,
             schedule: t.schedule,
+            bandwidth_weight: t.bandwidth_weight,
         }
     }
 }
@@ -233,6 +241,7 @@ mod tests {
             tags: Vec::new(),
             priority: crate::DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -286,6 +295,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: crate::DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -302,6 +312,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: crate::DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             },
         ];
 
@@ -347,6 +358,7 @@ mod tests {
             tags: Vec::new(),
             priority: crate::DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         };
 
         save_task_queue(&[task], data_dir).unwrap();

@@ -157,6 +157,7 @@ async fn test_p2p_download_progress_calculation() {
         tags: Vec::new(),
         priority: DownloadPriority::Normal,
         schedule: None,
+        bandwidth_weight: 1,
     };
 
     assert_eq!(task.progress(), 75.0);

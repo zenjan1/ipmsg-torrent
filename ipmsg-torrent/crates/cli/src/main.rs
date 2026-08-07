@@ -150,6 +150,12 @@ enum Command {
         /// Time window "HH:MM-HH:MM" or "none" to remove schedule
         window: String,
     },
+    /// Set bandwidth weight for a download task (1-10)
+    DlBandwidth {
+        task_id: String,
+        /// Bandwidth weight (1-10, higher = more bandwidth)
+        weight: u8,
+    },
     Block {
         peer: String,
     },
@@ -414,6 +420,22 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlschedule <task_id> <HH:MM-HH:MM|none>".to_string())
             }
         }
+        "dlbw" | "dl-bandwidth" | "dl-bw" => {
+            // /dlbw <task_id> <weight>
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 3 {
+                if let Ok(w) = args[2].parse::<u8>() {
+                    Command::DlBandwidth {
+                        task_id: args[1].to_string(),
+                        weight: w,
+                    }
+                } else {
+                    Command::Unknown("/dlbw <task_id> <1-10>".to_string())
+                }
+            } else {
+                Command::Unknown("/dlbw <task_id> <1-10>".to_string())
+            }
+        }
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -482,6 +504,7 @@ fn command_help() -> String {
         "/dltags [tag]    - List all tags, or filter tasks by tag",
         "/dlfind [query] [--state=X] [--protocol=X] [--sort=X] [--asc] - Search/filter downloads",
         "/dlpriority <id> <high|normal|low> - Set download task priority",
+        "/dlbw <id> <1-10>    - Set bandwidth weight (higher = more bandwidth)",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
@@ -1800,6 +1823,32 @@ async fn handle_command(
                 s.add_system_message(
                     "main",
                     "Usage: /dlschedule <task_id> <HH:MM-HH:MM|none>".to_string(),
+                );
+            }
+        }
+        Command::DlBandwidth { task_id, weight } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let weight = weight.clamp(1, 10);
+            let ok = download_manager
+                .set_bandwidth_weight(&task_id, weight)
+                .await;
+            let mut s = state.lock().await;
+            if ok {
+                s.add_system_message(
+                    "main",
+                    format!(
+                        "⚖️ Bandwidth weight set to {} for task {}",
+                        weight,
+                        &task_id[..8.min(task_id.len())]
+                    ),
+                );
+            } else {
+                s.add_system_message(
+                    "main",
+                    format!("Task {} not found", &task_id[..8.min(task_id.len())]),
                 );
             }
         }

@@ -106,6 +106,7 @@ pub struct TaskInfoEvent {
     pub error: Option<String>,
     pub tags: Vec<String>,
     pub priority: String,
+    pub bandwidth_weight: u8,
 }
 
 impl TaskInfoEvent {
@@ -122,6 +123,7 @@ impl TaskInfoEvent {
             error: task.error.clone(),
             tags: task.tags.clone(),
             priority: task.priority.label().to_string(),
+            bandwidth_weight: task.bandwidth_weight,
         }
     }
 }
@@ -202,6 +204,9 @@ pub struct DownloadTask {
     pub priority: DownloadPriority,
     /// Optional time window for scheduled downloading
     pub schedule: Option<TimeWindow>,
+    /// Bandwidth weight for proportional allocation (1-10, default 1).
+    /// Higher weights get proportionally more bandwidth when global limit is active.
+    pub bandwidth_weight: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -964,6 +969,68 @@ impl DownloadManager {
         tasks.iter().find(|t| t.id == task_id).map(|t| t.schedule)
     }
 
+    /// Set bandwidth weight for a download task (1-10, default 1).
+    /// Higher weights get proportionally more bandwidth when global limit is active.
+    /// Returns true if the task was found and updated.
+    pub async fn set_bandwidth_weight(&self, task_id: &str, weight: u8) -> bool {
+        let weight = weight.clamp(1, 10);
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            task.bandwidth_weight = weight;
+            task.updated_at = chrono::Utc::now();
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(task),
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the bandwidth weight for a download task.
+    pub async fn get_bandwidth_weight(&self, task_id: &str) -> Option<u8> {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .map(|t| t.bandwidth_weight)
+    }
+
+    /// Calculate proportional bandwidth limits for all running tasks.
+    /// Distributes the global limit proportionally based on task weights.
+    /// Returns a map of task_id -> bytes_per_sec.
+    pub async fn calculate_bandwidth_allocation(&self) -> HashMap<String, u64> {
+        let global_limit = self.rate_limiter.global_limit().await;
+        if global_limit == 0 {
+            // No global limit, no allocation needed
+            return HashMap::new();
+        }
+
+        let tasks = self.tasks.lock().await;
+        let running: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Downloading)
+            .collect();
+
+        if running.is_empty() {
+            return HashMap::new();
+        }
+
+        let total_weight: u64 = running.iter().map(|t| t.bandwidth_weight as u64).sum();
+        if total_weight == 0 {
+            return HashMap::new();
+        }
+
+        running
+            .iter()
+            .map(|t| {
+                let proportion = t.bandwidth_weight as f64 / total_weight as f64;
+                let allocated = (global_limit as f64 * proportion) as u64;
+                (t.id.clone(), allocated.max(1024)) // At least 1KB/s
+            })
+            .collect()
+    }
+
     /// Check all tasks with schedules and pause/resume as needed.
     /// Returns the number of tasks that were paused or resumed.
     pub async fn check_schedules(&self) -> usize {
@@ -1043,6 +1110,7 @@ impl DownloadManager {
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1090,6 +1158,7 @@ impl DownloadManager {
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1137,6 +1206,7 @@ impl DownloadManager {
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1182,6 +1252,7 @@ impl DownloadManager {
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1227,6 +1298,7 @@ impl DownloadManager {
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -2581,6 +2653,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2597,6 +2670,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -2613,6 +2687,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
         }
 
@@ -2721,6 +2796,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
         }
 
@@ -2764,6 +2840,7 @@ mod tests {
                 tags: vec!["movies".into(), "action".into(), "drama".into()],
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
         }
 
@@ -2800,6 +2877,7 @@ mod tests {
                 tags: vec!["movies".into(), "action".into()],
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2816,6 +2894,7 @@ mod tests {
                 tags: vec!["movies".into(), "drama".into()],
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -2832,6 +2911,7 @@ mod tests {
                 tags: vec!["work".into()],
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
         }
 
@@ -2871,6 +2951,7 @@ mod tests {
                 tags: vec!["movies".into(), "action".into()],
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2887,6 +2968,7 @@ mod tests {
                 tags: vec!["movies".into(), "drama".into()],
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
         }
 
@@ -2916,6 +2998,7 @@ mod tests {
                 tags: vec!["movies".into()],
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
         }
 
@@ -2945,6 +3028,7 @@ mod tests {
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         };
         assert!(task.tags.is_empty());
     }
@@ -2968,6 +3052,7 @@ mod tests {
             tags: vec!["linux".into()],
             priority: DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         };
 
         // Query match (case-insensitive)
@@ -3008,6 +3093,7 @@ mod tests {
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         };
 
         let filter = TaskFilter {
@@ -3040,6 +3126,7 @@ mod tests {
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         };
 
         let filter = TaskFilter {
@@ -3072,6 +3159,7 @@ mod tests {
             tags: vec!["movies".into(), "action".into()],
             priority: DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         };
 
         let filter = TaskFilter {
@@ -3104,6 +3192,7 @@ mod tests {
             tags: vec!["linux".into()],
             priority: DownloadPriority::Normal,
             schedule: None,
+            bandwidth_weight: 1,
         };
 
         // All criteria match
@@ -3143,6 +3232,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -3159,6 +3249,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -3175,6 +3266,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             },
         ];
 
@@ -3206,6 +3298,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -3222,6 +3315,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -3238,6 +3332,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             },
         ];
 
@@ -3265,6 +3360,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             },
             DownloadTask {
                 id: "p2".into(),
@@ -3281,6 +3377,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             },
             DownloadTask {
                 id: "p3".into(),
@@ -3297,6 +3394,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             },
         ];
 
@@ -3326,6 +3424,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3342,6 +3441,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
         }
 
@@ -3369,6 +3469,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3385,6 +3486,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3401,6 +3503,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
         }
 
@@ -3433,6 +3536,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3449,6 +3553,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3465,6 +3570,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
         }
 
@@ -3573,6 +3679,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
         }
 
@@ -3609,6 +3716,7 @@ mod tests {
             tags: vec!["test".into()],
             priority: DownloadPriority::High,
             schedule: None,
+            bandwidth_weight: 1,
         };
 
         let event = TaskInfoEvent::from_task(&task);
@@ -3719,6 +3827,255 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_set_bandwidth_weight() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_bandwidth"));
+
+        // Add a task manually
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "bw-test-1".into(),
+                name: "file.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+            });
+        }
+
+        // Test setting valid weight
+        let ok = dm.set_bandwidth_weight("bw-test-1", 5).await;
+        assert!(ok);
+
+        // Verify weight was set
+        let weight = dm.get_bandwidth_weight("bw-test-1").await;
+        assert_eq!(weight, Some(5));
+
+        // Test clamping: weight > 10 should be clamped to 10
+        let ok = dm.set_bandwidth_weight("bw-test-1", 15).await;
+        assert!(ok);
+        let weight = dm.get_bandwidth_weight("bw-test-1").await;
+        assert_eq!(weight, Some(10));
+
+        // Test clamping: weight < 1 should be clamped to 1
+        let ok = dm.set_bandwidth_weight("bw-test-1", 0).await;
+        assert!(ok);
+        let weight = dm.get_bandwidth_weight("bw-test-1").await;
+        assert_eq!(weight, Some(1));
+
+        // Test non-existent task
+        let ok = dm.set_bandwidth_weight("non-existent", 5).await;
+        assert!(!ok);
+    }
+
+    #[tokio::test]
+    async fn test_bandwidth_allocation_single_task() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_bandwidth_alloc"));
+
+        // Set global limit to 1000 bytes/sec
+        dm.set_global_speed_limit(1000).await;
+
+        // Add a single downloading task with weight 1
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "alloc-test-1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Downloading,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+            });
+        }
+
+        let allocation = dm.calculate_bandwidth_allocation().await;
+        assert_eq!(allocation.len(), 1);
+        // Single task gets all bandwidth (at least 1000)
+        assert!(allocation.get("alloc-test-1").unwrap() >= &1000);
+    }
+
+    #[tokio::test]
+    async fn test_bandwidth_allocation_proportional() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_bandwidth_prop"));
+
+        // Set global limit to 10000 bytes/sec
+        dm.set_global_speed_limit(10000).await;
+
+        // Add three downloading tasks with different weights
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "prop-1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Downloading,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+            });
+            tasks.push(DownloadTask {
+                id: "prop-2".into(),
+                name: "file2.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Downloading,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 2,
+            });
+            tasks.push(DownloadTask {
+                id: "prop-3".into(),
+                name: "file3.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Downloading,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 3,
+            });
+        }
+
+        let allocation = dm.calculate_bandwidth_allocation().await;
+        assert_eq!(allocation.len(), 3);
+
+        // Total weight is 1+2+3 = 6
+        // prop-1: 1/6 * 10000 = 1666
+        // prop-2: 2/6 * 10000 = 3333
+        // prop-3: 3/6 * 10000 = 5000
+        let alloc1 = *allocation.get("prop-1").unwrap();
+        let alloc2 = *allocation.get("prop-2").unwrap();
+        let alloc3 = *allocation.get("prop-3").unwrap();
+
+        // Verify proportional distribution (with some tolerance)
+        assert!(
+            alloc1 >= 1000 && alloc1 <= 2000,
+            "alloc1={} expected ~1666",
+            alloc1
+        );
+        assert!(
+            alloc2 >= 3000 && alloc2 <= 4000,
+            "alloc2={} expected ~3333",
+            alloc2
+        );
+        assert!(
+            alloc3 >= 4500 && alloc3 <= 5500,
+            "alloc3={} expected ~5000",
+            alloc3
+        );
+
+        // Verify prop-3 gets more than prop-2, which gets more than prop-1
+        assert!(alloc3 > alloc2);
+        assert!(alloc2 > alloc1);
+    }
+
+    #[tokio::test]
+    async fn test_bandwidth_allocation_no_global_limit() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_bandwidth_nolimit"));
+
+        // No global limit set (default 0)
+
+        // Add a downloading task
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "nolimit-1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Downloading,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+            });
+        }
+
+        let allocation = dm.calculate_bandwidth_allocation().await;
+        // No global limit means no allocation needed
+        assert!(allocation.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_bandwidth_allocation_no_downloading_tasks() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_bandwidth_empty"));
+
+        // Set global limit
+        dm.set_global_speed_limit(10000).await;
+
+        // Add only queued/paused tasks (no downloading)
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "queued-1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+            });
+        }
+
+        let allocation = dm.calculate_bandwidth_allocation().await;
+        // No downloading tasks means no allocation
+        assert!(allocation.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_set_schedule() {
         let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_schedule"));
 
@@ -3740,6 +4097,7 @@ mod tests {
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
                 schedule: None,
+                bandwidth_weight: 1,
             });
         }
 
