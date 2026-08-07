@@ -230,6 +230,15 @@ enum Command {
         /// Notes text (empty or "clear" to remove notes)
         notes: Option<String>,
     },
+    /// Set or clear group for a download task
+    DlGroup {
+        /// Task ID to set group for
+        task_id: String,
+        /// Group name (empty or "clear" to remove from group)
+        group: Option<String>,
+    },
+    /// List all download groups
+    DlGroups,
     Block {
         peer: String,
     },
@@ -662,6 +671,29 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlnotes <task_id> [notes|clear]".to_string())
             }
         }
+        "dlgroup" | "dl-group" | "dlgrp" => {
+            // /dlgroup <task_id> [group_name|clear]
+            let args: Vec<&str> = input.splitn(3, ' ').collect();
+            if args.len() >= 2 {
+                let group = if args.len() >= 3 {
+                    let g = args[2].trim();
+                    if g.eq_ignore_ascii_case("clear") || g.is_empty() {
+                        None
+                    } else {
+                        Some(g.to_string())
+                    }
+                } else {
+                    None
+                };
+                Command::DlGroup {
+                    task_id: args[1].to_string(),
+                    group,
+                }
+            } else {
+                Command::Unknown("/dlgroup <task_id> [group|clear]".to_string())
+            }
+        }
+        "dlgroups" | "dl-groups" | "dlgrps" => Command::DlGroups,
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -743,6 +775,8 @@ fn command_help() -> String {
         "/dlorganize <on|off> - Enable/disable auto-organize by file type",
         "/dlrename <id> <name> - Rename a download task",
         "/dlnotes <id> [text|clear] - Set or clear task notes/description",
+        "/dlgroup <id> [group|clear] - Set or clear task group",
+        "/dlgroups           - List all download groups",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -2651,6 +2685,55 @@ async fn handle_command(
                     "main",
                     format!("❌ Failed to set notes for task {} (not found)", task_id),
                 );
+            }
+        }
+        Command::DlGroup { task_id, group } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if download_manager
+                .set_task_group(&task_id, group.clone())
+                .await
+            {
+                let mut s = state.lock().await;
+                match group {
+                    Some(g) => s.add_system_message(
+                        "main",
+                        format!("✅ Task {} assigned to group '{}'", task_id, g),
+                    ),
+                    None => s.add_system_message(
+                        "main",
+                        format!("✅ Task {} removed from group", task_id),
+                    ),
+                }
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    format!("❌ Failed to set group for task {} (not found)", task_id),
+                );
+            }
+        }
+        Command::DlGroups => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let groups = download_manager.list_all_groups().await;
+            let mut s = state.lock().await;
+            if groups.is_empty() {
+                s.add_system_message(
+                    "main",
+                    "📂 No groups defined. Use /dlgroup <task_id> <group> to assign.".to_string(),
+                );
+            } else {
+                let mut lines = "📂 Download Groups:\n".to_string();
+                for g in &groups {
+                    let count = download_manager.list_tasks_by_group(g).await.len();
+                    lines.push_str(&format!("  • {} ({} tasks)\n", g, count));
+                }
+                s.add_system_message("main", lines.trim_end().to_string());
             }
         }
         Command::Block { peer } => {

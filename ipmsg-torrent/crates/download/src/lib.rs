@@ -125,6 +125,8 @@ pub struct TaskInfoEvent {
     pub depends_on: Vec<String>,
     /// User-defined notes or description (for WebSocket UI display)
     pub notes: Option<String>,
+    /// User-defined group for organizing downloads (optional)
+    pub group: Option<String>,
 }
 
 impl TaskInfoEvent {
@@ -145,6 +147,7 @@ impl TaskInfoEvent {
             queue_position: task.queue_position,
             depends_on: task.depends_on.clone(),
             notes: task.notes.clone(),
+            group: task.group.clone(),
         }
     }
 }
@@ -235,6 +238,8 @@ pub struct DownloadTask {
     pub depends_on: Vec<String>,
     /// User-defined notes or description for this task (optional)
     pub notes: Option<String>,
+    /// User-defined group for organizing downloads (optional)
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1344,6 +1349,7 @@ impl DownloadManager {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1395,6 +1401,7 @@ impl DownloadManager {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1446,6 +1453,7 @@ impl DownloadManager {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1495,6 +1503,7 @@ impl DownloadManager {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1544,6 +1553,7 @@ impl DownloadManager {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -3025,6 +3035,56 @@ impl DownloadManager {
             false
         }
     }
+
+    /// Set or clear the group for a download task.
+    /// Pass None or empty string to remove from group.
+    /// Returns true if the task was found and updated.
+    pub async fn set_task_group(&self, task_id: &str, group: Option<String>) -> bool {
+        let group = group.and_then(|g| {
+            let trimmed = g.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            task.group = group;
+            task.updated_at = chrono::Utc::now();
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(task),
+            });
+            drop(tasks);
+            self.persist_tasks().await;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// List all tasks in a specific group.
+    pub async fn list_tasks_by_group(&self, group: &str) -> Vec<DownloadTask> {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .iter()
+            .filter(|t| t.group.as_deref() == Some(group))
+            .cloned()
+            .collect()
+    }
+
+    /// List all unique group names across all tasks.
+    pub async fn list_all_groups(&self) -> Vec<String> {
+        let tasks = self.tasks.lock().await;
+        let mut groups: Vec<String> = tasks
+            .iter()
+            .filter_map(|t| t.group.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        groups.sort();
+        groups
+    }
     fn would_create_cycle(
         &self,
         tasks: &[DownloadTask],
@@ -3410,6 +3470,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3430,6 +3491,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3450,6 +3512,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -3562,6 +3625,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -3609,6 +3673,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -3649,6 +3714,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3669,6 +3735,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3689,6 +3756,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -3732,6 +3800,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3752,6 +3821,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -3785,6 +3855,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -3818,6 +3889,7 @@ mod tests {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         };
         assert!(task.tags.is_empty());
     }
@@ -3845,6 +3917,7 @@ mod tests {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         };
 
         // Query match (case-insensitive)
@@ -3889,6 +3962,7 @@ mod tests {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         };
 
         let filter = TaskFilter {
@@ -3925,6 +3999,7 @@ mod tests {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         };
 
         let filter = TaskFilter {
@@ -3961,6 +4036,7 @@ mod tests {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         };
 
         let filter = TaskFilter {
@@ -3997,6 +4073,7 @@ mod tests {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         };
 
         // All criteria match
@@ -4040,6 +4117,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -4060,6 +4138,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -4080,6 +4159,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             },
         ];
 
@@ -4115,6 +4195,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -4135,6 +4216,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -4155,6 +4237,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             },
         ];
 
@@ -4186,6 +4269,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             },
             DownloadTask {
                 id: "p2".into(),
@@ -4206,6 +4290,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             },
             DownloadTask {
                 id: "p3".into(),
@@ -4226,6 +4311,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             },
         ];
 
@@ -4259,6 +4345,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4279,6 +4366,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -4310,6 +4398,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4330,6 +4419,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4350,6 +4440,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -4386,6 +4477,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4406,6 +4498,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4426,6 +4519,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -4538,6 +4632,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -4578,6 +4673,7 @@ mod tests {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         };
 
         let event = TaskInfoEvent::from_task(&task);
@@ -4713,6 +4809,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -4770,6 +4867,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -4808,6 +4906,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-2".into(),
@@ -4828,6 +4927,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-3".into(),
@@ -4848,6 +4948,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -4912,6 +5013,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -4949,6 +5051,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -4983,6 +5086,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -5049,6 +5153,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -5092,6 +5197,7 @@ mod tests {
                 queue_position: Some(10),
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5112,6 +5218,7 @@ mod tests {
                 queue_position: Some(20),
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -5149,6 +5256,7 @@ mod tests {
                 queue_position: Some(10),
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5169,6 +5277,7 @@ mod tests {
                 queue_position: Some(20),
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -5206,6 +5315,7 @@ mod tests {
                 queue_position: Some(10),
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5226,6 +5336,7 @@ mod tests {
                 queue_position: Some(20),
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -5246,6 +5357,7 @@ mod tests {
                 queue_position: Some(30),
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -5281,6 +5393,7 @@ mod tests {
                 queue_position: Some(10),
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5301,6 +5414,7 @@ mod tests {
                 queue_position: Some(20),
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -5321,6 +5435,7 @@ mod tests {
                 queue_position: Some(30),
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -5357,6 +5472,7 @@ mod tests {
                 queue_position: Some(30),
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5377,6 +5493,7 @@ mod tests {
                 queue_position: Some(10),
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -5397,6 +5514,7 @@ mod tests {
                 queue_position: Some(20),
                 depends_on: Vec::new(),
                 notes: None,
+                group: None,
             });
         }
 
@@ -5924,5 +6042,91 @@ mod tests {
             !dm.set_task_notes("nonexistent", Some("notes".to_string()))
                 .await
         );
+    }
+
+    #[tokio::test]
+    async fn test_set_task_group() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_group"));
+        let id = dm
+            .add_magnet(
+                "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test_group",
+            )
+            .await
+            .unwrap();
+
+        // Set group
+        assert!(dm.set_task_group(&id, Some("movies".to_string())).await);
+        let task = dm.get_task(&id).await.unwrap();
+        assert_eq!(task.group, Some("movies".to_string()));
+
+        // List by group
+        let group_tasks = dm.list_tasks_by_group("movies").await;
+        assert_eq!(group_tasks.len(), 1);
+        assert_eq!(group_tasks[0].id, id);
+
+        // List all groups
+        let groups = dm.list_all_groups().await;
+        assert_eq!(groups, vec!["movies".to_string()]);
+
+        // Clear group
+        assert!(dm.set_task_group(&id, None).await);
+        let task = dm.get_task(&id).await.unwrap();
+        assert_eq!(task.group, None);
+
+        // Clear group with empty string
+        assert!(dm.set_task_group(&id, Some("".to_string())).await);
+        let task = dm.get_task(&id).await.unwrap();
+        assert_eq!(task.group, None);
+
+        // Groups list should be empty now
+        let groups = dm.list_all_groups().await;
+        assert!(groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_set_task_group_not_found() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_group_nf"));
+        assert!(
+            !dm.set_task_group("nonexistent", Some("group".to_string()))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_all_groups_multiple() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_groups_multi"));
+        let id1 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=file1")
+            .await
+            .unwrap();
+        let id2 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80710&dn=file2")
+            .await
+            .unwrap();
+        let id3 = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80711&dn=file3")
+            .await
+            .unwrap();
+
+        dm.set_task_group(&id1, Some("movies".to_string())).await;
+        dm.set_task_group(&id2, Some("music".to_string())).await;
+        dm.set_task_group(&id3, Some("movies".to_string())).await;
+
+        let groups = dm.list_all_groups().await;
+        assert_eq!(groups.len(), 2);
+        assert!(groups.contains(&"movies".to_string()));
+        assert!(groups.contains(&"music".to_string()));
+
+        // movies should have 2 tasks
+        let movie_tasks = dm.list_tasks_by_group("movies").await;
+        assert_eq!(movie_tasks.len(), 2);
+
+        // music should have 1 task
+        let music_tasks = dm.list_tasks_by_group("music").await;
+        assert_eq!(music_tasks.len(), 1);
+
+        // nonexistent group should have 0 tasks
+        let other_tasks = dm.list_tasks_by_group("other").await;
+        assert_eq!(other_tasks.len(), 0);
     }
 }

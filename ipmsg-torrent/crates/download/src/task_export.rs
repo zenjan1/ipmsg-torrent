@@ -40,6 +40,9 @@ pub struct ExportedTask {
     /// Original source URL for re-import (ed2k link, magnet URI, HTTP URL, torrent path)
     #[serde(default)]
     pub source_url: Option<String>,
+    /// User-defined group for organizing downloads
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 fn default_bandwidth_weight() -> u8 {
@@ -96,6 +99,7 @@ impl From<DownloadTask> for ExportedTask {
             queue_position: t.queue_position,
             depends_on: t.depends_on,
             source_url: None,
+            group: t.group,
         }
     }
 }
@@ -128,6 +132,7 @@ impl ExportedTask {
             queue_position: self.queue_position,
             depends_on: self.depends_on,
             notes: None,
+            group: self.group,
         }
     }
 }
@@ -243,6 +248,7 @@ mod tests {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         }
     }
 
@@ -418,6 +424,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 source_url: Some("http://example.com/file1.txt".to_string()),
+                group: None,
             },
             ExportedTask {
                 name: "file2.txt".to_string(),
@@ -436,6 +443,7 @@ mod tests {
                 queue_position: None,
                 depends_on: Vec::new(),
                 source_url: Some("ed2k://|file|file2.txt|2048|HASH|/".to_string()),
+                group: None,
             },
         ];
 
@@ -479,6 +487,7 @@ mod tests {
             queue_position: Some(5),
             depends_on: vec!["dep-1".to_string()],
             source_url: None,
+            group: None,
         };
 
         let task = exported.into_task("new-id".to_string());

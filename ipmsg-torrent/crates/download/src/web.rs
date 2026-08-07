@@ -796,6 +796,7 @@ mod tests {
                 depends_on: Vec::new(),
                 notes: None,
                 queue_position: None,
+                group: None,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -1271,6 +1272,7 @@ mod tests {
             queue_position: None,
             depends_on: vec!["task-0".into()],
             notes: None,
+            group: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

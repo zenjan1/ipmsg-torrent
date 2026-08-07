@@ -174,6 +174,8 @@ fn test_download_task_progress() {
         bandwidth_weight: 1,
         queue_position: None,
         depends_on: Vec::new(),
+        notes: None,
+        group: None,
     };
 
     assert_eq!(task.progress(), 50.0);
@@ -201,6 +203,8 @@ fn test_download_task_progress_zero_size() {
         bandwidth_weight: 1,
         queue_position: None,
         depends_on: Vec::new(),
+        notes: None,
+        group: None,
     };
 
     assert_eq!(task.progress(), 0.0);

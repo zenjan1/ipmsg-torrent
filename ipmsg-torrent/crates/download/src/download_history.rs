@@ -243,6 +243,7 @@ mod tests {
             queue_position: None,
             depends_on: Vec::new(),
             notes: None,
+            group: None,
         }
     }
 
