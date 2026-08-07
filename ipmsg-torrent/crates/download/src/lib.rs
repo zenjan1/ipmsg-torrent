@@ -1834,17 +1834,13 @@ impl DownloadManager {
         };
 
         let cancel_token = CancellationToken::new();
-        eprintln!(
-            "[DEBUG] spawn_task: created new cancel_token for task_id={}, generation={}",
-            task_id, generation
-        );
         let tasks = self.tasks.clone();
         let running = self.running.clone();
         let data_dir = self.data_dir.clone();
         let dht = self.dht.clone();
         let task_id_clone = task_id.clone();
         let cancel_clone = cancel_token.clone();
-        let task_generation = self.task_generation.clone();
+        let _task_generation = self.task_generation.clone();
         let rate_limiter = Some(self.rate_limiter.clone());
         let task_complete_notify = self.task_complete_notify.clone();
         let notifier = self.notifier.clone();
@@ -1890,6 +1886,7 @@ impl DownloadManager {
         }
 
         let proxy_config_for_spawn = proxy_config.read().await.clone();
+        let my_generation = generation; // capture for completion handler
 
         tokio::spawn(async move {
             let result: Result<(), String> = match params {
@@ -2038,11 +2035,9 @@ impl DownloadManager {
                 }
             };
 
-            // Update task state only if we're still the active task (same generation)
-            let my_generation = {
-                let gen_map = task_generation.lock().await;
-                gen_map.get(&task_id_clone).copied().unwrap_or(0)
-            };
+            // Update task state only if we're still the active task (same generation).
+            // Use the captured `my_generation` (set at spawn time) rather than
+            // re-reading from the map, which could have been updated by a newer spawn.
             let is_still_active = {
                 let r = running.lock().await;
                 r.get(&task_id_clone)
@@ -2053,12 +2048,7 @@ impl DownloadManager {
             // Only update task state if we're still the active generation.
             // This prevents stale tasks (cancelled by pause/resume) from
             // overwriting the state of a newly spawned replacement.
-            eprintln!(
-                "[DEBUG] spawn_task completion: task_id={}, generation={}, is_still_active={}, result={:?}",
-                task_id_clone, my_generation, is_still_active, result
-            );
             if !is_still_active {
-                eprintln!("[DEBUG] Stale task exiting, not updating task state");
                 return Ok(());
             }
 
