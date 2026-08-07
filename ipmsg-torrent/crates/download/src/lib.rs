@@ -637,6 +637,10 @@ impl DownloadManager {
             save_path_manager: Arc::new(SavePathManager::new(save_path)),
             proxy_config: Arc::new(tokio::sync::RwLock::new(None)),
         };
+        // Restore proxy configuration from disk
+        if let Ok(Some(proxy_cfg)) = proxy::load_proxy_config(&dm.data_dir) {
+            *dm.proxy_config.write().await = Some(proxy_cfg);
+        }
         dm.start_scheduler();
         dm
     }
@@ -1092,8 +1096,12 @@ impl DownloadManager {
 
     /// Set proxy configuration for HTTP/HTTPS downloads.
     /// Pass None to disable proxy.
+    /// Persists the configuration to disk for automatic restoration on restart.
     pub async fn set_proxy(&self, config: Option<proxy::ProxyConfig>) {
-        *self.proxy_config.write().await = config;
+        *self.proxy_config.write().await = config.clone();
+        if let Err(e) = proxy::save_proxy_config(&config, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist proxy configuration");
+        }
     }
 
     /// Get the current proxy configuration.

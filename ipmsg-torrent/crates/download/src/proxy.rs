@@ -3,6 +3,7 @@
 //! Supports SOCKS5 and HTTP proxies with optional authentication.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::time::Duration;
 
 /// Proxy type
@@ -192,6 +193,60 @@ pub enum ProxyConfigError {
     BuildFailed(String),
 }
 
+/// Save proxy configuration to disk
+pub fn save_proxy_config(
+    config: &Option<ProxyConfig>,
+    data_dir: &Path,
+) -> Result<(), ProxyPersistenceError> {
+    let config_path = data_dir.join("proxy_config.json");
+
+    match config {
+        Some(cfg) => {
+            let json = serde_json::to_string_pretty(cfg)
+                .map_err(|e| ProxyPersistenceError::Serialize(e.to_string()))?;
+            std::fs::write(&config_path, json)
+                .map_err(|e| ProxyPersistenceError::Io(e.to_string()))?;
+        }
+        None => {
+            // Remove config file if disabling proxy
+            if config_path.exists() {
+                std::fs::remove_file(&config_path)
+                    .map_err(|e| ProxyPersistenceError::Io(e.to_string()))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Load proxy configuration from disk
+pub fn load_proxy_config(data_dir: &Path) -> Result<Option<ProxyConfig>, ProxyPersistenceError> {
+    let config_path = data_dir.join("proxy_config.json");
+
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let json = std::fs::read_to_string(&config_path)
+        .map_err(|e| ProxyPersistenceError::Io(e.to_string()))?;
+
+    let config: ProxyConfig = serde_json::from_str(&json)
+        .map_err(|e| ProxyPersistenceError::Deserialize(e.to_string()))?;
+
+    Ok(Some(config))
+}
+
+/// Errors when persisting proxy configuration
+#[derive(Debug, thiserror::Error)]
+pub enum ProxyPersistenceError {
+    #[error("IO error: {0}")]
+    Io(String),
+    #[error("serialize error: {0}")]
+    Serialize(String),
+    #[error("deserialize error: {0}")]
+    Deserialize(String),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +399,86 @@ mod tests {
         let auth = cfg.auth.unwrap();
         assert_eq!(auth.username, "user");
         assert_eq!(auth.password, "pa:ss:word");
+    }
+
+    #[test]
+    fn test_save_load_proxy_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        // Load from non-existent file should return None
+        let loaded = load_proxy_config(data_dir).unwrap();
+        assert!(loaded.is_none());
+
+        // Save a proxy config
+        let cfg = ProxyConfig::with_auth(
+            ProxyType::Socks5,
+            "127.0.0.1".into(),
+            1080,
+            "user".into(),
+            "pass".into(),
+        );
+        save_proxy_config(&Some(cfg.clone()), data_dir).unwrap();
+
+        // Load should return the saved config
+        let loaded = load_proxy_config(data_dir).unwrap();
+        assert!(loaded.is_some());
+        let loaded_cfg = loaded.unwrap();
+        assert_eq!(loaded_cfg, cfg);
+    }
+
+    #[test]
+    fn test_save_none_removes_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        // Save a config first
+        let cfg = ProxyConfig::new(ProxyType::Http, "proxy.example.com".into(), 8080);
+        save_proxy_config(&Some(cfg), data_dir).unwrap();
+
+        // Verify file exists
+        let config_path = data_dir.join("proxy_config.json");
+        assert!(config_path.exists());
+
+        // Save None should remove the file
+        save_proxy_config(&None, data_dir).unwrap();
+        assert!(!config_path.exists());
+
+        // Load should return None
+        let loaded = load_proxy_config(data_dir).unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_save_load_without_auth() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let cfg = ProxyConfig::new(ProxyType::Socks5, "localhost".into(), 9050);
+        save_proxy_config(&Some(cfg.clone()), data_dir).unwrap();
+
+        let loaded = load_proxy_config(data_dir).unwrap().unwrap();
+        assert_eq!(loaded.proxy_type, ProxyType::Socks5);
+        assert_eq!(loaded.host, "localhost");
+        assert_eq!(loaded.port, 9050);
+        assert!(loaded.auth.is_none());
+    }
+
+    #[test]
+    fn test_load_corrupted_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        // Write invalid JSON
+        let config_path = data_dir.join("proxy_config.json");
+        std::fs::write(&config_path, "not valid json").unwrap();
+
+        // Should return error
+        let result = load_proxy_config(data_dir);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ProxyPersistenceError::Deserialize(_)
+        ));
     }
 }
