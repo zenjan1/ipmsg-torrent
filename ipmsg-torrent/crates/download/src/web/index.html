@@ -53,6 +53,23 @@
         .ws-status { font-size: 11px; color: #666; margin-top: 8px; }
         .ws-connected { color: #40c057; }
         .ws-disconnected { color: #ff6b6b; }
+        .proxy-panel { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        .proxy-panel summary { cursor: pointer; color: #00d4ff; font-weight: bold; margin-bottom: 10px; }
+        .proxy-status { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+        .proxy-indicator { width: 10px; height: 10px; border-radius: 50%; }
+        .proxy-indicator.on { background: #40c057; }
+        .proxy-indicator.off { background: #666; }
+        .proxy-info { font-size: 13px; color: #aaa; }
+        .proxy-form { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+        .proxy-form input { flex: 1; padding: 8px 10px; border: 1px solid #333; border-radius: 4px; background: #0f3460; color: #eee; font-size: 13px; }
+        .proxy-form button { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+        .proxy-btn-set { background: #00d4ff; color: #1a1a2e; font-weight: bold; }
+        .proxy-btn-set:hover { background: #00b8d4; }
+        .proxy-btn-disable { background: #5c1a1a; color: #ff6b6b; }
+        .proxy-btn-disable:hover { background: #3a1111; }
+        .proxy-result { font-size: 12px; margin-top: 8px; }
+        .proxy-result.success { color: #40c057; }
+        .proxy-result.error { color: #ff6b6b; }
     </style>
 </head>
 <body>
@@ -94,6 +111,19 @@
             <input type="text" id="url-input" placeholder="Enter URL, magnet link, or torrent path...">
             <button onclick="addDownload()">Add Download</button>
         </div>
+        <details class="proxy-panel" id="proxy-panel">
+            <summary>🔌 Proxy Configuration</summary>
+            <div class="proxy-status">
+                <span class="proxy-indicator" id="proxy-indicator"></span>
+                <span class="proxy-info" id="proxy-info">Loading...</span>
+            </div>
+            <div class="proxy-form">
+                <input type="text" id="proxy-input" placeholder="socks5://127.0.0.1:1080 or http://user:pass@proxy:8080">
+                <button class="proxy-btn-set" onclick="setProxy()">Set Proxy</button>
+                <button class="proxy-btn-disable" onclick="disableProxy()">Disable</button>
+            </div>
+            <div class="proxy-result" id="proxy-result"></div>
+        </details>
         <details class="batch-import">
             <summary>📋 Batch Import (paste multiple URLs)</summary>
             <textarea id="batch-input" placeholder="Paste URLs here, one per line. Supports HTTP, FTP, magnet links, ed2k links.&#10;Lines starting with # are treated as comments.&#10;&#10;Example:&#10;https://example.com/file1.zip&#10;magnet:?xt=urn:btih:abc123...&#10;ed2k://|file|name|size|hash|/"></textarea>
@@ -325,6 +355,75 @@
             }
         }
 
+        // --- Proxy ---
+        async function loadProxyStatus() {
+            try {
+                const resp = await fetch('/api/proxy');
+                const data = await resp.json();
+                const indicator = document.getElementById('proxy-indicator');
+                const info = document.getElementById('proxy-info');
+                if (data.enabled) {
+                    indicator.className = 'proxy-indicator on';
+                    info.textContent = `${data.proxy_type} ${data.host}:${data.port}${data.has_auth ? ' (authenticated)' : ''}`;
+                } else {
+                    indicator.className = 'proxy-indicator off';
+                    info.textContent = 'Proxy disabled';
+                }
+            } catch (e) {
+                document.getElementById('proxy-info').textContent = 'Failed to load proxy status';
+            }
+        }
+
+        async function setProxy() {
+            const input = document.getElementById('proxy-input');
+            const result = document.getElementById('proxy-result');
+            const url = input.value.trim();
+            if (!url) {
+                result.textContent = 'Please enter a proxy URL';
+                result.className = 'proxy-result error';
+                return;
+            }
+            try {
+                const resp = await fetch('/api/proxy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    result.textContent = '✓ ' + data.message;
+                    result.className = 'proxy-result success';
+                    input.value = '';
+                    loadProxyStatus();
+                } else {
+                    result.textContent = '✗ ' + data.message;
+                    result.className = 'proxy-result error';
+                }
+            } catch (e) {
+                result.textContent = '✗ Failed: ' + e.message;
+                result.className = 'proxy-result error';
+            }
+        }
+
+        async function disableProxy() {
+            const result = document.getElementById('proxy-result');
+            try {
+                const resp = await fetch('/api/proxy/disable', { method: 'POST' });
+                const data = await resp.json();
+                if (data.success) {
+                    result.textContent = '✓ ' + data.message;
+                    result.className = 'proxy-result success';
+                    loadProxyStatus();
+                } else {
+                    result.textContent = '✗ ' + data.message;
+                    result.className = 'proxy-result error';
+                }
+            } catch (e) {
+                result.textContent = '✗ Failed: ' + e.message;
+                result.className = 'proxy-result error';
+            }
+        }
+
         // --- Init ---
         // Try WebSocket first, fall back to polling
         if ('WebSocket' in window) {
@@ -349,6 +448,14 @@
         document.getElementById('url-input').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') addDownload();
         });
+
+        // Enter key to set proxy
+        document.getElementById('proxy-input').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') setProxy();
+        });
+
+        // Load proxy status on init
+        loadProxyStatus();
 
         // --- Batch operations ---
         async function batchPauseAll() {
