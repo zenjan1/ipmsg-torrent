@@ -21,7 +21,7 @@ bytes = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true }
 rand = "0.8"
-reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
 url = "2"
 hex = "0.4"
 urlencoding = "2"

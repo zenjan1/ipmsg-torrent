@@ -137,6 +137,13 @@ enum Command {
         task_id: String,
         priority: String,
     },
+    /// Configure download notifications (desktop/shell/log/webhook)
+    DlNotify {
+        /// Action: enable, disable, desktop, shell, log, webhook, status
+        action: String,
+        /// Configuration value (depends on action)
+        value: Option<String>,
+    },
     Block {
         peer: String,
     },
@@ -371,6 +378,24 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlpriority <task_id> <high|normal|low>".to_string())
             }
         }
+        "dlnotify" | "dl-notify" | "dln" => {
+            // /dlnotify <action> [value]
+            // Actions: enable, disable, desktop, shell <cmd>, log <path>, webhook <url>, status
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                let action = args[1].to_string();
+                let value = if args.len() >= 3 {
+                    Some(args[2..].join(" "))
+                } else {
+                    None
+                };
+                Command::DlNotify { action, value }
+            } else {
+                Command::Unknown(
+                    "/dlnotify <enable|disable|desktop|shell|log|webhook|status>".to_string(),
+                )
+            }
+        }
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -439,6 +464,7 @@ fn command_help() -> String {
         "/dltags [tag]    - List all tags, or filter tasks by tag",
         "/dlfind [query] [--state=X] [--protocol=X] [--sort=X] [--asc] - Search/filter downloads",
         "/dlpriority <id> <high|normal|low> - Set download task priority",
+        "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -1522,17 +1548,168 @@ async fn handle_command(
                 Some(p) => p,
                 None => {
                     let mut s = state.lock().await;
-                    s.add_system_message("main", format!("Invalid priority: {}. Use high/normal/low", priority));
+                    s.add_system_message(
+                        "main",
+                        format!("Invalid priority: {}. Use high/normal/low", priority),
+                    );
                     return;
                 }
             };
 
             if download_manager.set_priority(&task_id, pri).await {
                 let mut s = state.lock().await;
-                s.add_system_message("main", format!("Set task {} priority to {}", &task_id[..8.min(task_id.len())], pri.label()));
+                s.add_system_message(
+                    "main",
+                    format!(
+                        "Set task {} priority to {}",
+                        &task_id[..8.min(task_id.len())],
+                        pri.label()
+                    ),
+                );
             } else {
                 let mut s = state.lock().await;
-                s.add_system_message("main", format!("Task {} not found", &task_id[..8.min(task_id.len())]));
+                s.add_system_message(
+                    "main",
+                    format!("Task {} not found", &task_id[..8.min(task_id.len())]),
+                );
+            }
+        }
+        Command::DlNotify { action, value } => {
+            use ipmsg_download::{NotificationChannel, NotificationConfig, NotificationEvent};
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match action.as_str() {
+                "status" => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Notification system: configured via /dlnotify".to_string(),
+                    );
+                    s.add_system_message(
+                        "main",
+                        "Actions: enable, disable, desktop, shell <cmd>, log <path>, webhook <url>"
+                            .to_string(),
+                    );
+                }
+                "enable" => {
+                    let config = NotificationConfig {
+                        enabled: true,
+                        channels: vec![NotificationChannel::Desktop],
+                        events: vec![
+                            NotificationEvent::DownloadComplete,
+                            NotificationEvent::DownloadFailed,
+                        ],
+                    };
+                    download_manager.set_notification_config(config);
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ Download notifications enabled (desktop)".to_string(),
+                    );
+                }
+                "disable" => {
+                    download_manager.set_notification_config(NotificationConfig::disabled());
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "❌ Download notifications disabled".to_string());
+                }
+                "desktop" => {
+                    let config = NotificationConfig {
+                        enabled: true,
+                        channels: vec![NotificationChannel::Desktop],
+                        events: vec![NotificationEvent::DownloadComplete],
+                    };
+                    download_manager.set_notification_config(config);
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "🖥️ Desktop notifications enabled for download completion".to_string(),
+                    );
+                }
+                "shell" => {
+                    let cmd = match value {
+                        Some(c) => c,
+                        None => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "Usage: /dlnotify shell <command>\nTemplate vars: {name}, {size}, {save_path}, {protocol}, {event}".to_string());
+                            return;
+                        }
+                    };
+                    let config = NotificationConfig {
+                        enabled: true,
+                        channels: vec![NotificationChannel::Shell {
+                            command: cmd.clone(),
+                        }],
+                        events: vec![
+                            NotificationEvent::DownloadComplete,
+                            NotificationEvent::DownloadFailed,
+                        ],
+                    };
+                    download_manager.set_notification_config(config);
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("🐚 Shell notification enabled: {}", cmd));
+                }
+                "log" => {
+                    let path = match value {
+                        Some(p) => p,
+                        None => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "Usage: /dlnotify log <path>".to_string());
+                            return;
+                        }
+                    };
+                    let config = NotificationConfig {
+                        enabled: true,
+                        channels: vec![NotificationChannel::LogFile {
+                            path: path.clone().into(),
+                        }],
+                        events: vec![
+                            NotificationEvent::DownloadComplete,
+                            NotificationEvent::DownloadFailed,
+                        ],
+                    };
+                    download_manager.set_notification_config(config);
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("📝 Log file notification enabled: {}", path),
+                    );
+                }
+                "webhook" => {
+                    let url = match value {
+                        Some(u) => u,
+                        None => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "Usage: /dlnotify webhook <url>".to_string(),
+                            );
+                            return;
+                        }
+                    };
+                    let config = NotificationConfig {
+                        enabled: true,
+                        channels: vec![NotificationChannel::Webhook {
+                            url: url.clone(),
+                            secret: None,
+                        }],
+                        events: vec![
+                            NotificationEvent::DownloadComplete,
+                            NotificationEvent::DownloadFailed,
+                        ],
+                    };
+                    download_manager.set_notification_config(config);
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("🔗 Webhook notification enabled: {}", url),
+                    );
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("Unknown action: {}. Use: enable, disable, desktop, shell, log, webhook, status", action));
+                }
             }
         }
         Command::Block { peer } => {

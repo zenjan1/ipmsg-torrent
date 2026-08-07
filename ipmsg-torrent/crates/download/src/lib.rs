@@ -12,6 +12,7 @@ pub mod download_history;
 pub mod ed2k;
 pub mod magnet;
 pub mod metadata_cache;
+pub mod notification;
 pub mod progress;
 pub mod rate_limiter;
 pub mod task_queue;
@@ -28,7 +29,11 @@ use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use download_history::{HistoryEntry, append_entry};
+use notification::{NotificationContext, NotificationDispatcher};
 
+pub use notification::{
+    NotificationChannel, NotificationConfig, NotificationError, NotificationEvent,
+};
 pub use rate_limiter::{DownloadRateController, RateLimiter};
 
 /// Download statistics snapshot.
@@ -160,7 +165,19 @@ pub enum DownloadState {
 
 /// Priority level for download tasks.
 /// Higher priority tasks are spawned first when concurrent limits are active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    Default,
+)]
 pub enum DownloadPriority {
     Low = 0,
     #[default]
@@ -229,43 +246,39 @@ pub enum TaskSortBy {
 impl TaskFilter {
     /// Returns true if the task matches all filter criteria.
     pub fn matches(&self, task: &DownloadTask) -> bool {
-        if let Some(ref query) = self.query {
-            if !task.name.to_lowercase().contains(&query.to_lowercase()) {
-                return false;
-            }
+        if let Some(ref query) = self.query
+            && !task.name.to_lowercase().contains(&query.to_lowercase())
+        {
+            return false;
         }
-        if let Some(state) = self.state {
-            if task.state != state {
-                return false;
-            }
+        if let Some(state) = self.state
+            && task.state != state
+        {
+            return false;
         }
-        if let Some(protocol) = self.protocol {
-            if task.protocol != protocol {
-                return false;
-            }
+        if let Some(protocol) = self.protocol
+            && task.protocol != protocol
+        {
+            return false;
         }
-        if let Some(ref tag) = self.tag {
-            if !task.tags.iter().any(|t| t == tag) {
-                return false;
-            }
+        if let Some(ref tag) = self.tag
+            && !task.tags.iter().any(|t| t == tag)
+        {
+            return false;
         }
         true
     }
 }
 
 /// Apply sort to a list of tasks.
-pub fn sort_tasks(tasks: &mut Vec<DownloadTask>, sort_by: TaskSortBy) {
+pub fn sort_tasks(tasks: &mut [DownloadTask], sort_by: TaskSortBy) {
     match sort_by {
-        TaskSortBy::CreatedDesc => tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
-        TaskSortBy::CreatedAsc => tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at)),
-        TaskSortBy::NameAsc => {
-            tasks.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        }
-        TaskSortBy::NameDesc => {
-            tasks.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase()))
-        }
-        TaskSortBy::SizeDesc => tasks.sort_by(|a, b| b.size.cmp(&a.size)),
-        TaskSortBy::SizeAsc => tasks.sort_by(|a, b| a.size.cmp(&b.size)),
+        TaskSortBy::CreatedDesc => tasks.sort_by_key(|b| std::cmp::Reverse(b.created_at)),
+        TaskSortBy::CreatedAsc => tasks.sort_by_key(|a| a.created_at),
+        TaskSortBy::NameAsc => tasks.sort_by_key(|a| a.name.to_lowercase()),
+        TaskSortBy::NameDesc => tasks.sort_by_key(|b| std::cmp::Reverse(b.name.to_lowercase())),
+        TaskSortBy::SizeDesc => tasks.sort_by_key(|b| std::cmp::Reverse(b.size)),
+        TaskSortBy::SizeAsc => tasks.sort_by_key(|a| a.size),
         TaskSortBy::ProgressDesc => tasks.sort_by(|a, b| {
             b.progress()
                 .partial_cmp(&a.progress())
@@ -390,6 +403,8 @@ pub struct DownloadManager {
     event_tx: broadcast::Sender<TaskEvent>,
     /// Notification channel for task completion (triggers scheduler)
     task_complete_notify: Arc<tokio::sync::Notify>,
+    /// Notification dispatcher for download completion/failure events
+    notifier: Arc<NotificationDispatcher>,
 }
 
 impl DownloadManager {
@@ -407,6 +422,7 @@ impl DownloadManager {
             max_retries: Arc::new(AtomicU32::new(3)),
             event_tx: broadcast::channel(128).0,
             task_complete_notify: Arc::new(tokio::sync::Notify::new()),
+            notifier: Arc::new(NotificationDispatcher::new(NotificationConfig::disabled())),
         };
         dm.start_scheduler();
         dm
@@ -423,14 +439,43 @@ impl DownloadManager {
         let _ = self.event_tx.send(event);
     }
 
-    /// Record a completed or failed task to download history.
-    fn record_task_history(task: &DownloadTask, data_dir: &std::path::Path) {
+    /// Record a completed or failed task to download history and send notifications.
+    fn record_task_history(
+        task: &DownloadTask,
+        data_dir: &std::path::Path,
+        notifier: Option<&Arc<NotificationDispatcher>>,
+    ) {
         if let Some(entry) = HistoryEntry::from_task(task) {
             let data_dir = data_dir.to_path_buf();
             // Spawn async to avoid blocking the caller
             tokio::spawn(async move {
                 if let Err(e) = append_entry(&data_dir, entry) {
                     tracing::warn!(error = %e, "Failed to record download history");
+                }
+            });
+        }
+
+        // Send notification
+        if let Some(notifier) = notifier {
+            let event = match task.state {
+                DownloadState::Complete => NotificationEvent::DownloadComplete,
+                DownloadState::Error => NotificationEvent::DownloadFailed,
+                _ => return,
+            };
+            let ctx = NotificationContext {
+                task_id: task.id.clone(),
+                name: task.name.clone(),
+                size: task.size,
+                downloaded: task.downloaded,
+                protocol: format!("{:?}", task.protocol),
+                save_path: task.save_path.display().to_string(),
+                error: task.error.clone(),
+                event,
+            };
+            let notifier = notifier.clone();
+            tokio::spawn(async move {
+                if let Err(e) = notifier.dispatch(&ctx).await {
+                    tracing::warn!(error = %e, "Failed to send download notification");
                 }
             });
         }
@@ -461,6 +506,7 @@ impl DownloadManager {
             max_retries: Arc::new(AtomicU32::new(3)),
             event_tx: broadcast::channel(128).0,
             task_complete_notify: Arc::new(tokio::sync::Notify::new()),
+            notifier: Arc::new(NotificationDispatcher::new(NotificationConfig::disabled())),
         };
         dm.start_scheduler();
         dm
@@ -478,6 +524,7 @@ impl DownloadManager {
         let dht = self.dht.clone();
         let rate_limiter = self.rate_limiter.clone();
         let max_concurrent = self.max_concurrent;
+        let notifier = self.notifier.clone();
 
         tokio::spawn(async move {
             loop {
@@ -558,6 +605,7 @@ impl DownloadManager {
                         let rate_limiter_clone = rate_limiter.clone();
                         let notify_clone = notify.clone();
                         let task_id_clone = task_id.clone();
+                        let notifier_clone = notifier.clone();
 
                         tokio::spawn(async move {
                             let result: Result<(), String> = match params {
@@ -566,9 +614,15 @@ impl DownloadManager {
                                         Ok(data) => match torrent::TorrentMeta::from_bytes(&data) {
                                             Ok(meta) => {
                                                 let download_dir = data_dir_clone.join("downloads");
-                                                let mut engine = torrent::TorrentEngine::new(meta, download_dir);
-                                                engine.set_rate_limiter(rate_limiter_clone.per_task().clone());
-                                                engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                                                let mut engine =
+                                                    torrent::TorrentEngine::new(meta, download_dir);
+                                                engine.set_rate_limiter(
+                                                    rate_limiter_clone.per_task().clone(),
+                                                );
+                                                engine
+                                                    .download(Some(cancel_clone))
+                                                    .await
+                                                    .map_err(|e| e.to_string())
                                             }
                                             Err(e) => Err(e.to_string()),
                                         },
@@ -590,7 +644,10 @@ impl DownloadManager {
                                         servers,
                                     );
                                     engine.set_rate_limiter(rate_limiter_clone.per_task().clone());
-                                    engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                                    engine
+                                        .download(Some(cancel_clone))
+                                        .await
+                                        .map_err(|e| e.to_string())
                                 }
                                 TaskParams::Xunlei {
                                     file_name,
@@ -605,7 +662,10 @@ impl DownloadManager {
                                         download_dir,
                                     );
                                     engine.set_rate_limiter(rate_limiter_clone.per_task().clone());
-                                    engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                                    engine
+                                        .download(Some(cancel_clone))
+                                        .await
+                                        .map_err(|e| e.to_string())
                                 }
                                 TaskParams::Magnet {
                                     info_hash,
@@ -614,19 +674,32 @@ impl DownloadManager {
                                 } => {
                                     let download_dir = data_dir_clone.join("downloads");
                                     let cache = metadata_cache::cache_dir();
-                                    let metadata_bytes = match metadata_cache::load_metadata(&cache, &info_hash) {
+                                    let metadata_bytes = match metadata_cache::load_metadata(
+                                        &cache, &info_hash,
+                                    ) {
                                         Ok(cached) => cached,
                                         Err(metadata_cache::CacheError::NotFound) => {
-                                            let peers = dht_clone.find_peers(info_hash).await.map_err(|e| e.to_string())?;
+                                            let peers = dht_clone
+                                                .find_peers(info_hash)
+                                                .await
+                                                .map_err(|e| e.to_string())?;
                                             if peers.is_empty() {
                                                 return Err("No peers found via DHT".to_string());
                                             }
-                                            let bytes = match dht_clone.fetch_metadata(info_hash).await {
+                                            let bytes = match dht_clone
+                                                .fetch_metadata(info_hash)
+                                                .await
+                                            {
                                                 Ok(b) => b,
                                                 Err(dht::DhtError::NotImplemented) => {
                                                     return Err("Magnet link metadata exchange not yet implemented".to_string());
                                                 }
-                                                Err(e) => return Err(format!("Failed to fetch metadata: {}", e)),
+                                                Err(e) => {
+                                                    return Err(format!(
+                                                        "Failed to fetch metadata: {}",
+                                                        e
+                                                    ));
+                                                }
                                             };
                                             if let Err(e) = metadata_cache::save_metadata(
                                                 &cache,
@@ -645,14 +718,22 @@ impl DownloadManager {
                                         Ok(meta) => {
                                             {
                                                 let mut t = tasks_clone.lock().await;
-                                                if let Some(task) = t.iter_mut().find(|t| t.id == task_id_clone) {
+                                                if let Some(task) =
+                                                    t.iter_mut().find(|t| t.id == task_id_clone)
+                                                {
                                                     task.name = meta.info.name.clone();
                                                     task.size = meta.total_size();
                                                 }
                                             }
-                                            let mut engine = torrent::TorrentEngine::new(meta, download_dir);
-                                            engine.set_rate_limiter(rate_limiter_clone.per_task().clone());
-                                            engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                                            let mut engine =
+                                                torrent::TorrentEngine::new(meta, download_dir);
+                                            engine.set_rate_limiter(
+                                                rate_limiter_clone.per_task().clone(),
+                                            );
+                                            engine
+                                                .download(Some(cancel_clone))
+                                                .await
+                                                .map_err(|e| e.to_string())
                                         }
                                         Err(e) => Err(format!("Failed to parse metadata: {}", e)),
                                     }
@@ -681,7 +762,11 @@ impl DownloadManager {
                                         task.state = DownloadState::Complete;
                                         task.downloaded = task.size;
                                         task.speed_bps = 0.0;
-                                        Self::record_task_history(task, &data_dir_clone);
+                                        Self::record_task_history(
+                                            task,
+                                            &data_dir_clone,
+                                            Some(&notifier_clone),
+                                        );
                                     }
                                     Err(e) => {
                                         let err_str = e.to_string();
@@ -692,7 +777,11 @@ impl DownloadManager {
                                         } else {
                                             task.state = DownloadState::Error;
                                             task.error = Some(err_str);
-                                            Self::record_task_history(task, &data_dir_clone);
+                                            Self::record_task_history(
+                                                task,
+                                                &data_dir_clone,
+                                                Some(&notifier_clone),
+                                            );
                                         }
                                         task.speed_bps = 0.0;
                                     }
@@ -745,6 +834,11 @@ impl DownloadManager {
     /// Set maximum retry attempts for timed-out downloads.
     pub fn set_max_retries(&self, retries: u32) {
         self.max_retries.store(retries, Ordering::Relaxed);
+    }
+
+    /// Set notification configuration for download completion/failure events.
+    pub fn set_notification_config(&self, config: NotificationConfig) {
+        self.notifier.update_config(config);
     }
 
     /// Get current running task count
@@ -1086,7 +1180,7 @@ impl DownloadManager {
                 task.downloaded = task.size;
                 task.speed_bps = 0.0;
                 task.updated_at = chrono::Utc::now();
-                Self::record_task_history(task, &self.data_dir);
+                Self::record_task_history(task, &self.data_dir, Some(&self.notifier));
             }
         }
 
@@ -1186,6 +1280,7 @@ impl DownloadManager {
         let task_generation = self.task_generation.clone();
         let rate_limiter = Some(self.rate_limiter.clone());
         let task_complete_notify = self.task_complete_notify.clone();
+        let notifier = self.notifier.clone();
 
         // Store task info for resume
         {
@@ -1389,7 +1484,7 @@ impl DownloadManager {
                         task.state = DownloadState::Complete;
                         task.downloaded = task.size;
                         task.speed_bps = 0.0;
-                        Self::record_task_history(task, &data_dir);
+                        Self::record_task_history(task, &data_dir, Some(&notifier));
                     }
                     Err(e) => {
                         let err_str = e.to_string();
@@ -1402,7 +1497,7 @@ impl DownloadManager {
                         } else {
                             task.state = DownloadState::Error;
                             task.error = Some(err_str);
-                            Self::record_task_history(task, &data_dir);
+                            Self::record_task_history(task, &data_dir, Some(&notifier));
                         }
                         task.speed_bps = 0.0;
                     }
@@ -1436,6 +1531,7 @@ impl DownloadManager {
         let rate_limiter = self.rate_limiter.clone();
         let timeout_secs = self.timeout_secs.load(Ordering::Relaxed);
         let max_retries = self.max_retries.load(Ordering::Relaxed);
+        let notifier = self.notifier.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -1566,6 +1662,7 @@ impl DownloadManager {
 
                                 let cancel_token = CancellationToken::new();
                                 let cancel_clone = cancel_token.clone();
+                                let notifier_clone = notifier.clone();
 
                                 // Register new running task
                                 {
@@ -1781,7 +1878,11 @@ impl DownloadManager {
                                                 task.state = DownloadState::Complete;
                                                 task.downloaded = task.size;
                                                 task.speed_bps = 0.0;
-                                                Self::record_task_history(task, &data_dir_clone);
+                                                Self::record_task_history(
+                                                    task,
+                                                    &data_dir_clone,
+                                                    Some(&notifier_clone),
+                                                );
                                             }
                                             Err(e) => {
                                                 let err_str = e.to_string();
@@ -1795,6 +1896,7 @@ impl DownloadManager {
                                                     Self::record_task_history(
                                                         task,
                                                         &data_dir_clone,
+                                                        Some(&notifier_clone),
                                                     );
                                                 }
                                                 task.speed_bps = 0.0;
@@ -2325,7 +2427,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -2340,7 +2442,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             });
         }
 
@@ -2447,7 +2549,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             });
         }
 
@@ -2855,7 +2957,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -2870,7 +2972,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -2885,7 +2987,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             },
         ];
 
@@ -2915,7 +3017,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -2930,7 +3032,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -2945,7 +3047,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             },
         ];
 
@@ -2971,7 +3073,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             },
             DownloadTask {
                 id: "p2".into(),
@@ -2986,7 +3088,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             },
             DownloadTask {
                 id: "p3".into(),
@@ -3001,7 +3103,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             },
         ];
 
@@ -3029,7 +3131,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3044,7 +3146,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             });
         }
 
@@ -3070,7 +3172,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3085,7 +3187,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3100,7 +3202,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             });
         }
 
@@ -3131,7 +3233,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3146,7 +3248,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3161,7 +3263,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+                priority: DownloadPriority::Normal,
             });
         }
 
@@ -3187,20 +3289,53 @@ mod tests {
 
     #[test]
     fn test_download_priority_from_str() {
-        assert_eq!(DownloadPriority::from_str_opt("high"), Some(DownloadPriority::High));
-        assert_eq!(DownloadPriority::from_str_opt("HIGH"), Some(DownloadPriority::High));
-        assert_eq!(DownloadPriority::from_str_opt("h"), Some(DownloadPriority::High));
-        assert_eq!(DownloadPriority::from_str_opt("2"), Some(DownloadPriority::High));
-        
-        assert_eq!(DownloadPriority::from_str_opt("normal"), Some(DownloadPriority::Normal));
-        assert_eq!(DownloadPriority::from_str_opt("n"), Some(DownloadPriority::Normal));
-        assert_eq!(DownloadPriority::from_str_opt("1"), Some(DownloadPriority::Normal));
-        assert_eq!(DownloadPriority::from_str_opt("default"), Some(DownloadPriority::Normal));
-        
-        assert_eq!(DownloadPriority::from_str_opt("low"), Some(DownloadPriority::Low));
-        assert_eq!(DownloadPriority::from_str_opt("l"), Some(DownloadPriority::Low));
-        assert_eq!(DownloadPriority::from_str_opt("0"), Some(DownloadPriority::Low));
-        
+        assert_eq!(
+            DownloadPriority::from_str_opt("high"),
+            Some(DownloadPriority::High)
+        );
+        assert_eq!(
+            DownloadPriority::from_str_opt("HIGH"),
+            Some(DownloadPriority::High)
+        );
+        assert_eq!(
+            DownloadPriority::from_str_opt("h"),
+            Some(DownloadPriority::High)
+        );
+        assert_eq!(
+            DownloadPriority::from_str_opt("2"),
+            Some(DownloadPriority::High)
+        );
+
+        assert_eq!(
+            DownloadPriority::from_str_opt("normal"),
+            Some(DownloadPriority::Normal)
+        );
+        assert_eq!(
+            DownloadPriority::from_str_opt("n"),
+            Some(DownloadPriority::Normal)
+        );
+        assert_eq!(
+            DownloadPriority::from_str_opt("1"),
+            Some(DownloadPriority::Normal)
+        );
+        assert_eq!(
+            DownloadPriority::from_str_opt("default"),
+            Some(DownloadPriority::Normal)
+        );
+
+        assert_eq!(
+            DownloadPriority::from_str_opt("low"),
+            Some(DownloadPriority::Low)
+        );
+        assert_eq!(
+            DownloadPriority::from_str_opt("l"),
+            Some(DownloadPriority::Low)
+        );
+        assert_eq!(
+            DownloadPriority::from_str_opt("0"),
+            Some(DownloadPriority::Low)
+        );
+
         assert_eq!(DownloadPriority::from_str_opt("invalid"), None);
     }
 
@@ -3241,13 +3376,13 @@ mod tests {
 
         // Set priority to High
         assert!(dm.set_priority("t1", DownloadPriority::High).await);
-        
+
         let task = dm.get_task("t1").await.unwrap();
         assert_eq!(task.priority, DownloadPriority::High);
 
         // Set priority to Low
         assert!(dm.set_priority("t1", DownloadPriority::Low).await);
-        
+
         let task = dm.get_task("t1").await.unwrap();
         assert_eq!(task.priority, DownloadPriority::Low);
 
