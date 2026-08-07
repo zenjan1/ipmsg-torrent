@@ -145,24 +145,21 @@ impl ProxyConfig {
             ProxyType::Http => "http",
         };
         match &self.auth {
-            Some(auth) => format!("{scheme}://{}:{}@{}:{}", auth.username, auth.password, self.host, self.port),
+            Some(auth) => format!(
+                "{scheme}://{}:{}@{}:{}",
+                auth.username, auth.password, self.host, self.port
+            ),
             None => format!("{scheme}://{}:{}", self.host, self.port),
         }
     }
 
     /// Build a `reqwest::Proxy` from this config
     pub fn to_reqwest_proxy(&self) -> Result<reqwest::Proxy, ProxyConfigError> {
-        let url = format!(
-            "{}://{}:{}",
-            self.proxy_type.label(),
-            self.host,
-            self.port
-        );
-        let mut proxy = reqwest::Proxy::all(&url)
-            .map_err(|e| ProxyConfigError::BuildFailed(e.to_string()))?;
+        let url = format!("{}://{}:{}", self.proxy_type.label(), self.host, self.port);
+        let mut proxy =
+            reqwest::Proxy::all(&url).map_err(|e| ProxyConfigError::BuildFailed(e.to_string()))?;
         if let Some(ref auth) = self.auth {
-            proxy = proxy
-                .basic_auth(&auth.username, &auth.password);
+            proxy = proxy.basic_auth(&auth.username, &auth.password);
         }
         Ok(proxy)
     }
@@ -286,10 +283,7 @@ mod tests {
             "user".into(),
             "pass".into(),
         );
-        assert_eq!(
-            cfg.to_url(),
-            "http://user:pass@proxy.example.com:8080"
-        );
+        assert_eq!(cfg.to_url(), "http://user:pass@proxy.example.com:8080");
     }
 
     #[test]

@@ -2280,7 +2280,10 @@ async fn handle_command(
             let download_manager = s.download_manager.clone();
             drop(s);
 
-            if url.to_lowercase() == "none" || url.to_lowercase() == "off" || url.to_lowercase() == "disable" {
+            if url.to_lowercase() == "none"
+                || url.to_lowercase() == "off"
+                || url.to_lowercase() == "disable"
+            {
                 download_manager.set_proxy(None).await;
                 let mut s = state.lock().await;
                 s.add_system_message("main", "✅ Proxy disabled.".to_string());
