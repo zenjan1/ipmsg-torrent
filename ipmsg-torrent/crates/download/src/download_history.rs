@@ -242,6 +242,7 @@ mod tests {
             bandwidth_weight: 1,
             queue_position: None,
             depends_on: Vec::new(),
+            notes: None,
         }
     }
 

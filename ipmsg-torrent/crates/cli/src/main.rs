@@ -216,6 +216,20 @@ enum Command {
     },
     /// Test proxy connection
     DlProxyTest,
+    /// Rename a download task
+    DlRename {
+        /// Task ID to rename
+        task_id: String,
+        /// New name for the task
+        new_name: String,
+    },
+    /// Set or clear notes/description for a download task
+    DlNotes {
+        /// Task ID to set notes for
+        task_id: String,
+        /// Notes text (empty or "clear" to remove notes)
+        notes: Option<String>,
+    },
     Block {
         peer: String,
     },
@@ -614,6 +628,40 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlproxy <url|test|none>".to_string())
             }
         }
+        "dlrename" | "dl-rename" | "dlrn" => {
+            // /dlrename <task_id> <new_name>
+            let args: Vec<&str> = input.splitn(3, ' ').collect();
+            if args.len() >= 3 {
+                Command::DlRename {
+                    task_id: args[1].to_string(),
+                    new_name: args[2].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlrename <task_id> <new_name>".to_string())
+            }
+        }
+        "dlnotes" | "dl-note" | "dlnote" => {
+            // /dlnotes <task_id> [notes_text|clear]
+            let args: Vec<&str> = input.splitn(3, ' ').collect();
+            if args.len() >= 2 {
+                let notes = if args.len() >= 3 {
+                    let n = args[2].trim();
+                    if n.eq_ignore_ascii_case("clear") || n.is_empty() {
+                        None
+                    } else {
+                        Some(n.to_string())
+                    }
+                } else {
+                    None
+                };
+                Command::DlNotes {
+                    task_id: args[1].to_string(),
+                    notes,
+                }
+            } else {
+                Command::Unknown("/dlnotes <task_id> [notes|clear]".to_string())
+            }
+        }
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -693,6 +741,8 @@ fn command_help() -> String {
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/dlpath <path>       - Set download save path (absolute path)",
         "/dlorganize <on|off> - Enable/disable auto-organize by file type",
+        "/dlrename <id> <name> - Rename a download task",
+        "/dlnotes <id> [text|clear] - Set or clear task notes/description",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -2548,6 +2598,59 @@ async fn handle_command(
                         "⚠️ No proxy configured. Use /dlproxy <url> to set one.".to_string(),
                     );
                 }
+            }
+        }
+        Command::DlRename { task_id, new_name } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if download_manager
+                .rename_task(&task_id, new_name.clone())
+                .await
+            {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    format!("✅ Task {} renamed to '{}'", task_id, new_name),
+                );
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    format!(
+                        "❌ Failed to rename task {} (not found or empty name)",
+                        task_id
+                    ),
+                );
+            }
+        }
+        Command::DlNotes { task_id, notes } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if download_manager
+                .set_task_notes(&task_id, notes.clone())
+                .await
+            {
+                let mut s = state.lock().await;
+                match notes {
+                    Some(n) => s.add_system_message(
+                        "main",
+                        format!("✅ Notes set for task {}: {}", task_id, n),
+                    ),
+                    None => s.add_system_message(
+                        "main",
+                        format!("✅ Notes cleared for task {}", task_id),
+                    ),
+                }
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    format!("❌ Failed to set notes for task {} (not found)", task_id),
+                );
             }
         }
         Command::Block { peer } => {

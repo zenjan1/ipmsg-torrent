@@ -794,6 +794,7 @@ mod tests {
                 priority: "normal".into(),
                 bandwidth_weight: 1,
                 depends_on: Vec::new(),
+                notes: None,
                 queue_position: None,
             },
         };
@@ -1269,6 +1270,7 @@ mod tests {
             bandwidth_weight: 1,
             queue_position: None,
             depends_on: vec!["task-0".into()],
+            notes: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

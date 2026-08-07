@@ -149,6 +149,7 @@ impl From<PersistedTask> for DownloadTask {
             bandwidth_weight: t.bandwidth_weight,
             queue_position: t.queue_position,
             depends_on: t.depends_on,
+            notes: None,
         }
     }
 }
@@ -252,6 +253,7 @@ mod tests {
             bandwidth_weight: 1,
             queue_position: None,
             depends_on: Vec::new(),
+            notes: None,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -308,6 +310,7 @@ mod tests {
                 bandwidth_weight: 1,
                 queue_position: None,
                 depends_on: Vec::new(),
+                notes: None,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -327,6 +330,7 @@ mod tests {
                 bandwidth_weight: 1,
                 queue_position: None,
                 depends_on: Vec::new(),
+                notes: None,
             },
         ];
 
@@ -375,6 +379,7 @@ mod tests {
             bandwidth_weight: 1,
             queue_position: None,
             depends_on: Vec::new(),
+            notes: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();

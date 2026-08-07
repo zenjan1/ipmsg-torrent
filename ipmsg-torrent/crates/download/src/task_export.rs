@@ -127,6 +127,7 @@ impl ExportedTask {
             bandwidth_weight: self.bandwidth_weight,
             queue_position: self.queue_position,
             depends_on: self.depends_on,
+            notes: None,
         }
     }
 }
@@ -241,6 +242,7 @@ mod tests {
             bandwidth_weight: 1,
             queue_position: None,
             depends_on: Vec::new(),
+            notes: None,
         }
     }
 
