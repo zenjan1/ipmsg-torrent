@@ -159,6 +159,11 @@ enum Command {
     },
     /// Show bandwidth monitoring dashboard
     DlBandwidthMon,
+    /// Show speed trend chart (sparkline)
+    DlChart {
+        /// Time window in seconds (default: 300 = 5 min)
+        window: Option<u64>,
+    },
     /// Move a task up/down in the queue or to top/bottom
     DlQueueMove {
         task_id: String,
@@ -209,6 +214,8 @@ enum Command {
         /// Proxy URL (e.g., "socks5://host:port", "http://user:pass@host:port") or "none"
         url: String,
     },
+    /// Test proxy connection
+    DlProxyTest,
     Block {
         peer: String,
     },
@@ -490,6 +497,14 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dlbwmon" | "dl-bandwidth-mon" | "dlbwm" => Command::DlBandwidthMon,
+        "dlchart" | "dl-chart" | "dlc" => {
+            let window = if parts.len() > 1 {
+                parts[1].parse::<u64>().ok()
+            } else {
+                None
+            };
+            Command::DlChart { window }
+        }
         "dlqmove" | "dl-queue-move" | "dlqm" => {
             // /dlqmove <task_id> <up|down|top|bottom>
             let args: Vec<&str> = input.split_whitespace().collect();
@@ -588,11 +603,15 @@ fn parse_command(input: &str) -> Command {
         }
         "dlproxy" | "dl-proxy" | "dlpx" => {
             if parts.len() >= 2 {
-                Command::DlProxy {
-                    url: parts[1].to_string(),
+                if parts[1] == "test" {
+                    Command::DlProxyTest
+                } else {
+                    Command::DlProxy {
+                        url: parts[1].to_string(),
+                    }
                 }
             } else {
-                Command::Unknown("/dlproxy <url|none>".to_string())
+                Command::Unknown("/dlproxy <url|test|none>".to_string())
             }
         }
         "block" => {
@@ -665,7 +684,7 @@ fn command_help() -> String {
         "/dlpriority <id> <high|normal|low> - Set download task priority",
         "/dlbw <id> <1-10>    - Set bandwidth weight (higher = more bandwidth)",
         "/dlbwmon           - Show bandwidth monitoring dashboard",
-        "/dlproxy <url|none> - Configure download proxy (e.g., socks5://127.0.0.1:1080)",
+        "/dlproxy <url|test|none> - Configure download proxy (e.g., socks5://127.0.0.1:1080) or test connection",
         "/dlqmove <id> <up|down|top|bottom> - Move task in queue",
         "/dlddeps <id> <dep1,dep2,...|none> - Set task dependencies",
         "/dlexport <path> [desc] - Export tasks to JSON file",
@@ -2087,6 +2106,70 @@ async fn handle_command(
             let mut s = state.lock().await;
             s.add_system_message("main", lines.join("\n"));
         }
+        Command::DlChart { window } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let window_secs = window.unwrap_or(300);
+            let history = download_manager.bandwidth_monitor().history().await;
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let cutoff = now.saturating_sub(window_secs);
+
+            let samples: Vec<_> = history
+                .into_iter()
+                .filter(|s| s.timestamp >= cutoff)
+                .collect();
+
+            let mut lines = Vec::new();
+            lines.push(format!("📈 Speed Trend (last {}s)", window_secs));
+            lines.push("═".repeat(60));
+
+            if samples.len() < 2 {
+                lines.push("No data yet".to_string());
+            } else {
+                // Calculate stats
+                let speeds: Vec<f64> = samples.iter().map(|s| s.download_bps).collect();
+                let max_speed = speeds.iter().cloned().fold(0.0f64, f64::max);
+                let avg_speed = speeds.iter().sum::<f64>() / speeds.len() as f64;
+                let total_bytes = samples
+                    .iter()
+                    .map(|s| s.download_bps * 10.0 / 8.0)
+                    .sum::<f64>() as u64;
+
+                lines.push(format!(
+                    "Avg: {}/s  Peak: {}/s  Samples: {}  Est. Total: {}",
+                    format_speed(avg_speed),
+                    format_speed(max_speed),
+                    samples.len(),
+                    format_size(total_bytes)
+                ));
+                lines.push(String::new());
+
+                // Sparkline chart
+                let sparkline = generate_sparkline(&speeds, 50);
+                lines.push(sparkline);
+
+                // Time range
+                let start_time = chrono::DateTime::from_timestamp(samples[0].timestamp as i64, 0)
+                    .map(|dt| dt.format("%H:%M:%S").to_string())
+                    .unwrap_or_default();
+                let end_time = chrono::DateTime::from_timestamp(
+                    samples[samples.len() - 1].timestamp as i64,
+                    0,
+                )
+                .map(|dt| dt.format("%H:%M:%S").to_string())
+                .unwrap_or_default();
+                lines.push(format!("{} → {}", start_time, end_time));
+            }
+
+            let mut s = state.lock().await;
+            s.add_system_message("main", lines.join("\n"));
+        }
         Command::DlQueueMove { task_id, direction } => {
             let s = state.lock().await;
             let download_manager = s.download_manager.clone();
@@ -2427,6 +2510,46 @@ async fn handle_command(
                 );
             }
         }
+        Command::DlProxyTest => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let mut s = state.lock().await;
+            s.add_system_message("main", "🔍 Testing proxy connection...".to_string());
+            drop(s);
+
+            let result = download_manager.test_proxy_connection().await;
+            let mut s = state.lock().await;
+
+            match result {
+                Some(test_result) => {
+                    if test_result.success {
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "✅ Proxy connection successful! Latency: {}ms",
+                                test_result.latency_ms.unwrap_or(0)
+                            ),
+                        );
+                    } else {
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "❌ Proxy connection failed: {}",
+                                test_result.error.as_deref().unwrap_or("unknown error")
+                            ),
+                        );
+                    }
+                }
+                None => {
+                    s.add_system_message(
+                        "main",
+                        "⚠️ No proxy configured. Use /dlproxy <url> to set one.".to_string(),
+                    );
+                }
+            }
+        }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {
                 peer_id: peer.clone(),
@@ -2618,6 +2741,42 @@ fn parse_timeout(input: &str) -> Option<u64> {
     }
 
     Some((num * multiplier as f64) as u64)
+}
+
+/// Generate a sparkline chart from a list of values, fitting into max_width columns
+fn generate_sparkline(values: &[f64], max_width: usize) -> String {
+    const BARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if values.is_empty() {
+        return String::new();
+    }
+    // Downsample if more values than max_width
+    let sampled: Vec<f64> = if values.len() > max_width {
+        let step = values.len() as f64 / max_width as f64;
+        (0..max_width)
+            .map(|i| {
+                let start = (i as f64 * step) as usize;
+                let end = ((i + 1) as f64 * step) as usize;
+                let slice = &values[start..end.min(values.len())];
+                slice.iter().sum::<f64>() / slice.len() as f64
+            })
+            .collect()
+    } else {
+        values.to_vec()
+    };
+    let min = sampled.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = sampled.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let range = max - min;
+    sampled
+        .iter()
+        .map(|&v| {
+            let idx = if range <= 0.0 {
+                0
+            } else {
+                ((v - min) / range * (BARS.len() - 1) as f64).round() as usize
+            };
+            BARS[idx.min(BARS.len() - 1)]
+        })
+        .collect()
 }
 
 /// Format bytes/sec into human-readable speed string
@@ -3022,6 +3181,18 @@ mod save_path_tests {
     fn test_parse_dlproxy_alias() {
         let cmd = parse_command("/dlpx http://proxy:8080");
         assert!(matches!(cmd, Command::DlProxy { url } if url == "http://proxy:8080"));
+    }
+
+    #[test]
+    fn test_parse_dlproxy_test() {
+        let cmd = parse_command("/dlproxy test");
+        assert!(matches!(cmd, Command::DlProxyTest));
+    }
+
+    #[test]
+    fn test_parse_dlproxy_test_alias() {
+        let cmd = parse_command("/dlpx test");
+        assert!(matches!(cmd, Command::DlProxyTest));
     }
 
     #[test]

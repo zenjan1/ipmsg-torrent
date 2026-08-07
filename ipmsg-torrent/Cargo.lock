@@ -2642,6 +2642,7 @@ dependencies = [
 name = "ipmsg-cli"
 version = "2.4.0"
 dependencies = [
+ "chrono",
  "clap",
  "crossterm",
  "futures",

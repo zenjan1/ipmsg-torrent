@@ -122,10 +122,12 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/batch/remove-failed", post(remove_failed))
         .route("/api/batch-import", post(batch_import))
         .route("/api/bandwidth", get(get_bandwidth))
+        .route("/api/bandwidth/history", get(get_bandwidth_history))
         .route("/api/deps", get(get_deps))
         .route("/api/proxy", get(get_proxy))
         .route("/api/proxy", post(set_proxy))
         .route("/api/proxy/disable", post(disable_proxy))
+        .route("/api/proxy/test", post(test_proxy))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -306,6 +308,53 @@ async fn get_bandwidth(State(state): State<Arc<WebState>>) -> Json<crate::Bandwi
         .dashboard(task_speeds)
         .await;
     Json(dashboard)
+}
+
+/// Query parameters for bandwidth history
+#[derive(Debug, Deserialize)]
+pub struct BandwidthHistoryQuery {
+    /// Time window in seconds (default: 3600 = 1 hour)
+    pub window: Option<u64>,
+    /// Maximum number of samples to return (default: all in window)
+    pub limit: Option<usize>,
+}
+
+/// Response for bandwidth history
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BandwidthHistoryResponse {
+    pub samples: Vec<crate::BandwidthSample>,
+    pub window_secs: u64,
+    pub sample_count: usize,
+}
+
+/// Get bandwidth history samples for charting
+async fn get_bandwidth_history(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<BandwidthHistoryQuery>,
+) -> Json<BandwidthHistoryResponse> {
+    let window_secs = params.window.unwrap_or(3600);
+    let limit = params.limit.unwrap_or(usize::MAX);
+
+    let history = state.manager.bandwidth_monitor().history().await;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let cutoff = now.saturating_sub(window_secs);
+
+    let samples: Vec<crate::BandwidthSample> = history
+        .into_iter()
+        .filter(|s| s.timestamp >= cutoff)
+        .take(limit)
+        .collect();
+
+    let sample_count = samples.len();
+    Json(BandwidthHistoryResponse {
+        samples,
+        window_secs,
+        sample_count,
+    })
 }
 
 /// Dependency graph node for API response
@@ -538,6 +587,23 @@ async fn disable_proxy(State(state): State<Arc<WebState>>) -> Json<TaskResponse>
         task_id: None,
         message: "Proxy disabled".to_string(),
     })
+}
+
+/// Test proxy connection
+async fn test_proxy(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let result = state.manager.test_proxy_connection().await;
+    match result {
+        Some(test_result) => {
+            let mut value = serde_json::to_value(&test_result).unwrap_or_default();
+            value["display"] = serde_json::Value::String(test_result.format_display());
+            Json(value)
+        }
+        None => Json(serde_json::json!({
+            "success": false,
+            "error": "No proxy configured",
+            "display": "No proxy configured"
+        })),
+    }
 }
 
 /// WebSocket upgrade handler
@@ -1066,6 +1132,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_proxy_test_no_proxy() {
+        let state = test_state();
+        let app = create_router(state);
+
+        // Test proxy when none is configured
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/proxy/test")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["success"], false);
+        assert_eq!(resp["error"], "No proxy configured");
+    }
+
+    #[tokio::test]
     async fn test_get_deps_empty() {
         let state = test_state();
         let app = create_router(state);
@@ -1087,6 +1179,53 @@ mod tests {
         let resp: DepGraphResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(resp.nodes.len(), 0);
         assert_eq!(resp.edges.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_bandwidth_history() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/bandwidth/history")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: BandwidthHistoryResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp.window_secs, 3600);
+        assert_eq!(resp.sample_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_bandwidth_history_with_window() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/bandwidth/history?window=300&limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: BandwidthHistoryResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp.window_secs, 300);
     }
 
     #[tokio::test]

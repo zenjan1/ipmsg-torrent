@@ -70,6 +70,15 @@
         .proxy-result { font-size: 12px; margin-top: 8px; }
         .proxy-result.success { color: #40c057; }
         .proxy-result.error { color: #ff6b6b; }
+        .chart-panel { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        .chart-panel summary { cursor: pointer; color: #00d4ff; font-weight: bold; margin-bottom: 10px; }
+        .chart-controls { display: flex; gap: 8px; margin-bottom: 10px; }
+        .chart-btn { padding: 4px 12px; border: 1px solid #333; border-radius: 4px; background: #0f3460; color: #eee; cursor: pointer; font-size: 12px; }
+        .chart-btn:hover { background: #1a4a80; }
+        .chart-btn.active { background: #00d4ff; color: #1a1a2e; font-weight: bold; }
+        #speed-chart { width: 100%; height: 200px; background: #0f3460; border-radius: 4px; }
+        .chart-stats { font-size: 12px; color: #888; margin-top: 8px; display: flex; gap: 20px; flex-wrap: wrap; }
+        .chart-stats span { color: #00d4ff; }
         .dep-panel { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
         .dep-panel summary { cursor: pointer; color: #00d4ff; font-weight: bold; margin-bottom: 10px; }
         .dep-graph { position: relative; overflow-x: auto; padding: 10px 0; }
@@ -139,6 +148,17 @@
                 <button class="proxy-btn-disable" onclick="disableProxy()">Disable</button>
             </div>
             <div class="proxy-result" id="proxy-result"></div>
+        </details>
+        <details class="chart-panel" id="chart-panel">
+            <summary>📈 Speed Trend Chart</summary>
+            <div class="chart-controls">
+                <button class="chart-btn active" data-window="300" onclick="setChartWindow(300, this)">5m</button>
+                <button class="chart-btn" data-window="900" onclick="setChartWindow(900, this)">15m</button>
+                <button class="chart-btn" data-window="3600" onclick="setChartWindow(3600, this)">1h</button>
+                <button class="chart-btn" data-window="0" onclick="setChartWindow(0, this)">All</button>
+            </div>
+            <canvas id="speed-chart" width="860" height="200"></canvas>
+            <div class="chart-stats" id="chart-stats">No data yet</div>
         </details>
         <details class="dep-panel" id="dep-panel">
             <summary>🔗 Dependency Graph</summary>
@@ -548,6 +568,136 @@
             if (!confirm('Remove all failed downloads?')) return;
             await fetch('/api/batch/remove-failed', { method: 'POST' });
         }
+
+        // --- Speed Trend Chart ---
+        let chartWindow = 300;
+        let chartData = [];
+
+        function setChartWindow(window, btn) {
+            chartWindow = window;
+            document.querySelectorAll('.chart-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            loadSpeedChart();
+        }
+
+        async function loadSpeedChart() {
+            try {
+                const url = chartWindow > 0
+                    ? `/api/bandwidth/history?window=${chartWindow}`
+                    : '/api/bandwidth/history';
+                const resp = await fetch(url);
+                const data = await resp.json();
+                chartData = data.samples || [];
+                renderSpeedChart();
+            } catch (e) {
+                console.warn('Failed to load speed chart:', e);
+            }
+        }
+
+        function renderSpeedChart() {
+            const canvas = document.getElementById('speed-chart');
+            const ctx = canvas.getContext('2d');
+            const statsEl = document.getElementById('chart-stats');
+
+            // Set canvas size to match display size
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+
+            // Clear canvas
+            ctx.fillStyle = '#0f3460';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            if (chartData.length < 2) {
+                ctx.fillStyle = '#666';
+                ctx.font = '14px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('No data yet', canvas.width / 2, canvas.height / 2);
+                statsEl.textContent = 'No data yet';
+                return;
+            }
+
+            // Calculate stats
+            const speeds = chartData.map(s => s.download_bps);
+            const maxSpeed = Math.max(...speeds);
+            const avgSpeed = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+            const totalBytes = chartData.reduce((sum, s) => {
+                // Estimate bytes: speed * interval (assume 10s intervals)
+                return sum + (s.download_bps * 10 / 8);
+            }, 0);
+
+            // Draw chart
+            const padding = { top: 20, right: 20, bottom: 30, left: 60 };
+            const chartWidth = canvas.width - padding.left - padding.right;
+            const chartHeight = canvas.height - padding.top - padding.bottom;
+
+            // Draw grid lines
+            ctx.strokeStyle = '#1a4a80';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 4; i++) {
+                const y = padding.top + (chartHeight * i / 4);
+                ctx.beginPath();
+                ctx.moveTo(padding.left, y);
+                ctx.lineTo(canvas.width - padding.right, y);
+                ctx.stroke();
+
+                // Y-axis labels
+                const speed = maxSpeed * (1 - i / 4);
+                ctx.fillStyle = '#888';
+                ctx.font = '11px sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText(formatSpeed(speed), padding.left - 8, y + 4);
+            }
+
+            // Draw speed line
+            ctx.strokeStyle = '#00d4ff';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+
+            const timeRange = chartData[chartData.length - 1].timestamp - chartData[0].timestamp;
+            chartData.forEach((sample, i) => {
+                const x = padding.left + (chartWidth * (sample.timestamp - chartData[0].timestamp) / timeRange);
+                const y = padding.top + chartHeight * (1 - sample.download_bps / maxSpeed);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Draw gradient fill
+            const gradient = ctx.createLinearGradient(0, padding.top, 0, canvas.height - padding.bottom);
+            gradient.addColorStop(0, 'rgba(0, 212, 255, 0.3)');
+            gradient.addColorStop(1, 'rgba(0, 212, 255, 0)');
+            ctx.fillStyle = gradient;
+            ctx.lineTo(padding.left + chartWidth, padding.top + chartHeight);
+            ctx.lineTo(padding.left, padding.top + chartHeight);
+            ctx.closePath();
+            ctx.fill();
+
+            // X-axis time labels
+            ctx.fillStyle = '#888';
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'center';
+            const startTime = new Date(chartData[0].timestamp * 1000);
+            const endTime = new Date(chartData[chartData.length - 1].timestamp * 1000);
+            ctx.fillText(formatTime(startTime), padding.left, canvas.height - 8);
+            ctx.fillText(formatTime(endTime), canvas.width - padding.right, canvas.height - 8);
+
+            // Update stats
+            statsEl.innerHTML = `
+                <div>Avg: <span>${formatSpeed(avgSpeed)}</span></div>
+                <div>Peak: <span>${formatSpeed(maxSpeed)}</span></div>
+                <div>Samples: <span>${chartData.length}</span></div>
+                <div>Est. Total: <span>${formatSize(totalBytes)}</span></div>
+            `;
+        }
+
+        function formatTime(date) {
+            return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+        }
+
+        // Load chart on init and refresh periodically
+        loadSpeedChart();
+        setInterval(loadSpeedChart, 10000);
     </script>
 </body>
 </html>

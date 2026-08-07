@@ -1115,6 +1115,21 @@ impl DownloadManager {
         self.proxy_config.read().await.clone()
     }
 
+    /// Test the current proxy connection.
+    /// Returns a ProxyTestResult indicating whether the proxy is reachable.
+    pub async fn test_proxy_connection(&self) -> Option<proxy::ProxyTestResult> {
+        let proxy_cfg = self.proxy_config.read().await.clone();
+        match proxy_cfg {
+            Some(cfg) => Some(cfg.test_connection().await),
+            None => None,
+        }
+    }
+
+    /// Test a specific proxy configuration (does not need to be set as current).
+    pub async fn test_proxy_config(config: &proxy::ProxyConfig) -> proxy::ProxyTestResult {
+        config.test_connection().await
+    }
+
     /// Set the base download directory.
     pub async fn set_save_path(&self, path: PathBuf) {
         self.save_path_manager.set_base_dir(path).await;
