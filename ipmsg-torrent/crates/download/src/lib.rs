@@ -154,6 +154,101 @@ pub enum DownloadState {
     Error,
 }
 
+/// Filter criteria for listing download tasks.
+/// All fields are AND-combined; None fields are ignored.
+#[derive(Debug, Clone, Default)]
+pub struct TaskFilter {
+    /// Substring search in task name (case-insensitive)
+    pub query: Option<String>,
+    /// Filter by download state
+    pub state: Option<DownloadState>,
+    /// Filter by protocol
+    pub protocol: Option<DownloadProtocol>,
+    /// Filter by tag (exact match)
+    pub tag: Option<String>,
+}
+
+/// Sort criteria for listing download tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskSortBy {
+    /// Sort by creation time (newest first)
+    CreatedDesc,
+    /// Sort by creation time (oldest first)
+    CreatedAsc,
+    /// Sort by name (A-Z)
+    NameAsc,
+    /// Sort by name (Z-A)
+    NameDesc,
+    /// Sort by file size (largest first)
+    SizeDesc,
+    /// Sort by file size (smallest first)
+    SizeAsc,
+    /// Sort by progress (highest first)
+    ProgressDesc,
+    /// Sort by progress (lowest first)
+    ProgressAsc,
+    /// Sort by speed (fastest first)
+    SpeedDesc,
+}
+
+impl TaskFilter {
+    /// Returns true if the task matches all filter criteria.
+    pub fn matches(&self, task: &DownloadTask) -> bool {
+        if let Some(ref query) = self.query {
+            if !task.name.to_lowercase().contains(&query.to_lowercase()) {
+                return false;
+            }
+        }
+        if let Some(state) = self.state {
+            if task.state != state {
+                return false;
+            }
+        }
+        if let Some(protocol) = self.protocol {
+            if task.protocol != protocol {
+                return false;
+            }
+        }
+        if let Some(ref tag) = self.tag {
+            if !task.tags.iter().any(|t| t == tag) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Apply sort to a list of tasks.
+pub fn sort_tasks(tasks: &mut Vec<DownloadTask>, sort_by: TaskSortBy) {
+    match sort_by {
+        TaskSortBy::CreatedDesc => tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+        TaskSortBy::CreatedAsc => tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at)),
+        TaskSortBy::NameAsc => {
+            tasks.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        }
+        TaskSortBy::NameDesc => {
+            tasks.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase()))
+        }
+        TaskSortBy::SizeDesc => tasks.sort_by(|a, b| b.size.cmp(&a.size)),
+        TaskSortBy::SizeAsc => tasks.sort_by(|a, b| a.size.cmp(&b.size)),
+        TaskSortBy::ProgressDesc => tasks.sort_by(|a, b| {
+            b.progress()
+                .partial_cmp(&a.progress())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        TaskSortBy::ProgressAsc => tasks.sort_by(|a, b| {
+            a.progress()
+                .partial_cmp(&b.progress())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        TaskSortBy::SpeedDesc => tasks.sort_by(|a, b| {
+            b.speed_bps
+                .partial_cmp(&a.speed_bps)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+    }
+}
+
 impl DownloadTask {
     pub fn progress(&self) -> f32 {
         if self.size == 0 {
@@ -1430,6 +1525,26 @@ impl DownloadManager {
         self.tasks.lock().await.clone()
     }
 
+    /// List tasks with optional filtering and sorting.
+    pub async fn list_tasks_filtered(
+        &self,
+        filter: TaskFilter,
+        sort_by: Option<TaskSortBy>,
+    ) -> Vec<DownloadTask> {
+        let mut tasks: Vec<DownloadTask> = self
+            .tasks
+            .lock()
+            .await
+            .iter()
+            .filter(|t| filter.matches(t))
+            .cloned()
+            .collect();
+        if let Some(sort_by) = sort_by {
+            sort_tasks(&mut tasks, sort_by);
+        }
+        tasks
+    }
+
     /// Get task by ID
     pub async fn get_task(&self, task_id: &str) -> Option<DownloadTask> {
         self.tasks
@@ -2191,5 +2306,493 @@ mod tests {
             tags: Vec::new(),
         };
         assert!(task.tags.is_empty());
+    }
+
+    // ── Phase 15: TaskFilter & TaskSortBy tests ──
+
+    #[test]
+    fn test_task_filter_matches_query() {
+        let task = DownloadTask {
+            id: "f1".into(),
+            name: "Ubuntu 24.04.iso".into(),
+            protocol: DownloadProtocol::Torrent,
+            size: 4_000_000_000,
+            downloaded: 1_000_000_000,
+            state: DownloadState::Downloading,
+            error: None,
+            speed_bps: 500_000.0,
+            save_path: std::path::PathBuf::from("/tmp"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            tags: vec!["linux".into()],
+        };
+
+        // Query match (case-insensitive)
+        let filter = TaskFilter {
+            query: Some("ubuntu".into()),
+            ..Default::default()
+        };
+        assert!(filter.matches(&task));
+
+        let filter = TaskFilter {
+            query: Some("UBUNTU".into()),
+            ..Default::default()
+        };
+        assert!(filter.matches(&task));
+
+        // Query no match
+        let filter = TaskFilter {
+            query: Some("debian".into()),
+            ..Default::default()
+        };
+        assert!(!filter.matches(&task));
+    }
+
+    #[test]
+    fn test_task_filter_matches_state() {
+        let task = DownloadTask {
+            id: "f2".into(),
+            name: "file.txt".into(),
+            protocol: DownloadProtocol::Ed2k,
+            size: 1000,
+            downloaded: 500,
+            state: DownloadState::Paused,
+            error: None,
+            speed_bps: 0.0,
+            save_path: std::path::PathBuf::from("/tmp"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            tags: Vec::new(),
+        };
+
+        let filter = TaskFilter {
+            state: Some(DownloadState::Paused),
+            ..Default::default()
+        };
+        assert!(filter.matches(&task));
+
+        let filter = TaskFilter {
+            state: Some(DownloadState::Downloading),
+            ..Default::default()
+        };
+        assert!(!filter.matches(&task));
+    }
+
+    #[test]
+    fn test_task_filter_matches_protocol() {
+        let task = DownloadTask {
+            id: "f3".into(),
+            name: "file.txt".into(),
+            protocol: DownloadProtocol::Xunlei,
+            size: 1000,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: std::path::PathBuf::from("/tmp"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            tags: Vec::new(),
+        };
+
+        let filter = TaskFilter {
+            protocol: Some(DownloadProtocol::Xunlei),
+            ..Default::default()
+        };
+        assert!(filter.matches(&task));
+
+        let filter = TaskFilter {
+            protocol: Some(DownloadProtocol::Torrent),
+            ..Default::default()
+        };
+        assert!(!filter.matches(&task));
+    }
+
+    #[test]
+    fn test_task_filter_matches_tag() {
+        let task = DownloadTask {
+            id: "f4".into(),
+            name: "movie.mkv".into(),
+            protocol: DownloadProtocol::Torrent,
+            size: 2_000_000_000,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: std::path::PathBuf::from("/tmp"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            tags: vec!["movies".into(), "action".into()],
+        };
+
+        let filter = TaskFilter {
+            tag: Some("movies".into()),
+            ..Default::default()
+        };
+        assert!(filter.matches(&task));
+
+        let filter = TaskFilter {
+            tag: Some("work".into()),
+            ..Default::default()
+        };
+        assert!(!filter.matches(&task));
+    }
+
+    #[test]
+    fn test_task_filter_combined() {
+        let task = DownloadTask {
+            id: "f5".into(),
+            name: "linux.iso".into(),
+            protocol: DownloadProtocol::Torrent,
+            size: 1000,
+            downloaded: 500,
+            state: DownloadState::Downloading,
+            error: None,
+            speed_bps: 100.0,
+            save_path: std::path::PathBuf::from("/tmp"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            tags: vec!["linux".into()],
+        };
+
+        // All criteria match
+        let filter = TaskFilter {
+            query: Some("linux".into()),
+            state: Some(DownloadState::Downloading),
+            protocol: Some(DownloadProtocol::Torrent),
+            tag: Some("linux".into()),
+        };
+        assert!(filter.matches(&task));
+
+        // Query matches but state doesn't
+        let filter = TaskFilter {
+            query: Some("linux".into()),
+            state: Some(DownloadState::Paused),
+            protocol: Some(DownloadProtocol::Torrent),
+            tag: Some("linux".into()),
+        };
+        assert!(!filter.matches(&task));
+    }
+
+    #[test]
+    fn test_sort_tasks_by_name() {
+        let mut tasks = vec![
+            DownloadTask {
+                id: "s1".into(),
+                name: "Zebra.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 100,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            },
+            DownloadTask {
+                id: "s2".into(),
+                name: "apple.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 200,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            },
+            DownloadTask {
+                id: "s3".into(),
+                name: "Mango.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 300,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            },
+        ];
+
+        sort_tasks(&mut tasks, TaskSortBy::NameAsc);
+        assert_eq!(tasks[0].name, "apple.txt");
+        assert_eq!(tasks[1].name, "Mango.txt");
+        assert_eq!(tasks[2].name, "Zebra.txt");
+
+        sort_tasks(&mut tasks, TaskSortBy::NameDesc);
+        assert_eq!(tasks[0].name, "Zebra.txt");
+        assert_eq!(tasks[2].name, "apple.txt");
+    }
+
+    #[test]
+    fn test_sort_tasks_by_size() {
+        let mut tasks = vec![
+            DownloadTask {
+                id: "s1".into(),
+                name: "small".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 100,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            },
+            DownloadTask {
+                id: "s2".into(),
+                name: "big".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 9000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            },
+            DownloadTask {
+                id: "s3".into(),
+                name: "medium".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 500,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            },
+        ];
+
+        sort_tasks(&mut tasks, TaskSortBy::SizeDesc);
+        assert_eq!(tasks[0].size, 9000);
+        assert_eq!(tasks[1].size, 500);
+        assert_eq!(tasks[2].size, 100);
+    }
+
+    #[test]
+    fn test_sort_tasks_by_progress() {
+        let mut tasks = vec![
+            DownloadTask {
+                id: "p1".into(),
+                name: "a".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 100, // 10%
+                state: DownloadState::Downloading,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            },
+            DownloadTask {
+                id: "p2".into(),
+                name: "b".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 900, // 90%
+                state: DownloadState::Downloading,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            },
+            DownloadTask {
+                id: "p3".into(),
+                name: "c".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 500, // 50%
+                state: DownloadState::Downloading,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            },
+        ];
+
+        sort_tasks(&mut tasks, TaskSortBy::ProgressDesc);
+        assert_eq!(tasks[0].id, "p2");
+        assert_eq!(tasks[1].id, "p3");
+        assert_eq!(tasks[2].id, "p1");
+    }
+
+    #[tokio::test]
+    async fn test_list_tasks_filtered_no_filter() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_filtered_empty"));
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "t1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            });
+            tasks.push(DownloadTask {
+                id: "t2".into(),
+                name: "file2.txt".into(),
+                protocol: DownloadProtocol::Ed2k,
+                size: 2000,
+                downloaded: 1000,
+                state: DownloadState::Downloading,
+                error: None,
+                speed_bps: 100.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            });
+        }
+
+        let all = dm.list_tasks_filtered(TaskFilter::default(), None).await;
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_tasks_filtered_by_query() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_filtered_query"));
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "t1".into(),
+                name: "Ubuntu.iso".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            });
+            tasks.push(DownloadTask {
+                id: "t2".into(),
+                name: "Fedora.iso".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 2000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            });
+            tasks.push(DownloadTask {
+                id: "t3".into(),
+                name: "Debian.iso".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 500,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            });
+        }
+
+        let filter = TaskFilter {
+            query: Some("ubuntu".into()),
+            ..Default::default()
+        };
+        let result = dm.list_tasks_filtered(filter, None).await;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Ubuntu.iso");
+    }
+
+    #[tokio::test]
+    async fn test_list_tasks_filtered_by_state_and_sorted() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_filtered_state"));
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "t1".into(),
+                name: "big.iso".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 5000,
+                downloaded: 0,
+                state: DownloadState::Paused,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            });
+            tasks.push(DownloadTask {
+                id: "t2".into(),
+                name: "small.iso".into(),
+                protocol: DownloadProtocol::Ed2k,
+                size: 100,
+                downloaded: 100,
+                state: DownloadState::Complete,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            });
+            tasks.push(DownloadTask {
+                id: "t3".into(),
+                name: "medium.iso".into(),
+                protocol: DownloadProtocol::Xunlei,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Paused,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            });
+        }
+
+        // Filter by Paused, sort by size descending
+        let filter = TaskFilter {
+            state: Some(DownloadState::Paused),
+            ..Default::default()
+        };
+        let result = dm
+            .list_tasks_filtered(filter, Some(TaskSortBy::SizeDesc))
+            .await;
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "big.iso");
+        assert_eq!(result[1].name, "medium.iso");
     }
 }

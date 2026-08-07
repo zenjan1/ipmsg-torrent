@@ -119,6 +119,19 @@ enum Command {
     DlTags {
         tag: Option<String>,
     },
+    /// Search/filter/sort download tasks
+    DlFind {
+        /// Search query (substring match in name, case-insensitive)
+        query: Option<String>,
+        /// Filter by state: running, paused, completed, error, queued
+        state_filter: Option<String>,
+        /// Filter by protocol: torrent, ed2k, xunlei, magnet, p2p
+        protocol: Option<String>,
+        /// Sort by: name, size, progress, speed, created (default: created)
+        sort: Option<String>,
+        /// Sort ascending (default: descending for most fields)
+        asc: bool,
+    },
     Block {
         peer: String,
     },
@@ -310,6 +323,37 @@ fn parse_command(input: &str) -> Command {
             let tag = parts.get(1).map(|s| s.to_string());
             Command::DlTags { tag }
         }
+        "dlfind" | "dl-find" | "dlf" => {
+            // /dlfind [query] [--state=running] [--protocol=torrent] [--sort=name] [--asc]
+            let args: Vec<&str> = input.split_whitespace().collect();
+            let mut query: Option<String> = None;
+            let mut state_filter: Option<String> = None;
+            let mut protocol: Option<String> = None;
+            let mut sort: Option<String> = None;
+            let mut asc = false;
+            for arg in args.iter().skip(1) {
+                if let Some(val) = arg.strip_prefix("--state=") {
+                    state_filter = Some(val.to_string());
+                } else if let Some(val) = arg.strip_prefix("--protocol=") {
+                    protocol = Some(val.to_string());
+                } else if let Some(val) = arg.strip_prefix("--sort=") {
+                    sort = Some(val.to_string());
+                } else if *arg == "--asc" {
+                    asc = true;
+                } else if query.is_none() && !arg.starts_with("--") {
+                    query = Some(arg.to_string());
+                } else {
+                    // Unknown flag, ignore
+                }
+            }
+            Command::DlFind {
+                query,
+                state_filter,
+                protocol,
+                sort,
+                asc,
+            }
+        }
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -376,6 +420,7 @@ fn command_help() -> String {
         "/dltag <id> <tags>   - Add tags to a download (comma-separated)",
         "/dluntag <id> <tags> - Remove tags from a download",
         "/dltags [tag]    - List all tags, or filter tasks by tag",
+        "/dlfind [query] [--state=X] [--protocol=X] [--sort=X] [--asc] - Search/filter downloads",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -1358,6 +1403,95 @@ async fn handle_command(
                 } else {
                     s.add_system_message("main", format!("All tags: {}", tags.join(", ")));
                 }
+            }
+        }
+        Command::DlFind {
+            query,
+            state_filter,
+            protocol,
+            sort,
+            asc,
+        } => {
+            use ipmsg_download::{DownloadProtocol, DownloadState, TaskFilter, TaskSortBy};
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let filter = TaskFilter {
+                query,
+                state: state_filter
+                    .as_deref()
+                    .and_then(|s| match s.to_lowercase().as_str() {
+                        "running" | "downloading" => Some(DownloadState::Downloading),
+                        "paused" => Some(DownloadState::Paused),
+                        "completed" | "complete" => Some(DownloadState::Complete),
+                        "error" | "failed" => Some(DownloadState::Error),
+                        "queued" => Some(DownloadState::Queued),
+                        _ => None,
+                    }),
+                protocol: protocol
+                    .as_deref()
+                    .and_then(|p| match p.to_lowercase().as_str() {
+                        "torrent" => Some(DownloadProtocol::Torrent),
+                        "ed2k" => Some(DownloadProtocol::Ed2k),
+                        "xunlei" | "http" | "ftp" => Some(DownloadProtocol::Xunlei),
+                        "magnet" => Some(DownloadProtocol::Magnet),
+                        "p2p" => Some(DownloadProtocol::P2P),
+                        _ => None,
+                    }),
+                tag: None,
+            };
+
+            let sort_by = sort.as_deref().map(|s| match s.to_lowercase().as_str() {
+                "name" => {
+                    if asc {
+                        TaskSortBy::NameAsc
+                    } else {
+                        TaskSortBy::NameDesc
+                    }
+                }
+                "size" => {
+                    if asc {
+                        TaskSortBy::SizeAsc
+                    } else {
+                        TaskSortBy::SizeDesc
+                    }
+                }
+                "progress" => {
+                    if asc {
+                        TaskSortBy::ProgressAsc
+                    } else {
+                        TaskSortBy::ProgressDesc
+                    }
+                }
+                "speed" => TaskSortBy::SpeedDesc,
+                "created" => {
+                    if asc {
+                        TaskSortBy::CreatedAsc
+                    } else {
+                        TaskSortBy::CreatedDesc
+                    }
+                }
+                _ => {
+                    if asc {
+                        TaskSortBy::CreatedAsc
+                    } else {
+                        TaskSortBy::CreatedDesc
+                    }
+                }
+            });
+
+            let tasks = download_manager.list_tasks_filtered(filter, sort_by).await;
+            let mut s = state.lock().await;
+            if tasks.is_empty() {
+                s.add_system_message("main", "No matching download tasks".to_string());
+            } else {
+                let msg = format!(
+                    "Found {} task(s):\n{}",
+                    tasks.len(),
+                    format_task_list(&tasks)
+                );
+                s.add_system_message("main", msg);
             }
         }
         Command::Block { peer } => {
