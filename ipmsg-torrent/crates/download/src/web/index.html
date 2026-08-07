@@ -22,6 +22,15 @@
         .add-form input { flex: 1; padding: 10px; border: 1px solid #333; border-radius: 4px; background: #0f3460; color: #eee; font-size: 14px; }
         .add-form button { padding: 10px 20px; border: none; border-radius: 4px; background: #00d4ff; color: #1a1a2e; font-weight: bold; cursor: pointer; }
         .add-form button:hover { background: #00b8d4; }
+        .batch-import { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        .batch-import summary { cursor: pointer; color: #00d4ff; font-weight: bold; margin-bottom: 10px; }
+        .batch-import textarea { width: 100%; height: 100px; padding: 10px; border: 1px solid #333; border-radius: 4px; background: #0f3460; color: #eee; font-size: 13px; font-family: monospace; resize: vertical; margin-bottom: 10px; }
+        .batch-import .batch-import-actions { display: flex; gap: 10px; align-items: center; }
+        .batch-import button { padding: 8px 16px; border: none; border-radius: 4px; background: #00d4ff; color: #1a1a2e; font-weight: bold; cursor: pointer; }
+        .batch-import button:hover { background: #00b8d4; }
+        .batch-import .import-result { font-size: 12px; color: #888; margin-left: 10px; }
+        .import-result.success { color: #40c057; }
+        .import-result.partial { color: #ffa500; }
         .task-list { display: flex; flex-direction: column; gap: 10px; }
         .task { background: #16213e; padding: 15px; border-radius: 8px; }
         .task-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
@@ -85,6 +94,14 @@
             <input type="text" id="url-input" placeholder="Enter URL, magnet link, or torrent path...">
             <button onclick="addDownload()">Add Download</button>
         </div>
+        <details class="batch-import">
+            <summary>📋 Batch Import (paste multiple URLs)</summary>
+            <textarea id="batch-input" placeholder="Paste URLs here, one per line. Supports HTTP, FTP, magnet links, ed2k links.&#10;Lines starting with # are treated as comments.&#10;&#10;Example:&#10;https://example.com/file1.zip&#10;magnet:?xt=urn:btih:abc123...&#10;ed2k://|file|name|size|hash|/"></textarea>
+            <div class="batch-import-actions">
+                <button onclick="batchImport()">Import All</button>
+                <span id="import-result" class="import-result"></span>
+            </div>
+        </details>
         <div class="task-list" id="task-list">
             <div class="empty">No downloads yet</div>
         </div>
@@ -270,6 +287,42 @@
         async function removeTask(id) {
             if (!confirm('Remove this task?')) return;
             await fetch(`/api/tasks/${id}/remove`, { method: 'POST' });
+        }
+
+        // --- Batch import ---
+        async function batchImport() {
+            const textarea = document.getElementById('batch-input');
+            const resultSpan = document.getElementById('import-result');
+            const text = textarea.value.trim();
+            if (!text) return;
+
+            const urls = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            if (urls.length === 0) return;
+
+            resultSpan.textContent = 'Importing...';
+            resultSpan.className = 'import-result';
+
+            try {
+                const resp = await fetch('/api/batch-import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ urls })
+                });
+                const data = await resp.json();
+
+                if (data.failed === 0) {
+                    resultSpan.textContent = `✓ Imported ${data.added} URLs`;
+                    resultSpan.className = 'import-result success';
+                } else {
+                    resultSpan.textContent = `⚠ ${data.added} added, ${data.skipped} skipped, ${data.failed} failed`;
+                    resultSpan.className = 'import-result partial';
+                }
+
+                textarea.value = '';
+            } catch (e) {
+                resultSpan.textContent = '✗ Import failed: ' + e.message;
+                resultSpan.className = 'import-result partial';
+            }
         }
 
         // --- Init ---

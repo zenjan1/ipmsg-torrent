@@ -74,6 +74,23 @@ pub struct AddDownloadRequest {
     pub url: String,
 }
 
+/// Request to batch import multiple URLs
+#[derive(Debug, Deserialize)]
+pub struct BatchImportRequest {
+    pub urls: Vec<String>,
+}
+
+/// Response for batch import
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BatchImportResponse {
+    pub success: bool,
+    pub total: usize,
+    pub added: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub message: String,
+}
+
 /// Response for task operations
 #[derive(Debug, Serialize)]
 pub struct TaskResponse {
@@ -100,6 +117,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/batch/resume-all", post(resume_all))
         .route("/api/batch/remove-completed", post(remove_completed))
         .route("/api/batch/remove-failed", post(remove_failed))
+        .route("/api/batch-import", post(batch_import))
         .route("/api/bandwidth", get(get_bandwidth))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
@@ -205,6 +223,43 @@ async fn add_download(
             message: format!("Failed to add download: {}", e),
         })),
     }
+}
+
+/// Batch import multiple URLs
+async fn batch_import(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<BatchImportRequest>,
+) -> Json<BatchImportResponse> {
+    let results = state.manager.import_urls(&req.urls).await;
+
+    let mut added = 0;
+    let mut skipped = 0;
+    let mut failed = 0;
+
+    for result in &results {
+        match result.outcome {
+            crate::ImportOutcome::Added(_) => added += 1,
+            crate::ImportOutcome::SkippedDuplicate => skipped += 1,
+            crate::ImportOutcome::Failed(_) => failed += 1,
+        }
+    }
+
+    let total = results.len();
+    let success = failed == 0;
+    let message = if success {
+        format!("Successfully imported {} URLs", added)
+    } else {
+        format!("Imported {} URLs, {} failed", added, failed)
+    };
+
+    Json(BatchImportResponse {
+        success,
+        total,
+        added,
+        skipped,
+        failed,
+        message,
+    })
 }
 
 /// Get server status
@@ -618,5 +673,59 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_batch_import_empty() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/batch-import")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"urls":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: BatchImportResponse = serde_json::from_slice(&body).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.total, 0);
+        assert_eq!(resp.added, 0);
+        assert_eq!(resp.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_batch_import_unsupported_urls() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/batch-import")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"urls":["ftp://invalid","mailto://bad"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: BatchImportResponse = serde_json::from_slice(&body).unwrap();
+        // Both should fail since we can't actually connect
+        assert_eq!(resp.total, 2);
     }
 }
