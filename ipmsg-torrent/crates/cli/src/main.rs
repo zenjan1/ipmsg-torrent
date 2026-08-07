@@ -181,6 +181,21 @@ enum Command {
         /// Action: "disabled", "exit", or "shell:<command>"
         action: String,
     },
+    /// Set download save path
+    DlPath {
+        /// Path to save downloads to (e.g., /home/user/downloads)
+        path: String,
+    },
+    /// Enable/disable auto-organize by file type
+    DlOrganize {
+        /// "on" to enable, "off" to disable
+        enabled: String,
+    },
+    /// Configure download proxy (e.g., "socks5://127.0.0.1:1080" or "none" to disable)
+    DlProxy {
+        /// Proxy URL (e.g., "socks5://host:port", "http://user:pass@host:port") or "none"
+        url: String,
+    },
     Block {
         peer: String,
     },
@@ -513,6 +528,37 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlautoshutdown <disabled|exit|shell:<command>>".to_string())
             }
         }
+        "dlpath" | "dl-path" | "dlsp" => {
+            // /dlpath <path>
+            let args: Vec<&str> = input.splitn(2, ' ').collect();
+            if args.len() >= 2 {
+                Command::DlPath {
+                    path: args[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlpath <path>".to_string())
+            }
+        }
+        "dlorganize" | "dl-organize" | "dlorg" => {
+            // /dlorganize <on|off>
+            let args: Vec<&str> = input.splitn(2, ' ').collect();
+            if args.len() >= 2 {
+                Command::DlOrganize {
+                    enabled: args[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlorganize <on|off>".to_string())
+            }
+        }
+        "dlproxy" | "dl-proxy" | "dlpx" => {
+            if parts.len() >= 2 {
+                Command::DlProxy {
+                    url: parts[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlproxy <url|none>".to_string())
+            }
+        }
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -583,10 +629,13 @@ fn command_help() -> String {
         "/dlpriority <id> <high|normal|low> - Set download task priority",
         "/dlbw <id> <1-10>    - Set bandwidth weight (higher = more bandwidth)",
         "/dlbwmon           - Show bandwidth monitoring dashboard",
+        "/dlproxy <url|none> - Configure download proxy (e.g., socks5://127.0.0.1:1080)",
         "/dlqmove <id> <up|down|top|bottom> - Move task in queue",
         "/dlddeps <id> <dep1,dep2,...|none> - Set task dependencies",
         "/dlautoshutdown <disabled|exit|shell:<cmd>> - Auto-shutdown when all downloads complete",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
+        "/dlpath <path>       - Set download save path (absolute path)",
+        "/dlorganize <on|off> - Enable/disable auto-organize by file type",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -2179,6 +2228,77 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlPath { path } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let path = std::path::PathBuf::from(path);
+            if !path.is_absolute() {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    "❌ Path must be absolute (e.g., /home/user/downloads)".to_string(),
+                );
+                return;
+            }
+
+            download_manager.set_save_path(path.clone()).await;
+            let mut s = state.lock().await;
+            s.add_system_message(
+                "main",
+                format!("✅ Download save path set to: {}", path.display()),
+            );
+        }
+        Command::DlOrganize { enabled } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match enabled.to_lowercase().as_str() {
+                "on" | "true" | "1" | "yes" => {
+                    download_manager.set_auto_organize(true).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ Auto-organize enabled. Files will be sorted by type.".to_string(),
+                    );
+                }
+                "off" | "false" | "0" | "no" => {
+                    download_manager.set_auto_organize(false).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "✅ Auto-organize disabled.".to_string());
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "❌ Usage: /dlorganize <on|off>".to_string());
+                }
+            }
+        }
+        Command::DlProxy { url } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if url.to_lowercase() == "none" || url.to_lowercase() == "off" || url.to_lowercase() == "disable" {
+                download_manager.set_proxy(None).await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", "✅ Proxy disabled.".to_string());
+            } else if let Ok(proxy_cfg) = ipmsg_download::proxy::ProxyConfig::parse(&url) {
+                download_manager.set_proxy(Some(proxy_cfg.clone())).await;
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    format!("✅ Proxy configured: {}", proxy_cfg.to_url()),
+                );
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    "❌ Invalid proxy URL. Examples: socks5://127.0.0.1:1080, http://user:pass@proxy:8080".to_string(),
+                );
+            }
+        }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {
                 peer_id: peer.clone(),
@@ -2721,5 +2841,66 @@ mod tests {
         assert!(help.contains("/dlrmcompleted"));
         assert!(help.contains("/dlrmfailed"));
         assert!(help.contains("/dlstats"));
+    }
+}
+
+#[cfg(test)]
+mod save_path_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_dlpath_command() {
+        let cmd = parse_command("/dlpath /home/user/downloads");
+        assert!(matches!(cmd, Command::DlPath { path } if path == "/home/user/downloads"));
+    }
+
+    #[test]
+    fn test_parse_dlpath_command_alias() {
+        let cmd = parse_command("/dlsp /data/downloads");
+        assert!(matches!(cmd, Command::DlPath { path } if path == "/data/downloads"));
+    }
+
+    #[test]
+    fn test_parse_dlorganize_on() {
+        let cmd = parse_command("/dlorganize on");
+        assert!(matches!(cmd, Command::DlOrganize { enabled } if enabled == "on"));
+    }
+
+    #[test]
+    fn test_parse_dlorganize_off() {
+        let cmd = parse_command("/dlorganize off");
+        assert!(matches!(cmd, Command::DlOrganize { enabled } if enabled == "off"));
+    }
+
+    #[test]
+    fn test_parse_dlorganize_alias() {
+        let cmd = parse_command("/dlorg yes");
+        assert!(matches!(cmd, Command::DlOrganize { enabled } if enabled == "yes"));
+    }
+
+    #[test]
+    fn test_parse_dlproxy() {
+        let cmd = parse_command("/dlproxy socks5://127.0.0.1:1080");
+        assert!(matches!(cmd, Command::DlProxy { url } if url == "socks5://127.0.0.1:1080"));
+    }
+
+    #[test]
+    fn test_parse_dlproxy_none() {
+        let cmd = parse_command("/dlproxy none");
+        assert!(matches!(cmd, Command::DlProxy { url } if url == "none"));
+    }
+
+    #[test]
+    fn test_parse_dlproxy_alias() {
+        let cmd = parse_command("/dlpx http://proxy:8080");
+        assert!(matches!(cmd, Command::DlProxy { url } if url == "http://proxy:8080"));
+    }
+
+    #[test]
+    fn test_help_contains_save_path_commands() {
+        let help = command_help();
+        assert!(help.contains("/dlpath"));
+        assert!(help.contains("/dlorganize"));
+        assert!(help.contains("/dlproxy"));
     }
 }

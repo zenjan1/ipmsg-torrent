@@ -17,7 +17,9 @@ pub mod magnet;
 pub mod metadata_cache;
 pub mod notification;
 pub mod progress;
+pub mod proxy;
 pub mod rate_limiter;
+pub mod save_path_manager;
 pub mod task_queue;
 pub mod torrent;
 pub mod web;
@@ -45,6 +47,7 @@ pub use notification::{
     NotificationChannel, NotificationConfig, NotificationError, NotificationEvent,
 };
 pub use rate_limiter::{DownloadRateController, RateLimiter};
+pub use save_path_manager::{FileCategory, SavePathConfig, SavePathError, SavePathManager};
 
 /// Download statistics snapshot.
 /// Aggregated from all tasks for dashboard display.
@@ -512,10 +515,15 @@ pub struct DownloadManager {
     bandwidth_monitor: Arc<BandwidthMonitor>,
     /// Auto-shutdown configuration
     auto_shutdown: Arc<tokio::sync::RwLock<AutoShutdownConfig>>,
+    /// Save path manager for download directory configuration
+    save_path_manager: Arc<SavePathManager>,
+    /// Proxy configuration for HTTP/HTTPS downloads
+    proxy_config: Arc<tokio::sync::RwLock<Option<proxy::ProxyConfig>>>,
 }
 
 impl DownloadManager {
     pub fn new(data_dir: PathBuf) -> Self {
+        let save_path = data_dir.join("downloads");
         let dm = Self {
             tasks: Arc::new(Mutex::new(Vec::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
@@ -532,6 +540,8 @@ impl DownloadManager {
             notifier: Arc::new(NotificationDispatcher::new(NotificationConfig::disabled())),
             bandwidth_monitor: Arc::new(BandwidthMonitor::new()),
             auto_shutdown: Arc::new(tokio::sync::RwLock::new(AutoShutdownConfig::default())),
+            save_path_manager: Arc::new(SavePathManager::new(save_path)),
+            proxy_config: Arc::new(tokio::sync::RwLock::new(None)),
         };
         dm.start_scheduler();
         dm
@@ -607,6 +617,7 @@ impl DownloadManager {
             }
         }
 
+        let save_path = data_dir.join("downloads");
         let dm = Self {
             tasks: Arc::new(Mutex::new(tasks)),
             running: Arc::new(Mutex::new(HashMap::new())),
@@ -623,6 +634,8 @@ impl DownloadManager {
             notifier: Arc::new(NotificationDispatcher::new(NotificationConfig::disabled())),
             bandwidth_monitor: Arc::new(BandwidthMonitor::new()),
             auto_shutdown: Arc::new(tokio::sync::RwLock::new(AutoShutdownConfig::default())),
+            save_path_manager: Arc::new(SavePathManager::new(save_path)),
+            proxy_config: Arc::new(tokio::sync::RwLock::new(None)),
         };
         dm.start_scheduler();
         dm
@@ -1072,6 +1085,49 @@ impl DownloadManager {
         shutdown.clone()
     }
 
+    /// Get the save path manager for download directory configuration.
+    pub fn save_path_manager(&self) -> &Arc<SavePathManager> {
+        &self.save_path_manager
+    }
+
+    /// Set proxy configuration for HTTP/HTTPS downloads.
+    /// Pass None to disable proxy.
+    pub async fn set_proxy(&self, config: Option<proxy::ProxyConfig>) {
+        *self.proxy_config.write().await = config;
+    }
+
+    /// Get the current proxy configuration.
+    pub async fn get_proxy(&self) -> Option<proxy::ProxyConfig> {
+        self.proxy_config.read().await.clone()
+    }
+
+    /// Set the base download directory.
+    pub async fn set_save_path(&self, path: PathBuf) {
+        self.save_path_manager.set_base_dir(path).await;
+    }
+
+    /// Get the current base download directory.
+    pub async fn get_save_path(&self) -> PathBuf {
+        self.save_path_manager.get_config().await.base_dir
+    }
+
+    /// Enable or disable auto-organization by file type.
+    pub async fn set_auto_organize(&self, enabled: bool) {
+        self.save_path_manager.set_auto_organize(enabled).await;
+    }
+
+    /// Check if auto-organization is enabled.
+    pub async fn is_auto_organize(&self) -> bool {
+        self.save_path_manager.get_config().await.auto_organize
+    }
+
+    /// Set custom directory name for a file category.
+    pub async fn set_category_dir(&self, category: FileCategory, dir_name: String) {
+        self.save_path_manager
+            .set_category_dir(category, dir_name)
+            .await;
+    }
+
     /// Set a time window schedule for a download task.
     /// The task will only download during the specified time window.
     /// Pass None to remove the schedule and allow continuous downloading.
@@ -1230,7 +1286,7 @@ impl DownloadManager {
             state: DownloadState::Queued,
             error: None,
             speed_bps: 0.0,
-            save_path: self.data_dir.join("downloads"),
+            save_path: self.save_path_manager.get_save_path("").await,
             created_at: now,
             updated_at: now,
             tags: Vec::new(),
@@ -1280,7 +1336,7 @@ impl DownloadManager {
             state: DownloadState::Queued,
             error: None,
             speed_bps: 0.0,
-            save_path: self.data_dir.join("downloads"),
+            save_path: self.save_path_manager.get_save_path("").await,
             created_at: now,
             updated_at: now,
             tags: Vec::new(),
@@ -1330,7 +1386,7 @@ impl DownloadManager {
             state: DownloadState::Queued,
             error: None,
             speed_bps: 0.0,
-            save_path: self.data_dir.join("downloads"),
+            save_path: self.save_path_manager.get_save_path("").await,
             created_at: now,
             updated_at: now,
             tags: Vec::new(),
@@ -1378,7 +1434,7 @@ impl DownloadManager {
             state: DownloadState::Queued,
             error: None,
             speed_bps: 0.0,
-            save_path: self.data_dir.join("downloads"),
+            save_path: self.save_path_manager.get_save_path("").await,
             created_at: now,
             updated_at: now,
             tags: Vec::new(),
@@ -1426,7 +1482,7 @@ impl DownloadManager {
             state: DownloadState::Downloading,
             error: None,
             speed_bps: 0.0,
-            save_path: self.data_dir.join("downloads"),
+            save_path: self.save_path_manager.get_save_path("").await,
             created_at: now,
             updated_at: now,
             tags: Vec::new(),
@@ -1575,10 +1631,16 @@ impl DownloadManager {
     /// Add an HTTP/FTP URL download (auto-detects file size via HEAD)
     pub async fn add_url(&self, url: &str) -> Result<String, DownloadManagerError> {
         // HEAD request to get file size and name
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| DownloadManagerError::Io(e.to_string()))?;
+        let proxy_cfg = self.proxy_config.read().await.clone();
+        let client = if let Some(ref pcfg) = proxy_cfg {
+            pcfg.build_client(std::time::Duration::from_secs(15))
+                .map_err(|e| DownloadManagerError::Io(e.to_string()))?
+        } else {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(|e| DownloadManagerError::Io(e.to_string()))?
+        };
 
         let head_resp = client
             .head(url)
