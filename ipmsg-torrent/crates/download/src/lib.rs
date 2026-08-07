@@ -875,6 +875,7 @@ impl DownloadManager {
                                         engine.set_rate_limiter(
                                             rate_limiter_clone.per_task().clone(),
                                         );
+                                        engine.set_proxy_config(proxy_config_clone);
                                         engine
                                             .download(Some(cancel_clone))
                                             .await
@@ -1877,6 +1878,7 @@ impl DownloadManager {
                     if let Some(ref limiter) = rate_limiter {
                         engine.set_rate_limiter(limiter.per_task().clone());
                     }
+                    engine.set_proxy_config(proxy_config_for_spawn);
                     engine
                         .download(Some(cancel_clone))
                         .await
@@ -2285,6 +2287,7 @@ impl DownloadManager {
                                             engine.set_rate_limiter(
                                                 rate_limiter_clone.per_task().clone(),
                                             );
+                                            engine.set_proxy_config(proxy_config_clone);
                                             engine
                                                 .download(Some(cancel_clone))
                                                 .await

@@ -1,11 +1,16 @@
 //! eDonkey TCP client for server and peer connections
 
 use super::protocol::Ed2kFileHash;
+use crate::proxy::{ProxyConfig, ProxyType};
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
+
+/// Trait alias for async stream (read + write + send + sync + unpin)
+trait AsyncStream: AsyncRead + AsyncWrite + Send + Sync + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncStream for T {}
 
 /// Search type for Ed2k search requests
 #[derive(Debug, Clone, Copy)]
@@ -24,22 +29,72 @@ pub enum Ed2kClientError {
     Timeout,
     #[error("protocol error: {0}")]
     Protocol(String),
+    #[error("proxy error: {0}")]
+    Proxy(String),
 }
 
 /// eDonkey client connection
 pub struct Ed2kClient {
-    stream: TcpStream,
+    stream: Box<dyn AsyncStream>,
     #[allow(dead_code)]
     addr: SocketAddr,
 }
 
 impl Ed2kClient {
-    /// Connect to an eDonkey server or peer
+    /// Connect to an eDonkey server or peer directly (no proxy)
     pub async fn connect(addr: SocketAddr) -> Result<Self, Ed2kClientError> {
         let stream = timeout(Duration::from_secs(10), TcpStream::connect(addr))
             .await
             .map_err(|_| Ed2kClientError::Timeout)?
             .map_err(Ed2kClientError::Io)?;
+
+        Ok(Self {
+            stream: Box::new(stream),
+            addr,
+        })
+    }
+
+    /// Connect to an eDonkey server or peer through a proxy.
+    ///
+    /// SOCKS5 proxies are supported natively; HTTP CONNECT proxies
+    /// are not supported for raw TCP (Ed2k) connections and will
+    /// return an error.
+    pub async fn connect_with_proxy(
+        addr: SocketAddr,
+        proxy: &ProxyConfig,
+    ) -> Result<Self, Ed2kClientError> {
+        let stream: Box<dyn AsyncStream> = match proxy.proxy_type {
+            ProxyType::Socks5 => {
+                let proxy_addr = format!("{}:{}", proxy.host, proxy.port);
+                let target = tokio_socks::TargetAddr::Ip(addr);
+
+                let socks_stream = if let Some(ref auth) = proxy.auth {
+                    let fut = tokio_socks::tcp::Socks5Stream::connect_with_password(
+                        proxy_addr.as_str(),
+                        target,
+                        auth.username.as_str(),
+                        auth.password.as_str(),
+                    );
+                    timeout(Duration::from_secs(15), fut)
+                        .await
+                        .map_err(|_| Ed2kClientError::Timeout)?
+                        .map_err(|e| Ed2kClientError::Proxy(e.to_string()))?
+                } else {
+                    let fut = tokio_socks::tcp::Socks5Stream::connect(proxy_addr.as_str(), target);
+                    timeout(Duration::from_secs(15), fut)
+                        .await
+                        .map_err(|_| Ed2kClientError::Timeout)?
+                        .map_err(|e| Ed2kClientError::Proxy(e.to_string()))?
+                };
+
+                Box::new(socks_stream)
+            }
+            ProxyType::Http => {
+                return Err(Ed2kClientError::Proxy(
+                    "HTTP CONNECT proxies are not supported for Ed2k connections".to_string(),
+                ));
+            }
+        };
 
         Ok(Self { stream, addr })
     }
@@ -225,5 +280,58 @@ impl Ed2kClient {
     #[allow(dead_code)]
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy::{ProxyConfig, ProxyType};
+
+    #[tokio::test]
+    async fn test_connect_with_http_proxy_returns_error() {
+        // HTTP CONNECT proxies are not supported for Ed2k TCP connections
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let proxy = ProxyConfig::new(ProxyType::Http, "127.0.0.1".into(), 8080);
+        let result = Ed2kClient::connect_with_proxy(addr, &proxy).await;
+        assert!(result.is_err());
+        match result {
+            Err(Ed2kClientError::Proxy(msg)) => {
+                assert!(msg.contains("HTTP CONNECT"));
+            }
+            _ => panic!("Expected Proxy error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connect_with_socks5_proxy_connection_refused() {
+        // SOCKS5 proxy that doesn't exist — should get a proxy/IO error, not a panic
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let proxy = ProxyConfig::new(ProxyType::Socks5, "127.0.0.1".into(), 19999);
+        let result = Ed2kClient::connect_with_proxy(addr, &proxy).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_connect_with_socks5_proxy_with_auth_connection_refused() {
+        // SOCKS5 proxy with auth credentials — connection refused expected
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let proxy = ProxyConfig::with_auth(
+            ProxyType::Socks5,
+            "127.0.0.1".into(),
+            19999,
+            "user".into(),
+            "pass".into(),
+        );
+        let result = Ed2kClient::connect_with_proxy(addr, &proxy).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_connect_direct_connection_refused() {
+        // Direct connect to a port that shouldn't be open
+        let addr: SocketAddr = "127.0.0.1:19999".parse().unwrap();
+        let result = Ed2kClient::connect(addr).await;
+        assert!(result.is_err());
     }
 }

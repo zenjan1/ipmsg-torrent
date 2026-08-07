@@ -5,6 +5,7 @@ use super::peer_cache;
 use super::protocol::{ED2K_BLOCK_SIZE, ED2K_CHUNK_SIZE, Ed2kFileHash};
 use super::server_cache;
 use crate::progress::{self, ProgressSnapshot};
+use crate::proxy::ProxyConfig;
 use crate::rate_limiter::RateLimiter;
 use md4::{Digest, Md4};
 use std::collections::{HashMap, HashSet};
@@ -92,6 +93,8 @@ pub struct Ed2kEngine {
     cached_servers: Vec<SocketAddr>,
     /// Optional rate limiter for speed control
     rate_limiter: Option<RateLimiter>,
+    /// Optional proxy configuration for server/peer connections
+    proxy_config: Option<ProxyConfig>,
 }
 
 impl Ed2kEngine {
@@ -182,6 +185,7 @@ impl Ed2kEngine {
             cached_peers,
             cached_servers,
             rate_limiter: None,
+            proxy_config: None,
         }
     }
 
@@ -203,6 +207,11 @@ impl Ed2kEngine {
     /// Set rate limiter for speed control
     pub fn set_rate_limiter(&mut self, limiter: RateLimiter) {
         self.rate_limiter = Some(limiter);
+    }
+
+    /// Set proxy configuration for server and peer connections
+    pub fn set_proxy_config(&mut self, config: Option<ProxyConfig>) {
+        self.proxy_config = config;
     }
 
     /// Update chunk hash from peer's HashSet message
@@ -288,9 +297,15 @@ impl Ed2kEngine {
     }
 
     async fn connect_server(&mut self, addr: SocketAddr) -> Result<(), Ed2kDownloadError> {
-        let mut client = Ed2kClient::connect(addr)
-            .await
-            .map_err(|e| Ed2kDownloadError::Server(e.to_string()))?;
+        let mut client = if let Some(ref proxy) = self.proxy_config {
+            Ed2kClient::connect_with_proxy(addr, proxy)
+                .await
+                .map_err(|e| Ed2kDownloadError::Server(e.to_string()))?
+        } else {
+            Ed2kClient::connect(addr)
+                .await
+                .map_err(|e| Ed2kDownloadError::Server(e.to_string()))?
+        };
 
         // Login to server
         let client_id = rand::random();
@@ -413,9 +428,15 @@ impl Ed2kEngine {
             return Ok(());
         }
 
-        let client = Ed2kClient::connect(addr)
-            .await
-            .map_err(|e| Ed2kDownloadError::Peer(e.to_string()))?;
+        let client = if let Some(ref proxy) = self.proxy_config {
+            Ed2kClient::connect_with_proxy(addr, proxy)
+                .await
+                .map_err(|e| Ed2kDownloadError::Peer(e.to_string()))?
+        } else {
+            Ed2kClient::connect(addr)
+                .await
+                .map_err(|e| Ed2kDownloadError::Peer(e.to_string()))?
+        };
 
         self.peers.insert(addr, client);
         tracing::info!(addr = %addr, "Connected to ed2k peer");
@@ -580,4 +601,70 @@ pub enum Ed2kDownloadError {
     Peer(String),
     #[error("IO error: {0}")]
     Io(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy::{ProxyConfig, ProxyType};
+
+    #[test]
+    fn test_set_proxy_config_socks5() {
+        let hash = Ed2kFileHash([0u8; 16]);
+        let mut engine = Ed2kEngine::new(
+            hash,
+            1024,
+            "test.txt".to_string(),
+            std::env::temp_dir(),
+            vec![],
+        );
+
+        assert!(engine.proxy_config.is_none());
+
+        let proxy = ProxyConfig::new(ProxyType::Socks5, "127.0.0.1".into(), 1080);
+        engine.set_proxy_config(Some(proxy.clone()));
+
+        assert!(engine.proxy_config.is_some());
+        let saved = engine.proxy_config.unwrap();
+        assert_eq!(saved.proxy_type, ProxyType::Socks5);
+        assert_eq!(saved.host, "127.0.0.1");
+        assert_eq!(saved.port, 1080);
+    }
+
+    #[test]
+    fn test_set_proxy_config_http() {
+        let hash = Ed2kFileHash([0u8; 16]);
+        let mut engine = Ed2kEngine::new(
+            hash,
+            1024,
+            "test.txt".to_string(),
+            std::env::temp_dir(),
+            vec![],
+        );
+
+        let proxy = ProxyConfig::new(ProxyType::Http, "proxy.example.com".into(), 8080);
+        engine.set_proxy_config(Some(proxy));
+
+        assert!(engine.proxy_config.is_some());
+    }
+
+    #[test]
+    fn test_set_proxy_config_none() {
+        let hash = Ed2kFileHash([0u8; 16]);
+        let mut engine = Ed2kEngine::new(
+            hash,
+            1024,
+            "test.txt".to_string(),
+            std::env::temp_dir(),
+            vec![],
+        );
+
+        // Set then clear
+        let proxy = ProxyConfig::new(ProxyType::Socks5, "127.0.0.1".into(), 1080);
+        engine.set_proxy_config(Some(proxy));
+        assert!(engine.proxy_config.is_some());
+
+        engine.set_proxy_config(None);
+        assert!(engine.proxy_config.is_none());
+    }
 }
