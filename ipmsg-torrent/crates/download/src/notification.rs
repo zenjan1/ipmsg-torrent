@@ -5,14 +5,20 @@
 //! - Shell commands (user-defined scripts)
 //! - Log file entries
 //! - Webhook POST requests
+//!
+//! Also supports event subscription and filtering for programmatic access.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::RwLock;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::broadcast;
+use uuid::Uuid;
 
 /// Notification trigger events
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum NotificationEvent {
     /// Download completed successfully
     DownloadComplete,
@@ -130,16 +136,97 @@ impl NotificationContext {
     }
 }
 
+/// Notification filter for subscriptions
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NotificationFilter {
+    /// Filter by event types (empty = all events)
+    pub events: Vec<NotificationEvent>,
+    /// Filter by task IDs (empty = all tasks)
+    pub task_ids: Vec<String>,
+    /// Filter by tags (empty = all tags)
+    pub tags: Vec<String>,
+}
+
+impl NotificationFilter {
+    /// Create a filter that matches all notifications
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    /// Create a filter for specific event types
+    pub fn events(events: Vec<NotificationEvent>) -> Self {
+        Self {
+            events,
+            ..Default::default()
+        }
+    }
+
+    /// Create a filter for specific task IDs
+    pub fn task_ids(task_ids: Vec<String>) -> Self {
+        Self {
+            task_ids,
+            ..Default::default()
+        }
+    }
+
+    /// Check if a notification context matches this filter
+    pub fn matches(&self, ctx: &NotificationContext, context_tags: &[String]) -> bool {
+        // Check event filter
+        if !self.events.is_empty() && !self.events.contains(&ctx.event) {
+            return false;
+        }
+
+        // Check task ID filter
+        if !self.task_ids.is_empty() && !self.task_ids.contains(&ctx.task_id) {
+            return false;
+        }
+
+        // Check tag filter (any tag matches)
+        if !self.tags.is_empty() && !self.tags.iter().any(|t| context_tags.contains(t)) {
+            return false;
+        }
+
+        true
+    }
+}
+
+/// Subscription to notification events
+#[derive(Debug, Clone)]
+pub struct NotificationSubscription {
+    /// Unique subscription ID
+    pub id: String,
+    /// Filter for which events to receive
+    pub filter: NotificationFilter,
+    /// Creation timestamp
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl NotificationSubscription {
+    /// Create a new subscription with the given filter
+    pub fn new(filter: NotificationFilter) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            filter,
+            created_at: chrono::Utc::now(),
+        }
+    }
+}
+
 /// Notification dispatcher
 pub struct NotificationDispatcher {
-    config: std::sync::RwLock<NotificationConfig>,
+    config: RwLock<NotificationConfig>,
+    subscriptions: RwLock<HashMap<String, NotificationSubscription>>,
+    event_sender: broadcast::Sender<NotificationContext>,
 }
 
 impl NotificationDispatcher {
     /// Create a new dispatcher with the given config
     pub fn new(config: NotificationConfig) -> Self {
+        let (event_sender, _) = broadcast::channel(100);
         Self {
-            config: std::sync::RwLock::new(config),
+            config: RwLock::new(config),
+            subscriptions: RwLock::new(HashMap::new()),
+            event_sender,
         }
     }
 
@@ -149,8 +236,48 @@ impl NotificationDispatcher {
         *c = config;
     }
 
+    /// Subscribe to notification events with a filter
+    pub fn subscribe(&self, filter: NotificationFilter) -> NotificationSubscription {
+        let subscription = NotificationSubscription::new(filter);
+        let mut subs = self.subscriptions.write().unwrap();
+        subs.insert(subscription.id.clone(), subscription.clone());
+        subscription
+    }
+
+    /// Unsubscribe from notification events
+    pub fn unsubscribe(&self, subscription_id: &str) -> bool {
+        let mut subs = self.subscriptions.write().unwrap();
+        subs.remove(subscription_id).is_some()
+    }
+
+    /// Get the number of active subscriptions
+    pub fn subscription_count(&self) -> usize {
+        let subs = self.subscriptions.read().unwrap();
+        subs.len()
+    }
+
+    /// List all active subscriptions
+    pub fn list_subscriptions(&self) -> Vec<NotificationSubscription> {
+        let subs = self.subscriptions.read().unwrap();
+        subs.values().cloned().collect()
+    }
+
+    /// Subscribe to the broadcast channel for receiving events
+    pub fn subscribe_events(&self) -> broadcast::Receiver<NotificationContext> {
+        self.event_sender.subscribe()
+    }
+
     /// Send a notification for the given event and context
     pub async fn dispatch(&self, ctx: &NotificationContext) -> Result<(), NotificationError> {
+        self.dispatch_with_tags(ctx, &[]).await
+    }
+
+    /// Send a notification for the given event and context with tags
+    pub async fn dispatch_with_tags(
+        &self,
+        ctx: &NotificationContext,
+        tags: &[String],
+    ) -> Result<(), NotificationError> {
         let (channels, enabled, events) = {
             let config = self.config.read().unwrap();
             (
@@ -160,20 +287,44 @@ impl NotificationDispatcher {
             )
         };
 
-        if !enabled || !events.contains(&ctx.event) {
-            return Ok(());
+        // Send to configured channels if enabled
+        if enabled && events.contains(&ctx.event) {
+            for channel in &channels {
+                let result = match channel {
+                    NotificationChannel::Desktop => self.send_desktop(ctx).await,
+                    NotificationChannel::Shell { command } => {
+                        self.send_shell(ctx, command).await
+                    }
+                    NotificationChannel::LogFile { path } => {
+                        self.send_log_file(ctx, path).await
+                    }
+                    NotificationChannel::Webhook { url, .. } => {
+                        self.send_webhook(ctx, url).await
+                    }
+                };
+
+                if let Err(e) = result {
+                    tracing::warn!(error = %e, channel = ?channel, "Failed to send notification");
+                }
+            }
         }
 
-        for channel in &channels {
-            let result = match channel {
-                NotificationChannel::Desktop => self.send_desktop(ctx).await,
-                NotificationChannel::Shell { command } => self.send_shell(ctx, command).await,
-                NotificationChannel::LogFile { path } => self.send_log_file(ctx, path).await,
-                NotificationChannel::Webhook { url, .. } => self.send_webhook(ctx, url).await,
-            };
+        // Send to subscribers (broadcast to all, they filter)
+        // Ignore error if no receivers
+        let _ = self.event_sender.send(ctx.clone());
 
-            if let Err(e) = result {
-                tracing::warn!(error = %e, channel = ?channel, "Failed to send notification");
+        // Also dispatch to filtered subscriptions
+        {
+            let subs = self.subscriptions.read().unwrap();
+            for subscription in subs.values() {
+                if subscription.filter.matches(ctx, tags) {
+                    // Subscription matched, event already sent via broadcast
+                    tracing::debug!(
+                        subscription_id = %subscription.id,
+                        event = ?ctx.event,
+                        "Notification matched subscription filter"
+                    );
+                }
             }
         }
 
@@ -554,5 +705,170 @@ mod tests {
         assert!(deserialized.enabled);
         assert_eq!(deserialized.channels.len(), 2);
         assert_eq!(deserialized.events.len(), 2);
+    }
+
+    // ===== Phase 37: Subscription and Filtering Tests =====
+
+    #[test]
+    fn test_notification_filter_all() {
+        let filter = NotificationFilter::all();
+        let ctx = make_test_ctx("task1", "file.txt", NotificationEvent::DownloadComplete);
+        assert!(filter.matches(&ctx, &[]));
+        assert!(filter.matches(&ctx, &["tag1".into(), "tag2".into()]));
+    }
+
+    #[test]
+    fn test_notification_filter_by_event() {
+        let filter = NotificationFilter::events(vec![NotificationEvent::DownloadComplete]);
+
+        let complete_ctx =
+            make_test_ctx("task1", "file.txt", NotificationEvent::DownloadComplete);
+        let failed_ctx = make_test_ctx("task2", "file2.txt", NotificationEvent::DownloadFailed);
+
+        assert!(filter.matches(&complete_ctx, &[]));
+        assert!(!filter.matches(&failed_ctx, &[]));
+    }
+
+    #[test]
+    fn test_notification_filter_by_task_id() {
+        let filter = NotificationFilter::task_ids(vec!["task1".into(), "task3".into()]);
+
+        let ctx1 = make_test_ctx("task1", "file.txt", NotificationEvent::DownloadComplete);
+        let ctx2 = make_test_ctx("task2", "file2.txt", NotificationEvent::DownloadComplete);
+        let ctx3 = make_test_ctx("task3", "file3.txt", NotificationEvent::DownloadFailed);
+
+        assert!(filter.matches(&ctx1, &[]));
+        assert!(!filter.matches(&ctx2, &[]));
+        assert!(filter.matches(&ctx3, &[]));
+    }
+
+    #[test]
+    fn test_notification_filter_by_tags() {
+        let filter = NotificationFilter {
+            tags: vec!["important".into(), "urgent".into()],
+            ..Default::default()
+        };
+
+        let ctx = make_test_ctx("task1", "file.txt", NotificationEvent::DownloadComplete);
+
+        // No tags - should not match
+        assert!(!filter.matches(&ctx, &[]));
+
+        // Has matching tag
+        assert!(filter.matches(&ctx, &["important".into()]));
+        assert!(filter.matches(&ctx, &["urgent".into(), "other".into()]));
+
+        // No matching tag
+        assert!(!filter.matches(&ctx, &["other".into(), "misc".into()]));
+    }
+
+    #[test]
+    fn test_notification_filter_combined() {
+        let filter = NotificationFilter {
+            events: vec![NotificationEvent::DownloadComplete],
+            task_ids: vec!["task1".into()],
+            tags: vec!["important".into()],
+        };
+
+        // All match
+        let ctx = make_test_ctx("task1", "file.txt", NotificationEvent::DownloadComplete);
+        assert!(filter.matches(&ctx, &["important".into()]));
+
+        // Wrong event
+        let ctx_wrong_event =
+            make_test_ctx("task1", "file.txt", NotificationEvent::DownloadFailed);
+        assert!(!filter.matches(&ctx_wrong_event, &["important".into()]));
+
+        // Wrong task ID
+        let ctx_wrong_task =
+            make_test_ctx("task2", "file.txt", NotificationEvent::DownloadComplete);
+        assert!(!filter.matches(&ctx_wrong_task, &["important".into()]));
+
+        // Wrong tag
+        let ctx_wrong_tag =
+            make_test_ctx("task1", "file.txt", NotificationEvent::DownloadComplete);
+        assert!(!filter.matches(&ctx_wrong_tag, &["other".into()]));
+    }
+
+    #[test]
+    fn test_subscribe_unsubscribe() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+
+        assert_eq!(dispatcher.subscription_count(), 0);
+
+        let sub1 = dispatcher.subscribe(NotificationFilter::all());
+        assert_eq!(dispatcher.subscription_count(), 1);
+
+        let sub2 = dispatcher.subscribe(NotificationFilter::events(vec![
+            NotificationEvent::DownloadComplete,
+        ]));
+        assert_eq!(dispatcher.subscription_count(), 2);
+
+        // Verify subscriptions are listed
+        let subs = dispatcher.list_subscriptions();
+        assert_eq!(subs.len(), 2);
+
+        // Unsubscribe
+        assert!(dispatcher.unsubscribe(&sub1.id));
+        assert_eq!(dispatcher.subscription_count(), 1);
+
+        assert!(dispatcher.unsubscribe(&sub2.id));
+        assert_eq!(dispatcher.subscription_count(), 0);
+
+        // Unsubscribing non-existent returns false
+        assert!(!dispatcher.unsubscribe("nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_broadcast_to_subscribers() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+
+        // Subscribe with a receiver
+        let mut receiver = dispatcher.subscribe_events();
+
+        let ctx = make_test_ctx("task1", "file.txt", NotificationEvent::DownloadComplete);
+        dispatcher.dispatch(&ctx).await.unwrap();
+
+        // Receiver should get the event
+        let received = receiver.try_recv().unwrap();
+        assert_eq!(received.task_id, "task1");
+        assert_eq!(received.event, NotificationEvent::DownloadComplete);
+    }
+
+    #[test]
+    fn test_notification_filter_serialization() {
+        let filter = NotificationFilter {
+            events: vec![
+                NotificationEvent::DownloadComplete,
+                NotificationEvent::DownloadFailed,
+            ],
+            task_ids: vec!["task1".into(), "task2".into()],
+            tags: vec!["important".into()],
+        };
+
+        let json = serde_json::to_string(&filter).unwrap();
+        let deserialized: NotificationFilter = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.events.len(), 2);
+        assert_eq!(deserialized.task_ids.len(), 2);
+        assert_eq!(deserialized.tags.len(), 1);
+
+        // Verify it still works after deserialization
+        let ctx = make_test_ctx("task1", "file.txt", NotificationEvent::DownloadComplete);
+        assert!(deserialized.matches(&ctx, &["important".into()]));
+    }
+
+    /// Helper to create a test context
+    fn make_test_ctx(task_id: &str, name: &str, event: NotificationEvent) -> NotificationContext {
+        NotificationContext {
+            task_id: task_id.into(),
+            name: name.into(),
+            size: 1024,
+            downloaded: 1024,
+            protocol: "HTTP".into(),
+            save_path: "/tmp".into(),
+            error: None,
+            event,
+        }
     }
 }
