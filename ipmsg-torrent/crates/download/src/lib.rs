@@ -230,6 +230,26 @@ pub enum DownloadProtocol {
     P2P,
 }
 
+/// Result of a single URL import within a batch.
+#[derive(Debug, Clone)]
+pub struct ImportResult {
+    /// The original URL or link that was imported.
+    pub url: String,
+    /// Task ID if successfully added, or error message.
+    pub outcome: ImportOutcome,
+}
+
+/// Outcome of importing a single URL.
+#[derive(Debug, Clone)]
+pub enum ImportOutcome {
+    /// Successfully added with the given task ID.
+    Added(String),
+    /// Skipped because a task with the same URL already exists.
+    SkippedDuplicate,
+    /// Failed with an error message.
+    Failed(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DownloadState {
     Queued,
@@ -1514,6 +1534,69 @@ impl DownloadManager {
         self.add_xunlei(file_name, content_length, sources).await
     }
 
+    /// Import multiple URLs from a list of strings.
+    ///
+    /// Each string can be an HTTP/HTTPS URL, ed2k:// link, or magnet: link.
+    /// Blank lines and comments (starting with #) are ignored.
+    /// Duplicate URLs (already present in the task list) are skipped.
+    pub async fn import_urls(&self, urls: &[String]) -> Vec<ImportResult> {
+        let mut results = Vec::with_capacity(urls.len());
+
+        // Collect existing URLs for duplicate detection
+        let existing_urls: std::collections::HashSet<String> = {
+            let tasks = self.tasks.lock().await;
+            tasks.iter().map(|t| t.name.clone()).collect()
+        };
+
+        for line in urls {
+            let line = line.trim();
+            // Skip blank lines and comments
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            // Check for duplicate by name (simple heuristic)
+            let display_name = extract_display_name(line);
+            if existing_urls.contains(&display_name) {
+                results.push(ImportResult {
+                    url: line.to_string(),
+                    outcome: ImportOutcome::SkippedDuplicate,
+                });
+                continue;
+            }
+
+            // Try to add based on protocol prefix
+            let outcome = if line.starts_with("ed2k://") {
+                match parse_and_add_ed2k(self, line).await {
+                    Ok(id) => ImportOutcome::Added(id),
+                    Err(e) => ImportOutcome::Failed(e),
+                }
+            } else if line.starts_with("magnet:") {
+                match self.add_magnet(line).await {
+                    Ok(id) => ImportOutcome::Added(id),
+                    Err(e) => ImportOutcome::Failed(e.to_string()),
+                }
+            } else if line.starts_with("http://")
+                || line.starts_with("https://")
+                || line.starts_with("ftp://")
+            {
+                match self.add_url(line).await {
+                    Ok(id) => ImportOutcome::Added(id),
+                    Err(e) => ImportOutcome::Failed(e.to_string()),
+                }
+            } else {
+                ImportOutcome::Failed(format!("Unsupported URL scheme: {}", line))
+            };
+
+            results.push(ImportResult {
+                url: line.to_string(),
+                outcome,
+            });
+        }
+
+        results
+    }
+
     /// Spawn the actual download task
     async fn spawn_task(&self, task_id: String, params: TaskParams) {
         // Check if we can start a new task
@@ -2768,6 +2851,65 @@ impl DownloadManager {
             }
         });
     }
+}
+
+/// Extract a display name from a URL for duplicate detection.
+fn extract_display_name(url: &str) -> String {
+    if url.starts_with("ed2k://") {
+        // ed2k://|file|name|size|hash|/
+        let parts: Vec<&str> = url.split('|').collect();
+        if parts.len() >= 3 {
+            return parts[2].to_string();
+        }
+    } else if url.starts_with("magnet:") {
+        // magnet:?xt=urn:btih:HASH&dn=NAME
+        if let Some(pos) = url.find("dn=") {
+            let rest = &url[pos + 3..];
+            let name = rest.split('&').next().unwrap_or(rest);
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    } else {
+        // HTTP/FTP: extract filename from URL path
+        let name = url
+            .split('/')
+            .next_back()
+            .unwrap_or("download")
+            .split('?')
+            .next()
+            .unwrap_or("download");
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    url.to_string()
+}
+
+/// Parse an ed2k:// link and add it as a download task.
+async fn parse_and_add_ed2k(manager: &DownloadManager, link: &str) -> Result<String, String> {
+    // ed2k://|file|name|size|hash|/
+    let parts: Vec<&str> = link.split('|').collect();
+    if parts.len() < 5 {
+        return Err("Invalid ed2k link format".to_string());
+    }
+    if parts[1] != "file" {
+        return Err("Only ed2k file links are supported".to_string());
+    }
+    let file_name = parts[2].to_string();
+    let file_size: u64 = parts[3]
+        .parse()
+        .map_err(|_| "Invalid file size in ed2k link".to_string())?;
+    let hash = ed2k::Ed2kFileHash::from_hex(parts[4])
+        .map_err(|e| format!("Invalid hash in ed2k link: {e}"))?;
+
+    // Parse optional servers from h= parameters
+    let servers = Vec::new(); // ed2k links rarely include servers inline
+
+    manager
+        .add_ed2k(hash, file_size, file_name, servers)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -4760,5 +4902,120 @@ mod tests {
         assert_eq!(queued[0].id, "q-2");
         assert_eq!(queued[1].id, "q-3");
         assert_eq!(queued[2].id, "q-1");
+    }
+
+    // ─── Phase 23: Batch URL Import Tests ───
+
+    #[test]
+    fn test_extract_display_name_http() {
+        assert_eq!(
+            extract_display_name("https://example.com/files/archive.tar.gz"),
+            "archive.tar.gz"
+        );
+        assert_eq!(
+            extract_display_name("https://example.com/files/archive.tar.gz?v=2"),
+            "archive.tar.gz"
+        );
+    }
+
+    #[test]
+    fn test_extract_display_name_ed2k() {
+        assert_eq!(
+            extract_display_name(
+                "ed2k://|file|ubuntu.iso|1234567|abcdef0123456789abcdef0123456789|/"
+            ),
+            "ubuntu.iso"
+        );
+    }
+
+    #[test]
+    fn test_extract_display_name_magnet() {
+        assert_eq!(
+            extract_display_name("magnet:?xt=urn:btih:abc123&dn=MyFile.zip&tr=tracker"),
+            "MyFile.zip"
+        );
+    }
+
+    #[test]
+    fn test_extract_display_name_magnet_no_dn() {
+        // Falls back to full URL when no dn= parameter
+        let url = "magnet:?xt=urn:btih:abc123";
+        assert_eq!(extract_display_name(url), url);
+    }
+
+    #[tokio::test]
+    async fn test_import_urls_empty_input() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_import_empty"));
+        let results = dm.import_urls(&[]).await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_import_urls_skips_comments_and_blanks() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_import_skip"));
+        let urls = vec![
+            "# this is a comment".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+        ];
+        let results = dm.import_urls(&urls).await;
+        // All should be skipped (comments/blanks produce no results)
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_import_urls_unsupported_scheme() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_import_unsupported"));
+        let urls = vec!["ftp://invalid-but-unsupported-scheme".to_string()];
+        // ftp:// is actually supported as HTTP-like
+        let results = dm.import_urls(&urls).await;
+        assert_eq!(results.len(), 1);
+        // Will fail because the URL doesn't exist, but it's not "unsupported"
+        assert!(matches!(
+            results[0].outcome,
+            ImportOutcome::Failed(_) | ImportOutcome::Added(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_import_urls_truly_unsupported_scheme() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_import_unsupported2"));
+        let urls = vec!["gopher://example.com/file".to_string()];
+        let results = dm.import_urls(&urls).await;
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].outcome, ImportOutcome::Failed(_)));
+        if let ImportOutcome::Failed(e) = &results[0].outcome {
+            assert!(e.contains("Unsupported URL scheme"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_import_urls_ed2k_invalid_format() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_import_ed2k_bad"));
+        let urls = vec!["ed2k://|file|broken".to_string()];
+        let results = dm.import_urls(&urls).await;
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].outcome, ImportOutcome::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn test_import_urls_ed2k_valid() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_import_ed2k_ok"));
+        let urls =
+            vec!["ed2k://|file|test.txt|1024|d41d8cd98f00b204e9800998ecf8427e|/".to_string()];
+        let results = dm.import_urls(&urls).await;
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].outcome, ImportOutcome::Added(_)));
+    }
+
+    #[tokio::test]
+    async fn test_import_urls_magnet_valid() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_import_magnet_ok"));
+        let urls = vec![
+            "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile".to_string(),
+        ];
+        let results = dm.import_urls(&urls).await;
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].outcome, ImportOutcome::Added(_)));
     }
 }

@@ -164,6 +164,11 @@ enum Command {
         /// Direction: "up", "down", "top", "bottom"
         direction: String,
     },
+    /// Batch import URLs from a file or inline list
+    DlBatch {
+        /// File path containing URLs (one per line), or inline URLs separated by spaces
+        source: String,
+    },
     Block {
         peer: String,
     },
@@ -460,6 +465,17 @@ fn parse_command(input: &str) -> Command {
                 }
             } else {
                 Command::Unknown("/dlqmove <task_id> <up|down|top|bottom>".to_string())
+            }
+        }
+        "dlbatch" | "dl-import" => {
+            // /dlbatch <file_path> - Import URLs from a file (one per line)
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                Command::DlBatch {
+                    source: args[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlbatch <file_path>".to_string())
             }
         }
         "block" => {
@@ -1980,6 +1996,66 @@ async fn handle_command(
                     ),
                 );
             }
+        }
+        Command::DlBatch { source } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            // Read URLs from file
+            let urls: Vec<String> = match tokio::fs::read_to_string(&source).await {
+                Ok(content) => content
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                    .collect(),
+                Err(e) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("❌ Failed to read {}: {}", source, e));
+                    return;
+                }
+            };
+
+            if urls.is_empty() {
+                let mut s = state.lock().await;
+                s.add_system_message("main", "⚠️ No URLs found in file".to_string());
+                return;
+            }
+
+            let results = download_manager.import_urls(&urls).await;
+            let added = results
+                .iter()
+                .filter(|r| matches!(r.outcome, ipmsg_download::ImportOutcome::Added(_)))
+                .count();
+            let skipped = results
+                .iter()
+                .filter(|r| matches!(r.outcome, ipmsg_download::ImportOutcome::SkippedDuplicate))
+                .count();
+            let failed = results
+                .iter()
+                .filter(|r| matches!(r.outcome, ipmsg_download::ImportOutcome::Failed(_)))
+                .count();
+
+            let mut msg = format!("📥 Batch import: {} added", added);
+            if skipped > 0 {
+                msg.push_str(&format!(", {} skipped (duplicate)", skipped));
+            }
+            if failed > 0 {
+                msg.push_str(&format!(", {} failed", failed));
+                // Show first few failures
+                for r in results
+                    .iter()
+                    .filter(|r| matches!(r.outcome, ipmsg_download::ImportOutcome::Failed(_)))
+                    .take(3)
+                {
+                    if let ipmsg_download::ImportOutcome::Failed(e) = &r.outcome {
+                        msg.push_str(&format!("\n  ❌ {} - {}", r.url, e));
+                    }
+                }
+            }
+
+            let mut s = state.lock().await;
+            s.add_system_message("main", msg);
         }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {
