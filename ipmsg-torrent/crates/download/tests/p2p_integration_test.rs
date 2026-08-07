@@ -140,7 +140,7 @@ async fn test_p2p_download_in_task_list() {
 
 #[tokio::test]
 async fn test_p2p_download_progress_calculation() {
-    use ipmsg_download::DownloadTask;
+    use ipmsg_download::{DownloadPriority, DownloadTask};
 
     let task = DownloadTask {
         id: "test-id".to_string(),
@@ -155,6 +155,7 @@ async fn test_p2p_download_progress_calculation() {
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         tags: Vec::new(),
+        priority: DownloadPriority::Normal,
     };
 
     assert_eq!(task.progress(), 75.0);

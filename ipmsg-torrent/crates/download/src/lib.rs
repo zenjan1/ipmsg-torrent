@@ -99,6 +99,7 @@ pub struct TaskInfoEvent {
     pub state: String,
     pub error: Option<String>,
     pub tags: Vec<String>,
+    pub priority: String,
 }
 
 impl TaskInfoEvent {
@@ -114,6 +115,7 @@ impl TaskInfoEvent {
             state: task.state_label().to_string(),
             error: task.error.clone(),
             tags: task.tags.clone(),
+            priority: task.priority.label().to_string(),
         }
     }
 }
@@ -134,6 +136,8 @@ pub struct DownloadTask {
     pub updated_at: chrono::DateTime<chrono::Utc>,
     /// User-defined tags for organizing downloads (e.g., "movies", "work", "linux")
     pub tags: Vec<String>,
+    /// Download priority (higher priority tasks are spawned first)
+    pub priority: DownloadPriority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +156,37 @@ pub enum DownloadState {
     Paused,
     Complete,
     Error,
+}
+
+/// Priority level for download tasks.
+/// Higher priority tasks are spawned first when concurrent limits are active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize, Default)]
+pub enum DownloadPriority {
+    Low = 0,
+    #[default]
+    Normal = 1,
+    High = 2,
+}
+
+impl DownloadPriority {
+    /// Parse from string (case-insensitive).
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "high" | "h" | "2" => Some(Self::High),
+            "normal" | "n" | "1" | "default" => Some(Self::Normal),
+            "low" | "l" | "0" => Some(Self::Low),
+            _ => None,
+        }
+    }
+
+    /// Human-readable label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
 }
 
 /// Filter criteria for listing download tasks.
@@ -353,11 +388,13 @@ pub struct DownloadManager {
     max_retries: Arc<AtomicU32>,
     /// Broadcast channel for task change events (WebSocket push)
     event_tx: broadcast::Sender<TaskEvent>,
+    /// Notification channel for task completion (triggers scheduler)
+    task_complete_notify: Arc<tokio::sync::Notify>,
 }
 
 impl DownloadManager {
     pub fn new(data_dir: PathBuf) -> Self {
-        Self {
+        let dm = Self {
             tasks: Arc::new(Mutex::new(Vec::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
@@ -369,7 +406,10 @@ impl DownloadManager {
             timeout_secs: Arc::new(AtomicU64::new(0)),
             max_retries: Arc::new(AtomicU32::new(3)),
             event_tx: broadcast::channel(128).0,
-        }
+            task_complete_notify: Arc::new(tokio::sync::Notify::new()),
+        };
+        dm.start_scheduler();
+        dm
     }
 
     /// Subscribe to task change events for real-time updates.
@@ -408,7 +448,7 @@ impl DownloadManager {
             }
         }
 
-        Self {
+        let dm = Self {
             tasks: Arc::new(Mutex::new(tasks)),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
@@ -420,7 +460,259 @@ impl DownloadManager {
             timeout_secs: Arc::new(AtomicU64::new(0)),
             max_retries: Arc::new(AtomicU32::new(3)),
             event_tx: broadcast::channel(128).0,
-        }
+            task_complete_notify: Arc::new(tokio::sync::Notify::new()),
+        };
+        dm.start_scheduler();
+        dm
+    }
+
+    /// Start the background scheduler that listens for task completion signals
+    /// and spawns the next queued task if a slot is available.
+    fn start_scheduler(&self) {
+        let notify = self.task_complete_notify.clone();
+        let tasks = self.tasks.clone();
+        let running = self.running.clone();
+        let task_info = self.task_info.clone();
+        let task_generation = self.task_generation.clone();
+        let data_dir = self.data_dir.clone();
+        let dht = self.dht.clone();
+        let rate_limiter = self.rate_limiter.clone();
+        let max_concurrent = self.max_concurrent;
+
+        tokio::spawn(async move {
+            loop {
+                notify.notified().await;
+
+                // Check if we can start a new task
+                let can_start = if max_concurrent == 0 {
+                    true
+                } else {
+                    running.lock().await.len() < max_concurrent
+                };
+
+                if !can_start {
+                    continue;
+                }
+
+                // Find the highest-priority queued task
+                let next_task_id = {
+                    let tasks_lock = tasks.lock().await;
+                    tasks_lock
+                        .iter()
+                        .filter(|t| t.state == DownloadState::Queued)
+                        .max_by_key(|t| t.priority)
+                        .map(|t| t.id.clone())
+                };
+
+                if let Some(task_id) = next_task_id {
+                    // Get stored params
+                    let info = task_info.lock().await;
+                    if let Some(task_info) = info.get(&task_id) {
+                        let params = task_info.params.clone();
+                        drop(info);
+
+                        // Increment generation
+                        let generation = {
+                            let mut gen_map = task_generation.lock().await;
+                            let g = gen_map.entry(task_id.clone()).or_insert(0);
+                            *g += 1;
+                            *g
+                        };
+
+                        let cancel_token = CancellationToken::new();
+
+                        // Register running task
+                        {
+                            let mut r = running.lock().await;
+                            r.insert(
+                                task_id.clone(),
+                                RunningTask {
+                                    cancel_token: cancel_token.clone(),
+                                    params: params.clone(),
+                                    started_at: std::time::Instant::now(),
+                                    last_downloaded: 0,
+                                    generation,
+                                    speed_samples: Vec::new(),
+                                    last_sample_time: std::time::Instant::now(),
+                                    last_progress_time: std::time::Instant::now(),
+                                    retry_count: 0,
+                                },
+                            );
+                        }
+
+                        // Mark as downloading
+                        {
+                            let mut t = tasks.lock().await;
+                            if let Some(task) = t.iter_mut().find(|t| t.id == task_id) {
+                                task.state = DownloadState::Downloading;
+                                task.updated_at = chrono::Utc::now();
+                            }
+                        }
+
+                        let cancel_clone = cancel_token.clone();
+                        let tasks_clone = tasks.clone();
+                        let running_clone = running.clone();
+                        let task_generation_clone = task_generation.clone();
+                        let data_dir_clone = data_dir.clone();
+                        let dht_clone = dht.clone();
+                        let rate_limiter_clone = rate_limiter.clone();
+                        let notify_clone = notify.clone();
+                        let task_id_clone = task_id.clone();
+
+                        tokio::spawn(async move {
+                            let result: Result<(), String> = match params {
+                                TaskParams::Torrent { torrent_path } => {
+                                    match tokio::fs::read(&torrent_path).await {
+                                        Ok(data) => match torrent::TorrentMeta::from_bytes(&data) {
+                                            Ok(meta) => {
+                                                let download_dir = data_dir_clone.join("downloads");
+                                                let mut engine = torrent::TorrentEngine::new(meta, download_dir);
+                                                engine.set_rate_limiter(rate_limiter_clone.per_task().clone());
+                                                engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                                            }
+                                            Err(e) => Err(e.to_string()),
+                                        },
+                                        Err(e) => Err(e.to_string()),
+                                    }
+                                }
+                                TaskParams::Ed2k {
+                                    file_hash,
+                                    file_size,
+                                    file_name,
+                                    servers,
+                                } => {
+                                    let download_dir = data_dir_clone.join("downloads");
+                                    let mut engine = ed2k::Ed2kEngine::new(
+                                        file_hash,
+                                        file_size,
+                                        file_name,
+                                        download_dir,
+                                        servers,
+                                    );
+                                    engine.set_rate_limiter(rate_limiter_clone.per_task().clone());
+                                    engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                                }
+                                TaskParams::Xunlei {
+                                    file_name,
+                                    file_size,
+                                    sources,
+                                } => {
+                                    let download_dir = data_dir_clone.join("downloads");
+                                    let mut engine = xunlei::XunleiEngine::new(
+                                        file_name,
+                                        file_size,
+                                        sources,
+                                        download_dir,
+                                    );
+                                    engine.set_rate_limiter(rate_limiter_clone.per_task().clone());
+                                    engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                                }
+                                TaskParams::Magnet {
+                                    info_hash,
+                                    display_name,
+                                    trackers,
+                                } => {
+                                    let download_dir = data_dir_clone.join("downloads");
+                                    let cache = metadata_cache::cache_dir();
+                                    let metadata_bytes = match metadata_cache::load_metadata(&cache, &info_hash) {
+                                        Ok(cached) => cached,
+                                        Err(metadata_cache::CacheError::NotFound) => {
+                                            let peers = dht_clone.find_peers(info_hash).await.map_err(|e| e.to_string())?;
+                                            if peers.is_empty() {
+                                                return Err("No peers found via DHT".to_string());
+                                            }
+                                            let bytes = match dht_clone.fetch_metadata(info_hash).await {
+                                                Ok(b) => b,
+                                                Err(dht::DhtError::NotImplemented) => {
+                                                    return Err("Magnet link metadata exchange not yet implemented".to_string());
+                                                }
+                                                Err(e) => return Err(format!("Failed to fetch metadata: {}", e)),
+                                            };
+                                            if let Err(e) = metadata_cache::save_metadata(
+                                                &cache,
+                                                &info_hash,
+                                                &bytes,
+                                                display_name.as_deref(),
+                                                &trackers,
+                                            ) {
+                                                tracing::warn!(error = %e, "Failed to cache metadata");
+                                            }
+                                            bytes
+                                        }
+                                        Err(e) => return Err(format!("Cache error: {e}")),
+                                    };
+                                    match torrent::TorrentMeta::from_bytes(&metadata_bytes) {
+                                        Ok(meta) => {
+                                            {
+                                                let mut t = tasks_clone.lock().await;
+                                                if let Some(task) = t.iter_mut().find(|t| t.id == task_id_clone) {
+                                                    task.name = meta.info.name.clone();
+                                                    task.size = meta.total_size();
+                                                }
+                                            }
+                                            let mut engine = torrent::TorrentEngine::new(meta, download_dir);
+                                            engine.set_rate_limiter(rate_limiter_clone.per_task().clone());
+                                            engine.download(Some(cancel_clone)).await.map_err(|e| e.to_string())
+                                        }
+                                        Err(e) => Err(format!("Failed to parse metadata: {}", e)),
+                                    }
+                                }
+                                TaskParams::P2P { .. } => {
+                                    Err("P2P resume not yet supported".to_string())
+                                }
+                            };
+
+                            // Update task state
+                            let my_generation = {
+                                let gen_map = task_generation_clone.lock().await;
+                                gen_map.get(&task_id_clone).copied().unwrap_or(0)
+                            };
+                            let is_still_active = {
+                                let r = running_clone.lock().await;
+                                r.get(&task_id_clone)
+                                    .map(|rt| rt.generation == my_generation)
+                                    .unwrap_or(false)
+                            };
+
+                            let mut t = tasks_clone.lock().await;
+                            if let Some(task) = t.iter_mut().find(|t| t.id == task_id_clone) {
+                                match result {
+                                    Ok(()) => {
+                                        task.state = DownloadState::Complete;
+                                        task.downloaded = task.size;
+                                        task.speed_bps = 0.0;
+                                        Self::record_task_history(task, &data_dir_clone);
+                                    }
+                                    Err(e) => {
+                                        let err_str = e.to_string();
+                                        if err_str == "cancelled" {
+                                            if is_still_active {
+                                                task.state = DownloadState::Paused;
+                                            }
+                                        } else {
+                                            task.state = DownloadState::Error;
+                                            task.error = Some(err_str);
+                                            Self::record_task_history(task, &data_dir_clone);
+                                        }
+                                        task.speed_bps = 0.0;
+                                    }
+                                }
+                                task.updated_at = chrono::Utc::now();
+                            }
+
+                            if is_still_active {
+                                running_clone.lock().await.remove(&task_id_clone);
+                            }
+
+                            // Notify scheduler that a slot freed up
+                            notify_clone.notify_one();
+
+                            Ok(())
+                        });
+                    }
+                }
+            }
+        });
     }
 
     /// Set maximum concurrent downloads (0 = unlimited)
@@ -493,6 +785,7 @@ impl DownloadManager {
             created_at: now,
             updated_at: now,
             tags: Vec::new(),
+            priority: DownloadPriority::Normal,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -538,6 +831,7 @@ impl DownloadManager {
             created_at: now,
             updated_at: now,
             tags: Vec::new(),
+            priority: DownloadPriority::Normal,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -583,6 +877,7 @@ impl DownloadManager {
             created_at: now,
             updated_at: now,
             tags: Vec::new(),
+            priority: DownloadPriority::Normal,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -626,6 +921,7 @@ impl DownloadManager {
             created_at: now,
             updated_at: now,
             tags: Vec::new(),
+            priority: DownloadPriority::Normal,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -669,6 +965,7 @@ impl DownloadManager {
             created_at: now,
             updated_at: now,
             tags: Vec::new(),
+            priority: DownloadPriority::Normal,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -888,6 +1185,7 @@ impl DownloadManager {
         let cancel_clone = cancel_token.clone();
         let task_generation = self.task_generation.clone();
         let rate_limiter = Some(self.rate_limiter.clone());
+        let task_complete_notify = self.task_complete_notify.clone();
 
         // Store task info for resume
         {
@@ -1116,6 +1414,9 @@ impl DownloadManager {
             if is_still_active {
                 running.lock().await.remove(&task_id_clone);
             }
+
+            // Notify scheduler that a slot may have freed up
+            task_complete_notify.notify_one();
 
             Ok(())
         });
@@ -1858,6 +2159,53 @@ impl DownloadManager {
         tags
     }
 
+    /// Set the priority of a download task.
+    /// Higher priority tasks are spawned first when concurrent limits are active.
+    pub async fn set_priority(&self, task_id: &str, priority: DownloadPriority) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            task.priority = priority;
+            task.updated_at = chrono::Utc::now();
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(task),
+            });
+            drop(tasks);
+            self.persist_tasks().await;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Try to start the next queued task if a slot is available.
+    /// Picks the highest-priority queued task (FIFO within same priority).
+    pub async fn try_start_next_queued(&self) -> Option<String> {
+        if !self.can_start_task().await {
+            return None;
+        }
+
+        // Find the highest-priority queued task
+        let tasks = self.tasks.lock().await;
+        let next = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Queued)
+            .max_by_key(|t| t.priority)
+            .map(|t| t.id.clone());
+        drop(tasks);
+
+        if let Some(ref task_id) = next {
+            // Get stored params
+            let info = self.task_info.lock().await;
+            if let Some(task_info) = info.get(task_id) {
+                let params = task_info.params.clone();
+                drop(info);
+                self.spawn_task(task_id.clone(), params).await;
+                return Some(task_id.clone());
+            }
+        }
+        None
+    }
+
     /// Persist current task list to disk (fire-and-forget)
     async fn persist_tasks(&self) {
         let tasks = self.tasks.lock().await.clone();
@@ -1885,21 +2233,21 @@ pub enum DownloadManagerError {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_timeout_default_disabled() {
+    #[tokio::test]
+    async fn test_timeout_default_disabled() {
         let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test"));
         assert_eq!(dm.timeout_secs.load(Ordering::Relaxed), 0);
     }
 
-    #[test]
-    fn test_set_timeout_secs() {
+    #[tokio::test]
+    async fn test_set_timeout_secs() {
         let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test"));
         dm.set_timeout_secs(30);
         assert_eq!(dm.timeout_secs.load(Ordering::Relaxed), 30);
     }
 
-    #[test]
-    fn test_set_max_retries() {
+    #[tokio::test]
+    async fn test_set_max_retries() {
         let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test"));
         assert_eq!(dm.max_retries.load(Ordering::Relaxed), 3);
         dm.set_max_retries(5);
@@ -1962,6 +2310,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+                priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -1976,6 +2325,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -1990,6 +2340,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             });
         }
 
@@ -2096,6 +2447,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             });
         }
 
@@ -2137,6 +2489,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: vec!["movies".into(), "action".into(), "drama".into()],
+                priority: DownloadPriority::Normal,
             });
         }
 
@@ -2171,6 +2524,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: vec!["movies".into(), "action".into()],
+                priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2185,6 +2539,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: vec!["movies".into(), "drama".into()],
+                priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -2199,6 +2554,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: vec!["work".into()],
+                priority: DownloadPriority::Normal,
             });
         }
 
@@ -2236,6 +2592,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: vec!["movies".into(), "action".into()],
+                priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2250,6 +2607,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: vec!["movies".into(), "drama".into()],
+                priority: DownloadPriority::Normal,
             });
         }
 
@@ -2277,6 +2635,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: vec!["movies".into()],
+                priority: DownloadPriority::Normal,
             });
         }
 
@@ -2304,6 +2663,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             tags: Vec::new(),
+            priority: DownloadPriority::Normal,
         };
         assert!(task.tags.is_empty());
     }
@@ -2325,6 +2685,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             tags: vec!["linux".into()],
+            priority: DownloadPriority::Normal,
         };
 
         // Query match (case-insensitive)
@@ -2363,6 +2724,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             tags: Vec::new(),
+            priority: DownloadPriority::Normal,
         };
 
         let filter = TaskFilter {
@@ -2393,6 +2755,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             tags: Vec::new(),
+            priority: DownloadPriority::Normal,
         };
 
         let filter = TaskFilter {
@@ -2423,6 +2786,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             tags: vec!["movies".into(), "action".into()],
+            priority: DownloadPriority::Normal,
         };
 
         let filter = TaskFilter {
@@ -2453,6 +2817,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             tags: vec!["linux".into()],
+            priority: DownloadPriority::Normal,
         };
 
         // All criteria match
@@ -2490,6 +2855,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -2504,6 +2870,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -2518,6 +2885,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             },
         ];
 
@@ -2547,6 +2915,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -2561,6 +2930,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -2575,6 +2945,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             },
         ];
 
@@ -2600,6 +2971,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             },
             DownloadTask {
                 id: "p2".into(),
@@ -2614,6 +2986,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             },
             DownloadTask {
                 id: "p3".into(),
@@ -2628,6 +3001,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             },
         ];
 
@@ -2655,6 +3029,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2669,6 +3044,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             });
         }
 
@@ -2694,6 +3070,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2708,6 +3085,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -2722,6 +3100,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             });
         }
 
@@ -2752,6 +3131,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2766,6 +3146,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -2780,6 +3161,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
+            priority: DownloadPriority::Normal,
             });
         }
 
@@ -2794,5 +3176,111 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].name, "big.iso");
         assert_eq!(result[1].name, "medium.iso");
+    }
+
+    #[test]
+    fn test_download_priority_ordering() {
+        assert!(DownloadPriority::High > DownloadPriority::Normal);
+        assert!(DownloadPriority::Normal > DownloadPriority::Low);
+        assert!(DownloadPriority::High > DownloadPriority::Low);
+    }
+
+    #[test]
+    fn test_download_priority_from_str() {
+        assert_eq!(DownloadPriority::from_str_opt("high"), Some(DownloadPriority::High));
+        assert_eq!(DownloadPriority::from_str_opt("HIGH"), Some(DownloadPriority::High));
+        assert_eq!(DownloadPriority::from_str_opt("h"), Some(DownloadPriority::High));
+        assert_eq!(DownloadPriority::from_str_opt("2"), Some(DownloadPriority::High));
+        
+        assert_eq!(DownloadPriority::from_str_opt("normal"), Some(DownloadPriority::Normal));
+        assert_eq!(DownloadPriority::from_str_opt("n"), Some(DownloadPriority::Normal));
+        assert_eq!(DownloadPriority::from_str_opt("1"), Some(DownloadPriority::Normal));
+        assert_eq!(DownloadPriority::from_str_opt("default"), Some(DownloadPriority::Normal));
+        
+        assert_eq!(DownloadPriority::from_str_opt("low"), Some(DownloadPriority::Low));
+        assert_eq!(DownloadPriority::from_str_opt("l"), Some(DownloadPriority::Low));
+        assert_eq!(DownloadPriority::from_str_opt("0"), Some(DownloadPriority::Low));
+        
+        assert_eq!(DownloadPriority::from_str_opt("invalid"), None);
+    }
+
+    #[test]
+    fn test_download_priority_label() {
+        assert_eq!(DownloadPriority::High.label(), "high");
+        assert_eq!(DownloadPriority::Normal.label(), "normal");
+        assert_eq!(DownloadPriority::Low.label(), "low");
+    }
+
+    #[test]
+    fn test_download_priority_default() {
+        let priority = DownloadPriority::default();
+        assert_eq!(priority, DownloadPriority::Normal);
+    }
+
+    #[tokio::test]
+    async fn test_set_priority() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_priority"));
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "t1".into(),
+                name: "file.iso".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+            });
+        }
+
+        // Set priority to High
+        assert!(dm.set_priority("t1", DownloadPriority::High).await);
+        
+        let task = dm.get_task("t1").await.unwrap();
+        assert_eq!(task.priority, DownloadPriority::High);
+
+        // Set priority to Low
+        assert!(dm.set_priority("t1", DownloadPriority::Low).await);
+        
+        let task = dm.get_task("t1").await.unwrap();
+        assert_eq!(task.priority, DownloadPriority::Low);
+
+        // Non-existent task
+        assert!(!dm.set_priority("nonexistent", DownloadPriority::High).await);
+    }
+
+    #[tokio::test]
+    async fn test_priority_in_task_info_event() {
+        let task = DownloadTask {
+            id: "t1".into(),
+            name: "file.iso".into(),
+            protocol: DownloadProtocol::Torrent,
+            size: 1000,
+            downloaded: 500,
+            state: DownloadState::Downloading,
+            error: None,
+            speed_bps: 100.0,
+            save_path: std::path::PathBuf::from("/tmp"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            tags: vec!["test".into()],
+            priority: DownloadPriority::High,
+        };
+
+        let event = TaskInfoEvent::from_task(&task);
+        assert_eq!(event.priority, "high");
+
+        let task_low = DownloadTask {
+            priority: DownloadPriority::Low,
+            ..task
+        };
+        let event_low = TaskInfoEvent::from_task(&task_low);
+        assert_eq!(event_low.priority, "low");
     }
 }

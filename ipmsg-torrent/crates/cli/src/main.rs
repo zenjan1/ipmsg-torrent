@@ -132,6 +132,11 @@ enum Command {
         /// Sort ascending (default: descending for most fields)
         asc: bool,
     },
+    /// Set download task priority (high/normal/low)
+    DlPriority {
+        task_id: String,
+        priority: String,
+    },
     Block {
         peer: String,
     },
@@ -354,6 +359,18 @@ fn parse_command(input: &str) -> Command {
                 asc,
             }
         }
+        "dlpriority" | "dl-priority" | "dlpri" => {
+            // /dlpriority <task_id> <high|normal|low>
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 3 {
+                Command::DlPriority {
+                    task_id: args[1].to_string(),
+                    priority: args[2].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlpriority <task_id> <high|normal|low>".to_string())
+            }
+        }
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -421,6 +438,7 @@ fn command_help() -> String {
         "/dluntag <id> <tags> - Remove tags from a download",
         "/dltags [tag]    - List all tags, or filter tasks by tag",
         "/dlfind [query] [--state=X] [--protocol=X] [--sort=X] [--asc] - Search/filter downloads",
+        "/dlpriority <id> <high|normal|low> - Set download task priority",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -1492,6 +1510,29 @@ async fn handle_command(
                     format_task_list(&tasks)
                 );
                 s.add_system_message("main", msg);
+            }
+        }
+        Command::DlPriority { task_id, priority } => {
+            use ipmsg_download::DownloadPriority;
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let pri = match DownloadPriority::from_str_opt(&priority) {
+                Some(p) => p,
+                None => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("Invalid priority: {}. Use high/normal/low", priority));
+                    return;
+                }
+            };
+
+            if download_manager.set_priority(&task_id, pri).await {
+                let mut s = state.lock().await;
+                s.add_system_message("main", format!("Set task {} priority to {}", &task_id[..8.min(task_id.len())], pri.label()));
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message("main", format!("Task {} not found", &task_id[..8.min(task_id.len())]));
             }
         }
         Command::Block { peer } => {

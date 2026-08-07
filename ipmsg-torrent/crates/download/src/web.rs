@@ -477,6 +477,7 @@ mod tests {
                 state: "downloading".into(),
                 error: None,
                 tags: Vec::new(),
+                priority: "normal".into(),
             },
         };
         let json = serde_json::to_string(&event).unwrap();

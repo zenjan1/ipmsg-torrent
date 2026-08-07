@@ -221,6 +221,7 @@ pub enum HistoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DownloadPriority;
 
     fn make_task(state: DownloadState, error: Option<String>) -> DownloadTask {
         DownloadTask {
@@ -236,6 +237,7 @@ mod tests {
             created_at: Utc::now() - chrono::Duration::minutes(30),
             updated_at: Utc::now(),
             tags: vec!["linux".into()],
+            priority: DownloadPriority::Normal,
         }
     }
 

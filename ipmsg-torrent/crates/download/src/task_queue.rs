@@ -2,7 +2,7 @@
 //!
 //! Saves and loads download task state to survive application restarts.
 
-use crate::{DownloadProtocol, DownloadState, DownloadTask};
+use crate::{DownloadPriority, DownloadProtocol, DownloadState, DownloadTask};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -23,6 +23,8 @@ pub struct PersistedTask {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub priority: DownloadPriority,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -106,6 +108,7 @@ impl From<DownloadTask> for PersistedTask {
             created_at: t.created_at,
             updated_at: t.updated_at,
             tags: t.tags,
+            priority: t.priority,
         }
     }
 }
@@ -125,6 +128,7 @@ impl From<PersistedTask> for DownloadTask {
             created_at: t.created_at,
             updated_at: t.updated_at,
             tags: t.tags,
+            priority: t.priority,
         }
     }
 }
@@ -223,6 +227,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             tags: Vec::new(),
+            priority: crate::DownloadPriority::Normal,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -274,6 +279,7 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 tags: Vec::new(),
+                priority: crate::DownloadPriority::Normal,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -288,6 +294,7 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 tags: Vec::new(),
+                priority: crate::DownloadPriority::Normal,
             },
         ];
 
@@ -331,6 +338,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             tags: Vec::new(),
+            priority: crate::DownloadPriority::Normal,
         };
 
         save_task_queue(&[task], data_dir).unwrap();

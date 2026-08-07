@@ -154,7 +154,7 @@ async fn test_download_manager_remove_task() {
 
 #[test]
 fn test_download_task_progress() {
-    use ipmsg_download::DownloadTask;
+    use ipmsg_download::{DownloadPriority, DownloadTask};
 
     let task = DownloadTask {
         id: "test-id".to_string(),
@@ -169,6 +169,7 @@ fn test_download_task_progress() {
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         tags: Vec::new(),
+        priority: DownloadPriority::Normal,
     };
 
     assert_eq!(task.progress(), 50.0);
@@ -176,7 +177,7 @@ fn test_download_task_progress() {
 
 #[test]
 fn test_download_task_progress_zero_size() {
-    use ipmsg_download::DownloadTask;
+    use ipmsg_download::{DownloadPriority, DownloadTask};
 
     let task = DownloadTask {
         id: "test-id".to_string(),
@@ -191,6 +192,7 @@ fn test_download_task_progress_zero_size() {
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         tags: Vec::new(),
+        priority: DownloadPriority::Normal,
     };
 
     assert_eq!(task.progress(), 0.0);
