@@ -176,6 +176,7 @@ fn test_download_task_progress() {
         depends_on: Vec::new(),
         notes: None,
         group: None,
+        speed_limit_bps: None,
     };
 
     assert_eq!(task.progress(), 50.0);
@@ -205,6 +206,7 @@ fn test_download_task_progress_zero_size() {
         depends_on: Vec::new(),
         notes: None,
         group: None,
+        speed_limit_bps: None,
     };
 
     assert_eq!(task.progress(), 0.0);

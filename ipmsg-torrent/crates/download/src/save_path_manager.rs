@@ -5,6 +5,7 @@
 //! - Per-task custom save paths
 //! - Auto-organize by file type (videos, music, documents, etc.)
 //! - Path validation and creation
+//! - Configuration persistence to disk
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -229,6 +230,65 @@ impl SavePathManager {
     }
 }
 
+// ─── Persistence Functions ───
+
+/// Save save-path configuration to disk.
+///
+/// Writes atomically using a temporary file to prevent corruption.
+pub async fn save_save_path_config(
+    data_dir: &Path,
+    config: &SavePathConfig,
+) -> Result<(), SavePathPersistenceError> {
+    let config_path = data_dir.join("save_path_config.json");
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| SavePathPersistenceError::Serialize(e.to_string()))?;
+
+    // Atomic write: write to temp file, then rename
+    let tmp_path = data_dir.join("save_path_config.json.tmp");
+    tokio::fs::write(&tmp_path, &json)
+        .await
+        .map_err(|e| SavePathPersistenceError::Io(e.to_string()))?;
+    tokio::fs::rename(&tmp_path, &config_path)
+        .await
+        .map_err(|e| SavePathPersistenceError::Io(e.to_string()))?;
+
+    Ok(())
+}
+
+/// Load save-path configuration from disk.
+///
+/// Returns `Ok(None)` if the config file doesn't exist (first run).
+/// Returns `Err` if the file exists but can't be parsed.
+pub async fn load_save_path_config(
+    data_dir: &Path,
+) -> Result<Option<SavePathConfig>, SavePathPersistenceError> {
+    let config_path = data_dir.join("save_path_config.json");
+
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let json = tokio::fs::read_to_string(&config_path)
+        .await
+        .map_err(|e| SavePathPersistenceError::Io(e.to_string()))?;
+
+    let config: SavePathConfig = serde_json::from_str(&json)
+        .map_err(|e| SavePathPersistenceError::Deserialize(e.to_string()))?;
+
+    Ok(Some(config))
+}
+
+/// Errors from save-path configuration persistence.
+#[derive(Debug, thiserror::Error)]
+pub enum SavePathPersistenceError {
+    #[error("IO error: {0}")]
+    Io(String),
+    #[error("serialization error: {0}")]
+    Serialize(String),
+    #[error("deserialization error: {0}")]
+    Deserialize(String),
+}
+
 /// Errors that can occur during save path operations
 #[derive(Debug, thiserror::Error)]
 pub enum SavePathError {
@@ -444,5 +504,142 @@ mod tests {
         assert_eq!(deserialized.base_dir, config.base_dir);
         assert_eq!(deserialized.auto_organize, config.auto_organize);
         assert_eq!(deserialized.category_dirs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load_config() {
+        let temp_dir = std::env::temp_dir().join("ipmsg_test_save_path_persist");
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        let config = SavePathConfig {
+            base_dir: PathBuf::from("/my/downloads"),
+            auto_organize: true,
+            category_dirs: {
+                let mut map = HashMap::new();
+                map.insert(FileCategory::Video, "MyVideos".to_string());
+                map.insert(FileCategory::Music, "MyMusic".to_string());
+                map
+            },
+        };
+
+        // Save config
+        save_save_path_config(&temp_dir, &config).await.unwrap();
+
+        // Verify file exists
+        let config_path = temp_dir.join("save_path_config.json");
+        assert!(config_path.exists());
+
+        // Load config
+        let loaded = load_save_path_config(&temp_dir).await.unwrap();
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+
+        assert_eq!(loaded.base_dir, config.base_dir);
+        assert_eq!(loaded.auto_organize, config.auto_organize);
+        assert_eq!(loaded.category_dirs.len(), 2);
+        assert_eq!(
+            loaded.category_dirs.get(&FileCategory::Video),
+            Some(&"MyVideos".to_string())
+        );
+
+        // Cleanup
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_load_config_missing_file() {
+        let temp_dir = std::env::temp_dir().join("ipmsg_test_save_path_missing");
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        // Load from non-existent file should return Ok(None)
+        let result = load_save_path_config(&temp_dir).await.unwrap();
+        assert!(result.is_none());
+
+        // Cleanup
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load_empty_category_dirs() {
+        let temp_dir = std::env::temp_dir().join("ipmsg_test_save_path_empty_cats");
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        let config = SavePathConfig {
+            base_dir: PathBuf::from("/downloads"),
+            auto_organize: false,
+            category_dirs: HashMap::new(),
+        };
+
+        save_save_path_config(&temp_dir, &config).await.unwrap();
+        let loaded = load_save_path_config(&temp_dir).await.unwrap().unwrap();
+
+        assert_eq!(loaded.base_dir, config.base_dir);
+        assert!(!loaded.auto_organize);
+        assert!(loaded.category_dirs.is_empty());
+
+        // Cleanup
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_load_config_corrupted_file() {
+        let temp_dir = std::env::temp_dir().join("ipmsg_test_save_path_corrupt");
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        // Write invalid JSON
+        let config_path = temp_dir.join("save_path_config.json");
+        tokio::fs::write(&config_path, "not valid json {{{")
+            .await
+            .unwrap();
+
+        // Should return error
+        let result = load_save_path_config(&temp_dir).await;
+        assert!(result.is_err());
+
+        // Cleanup
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_save_overwrite_config() {
+        let temp_dir = std::env::temp_dir().join("ipmsg_test_save_path_overwrite");
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        // Save initial config
+        let config1 = SavePathConfig {
+            base_dir: PathBuf::from("/downloads1"),
+            auto_organize: false,
+            category_dirs: HashMap::new(),
+        };
+        save_save_path_config(&temp_dir, &config1).await.unwrap();
+
+        // Overwrite with new config
+        let config2 = SavePathConfig {
+            base_dir: PathBuf::from("/downloads2"),
+            auto_organize: true,
+            category_dirs: {
+                let mut map = HashMap::new();
+                map.insert(FileCategory::Document, "Docs".to_string());
+                map
+            },
+        };
+        save_save_path_config(&temp_dir, &config2).await.unwrap();
+
+        // Load should get the second config
+        let loaded = load_save_path_config(&temp_dir).await.unwrap().unwrap();
+        assert_eq!(loaded.base_dir, PathBuf::from("/downloads2"));
+        assert!(loaded.auto_organize);
+        assert_eq!(
+            loaded.category_dirs.get(&FileCategory::Document),
+            Some(&"Docs".to_string())
+        );
+
+        // Cleanup
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 }

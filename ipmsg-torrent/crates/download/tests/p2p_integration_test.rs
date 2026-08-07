@@ -162,6 +162,7 @@ async fn test_p2p_download_progress_calculation() {
         bandwidth_weight: 1,
         notes: None,
         group: None,
+        speed_limit_bps: None,
     };
 
     assert_eq!(task.progress(), 75.0);

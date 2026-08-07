@@ -48,7 +48,10 @@ pub use notification::{
     NotificationChannel, NotificationConfig, NotificationError, NotificationEvent,
 };
 pub use rate_limiter::{DownloadRateController, RateLimiter};
-pub use save_path_manager::{FileCategory, SavePathConfig, SavePathError, SavePathManager};
+pub use save_path_manager::{
+    FileCategory, SavePathConfig, SavePathError, SavePathManager, SavePathPersistenceError,
+    load_save_path_config, save_save_path_config,
+};
 
 /// Download statistics snapshot.
 /// Aggregated from all tasks for dashboard display.
@@ -669,6 +672,12 @@ impl DownloadManager {
         if let Ok(Some(shutdown_cfg)) = auto_shutdown::load_auto_shutdown_config(&dm.data_dir) {
             *dm.auto_shutdown.write().await = shutdown_cfg;
         }
+        // Restore save-path configuration from disk
+        if let Ok(Some(save_path_cfg)) =
+            save_path_manager::load_save_path_config(&dm.data_dir).await
+        {
+            dm.save_path_manager.set_config(save_path_cfg).await;
+        }
         dm.start_scheduler();
         dm
     }
@@ -1227,8 +1236,12 @@ impl DownloadManager {
     }
 
     /// Set the base download directory.
+    ///
+    /// Automatically persists the configuration to disk.
     pub async fn set_save_path(&self, path: PathBuf) {
         self.save_path_manager.set_base_dir(path).await;
+        let _ =
+            save_save_path_config(&self.data_dir, &self.save_path_manager.get_config().await).await;
     }
 
     /// Get the current base download directory.
@@ -1237,8 +1250,12 @@ impl DownloadManager {
     }
 
     /// Enable or disable auto-organization by file type.
+    ///
+    /// Automatically persists the configuration to disk.
     pub async fn set_auto_organize(&self, enabled: bool) {
         self.save_path_manager.set_auto_organize(enabled).await;
+        let _ =
+            save_save_path_config(&self.data_dir, &self.save_path_manager.get_config().await).await;
     }
 
     /// Check if auto-organization is enabled.
@@ -1247,10 +1264,14 @@ impl DownloadManager {
     }
 
     /// Set custom directory name for a file category.
+    ///
+    /// Automatically persists the configuration to disk.
     pub async fn set_category_dir(&self, category: FileCategory, dir_name: String) {
         self.save_path_manager
             .set_category_dir(category, dir_name)
             .await;
+        let _ =
+            save_save_path_config(&self.data_dir, &self.save_path_manager.get_config().await).await;
     }
 
     /// Set a time window schedule for a download task.
