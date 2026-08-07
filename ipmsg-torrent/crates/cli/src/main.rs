@@ -169,6 +169,11 @@ enum Command {
         /// File path containing URLs (one per line), or inline URLs separated by spaces
         source: String,
     },
+    /// Configure auto-shutdown when all downloads complete
+    DlAutoshutdown {
+        /// Action: "disabled", "exit", or "shell:<command>"
+        action: String,
+    },
     Block {
         peer: String,
     },
@@ -478,6 +483,17 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlbatch <file_path>".to_string())
             }
         }
+        "dlautoshutdown" | "dl-auto-shutdown" | "dlas" => {
+            // /dlautoshutdown <disabled|exit|shell:<command>>
+            let args: Vec<&str> = input.splitn(2, ' ').collect();
+            if args.len() >= 2 {
+                Command::DlAutoshutdown {
+                    action: args[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlautoshutdown <disabled|exit|shell:<command>>".to_string())
+            }
+        }
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -549,6 +565,7 @@ fn command_help() -> String {
         "/dlbw <id> <1-10>    - Set bandwidth weight (higher = more bandwidth)",
         "/dlbwmon           - Show bandwidth monitoring dashboard",
         "/dlqmove <id> <up|down|top|bottom> - Move task in queue",
+        "/dlautoshutdown <disabled|exit|shell:<cmd>> - Auto-shutdown when all downloads complete",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
@@ -2056,6 +2073,46 @@ async fn handle_command(
 
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
+        }
+        Command::DlAutoshutdown { action } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            use ipmsg_download::auto_shutdown::{AutoShutdownAction, AutoShutdownConfig};
+
+            let config = download_manager.get_auto_shutdown().await;
+
+            if action == "status" {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    format!("🔧 Auto-shutdown: {}", config.action.display()),
+                );
+                return;
+            }
+
+            match AutoShutdownAction::from_str_opt(&action) {
+                Some(new_action) => {
+                    let new_config = AutoShutdownConfig {
+                        action: new_action,
+                        require_empty_queue: config.require_empty_queue,
+                    };
+                    download_manager.set_auto_shutdown(new_config.clone()).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("✅ Auto-shutdown set to: {}", new_config.action.display()),
+                    );
+                }
+                None => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "❌ Invalid action. Use: disabled, exit, or shell:<command>".to_string(),
+                    );
+                }
+            }
         }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {
