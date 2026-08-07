@@ -4,6 +4,7 @@
 //! optionally exit the application or execute a shell command.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -103,6 +104,46 @@ pub fn all_tasks_terminal(
 /// Check if queue is "empty enough" (no active work)
 pub fn queue_is_idle(running_count: usize, queued_count: usize, downloading_count: usize) -> bool {
     running_count == 0 && queued_count == 0 && downloading_count == 0
+}
+
+/// Save auto-shutdown configuration to disk.
+pub fn save_auto_shutdown_config(
+    config: &AutoShutdownConfig,
+    data_dir: &Path,
+) -> Result<(), AutoShutdownPersistenceError> {
+    let config_path = data_dir.join("auto_shutdown_config.json");
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| AutoShutdownPersistenceError::Serialize(e.to_string()))?;
+    std::fs::write(&config_path, json)
+        .map_err(|e| AutoShutdownPersistenceError::Io(e.to_string()))?;
+    Ok(())
+}
+
+/// Load auto-shutdown configuration from disk.
+/// Returns `Ok(None)` if no config file exists.
+pub fn load_auto_shutdown_config(
+    data_dir: &Path,
+) -> Result<Option<AutoShutdownConfig>, AutoShutdownPersistenceError> {
+    let config_path = data_dir.join("auto_shutdown_config.json");
+    if !config_path.exists() {
+        return Ok(None);
+    }
+    let json = std::fs::read_to_string(&config_path)
+        .map_err(|e| AutoShutdownPersistenceError::Io(e.to_string()))?;
+    let config: AutoShutdownConfig = serde_json::from_str(&json)
+        .map_err(|e| AutoShutdownPersistenceError::Deserialize(e.to_string()))?;
+    Ok(Some(config))
+}
+
+/// Errors when persisting auto-shutdown configuration.
+#[derive(Debug, thiserror::Error)]
+pub enum AutoShutdownPersistenceError {
+    #[error("IO error: {0}")]
+    Io(String),
+    #[error("serialize error: {0}")]
+    Serialize(String),
+    #[error("deserialize error: {0}")]
+    Deserialize(String),
 }
 
 /// Execute the auto-shutdown action.
@@ -293,5 +334,45 @@ mod tests {
             require_empty_queue: false,
         };
         assert!(!execute_shutdown_action(&config).await);
+    }
+
+    #[test]
+    fn test_save_load_auto_shutdown_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = AutoShutdownConfig {
+            action: AutoShutdownAction::Shell {
+                command: "echo done".to_string(),
+            },
+            require_empty_queue: true,
+        };
+        save_auto_shutdown_config(&config, tmp.path()).unwrap();
+        let loaded = load_auto_shutdown_config(tmp.path()).unwrap().unwrap();
+        assert_eq!(loaded.action, config.action);
+        assert_eq!(loaded.require_empty_queue, config.require_empty_queue);
+    }
+
+    #[test]
+    fn test_load_auto_shutdown_config_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loaded = load_auto_shutdown_config(tmp.path()).unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_save_auto_shutdown_config_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config1 = AutoShutdownConfig {
+            action: AutoShutdownAction::Exit,
+            require_empty_queue: false,
+        };
+        save_auto_shutdown_config(&config1, tmp.path()).unwrap();
+        let config2 = AutoShutdownConfig {
+            action: AutoShutdownAction::Disabled,
+            require_empty_queue: true,
+        };
+        save_auto_shutdown_config(&config2, tmp.path()).unwrap();
+        let loaded = load_auto_shutdown_config(tmp.path()).unwrap().unwrap();
+        assert_eq!(loaded.action, AutoShutdownAction::Disabled);
+        assert!(loaded.require_empty_queue);
     }
 }

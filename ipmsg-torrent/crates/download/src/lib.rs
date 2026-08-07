@@ -656,6 +656,10 @@ impl DownloadManager {
         if let Ok(Some(notif_cfg)) = notification::load_notification_config(&dm.data_dir) {
             dm.notifier.update_config(notif_cfg);
         }
+        // Restore auto-shutdown configuration from disk
+        if let Ok(Some(shutdown_cfg)) = auto_shutdown::load_auto_shutdown_config(&dm.data_dir) {
+            *dm.auto_shutdown.write().await = shutdown_cfg;
+        }
         dm.start_scheduler();
         dm
     }
@@ -1108,9 +1112,12 @@ impl DownloadManager {
 
     /// Set auto-shutdown configuration.
     /// When enabled, triggers an action when all downloads finish.
+    /// Also persists the configuration to disk for restoration on restart.
     pub async fn set_auto_shutdown(&self, config: AutoShutdownConfig) {
-        let mut shutdown = self.auto_shutdown.write().await;
-        *shutdown = config;
+        *self.auto_shutdown.write().await = config.clone();
+        if let Err(e) = auto_shutdown::save_auto_shutdown_config(&config, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist auto-shutdown config");
+        }
     }
 
     /// Get current auto-shutdown configuration.
