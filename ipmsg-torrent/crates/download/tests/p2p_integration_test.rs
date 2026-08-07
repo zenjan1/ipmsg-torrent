@@ -156,6 +156,7 @@ async fn test_p2p_download_progress_calculation() {
         updated_at: chrono::Utc::now(),
         tags: Vec::new(),
         priority: DownloadPriority::Normal,
+        schedule: None,
     };
 
     assert_eq!(task.progress(), 75.0);

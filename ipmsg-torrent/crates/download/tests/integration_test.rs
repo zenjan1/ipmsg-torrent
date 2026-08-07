@@ -170,6 +170,7 @@ fn test_download_task_progress() {
         updated_at: chrono::Utc::now(),
         tags: Vec::new(),
         priority: DownloadPriority::Normal,
+        schedule: None,
     };
 
     assert_eq!(task.progress(), 50.0);
@@ -193,6 +194,7 @@ fn test_download_task_progress_zero_size() {
         updated_at: chrono::Utc::now(),
         tags: Vec::new(),
         priority: DownloadPriority::Normal,
+        schedule: None,
     };
 
     assert_eq!(task.progress(), 0.0);

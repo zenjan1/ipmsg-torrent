@@ -144,6 +144,12 @@ enum Command {
         /// Configuration value (depends on action)
         value: Option<String>,
     },
+    /// Set download schedule time window (e.g., "09:00-17:00" or "none" to disable)
+    DlSchedule {
+        task_id: String,
+        /// Time window "HH:MM-HH:MM" or "none" to remove schedule
+        window: String,
+    },
     Block {
         peer: String,
     },
@@ -394,6 +400,18 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown(
                     "/dlnotify <enable|disable|desktop|shell|log|webhook|status>".to_string(),
                 )
+            }
+        }
+        "dlschedule" | "dl-schedule" | "dlsch" => {
+            // /dlschedule <task_id> <HH:MM-HH:MM|none>
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 3 {
+                Command::DlSchedule {
+                    task_id: args[1].to_string(),
+                    window: args[2].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlschedule <task_id> <HH:MM-HH:MM|none>".to_string())
             }
         }
         "block" => {
@@ -1710,6 +1728,79 @@ async fn handle_command(
                     let mut s = state.lock().await;
                     s.add_system_message("main", format!("Unknown action: {}. Use: enable, disable, desktop, shell, log, webhook, status", action));
                 }
+            }
+        }
+        Command::DlSchedule { task_id, window } => {
+            use ipmsg_download::TimeWindow;
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if window.to_lowercase() == "none" || window.to_lowercase() == "off" {
+                let ok = download_manager.set_schedule(&task_id, None).await;
+                let mut s = state.lock().await;
+                if ok {
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "📅 Schedule removed for task {}",
+                            &task_id[..8.min(task_id.len())]
+                        ),
+                    );
+                } else {
+                    s.add_system_message(
+                        "main",
+                        format!("Task {} not found", &task_id[..8.min(task_id.len())]),
+                    );
+                }
+            } else if let Some((start, end)) = window.split_once('-') {
+                let parse_hhmm = |s: &str| -> Option<(u8, u8)> {
+                    let parts: Vec<&str> = s.split(':').collect();
+                    if parts.len() != 2 {
+                        return None;
+                    }
+                    let h = parts[0].parse::<u8>().ok()?;
+                    let m = parts[1].parse::<u8>().ok()?;
+                    if h > 23 || m > 59 {
+                        return None;
+                    }
+                    Some((h, m))
+                };
+                match (parse_hhmm(start), parse_hhmm(end)) {
+                    (Some((sh, sm)), Some((eh, em))) => {
+                        let tw = TimeWindow::new(sh, sm, eh, em);
+                        let ok = download_manager.set_schedule(&task_id, tw).await;
+                        let mut s = state.lock().await;
+                        if ok {
+                            s.add_system_message(
+                                "main",
+                                format!(
+                                    "📅 Schedule {} set for task {}",
+                                    tw.map(|w| w.format()).unwrap_or_default(),
+                                    &task_id[..8.min(task_id.len())]
+                                ),
+                            );
+                        } else {
+                            s.add_system_message(
+                                "main",
+                                format!("Task {} not found", &task_id[..8.min(task_id.len())]),
+                            );
+                        }
+                    }
+                    _ => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Invalid time format. Use HH:MM-HH:MM (e.g., 09:00-17:00)".to_string(),
+                        );
+                    }
+                }
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    "Usage: /dlschedule <task_id> <HH:MM-HH:MM|none>".to_string(),
+                );
             }
         }
         Command::Block { peer } => {

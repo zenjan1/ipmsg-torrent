@@ -20,6 +20,7 @@ pub mod torrent;
 pub mod web;
 pub mod xunlei;
 
+use chrono::Timelike;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -125,6 +126,62 @@ impl TaskInfoEvent {
     }
 }
 
+/// Time window for scheduled downloads
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct TimeWindow {
+    /// Start hour (0-23)
+    pub start_hour: u8,
+    /// Start minute (0-59)
+    pub start_minute: u8,
+    /// End hour (0-23)
+    pub end_hour: u8,
+    /// End minute (0-59)
+    pub end_minute: u8,
+}
+
+impl TimeWindow {
+    /// Create a new time window
+    pub fn new(start_hour: u8, start_minute: u8, end_hour: u8, end_minute: u8) -> Option<Self> {
+        if start_hour > 23 || end_hour > 23 || start_minute > 59 || end_minute > 59 {
+            return None;
+        }
+        Some(Self {
+            start_hour,
+            start_minute,
+            end_hour,
+            end_minute,
+        })
+    }
+
+    /// Check if current time is within the window
+    pub fn is_active_now(&self) -> bool {
+        self.is_active_at(chrono::Local::now())
+    }
+
+    /// Check if given time is within the window
+    pub fn is_active_at(&self, dt: chrono::DateTime<chrono::Local>) -> bool {
+        let current_minutes = dt.hour() as u16 * 60 + dt.minute() as u16;
+        let start_minutes = self.start_hour as u16 * 60 + self.start_minute as u16;
+        let end_minutes = self.end_hour as u16 * 60 + self.end_minute as u16;
+
+        if start_minutes <= end_minutes {
+            // Normal window (e.g., 09:00 - 17:00)
+            current_minutes >= start_minutes && current_minutes < end_minutes
+        } else {
+            // Overnight window (e.g., 22:00 - 06:00)
+            current_minutes >= start_minutes || current_minutes < end_minutes
+        }
+    }
+
+    /// Format as human-readable string
+    pub fn format(&self) -> String {
+        format!(
+            "{:02}:{:02}-{:02}:{:02}",
+            self.start_hour, self.start_minute, self.end_hour, self.end_minute
+        )
+    }
+}
+
 /// Unified download task
 #[derive(Debug, Clone)]
 pub struct DownloadTask {
@@ -143,6 +200,8 @@ pub struct DownloadTask {
     pub tags: Vec<String>,
     /// Download priority (higher priority tasks are spawned first)
     pub priority: DownloadPriority,
+    /// Optional time window for scheduled downloading
+    pub schedule: Option<TimeWindow>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -526,6 +585,47 @@ impl DownloadManager {
         let max_concurrent = self.max_concurrent;
         let notifier = self.notifier.clone();
 
+        // Spawn schedule checker (runs every 60 seconds)
+        let schedule_check_tasks = self.tasks.clone();
+        let schedule_check_notify = self.task_complete_notify.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let now = chrono::Local::now();
+                let mut changes = 0;
+                let mut tasks = schedule_check_tasks.lock().await;
+
+                for task in tasks.iter_mut() {
+                    if let Some(window) = task.schedule {
+                        let in_window = window.is_active_at(now);
+
+                        match task.state {
+                            // Task is downloading but outside its time window — pause it
+                            DownloadState::Downloading if !in_window => {
+                                task.state = DownloadState::Paused;
+                                task.speed_bps = 0.0;
+                                task.updated_at = chrono::Utc::now();
+                                changes += 1;
+                            }
+                            // Task is paused but inside its time window — resume it
+                            DownloadState::Paused if in_window => {
+                                task.state = DownloadState::Queued;
+                                task.updated_at = chrono::Utc::now();
+                                changes += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                if changes > 0 {
+                    drop(tasks);
+                    schedule_check_notify.notify_one();
+                }
+            }
+        });
+
         tokio::spawn(async move {
             loop {
                 notify.notified().await;
@@ -841,6 +941,68 @@ impl DownloadManager {
         self.notifier.update_config(config);
     }
 
+    /// Set a time window schedule for a download task.
+    /// The task will only download during the specified time window.
+    /// Pass None to remove the schedule and allow continuous downloading.
+    pub async fn set_schedule(&self, task_id: &str, schedule: Option<TimeWindow>) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            task.schedule = schedule;
+            task.updated_at = chrono::Utc::now();
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(task),
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the schedule for a download task.
+    pub async fn get_schedule(&self, task_id: &str) -> Option<Option<TimeWindow>> {
+        let tasks = self.tasks.lock().await;
+        tasks.iter().find(|t| t.id == task_id).map(|t| t.schedule)
+    }
+
+    /// Check all tasks with schedules and pause/resume as needed.
+    /// Returns the number of tasks that were paused or resumed.
+    pub async fn check_schedules(&self) -> usize {
+        let now = chrono::Local::now();
+        let mut changes = 0;
+        let mut tasks = self.tasks.lock().await;
+
+        for task in tasks.iter_mut() {
+            if let Some(window) = task.schedule {
+                let in_window = window.is_active_at(now);
+
+                match task.state {
+                    // Task is downloading but outside its time window — pause it
+                    DownloadState::Downloading if !in_window => {
+                        task.state = DownloadState::Paused;
+                        task.speed_bps = 0.0;
+                        task.updated_at = chrono::Utc::now();
+                        changes += 1;
+                    }
+                    // Task is paused but inside its time window — resume it
+                    DownloadState::Paused if in_window => {
+                        task.state = DownloadState::Queued;
+                        task.updated_at = chrono::Utc::now();
+                        changes += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if changes > 0 {
+            // Notify scheduler that new tasks may be ready
+            drop(tasks);
+            self.task_complete_notify.notify_one();
+        }
+
+        changes
+    }
+
     /// Get current running task count
     pub async fn running_count(&self) -> usize {
         self.running.lock().await.len()
@@ -880,6 +1042,7 @@ impl DownloadManager {
             updated_at: now,
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
+            schedule: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -926,6 +1089,7 @@ impl DownloadManager {
             updated_at: now,
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
+            schedule: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -972,6 +1136,7 @@ impl DownloadManager {
             updated_at: now,
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
+            schedule: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1016,6 +1181,7 @@ impl DownloadManager {
             updated_at: now,
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
+            schedule: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1060,6 +1226,7 @@ impl DownloadManager {
             updated_at: now,
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
+            schedule: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -2413,6 +2580,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2428,6 +2596,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -2443,6 +2612,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
         }
 
@@ -2550,6 +2720,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
         }
 
@@ -2592,6 +2763,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: vec!["movies".into(), "action".into(), "drama".into()],
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
         }
 
@@ -2627,6 +2799,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: vec!["movies".into(), "action".into()],
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2642,6 +2815,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: vec!["movies".into(), "drama".into()],
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -2657,6 +2831,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: vec!["work".into()],
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
         }
 
@@ -2695,6 +2870,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: vec!["movies".into(), "action".into()],
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -2710,6 +2886,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: vec!["movies".into(), "drama".into()],
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
         }
 
@@ -2738,6 +2915,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: vec!["movies".into()],
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
         }
 
@@ -2766,6 +2944,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
+            schedule: None,
         };
         assert!(task.tags.is_empty());
     }
@@ -2788,6 +2967,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             tags: vec!["linux".into()],
             priority: DownloadPriority::Normal,
+            schedule: None,
         };
 
         // Query match (case-insensitive)
@@ -2827,6 +3007,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
+            schedule: None,
         };
 
         let filter = TaskFilter {
@@ -2858,6 +3039,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             tags: Vec::new(),
             priority: DownloadPriority::Normal,
+            schedule: None,
         };
 
         let filter = TaskFilter {
@@ -2889,6 +3071,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             tags: vec!["movies".into(), "action".into()],
             priority: DownloadPriority::Normal,
+            schedule: None,
         };
 
         let filter = TaskFilter {
@@ -2920,6 +3103,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             tags: vec!["linux".into()],
             priority: DownloadPriority::Normal,
+            schedule: None,
         };
 
         // All criteria match
@@ -2958,6 +3142,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -2973,6 +3158,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -2988,6 +3174,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             },
         ];
 
@@ -3018,6 +3205,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -3033,6 +3221,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -3048,6 +3237,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             },
         ];
 
@@ -3074,6 +3264,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             },
             DownloadTask {
                 id: "p2".into(),
@@ -3089,6 +3280,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             },
             DownloadTask {
                 id: "p3".into(),
@@ -3104,6 +3296,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             },
         ];
 
@@ -3132,6 +3325,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3147,6 +3341,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
         }
 
@@ -3173,6 +3368,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3188,6 +3384,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3203,6 +3400,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
         }
 
@@ -3234,6 +3432,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3249,6 +3448,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3264,6 +3464,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
         }
 
@@ -3371,6 +3572,7 @@ mod tests {
                 updated_at: chrono::Utc::now(),
                 tags: Vec::new(),
                 priority: DownloadPriority::Normal,
+                schedule: None,
             });
         }
 
@@ -3406,6 +3608,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             tags: vec!["test".into()],
             priority: DownloadPriority::High,
+            schedule: None,
         };
 
         let event = TaskInfoEvent::from_task(&task);
@@ -3417,5 +3620,165 @@ mod tests {
         };
         let event_low = TaskInfoEvent::from_task(&task_low);
         assert_eq!(event_low.priority, "low");
+    }
+
+    #[test]
+    fn test_time_window_new_valid() {
+        let window = TimeWindow::new(9, 0, 17, 30);
+        assert!(window.is_some());
+        let window = window.unwrap();
+        assert_eq!(window.start_hour, 9);
+        assert_eq!(window.start_minute, 0);
+        assert_eq!(window.end_hour, 17);
+        assert_eq!(window.end_minute, 30);
+    }
+
+    #[test]
+    fn test_time_window_new_invalid() {
+        // Invalid hour
+        assert!(TimeWindow::new(24, 0, 17, 0).is_none());
+        assert!(TimeWindow::new(9, 0, 25, 0).is_none());
+        // Invalid minute
+        assert!(TimeWindow::new(9, 60, 17, 0).is_none());
+        assert!(TimeWindow::new(9, 0, 17, 60).is_none());
+    }
+
+    #[test]
+    fn test_time_window_format() {
+        let window = TimeWindow::new(9, 0, 17, 30).unwrap();
+        assert_eq!(window.format(), "09:00-17:30");
+
+        let window = TimeWindow::new(22, 15, 6, 45).unwrap();
+        assert_eq!(window.format(), "22:15-06:45");
+    }
+
+    #[test]
+    fn test_time_window_is_active_normal() {
+        // Normal window: 09:00 - 17:00
+        let window = TimeWindow::new(9, 0, 17, 0).unwrap();
+
+        // Before window
+        let before = chrono::Local::now()
+            .date_naive()
+            .and_hms_opt(8, 30, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap();
+        assert!(!window.is_active_at(before));
+
+        // Inside window
+        let inside = chrono::Local::now()
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap();
+        assert!(window.is_active_at(inside));
+
+        // After window
+        let after = chrono::Local::now()
+            .date_naive()
+            .and_hms_opt(18, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap();
+        assert!(!window.is_active_at(after));
+    }
+
+    #[test]
+    fn test_time_window_is_active_overnight() {
+        // Overnight window: 22:00 - 06:00
+        let window = TimeWindow::new(22, 0, 6, 0).unwrap();
+
+        // Inside window (late night)
+        let late_night = chrono::Local::now()
+            .date_naive()
+            .and_hms_opt(23, 30, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap();
+        assert!(window.is_active_at(late_night));
+
+        // Inside window (early morning)
+        let early_morning = chrono::Local::now()
+            .date_naive()
+            .and_hms_opt(3, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap();
+        assert!(window.is_active_at(early_morning));
+
+        // Outside window (afternoon)
+        let afternoon = chrono::Local::now()
+            .date_naive()
+            .and_hms_opt(14, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap();
+        assert!(!window.is_active_at(afternoon));
+    }
+
+    #[tokio::test]
+    async fn test_set_schedule() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_schedule"));
+
+        // Add a task manually
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "schedule-test-1".into(),
+                name: "file.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+            });
+        }
+
+        // Set a schedule
+        let window = TimeWindow::new(9, 0, 17, 0).unwrap();
+        let success = dm.set_schedule("schedule-test-1", Some(window)).await;
+        assert!(success);
+
+        // Verify schedule was set
+        let schedule = dm.get_schedule("schedule-test-1").await;
+        assert!(schedule.is_some());
+        let schedule = schedule.unwrap();
+        assert!(schedule.is_some());
+        let window = schedule.unwrap();
+        assert_eq!(window.start_hour, 9);
+        assert_eq!(window.end_hour, 17);
+
+        // Remove schedule
+        let success = dm.set_schedule("schedule-test-1", None).await;
+        assert!(success);
+
+        // Verify schedule was removed
+        let schedule = dm.get_schedule("schedule-test-1").await;
+        assert!(schedule.is_some());
+        assert!(schedule.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_schedule_nonexistent_task() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_schedule_nonexist"));
+        let window = TimeWindow::new(9, 0, 17, 0).unwrap();
+        let success = dm.set_schedule("nonexistent", Some(window)).await;
+        assert!(!success);
+    }
+
+    #[tokio::test]
+    async fn test_get_schedule_nonexistent_task() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_get_schedule_nonexist"));
+        let schedule = dm.get_schedule("nonexistent").await;
+        assert!(schedule.is_none());
     }
 }

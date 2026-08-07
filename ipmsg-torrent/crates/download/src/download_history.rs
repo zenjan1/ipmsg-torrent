@@ -238,6 +238,7 @@ mod tests {
             updated_at: Utc::now(),
             tags: vec!["linux".into()],
             priority: DownloadPriority::Normal,
+            schedule: None,
         }
     }
 
