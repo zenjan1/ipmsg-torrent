@@ -70,6 +70,22 @@
         .proxy-result { font-size: 12px; margin-top: 8px; }
         .proxy-result.success { color: #40c057; }
         .proxy-result.error { color: #ff6b6b; }
+        .dep-panel { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        .dep-panel summary { cursor: pointer; color: #00d4ff; font-weight: bold; margin-bottom: 10px; }
+        .dep-graph { position: relative; overflow-x: auto; padding: 10px 0; }
+        .dep-nodes { display: flex; flex-wrap: wrap; gap: 8px; }
+        .dep-node { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 6px; font-size: 12px; border: 1px solid #333; }
+        .dep-node .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .dep-node .dot.complete { background: #40c057; }
+        .dep-node .dot.downloading { background: #00d4ff; }
+        .dep-node .dot.paused { background: #ffa500; }
+        .dep-node .dot.error { background: #ff6b6b; }
+        .dep-node .dot.queued { background: #666; }
+        .dep-node .name { max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .dep-edges { margin-top: 10px; font-size: 12px; color: #888; }
+        .dep-edge-item { padding: 3px 0; }
+        .dep-edge-item .arrow { color: #00d4ff; margin: 0 4px; }
+        .dep-empty { color: #666; font-size: 13px; padding: 10px 0; }
     </style>
 </head>
 <body>
@@ -123,6 +139,10 @@
                 <button class="proxy-btn-disable" onclick="disableProxy()">Disable</button>
             </div>
             <div class="proxy-result" id="proxy-result"></div>
+        </details>
+        <details class="dep-panel" id="dep-panel">
+            <summary>🔗 Dependency Graph</summary>
+            <div id="dep-content"><div class="dep-empty">Loading...</div></div>
         </details>
         <details class="batch-import">
             <summary>📋 Batch Import (paste multiple URLs)</summary>
@@ -424,6 +444,58 @@
             }
         }
 
+        // --- Dependency Graph ---
+        async function loadDeps() {
+            try {
+                const resp = await fetch('/api/deps');
+                const data = await resp.json();
+                renderDepsGraph(data);
+            } catch (e) {
+                document.getElementById('dep-content').innerHTML = '<div class="dep-empty">Failed to load</div>';
+            }
+        }
+
+        function renderDepsGraph(data) {
+            const container = document.getElementById('dep-content');
+            if (!data.nodes || data.nodes.length === 0) {
+                container.innerHTML = '<div class="dep-empty">No tasks with dependencies</div>';
+                return;
+            }
+            // Only show nodes that have dependencies or are depended upon
+            const depNodeIds = new Set();
+            data.nodes.forEach(n => {
+                if (n.depends_on && n.depends_on.length > 0) {
+                    depNodeIds.add(n.id);
+                    n.depends_on.forEach(d => depNodeIds.add(d));
+                }
+            });
+            if (depNodeIds.size === 0) {
+                container.innerHTML = '<div class="dep-empty">No tasks with dependencies</div>';
+                return;
+            }
+            const nodeMap = {};
+            data.nodes.forEach(n => { nodeMap[n.id] = n; });
+            let html = '<div class="dep-nodes">';
+            data.nodes.filter(n => depNodeIds.has(n.id)).forEach(n => {
+                const stateCls = n.state.toLowerCase();
+                const title = n.depends_on.length > 0
+                    ? 'Depends on: ' + n.depends_on.map(d => (nodeMap[d] || {}).name || d).join(', ')
+                    : 'No dependencies';
+                html += `<div class="dep-node" title="${title}"><span class="dot ${stateCls}"></span><span class="name">${n.name}</span></div>`;
+            });
+            html += '</div>';
+            if (data.edges && data.edges.length > 0) {
+                html += '<div class="dep-edges">';
+                data.edges.forEach(e => {
+                    const fromName = (nodeMap[e.from] || {}).name || e.from;
+                    const toName = (nodeMap[e.to] || {}).name || e.to;
+                    html += `<div class="dep-edge-item">${fromName} <span class="arrow">→</span> ${toName}</div>`;
+                });
+                html += '</div>';
+            }
+            container.innerHTML = html;
+        }
+
         // --- Init ---
         // Try WebSocket first, fall back to polling
         if ('WebSocket' in window) {
@@ -456,6 +528,10 @@
 
         // Load proxy status on init
         loadProxyStatus();
+
+        // Load dependency graph on init and refresh periodically
+        loadDeps();
+        setInterval(loadDeps, 5000);
 
         // --- Batch operations ---
         async function batchPauseAll() {

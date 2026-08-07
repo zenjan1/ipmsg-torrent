@@ -47,6 +47,8 @@ pub struct TaskInfo {
     pub state: String,
     pub error: Option<String>,
     pub tags: Vec<String>,
+    /// Task IDs this task depends on (for dependency visualization)
+    pub depends_on: Vec<String>,
 }
 
 impl From<DownloadTask> for TaskInfo {
@@ -64,6 +66,7 @@ impl From<DownloadTask> for TaskInfo {
             state,
             error: task.error,
             tags: task.tags,
+            depends_on: task.depends_on,
         }
     }
 }
@@ -119,6 +122,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/batch/remove-failed", post(remove_failed))
         .route("/api/batch-import", post(batch_import))
         .route("/api/bandwidth", get(get_bandwidth))
+        .route("/api/deps", get(get_deps))
         .route("/api/proxy", get(get_proxy))
         .route("/api/proxy", post(set_proxy))
         .route("/api/proxy/disable", post(disable_proxy))
@@ -302,6 +306,60 @@ async fn get_bandwidth(State(state): State<Arc<WebState>>) -> Json<crate::Bandwi
         .dashboard(task_speeds)
         .await;
     Json(dashboard)
+}
+
+/// Dependency graph node for API response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DepNode {
+    pub id: String,
+    pub name: String,
+    pub state: String,
+    pub depends_on: Vec<String>,
+}
+
+/// Dependency graph response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DepGraphResponse {
+    pub nodes: Vec<DepNode>,
+    pub edges: Vec<DepEdge>,
+}
+
+/// Dependency edge (from depends on to)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DepEdge {
+    pub from: String,
+    pub to: String,
+}
+
+/// Get task dependency graph
+async fn get_deps(State(state): State<Arc<WebState>>) -> Json<DepGraphResponse> {
+    let tasks = state.manager.list_tasks().await;
+    let task_ids: std::collections::HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+
+    let nodes: Vec<DepNode> = tasks
+        .iter()
+        .map(|t| DepNode {
+            id: t.id.clone(),
+            name: t.name.clone(),
+            state: t.state_label().to_string(),
+            depends_on: t.depends_on.clone(),
+        })
+        .collect();
+
+    let edges: Vec<DepEdge> = tasks
+        .iter()
+        .flat_map(|t| {
+            t.depends_on
+                .iter()
+                .filter(|dep_id| task_ids.contains(dep_id.as_str()))
+                .map(|dep_id| DepEdge {
+                    from: dep_id.clone(),
+                    to: t.id.clone(),
+                })
+        })
+        .collect();
+
+    Json(DepGraphResponse { nodes, edges })
 }
 
 /// Pause all running downloads
@@ -1005,5 +1063,54 @@ mod tests {
         assert_eq!(resp.port, Some(1080));
         assert!(resp.has_auth);
         assert!(resp.url.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_deps_empty() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/deps")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: DepGraphResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp.nodes.len(), 0);
+        assert_eq!(resp.edges.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_task_info_includes_depends_on() {
+        let task = DownloadTask {
+            id: "task-1".into(),
+            name: "test.txt".into(),
+            protocol: crate::DownloadProtocol::Xunlei,
+            save_path: std::path::PathBuf::from("/tmp"),
+            size: 1024,
+            downloaded: 0,
+            speed_bps: 0.0,
+            state: crate::DownloadState::Queued,
+            error: None,
+            tags: vec![],
+            priority: crate::DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: vec!["task-0".into()],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let info = TaskInfo::from(task);
+        assert_eq!(info.depends_on, vec!["task-0".to_string()]);
     }
 }
