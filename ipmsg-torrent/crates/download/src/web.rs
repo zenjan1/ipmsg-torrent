@@ -90,6 +90,11 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/tasks/:id/remove", post(remove_task))
         .route("/api/download", post(add_download))
         .route("/api/status", get(get_status))
+        .route("/api/stats", get(get_stats))
+        .route("/api/batch/pause-all", post(pause_all))
+        .route("/api/batch/resume-all", post(resume_all))
+        .route("/api/batch/remove-completed", post(remove_completed))
+        .route("/api/batch/remove-failed", post(remove_failed))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -210,6 +215,52 @@ async fn get_status(State(state): State<Arc<WebState>>) -> Json<serde_json::Valu
         "running_tasks": running,
         "total_speed_bps": total_speed,
     }))
+}
+
+/// Get detailed download statistics
+async fn get_stats(State(state): State<Arc<WebState>>) -> Json<crate::DownloadStats> {
+    let stats = state.manager.get_stats().await;
+    Json(stats)
+}
+
+/// Pause all running downloads
+async fn pause_all(State(state): State<Arc<WebState>>) -> Json<TaskResponse> {
+    let count = state.manager.pause_all().await;
+    Json(TaskResponse {
+        success: true,
+        task_id: None,
+        message: format!("Paused {} tasks", count),
+    })
+}
+
+/// Resume all paused downloads
+async fn resume_all(State(state): State<Arc<WebState>>) -> Json<TaskResponse> {
+    let count = state.manager.resume_all().await;
+    Json(TaskResponse {
+        success: true,
+        task_id: None,
+        message: format!("Resumed {} tasks", count),
+    })
+}
+
+/// Remove all completed downloads
+async fn remove_completed(State(state): State<Arc<WebState>>) -> Json<TaskResponse> {
+    let count = state.manager.remove_completed().await;
+    Json(TaskResponse {
+        success: true,
+        task_id: None,
+        message: format!("Removed {} completed tasks", count),
+    })
+}
+
+/// Remove all failed downloads
+async fn remove_failed(State(state): State<Arc<WebState>>) -> Json<TaskResponse> {
+    let count = state.manager.remove_failed().await;
+    Json(TaskResponse {
+        success: true,
+        task_id: None,
+        message: format!("Removed {} failed tasks", count),
+    })
 }
 
 /// WebSocket upgrade handler
@@ -399,5 +450,99 @@ mod tests {
             TaskEvent::Removed { task_id } => assert_eq!(task_id, "test-id"),
             _ => panic!("Expected Removed event"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_get_stats() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_batch_pause_all() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/batch/pause-all")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_batch_resume_all() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/batch/resume-all")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_batch_remove_completed() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/batch/remove-completed")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_batch_remove_failed() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/batch/remove-failed")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

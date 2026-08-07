@@ -28,6 +28,38 @@ use tokio_util::sync::CancellationToken;
 
 pub use rate_limiter::{DownloadRateController, RateLimiter};
 
+/// Download statistics snapshot.
+/// Aggregated from all tasks for dashboard display.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct DownloadStats {
+    /// Total number of tasks
+    pub total_tasks: usize,
+    /// Number of tasks in each state
+    pub running: usize,
+    pub paused: usize,
+    pub completed: usize,
+    pub queued: usize,
+    pub errored: usize,
+    /// Total bytes downloaded across all tasks
+    pub total_downloaded: u64,
+    /// Total bytes expected (sum of all task sizes)
+    pub total_size: u64,
+    /// Aggregate download speed (bytes/sec)
+    pub total_speed_bps: f64,
+    /// Number of tasks per protocol
+    pub by_protocol: ProtocolStats,
+}
+
+/// Per-protocol task counts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct ProtocolStats {
+    pub torrent: usize,
+    pub ed2k: usize,
+    pub xunlei: usize,
+    pub magnet: usize,
+    pub p2p: usize,
+}
+
 /// Events emitted when download tasks change state.
 /// WebSocket clients receive these for real-time UI updates.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1505,6 +1537,115 @@ impl DownloadManager {
         self.emit_event(event);
     }
 
+    /// Get aggregated download statistics.
+    pub async fn get_stats(&self) -> DownloadStats {
+        let tasks = self.tasks.lock().await;
+        let mut stats = DownloadStats {
+            total_tasks: tasks.len(),
+            ..Default::default()
+        };
+
+        for task in tasks.iter() {
+            stats.total_downloaded += task.downloaded;
+            stats.total_size += task.size;
+            stats.total_speed_bps += task.speed_bps;
+
+            match task.state {
+                DownloadState::Downloading => stats.running += 1,
+                DownloadState::Paused => stats.paused += 1,
+                DownloadState::Complete => stats.completed += 1,
+                DownloadState::Queued => stats.queued += 1,
+                DownloadState::Error => stats.errored += 1,
+            }
+
+            match task.protocol {
+                DownloadProtocol::Torrent => stats.by_protocol.torrent += 1,
+                DownloadProtocol::Ed2k => stats.by_protocol.ed2k += 1,
+                DownloadProtocol::Xunlei => stats.by_protocol.xunlei += 1,
+                DownloadProtocol::Magnet => stats.by_protocol.magnet += 1,
+                DownloadProtocol::P2P => stats.by_protocol.p2p += 1,
+            }
+        }
+
+        stats
+    }
+
+    /// Pause all running downloads.
+    pub async fn pause_all(&self) -> usize {
+        let tasks = self.tasks.lock().await;
+        let mut running_ids: Vec<String> = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Downloading)
+            .map(|t| t.id.clone())
+            .collect();
+        drop(tasks);
+
+        let mut count = 0;
+        for id in running_ids.drain(..) {
+            if self.pause_task(&id).await {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Resume all paused downloads.
+    pub async fn resume_all(&self) -> usize {
+        let tasks = self.tasks.lock().await;
+        let paused_ids: Vec<String> = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Paused)
+            .map(|t| t.id.clone())
+            .collect();
+        drop(tasks);
+
+        let mut count = 0;
+        for id in paused_ids {
+            if self.resume_task(&id).await {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Remove all completed downloads.
+    pub async fn remove_completed(&self) -> usize {
+        let tasks = self.tasks.lock().await;
+        let completed_ids: Vec<String> = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Complete)
+            .map(|t| t.id.clone())
+            .collect();
+        drop(tasks);
+
+        let mut count = 0;
+        for id in completed_ids {
+            if self.remove_task(&id).await {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Remove all failed downloads.
+    pub async fn remove_failed(&self) -> usize {
+        let tasks = self.tasks.lock().await;
+        let failed_ids: Vec<String> = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Error)
+            .map(|t| t.id.clone())
+            .collect();
+        drop(tasks);
+
+        let mut count = 0;
+        for id in failed_ids {
+            if self.remove_task(&id).await {
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Persist current task list to disk (fire-and-forget)
     async fn persist_tasks(&self) {
         let tasks = self.tasks.lock().await.clone();
@@ -1572,5 +1713,151 @@ mod tests {
             retry_count: 0,
         };
         assert_eq!(rt.retry_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_stats_empty() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_stats"));
+        let stats = dm.get_stats().await;
+        assert_eq!(stats.total_tasks, 0);
+        assert_eq!(stats.running, 0);
+        assert_eq!(stats.paused, 0);
+        assert_eq!(stats.completed, 0);
+        assert_eq!(stats.queued, 0);
+        assert_eq!(stats.errored, 0);
+        assert_eq!(stats.total_downloaded, 0);
+        assert_eq!(stats.total_size, 0);
+        assert_eq!(stats.total_speed_bps, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_get_stats_with_tasks() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_stats2"));
+
+        // Manually add some tasks to test stats aggregation
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "t1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 500,
+                state: DownloadState::Downloading,
+                error: None,
+                speed_bps: 100.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            });
+            tasks.push(DownloadTask {
+                id: "t2".into(),
+                name: "file2.txt".into(),
+                protocol: DownloadProtocol::Ed2k,
+                size: 2000,
+                downloaded: 2000,
+                state: DownloadState::Complete,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            });
+            tasks.push(DownloadTask {
+                id: "t3".into(),
+                name: "file3.txt".into(),
+                protocol: DownloadProtocol::Xunlei,
+                size: 500,
+                downloaded: 100,
+                state: DownloadState::Paused,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            });
+        }
+
+        let stats = dm.get_stats().await;
+        assert_eq!(stats.total_tasks, 3);
+        assert_eq!(stats.running, 1);
+        assert_eq!(stats.completed, 1);
+        assert_eq!(stats.paused, 1);
+        assert_eq!(stats.total_downloaded, 2600);
+        assert_eq!(stats.total_size, 3500);
+        assert_eq!(stats.total_speed_bps, 100.0);
+        assert_eq!(stats.by_protocol.torrent, 1);
+        assert_eq!(stats.by_protocol.ed2k, 1);
+        assert_eq!(stats.by_protocol.xunlei, 1);
+    }
+
+    #[tokio::test]
+    async fn test_pause_all_no_running() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_pause_all"));
+        let count = dm.pause_all().await;
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_resume_all_no_paused() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_resume_all"));
+        let count = dm.resume_all().await;
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_remove_completed_empty() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_rm_completed"));
+        let count = dm.remove_completed().await;
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_remove_failed_empty() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_rm_failed"));
+        let count = dm.remove_failed().await;
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_download_stats_default() {
+        let stats = DownloadStats::default();
+        assert_eq!(stats.total_tasks, 0);
+        assert_eq!(stats.running, 0);
+        assert_eq!(stats.paused, 0);
+        assert_eq!(stats.completed, 0);
+        assert_eq!(stats.queued, 0);
+        assert_eq!(stats.errored, 0);
+        assert_eq!(stats.total_downloaded, 0);
+        assert_eq!(stats.total_size, 0);
+        assert_eq!(stats.total_speed_bps, 0.0);
+    }
+
+    #[test]
+    fn test_download_stats_serialization() {
+        let stats = DownloadStats {
+            total_tasks: 5,
+            running: 2,
+            paused: 1,
+            completed: 1,
+            queued: 0,
+            errored: 1,
+            total_downloaded: 1024,
+            total_size: 2048,
+            total_speed_bps: 500.0,
+            by_protocol: ProtocolStats {
+                torrent: 2,
+                ed2k: 1,
+                xunlei: 1,
+                magnet: 0,
+                p2p: 1,
+            },
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: DownloadStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.total_tasks, 5);
+        assert_eq!(deserialized.running, 2);
+        assert_eq!(deserialized.by_protocol.torrent, 2);
+        assert_eq!(deserialized.by_protocol.p2p, 1);
     }
 }

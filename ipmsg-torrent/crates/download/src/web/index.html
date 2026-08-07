@@ -9,10 +9,15 @@
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
         .container { max-width: 900px; margin: 0 auto; }
         h1 { color: #00d4ff; margin-bottom: 20px; }
-        .status-bar { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 30px; }
+        .status-bar { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 30px; flex-wrap: wrap; }
         .status-item { display: flex; flex-direction: column; }
         .status-label { font-size: 12px; color: #888; }
         .status-value { font-size: 20px; font-weight: bold; color: #00d4ff; }
+        .batch-bar { background: #16213e; padding: 10px 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 10px; flex-wrap: wrap; }
+        .batch-btn { padding: 6px 14px; border: 1px solid #333; border-radius: 4px; background: #0f3460; color: #eee; cursor: pointer; font-size: 12px; }
+        .batch-btn:hover { background: #1a4a80; }
+        .batch-btn.danger { border-color: #5c1a1a; color: #ff6b6b; }
+        .batch-btn.danger:hover { background: #3a1111; }
         .add-form { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 10px; }
         .add-form input { flex: 1; padding: 10px; border: 1px solid #333; border-radius: 4px; background: #0f3460; color: #eee; font-size: 14px; }
         .add-form button { padding: 10px 20px; border: none; border-radius: 4px; background: #00d4ff; color: #1a1a2e; font-weight: bold; cursor: pointer; }
@@ -46,7 +51,7 @@
         <h1>📥 IPMsg-Torrent Downloads</h1>
         <div class="status-bar">
             <div class="status-item">
-                <span class="status-label">Total Tasks</span>
+                <span class="status-label">Total</span>
                 <span class="status-value" id="total-tasks">0</span>
             </div>
             <div class="status-item">
@@ -54,9 +59,27 @@
                 <span class="status-value" id="running-tasks">0</span>
             </div>
             <div class="status-item">
-                <span class="status-label">Total Speed</span>
+                <span class="status-label">Paused</span>
+                <span class="status-value" id="paused-tasks">0</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Completed</span>
+                <span class="status-value" id="completed-tasks">0</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Speed</span>
                 <span class="status-value" id="total-speed">0 B/s</span>
             </div>
+            <div class="status-item">
+                <span class="status-label">Downloaded</span>
+                <span class="status-value" id="total-downloaded">0 B</span>
+            </div>
+        </div>
+        <div class="batch-bar">
+            <button class="batch-btn" onclick="batchPauseAll()">⏸ Pause All</button>
+            <button class="batch-btn" onclick="batchResumeAll()">▶ Resume All</button>
+            <button class="batch-btn danger" onclick="batchRemoveCompleted()">🗑 Clear Completed</button>
+            <button class="batch-btn danger" onclick="batchRemoveFailed()">🗑 Clear Failed</button>
         </div>
         <div class="add-form">
             <input type="text" id="url-input" placeholder="Enter URL, magnet link, or torrent path...">
@@ -100,13 +123,21 @@
 
             if (taskArr.length === 0) {
                 list.innerHTML = '<div class="empty">No downloads yet</div>';
-                updateStatus(0, 0, 0);
+                updateStatus({ total_tasks: 0, running: 0, paused: 0, completed: 0, total_speed_bps: 0, total_downloaded: 0 });
                 return;
             }
 
             const running = taskArr.filter(t => t.state === 'downloading').length;
             const totalSpeed = taskArr.reduce((sum, t) => sum + (t.speed_bps || 0), 0);
-            updateStatus(taskArr.length, running, totalSpeed);
+            // Build stats from local state for rendering
+            updateStatus({
+                total_tasks: taskArr.length,
+                running: running,
+                paused: taskArr.filter(t => t.state === 'paused').length,
+                completed: taskArr.filter(t => t.state === 'complete').length,
+                total_speed_bps: totalSpeed,
+                total_downloaded: taskArr.reduce((sum, t) => sum + (t.downloaded || 0), 0),
+            });
 
             list.innerHTML = taskArr.map(task => `
                 <div class="task">
@@ -131,10 +162,13 @@
             `).join('');
         }
 
-        function updateStatus(total, running, speed) {
-            document.getElementById('total-tasks').textContent = total;
-            document.getElementById('running-tasks').textContent = running;
-            document.getElementById('total-speed').textContent = formatSpeed(speed);
+        function updateStatus(stats) {
+            document.getElementById('total-tasks').textContent = stats.total_tasks;
+            document.getElementById('running-tasks').textContent = stats.running;
+            document.getElementById('paused-tasks').textContent = stats.paused;
+            document.getElementById('completed-tasks').textContent = stats.completed;
+            document.getElementById('total-speed').textContent = formatSpeed(stats.total_speed_bps);
+            document.getElementById('total-downloaded').textContent = formatSize(stats.total_downloaded);
         }
 
         // --- WebSocket ---
@@ -204,7 +238,7 @@
                     }
                     break;
                 case 'status':
-                    updateStatus(data.total_tasks, data.running_tasks, data.total_speed_bps);
+                    updateStatus(data);
                     break;
             }
         }
@@ -249,9 +283,9 @@
                 const taskArr = await resp.json();
                 tasks = {};
                 taskArr.forEach(t => { tasks[t.id] = t; });
-                const statusResp = await fetch('/api/status');
-                const status = await statusResp.json();
-                updateStatus(status.total_tasks, status.running_tasks, status.total_speed_bps);
+                const statsResp = await fetch('/api/stats');
+                const stats = await statsResp.json();
+                updateStatus(stats);
                 renderTasks();
             }
             pollRender();
@@ -262,6 +296,22 @@
         document.getElementById('url-input').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') addDownload();
         });
+
+        // --- Batch operations ---
+        async function batchPauseAll() {
+            await fetch('/api/batch/pause-all', { method: 'POST' });
+        }
+        async function batchResumeAll() {
+            await fetch('/api/batch/resume-all', { method: 'POST' });
+        }
+        async function batchRemoveCompleted() {
+            if (!confirm('Remove all completed downloads?')) return;
+            await fetch('/api/batch/remove-completed', { method: 'POST' });
+        }
+        async function batchRemoveFailed() {
+            if (!confirm('Remove all failed downloads?')) return;
+            await fetch('/api/batch/remove-failed', { method: 'POST' });
+        }
     </script>
 </body>
 </html>
