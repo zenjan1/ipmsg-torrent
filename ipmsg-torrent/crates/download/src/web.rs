@@ -129,6 +129,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/proxy", post(set_proxy))
         .route("/api/proxy/disable", post(disable_proxy))
         .route("/api/proxy/test", post(test_proxy))
+        .route("/api/notifications/history", get(get_notification_history))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -617,6 +618,15 @@ async fn test_proxy(State(state): State<Arc<WebState>>) -> Json<serde_json::Valu
             "display": "No proxy configured"
         })),
     }
+}
+
+/// Get notification history
+async fn get_notification_history(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let history = state.manager.notification_history();
+    Json(serde_json::json!({
+        "entries": history.get_all(),
+        "count": history.len()
+    }))
 }
 
 /// WebSocket upgrade handler

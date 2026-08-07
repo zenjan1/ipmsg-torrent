@@ -642,6 +642,10 @@ impl DownloadManager {
         if let Ok(Some(proxy_cfg)) = proxy::load_proxy_config(&dm.data_dir) {
             *dm.proxy_config.write().await = Some(proxy_cfg);
         }
+        // Restore notification configuration from disk
+        if let Ok(Some(notif_cfg)) = notification::load_notification_config(&dm.data_dir) {
+            dm.notifier.update_config(notif_cfg);
+        }
         dm.start_scheduler();
         dm
     }
@@ -1078,8 +1082,18 @@ impl DownloadManager {
     }
 
     /// Set notification configuration for download completion/failure events.
+    /// Also persists the configuration to disk for restoration on restart.
     pub fn set_notification_config(&self, config: NotificationConfig) {
-        self.notifier.update_config(config);
+        self.notifier.update_config(config.clone());
+        // Persist to disk (best-effort, don't block on failure)
+        if let Err(e) = notification::save_notification_config(&config, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist notification config");
+        }
+    }
+
+    /// Get notification history manager for querying recent notifications
+    pub fn notification_history(&self) -> &notification::NotificationHistory {
+        self.notifier.history()
     }
 
     /// Set auto-shutdown configuration.

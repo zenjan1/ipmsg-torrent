@@ -9,10 +9,10 @@
 //! Also supports event subscription and filtering for programmatic access.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -212,11 +212,95 @@ impl NotificationSubscription {
     }
 }
 
+/// Notification history entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationHistoryEntry {
+    /// When the notification was sent
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Event type that triggered the notification
+    pub event: NotificationEvent,
+    /// Task ID
+    pub task_id: String,
+    /// Task name
+    pub name: String,
+    /// File size
+    pub size: u64,
+    /// Bytes downloaded
+    pub downloaded: u64,
+    /// Protocol used
+    pub protocol: String,
+    /// Save path
+    pub save_path: String,
+    /// Error message (if any)
+    pub error: Option<String>,
+    /// Tags associated with the task
+    pub tags: Vec<String>,
+}
+
+/// Notification history manager
+///
+/// Stores recent notification events in memory for querying.
+/// Maximum 100 entries, oldest are evicted when limit is reached.
+#[derive(Debug, Clone)]
+pub struct NotificationHistory {
+    entries: Arc<RwLock<VecDeque<NotificationHistoryEntry>>>,
+    max_entries: usize,
+}
+
+impl Default for NotificationHistory {
+    fn default() -> Self {
+        Self::new(100)
+    }
+}
+
+impl NotificationHistory {
+    /// Create a new history manager with the given capacity
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            entries: Arc::new(RwLock::new(VecDeque::new())),
+            max_entries,
+        }
+    }
+
+    /// Record a notification event
+    pub fn record(&self, entry: NotificationHistoryEntry) {
+        let mut entries = self.entries.write().unwrap();
+        if entries.len() >= self.max_entries {
+            entries.pop_front();
+        }
+        entries.push_back(entry);
+    }
+
+    /// Get all history entries (newest first)
+    pub fn get_all(&self) -> Vec<NotificationHistoryEntry> {
+        let entries = self.entries.read().unwrap();
+        entries.iter().rev().cloned().collect()
+    }
+
+    /// Get the number of entries in history
+    pub fn len(&self) -> usize {
+        let entries = self.entries.read().unwrap();
+        entries.len()
+    }
+
+    /// Check if history is empty
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Clear all history entries
+    pub fn clear(&self) {
+        let mut entries = self.entries.write().unwrap();
+        entries.clear();
+    }
+}
+
 /// Notification dispatcher
 pub struct NotificationDispatcher {
     config: RwLock<NotificationConfig>,
     subscriptions: RwLock<HashMap<String, NotificationSubscription>>,
     event_sender: broadcast::Sender<NotificationContext>,
+    history: NotificationHistory,
 }
 
 impl NotificationDispatcher {
@@ -227,7 +311,13 @@ impl NotificationDispatcher {
             config: RwLock::new(config),
             subscriptions: RwLock::new(HashMap::new()),
             event_sender,
+            history: NotificationHistory::default(),
         }
+    }
+
+    /// Get the notification history manager
+    pub fn history(&self) -> &NotificationHistory {
+        &self.history
     }
 
     /// Update the notification configuration
@@ -292,15 +382,9 @@ impl NotificationDispatcher {
             for channel in &channels {
                 let result = match channel {
                     NotificationChannel::Desktop => self.send_desktop(ctx).await,
-                    NotificationChannel::Shell { command } => {
-                        self.send_shell(ctx, command).await
-                    }
-                    NotificationChannel::LogFile { path } => {
-                        self.send_log_file(ctx, path).await
-                    }
-                    NotificationChannel::Webhook { url, .. } => {
-                        self.send_webhook(ctx, url).await
-                    }
+                    NotificationChannel::Shell { command } => self.send_shell(ctx, command).await,
+                    NotificationChannel::LogFile { path } => self.send_log_file(ctx, path).await,
+                    NotificationChannel::Webhook { url, .. } => self.send_webhook(ctx, url).await,
                 };
 
                 if let Err(e) = result {
@@ -308,6 +392,20 @@ impl NotificationDispatcher {
                 }
             }
         }
+
+        // Record to history
+        self.history.record(NotificationHistoryEntry {
+            timestamp: chrono::Utc::now(),
+            event: ctx.event,
+            task_id: ctx.task_id.clone(),
+            name: ctx.name.clone(),
+            size: ctx.size,
+            downloaded: ctx.downloaded,
+            protocol: ctx.protocol.clone(),
+            save_path: ctx.save_path.clone(),
+            error: ctx.error.clone(),
+            tags: tags.to_vec(),
+        });
 
         // Send to subscribers (broadcast to all, they filter)
         // Ignore error if no receivers
@@ -498,6 +596,49 @@ pub enum NotificationError {
     Http(String),
     #[error("Serialization error: {0}")]
     Serialize(String),
+}
+
+/// Save notification configuration to disk
+pub fn save_notification_config(
+    config: &NotificationConfig,
+    data_dir: &std::path::Path,
+) -> Result<(), NotificationPersistenceError> {
+    let config_path = data_dir.join("notification_config.json");
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| NotificationPersistenceError::Serialize(e.to_string()))?;
+    std::fs::write(&config_path, json)
+        .map_err(|e| NotificationPersistenceError::Io(e.to_string()))?;
+    Ok(())
+}
+
+/// Load notification configuration from disk
+pub fn load_notification_config(
+    data_dir: &std::path::Path,
+) -> Result<Option<NotificationConfig>, NotificationPersistenceError> {
+    let config_path = data_dir.join("notification_config.json");
+
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let json = std::fs::read_to_string(&config_path)
+        .map_err(|e| NotificationPersistenceError::Io(e.to_string()))?;
+
+    let config: NotificationConfig = serde_json::from_str(&json)
+        .map_err(|e| NotificationPersistenceError::Deserialize(e.to_string()))?;
+
+    Ok(Some(config))
+}
+
+/// Errors when persisting notification configuration
+#[derive(Debug, thiserror::Error)]
+pub enum NotificationPersistenceError {
+    #[error("IO error: {0}")]
+    Io(String),
+    #[error("serialize error: {0}")]
+    Serialize(String),
+    #[error("deserialize error: {0}")]
+    Deserialize(String),
 }
 
 /// Format file size for display
@@ -721,8 +862,7 @@ mod tests {
     fn test_notification_filter_by_event() {
         let filter = NotificationFilter::events(vec![NotificationEvent::DownloadComplete]);
 
-        let complete_ctx =
-            make_test_ctx("task1", "file.txt", NotificationEvent::DownloadComplete);
+        let complete_ctx = make_test_ctx("task1", "file.txt", NotificationEvent::DownloadComplete);
         let failed_ctx = make_test_ctx("task2", "file2.txt", NotificationEvent::DownloadFailed);
 
         assert!(filter.matches(&complete_ctx, &[]));
@@ -775,8 +915,7 @@ mod tests {
         assert!(filter.matches(&ctx, &["important".into()]));
 
         // Wrong event
-        let ctx_wrong_event =
-            make_test_ctx("task1", "file.txt", NotificationEvent::DownloadFailed);
+        let ctx_wrong_event = make_test_ctx("task1", "file.txt", NotificationEvent::DownloadFailed);
         assert!(!filter.matches(&ctx_wrong_event, &["important".into()]));
 
         // Wrong task ID
@@ -785,8 +924,7 @@ mod tests {
         assert!(!filter.matches(&ctx_wrong_task, &["important".into()]));
 
         // Wrong tag
-        let ctx_wrong_tag =
-            make_test_ctx("task1", "file.txt", NotificationEvent::DownloadComplete);
+        let ctx_wrong_tag = make_test_ctx("task1", "file.txt", NotificationEvent::DownloadComplete);
         assert!(!filter.matches(&ctx_wrong_tag, &["other".into()]));
     }
 
@@ -870,5 +1008,151 @@ mod tests {
             error: None,
             event,
         }
+    }
+
+    // ===== Phase 38: Notification Persistence Tests =====
+
+    #[test]
+    fn test_notification_history_record() {
+        let history = NotificationHistory::new(100);
+        assert!(history.is_empty());
+        assert_eq!(history.len(), 0);
+
+        let entry = NotificationHistoryEntry {
+            timestamp: chrono::Utc::now(),
+            event: NotificationEvent::DownloadComplete,
+            task_id: "task1".into(),
+            name: "file.txt".into(),
+            size: 1024,
+            downloaded: 1024,
+            protocol: "HTTP".into(),
+            save_path: "/tmp".into(),
+            error: None,
+            tags: vec!["tag1".into()],
+        };
+
+        history.record(entry);
+        assert_eq!(history.len(), 1);
+        assert!(!history.is_empty());
+    }
+
+    #[test]
+    fn test_notification_history_eviction() {
+        let history = NotificationHistory::new(3);
+
+        for i in 0..5 {
+            history.record(NotificationHistoryEntry {
+                timestamp: chrono::Utc::now(),
+                event: NotificationEvent::DownloadComplete,
+                task_id: format!("task{}", i),
+                name: format!("file{}.txt", i),
+                size: 1024,
+                downloaded: 1024,
+                protocol: "HTTP".into(),
+                save_path: "/tmp".into(),
+                error: None,
+                tags: vec![],
+            });
+        }
+
+        // Should only keep the last 3 entries
+        assert_eq!(history.len(), 3);
+        let all = history.get_all();
+        assert_eq!(all[0].task_id, "task4"); // newest first
+        assert_eq!(all[1].task_id, "task3");
+        assert_eq!(all[2].task_id, "task2");
+    }
+
+    #[test]
+    fn test_notification_history_clear() {
+        let history = NotificationHistory::new(100);
+
+        for i in 0..5 {
+            history.record(NotificationHistoryEntry {
+                timestamp: chrono::Utc::now(),
+                event: NotificationEvent::DownloadComplete,
+                task_id: format!("task{}", i),
+                name: "test".into(),
+                size: 1024,
+                downloaded: 1024,
+                protocol: "HTTP".into(),
+                save_path: "/tmp".into(),
+                error: None,
+                tags: vec![],
+            });
+        }
+
+        assert_eq!(history.len(), 5);
+        history.clear();
+        assert_eq!(history.len(), 0);
+        assert!(history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_records_to_history() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+
+        let ctx = make_test_ctx("task1", "file.txt", NotificationEvent::DownloadComplete);
+        dispatcher.dispatch(&ctx).await.unwrap();
+
+        let history = dispatcher.history();
+        assert_eq!(history.len(), 1);
+
+        let entries = history.get_all();
+        assert_eq!(entries[0].task_id, "task1");
+        assert_eq!(entries[0].name, "file.txt");
+        assert_eq!(entries[0].event, NotificationEvent::DownloadComplete);
+    }
+
+    #[test]
+    fn test_save_load_notification_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        // No config file initially
+        let loaded = load_notification_config(data_dir).unwrap();
+        assert!(loaded.is_none());
+
+        // Save a config
+        let config = NotificationConfig {
+            enabled: true,
+            channels: vec![NotificationChannel::Desktop],
+            events: vec![
+                NotificationEvent::DownloadComplete,
+                NotificationEvent::DownloadFailed,
+            ],
+        };
+
+        save_notification_config(&config, data_dir).unwrap();
+
+        // Load it back
+        let loaded = load_notification_config(data_dir).unwrap().unwrap();
+        assert!(loaded.enabled);
+        assert_eq!(loaded.channels.len(), 1);
+        assert_eq!(loaded.events.len(), 2);
+    }
+
+    #[test]
+    fn test_notification_history_entry_serialization() {
+        let entry = NotificationHistoryEntry {
+            timestamp: chrono::Utc::now(),
+            event: NotificationEvent::DownloadFailed,
+            task_id: "task-123".into(),
+            name: "broken.zip".into(),
+            size: 1024 * 1024,
+            downloaded: 512,
+            protocol: "Torrent".into(),
+            save_path: "/downloads".into(),
+            error: Some("Connection reset".into()),
+            tags: vec!["important".into(), "large".into()],
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: NotificationHistoryEntry = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.task_id, "task-123");
+        assert_eq!(deserialized.event, NotificationEvent::DownloadFailed);
+        assert_eq!(deserialized.error, Some("Connection reset".into()));
+        assert_eq!(deserialized.tags.len(), 2);
     }
 }
