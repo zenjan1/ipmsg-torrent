@@ -5,6 +5,7 @@
 //! - eDonkey/eMule (ed2k links)
 //! - Xunlei P2SP (HTTP/FTP + P2P hybrid)
 
+pub mod bandwidth_monitor;
 pub mod checksum;
 pub mod connection_pool;
 pub mod dht;
@@ -30,9 +31,14 @@ use task_queue::{load_task_queue, save_task_queue};
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
+use bandwidth_monitor::BandwidthMonitor;
 use download_history::{HistoryEntry, append_entry};
 use notification::{NotificationContext, NotificationDispatcher};
 
+pub use bandwidth_monitor::{
+    BandwidthDashboard, BandwidthMonitor as BandwidthMonitorType, BandwidthSample, BandwidthStats,
+    TaskBandwidth,
+};
 pub use notification::{
     NotificationChannel, NotificationConfig, NotificationError, NotificationEvent,
 };
@@ -470,6 +476,8 @@ pub struct DownloadManager {
     task_complete_notify: Arc<tokio::sync::Notify>,
     /// Notification dispatcher for download completion/failure events
     notifier: Arc<NotificationDispatcher>,
+    /// Bandwidth monitor for dashboard
+    bandwidth_monitor: Arc<BandwidthMonitor>,
 }
 
 impl DownloadManager {
@@ -488,6 +496,7 @@ impl DownloadManager {
             event_tx: broadcast::channel(128).0,
             task_complete_notify: Arc::new(tokio::sync::Notify::new()),
             notifier: Arc::new(NotificationDispatcher::new(NotificationConfig::disabled())),
+            bandwidth_monitor: Arc::new(BandwidthMonitor::new()),
         };
         dm.start_scheduler();
         dm
@@ -496,6 +505,11 @@ impl DownloadManager {
     /// Subscribe to task change events for real-time updates.
     pub fn subscribe(&self) -> broadcast::Receiver<TaskEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// Get the bandwidth monitor handle for dashboard/statistics queries.
+    pub fn bandwidth_monitor(&self) -> &Arc<BandwidthMonitor> {
+        &self.bandwidth_monitor
     }
 
     /// Broadcast a task event to all subscribers (best-effort).
@@ -572,6 +586,7 @@ impl DownloadManager {
             event_tx: broadcast::channel(128).0,
             task_complete_notify: Arc::new(tokio::sync::Notify::new()),
             notifier: Arc::new(NotificationDispatcher::new(NotificationConfig::disabled())),
+            bandwidth_monitor: Arc::new(BandwidthMonitor::new()),
         };
         dm.start_scheduler();
         dm
@@ -1772,6 +1787,7 @@ impl DownloadManager {
         let timeout_secs = self.timeout_secs.load(Ordering::Relaxed);
         let max_retries = self.max_retries.load(Ordering::Relaxed);
         let notifier = self.notifier.clone();
+        let bandwidth_monitor = self.bandwidth_monitor.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -1844,6 +1860,19 @@ impl DownloadManager {
                     if let Some(task) = t.iter_mut().find(|t| t.id == task_id) {
                         task.speed_bps = avg_speed;
                         task.updated_at = chrono::Utc::now();
+                    }
+
+                    // Update bandwidth monitor with aggregate speed
+                    {
+                        let all_tasks = tasks.lock().await;
+                        let total_speed: f64 = all_tasks
+                            .iter()
+                            .filter(|t| t.state == DownloadState::Downloading)
+                            .map(|t| t.speed_bps)
+                            .sum();
+                        bandwidth_monitor
+                            .update_current_speed(total_speed, 0.0)
+                            .await;
                     }
 
                     rt.last_downloaded = current_downloaded;

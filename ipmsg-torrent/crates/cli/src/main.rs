@@ -156,6 +156,8 @@ enum Command {
         /// Bandwidth weight (1-10, higher = more bandwidth)
         weight: u8,
     },
+    /// Show bandwidth monitoring dashboard
+    DlBandwidthMon,
     Block {
         peer: String,
     },
@@ -436,6 +438,7 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlbw <task_id> <1-10>".to_string())
             }
         }
+        "dlbwmon" | "dl-bandwidth-mon" | "dlbwm" => Command::DlBandwidthMon,
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -505,6 +508,7 @@ fn command_help() -> String {
         "/dlfind [query] [--state=X] [--protocol=X] [--sort=X] [--asc] - Search/filter downloads",
         "/dlpriority <id> <high|normal|low> - Set download task priority",
         "/dlbw <id> <1-10>    - Set bandwidth weight (higher = more bandwidth)",
+        "/dlbwmon           - Show bandwidth monitoring dashboard",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
@@ -1852,6 +1856,73 @@ async fn handle_command(
                 );
             }
         }
+        Command::DlBandwidthMon => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            // Collect task speed info
+            let tasks = download_manager.list_tasks().await;
+            let running_tasks: Vec<_> = tasks
+                .iter()
+                .filter(|t| t.state == ipmsg_download::DownloadState::Downloading)
+                .cloned()
+                .collect();
+
+            let task_speeds: Vec<_> = running_tasks
+                .iter()
+                .map(|t| (t.id.clone(), t.name.clone(), t.speed_bps, t.downloaded))
+                .collect();
+
+            let dashboard = download_manager
+                .bandwidth_monitor()
+                .dashboard(task_speeds)
+                .await;
+
+            let mut lines = Vec::new();
+            lines.push("📊 Bandwidth Monitor".to_string());
+            lines.push("═".repeat(50));
+
+            // Current speed
+            lines.push(format!(
+                "Current: ↓ {}/s  ↑ {}/s",
+                format_speed(dashboard.current_download_bps),
+                format_speed(dashboard.current_upload_bps)
+            ));
+            lines.push(String::new());
+
+            // Window stats
+            let format_window = |label: &str, stats: &ipmsg_download::BandwidthStats| -> String {
+                format!(
+                    "{}: avg ↓ {}/s  peak ↓ {}/s  ({} samples, {}s window)",
+                    label,
+                    format_speed(stats.avg_download_bps),
+                    format_speed(stats.peak_download_bps),
+                    stats.sample_count,
+                    stats.window_secs
+                )
+            };
+            lines.push(format_window("Last 5 min", &dashboard.last_5min));
+            lines.push(format_window("Last 15 min", &dashboard.last_15min));
+            lines.push(format_window("Last 60 min", &dashboard.last_60min));
+
+            // Per-task breakdown
+            if !dashboard.tasks.is_empty() {
+                lines.push(String::new());
+                lines.push("Per-task:".to_string());
+                for task in &dashboard.tasks {
+                    lines.push(format!(
+                        "  {} : ↓ {}/s  total {}",
+                        truncate_name(&task.task_name, 20),
+                        format_speed(task.current_bps),
+                        format_size(task.total_downloaded)
+                    ));
+                }
+            }
+
+            let mut s = state.lock().await;
+            s.add_system_message("main", lines.join("\n"));
+        }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {
                 peer_id: peer.clone(),
@@ -2096,6 +2167,15 @@ fn format_size(bytes: u64) -> String {
         idx += 1;
     }
     format!("{:.1} {}", val, units[idx])
+}
+
+/// Truncate a name to max_len, adding "..." if truncated
+fn truncate_name(name: &str, max_len: usize) -> String {
+    if name.len() <= max_len {
+        name.to_string()
+    } else {
+        format!("{}...", &name[..max_len.saturating_sub(3)])
+    }
 }
 
 fn draw(

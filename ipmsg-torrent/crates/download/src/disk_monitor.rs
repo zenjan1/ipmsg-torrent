@@ -92,10 +92,7 @@ pub fn check_disk_space(
     if available >= needed {
         Ok(())
     } else {
-        Err(DiskSpaceError::Insufficient {
-            needed,
-            available,
-        })
+        Err(DiskSpaceError::Insufficient { needed, available })
     }
 }
 
@@ -125,11 +122,7 @@ impl DiskSpaceMonitor {
     /// * `monitor_path` - Directory to monitor
     /// * `safety_margin_bytes` - Minimum free space to maintain (bytes)
     /// * `check_interval_secs` - How often to check (seconds)
-    pub fn new(
-        monitor_path: PathBuf,
-        safety_margin_bytes: u64,
-        check_interval_secs: u64,
-    ) -> Self {
+    pub fn new(monitor_path: PathBuf, safety_margin_bytes: u64, check_interval_secs: u64) -> Self {
         Self {
             monitor_path,
             safety_margin_bytes,
@@ -169,11 +162,8 @@ impl DiskSpaceMonitor {
     /// The monitor will check disk space every `check_interval_secs` seconds.
     /// When space becomes critical, `on_critical` callback is called.
     /// When space recovers from critical, `on_recover` callback is called.
-    pub async fn start_monitoring<FC, FR, FutC, FutR>(
-        &self,
-        on_critical: FC,
-        on_recover: FR,
-    ) where
+    pub async fn start_monitoring<FC, FR, FutC, FutR>(&self, on_critical: FC, on_recover: FR)
+    where
         FC: Fn() -> FutC + Send + Sync + 'static,
         FR: Fn() -> FutR + Send + Sync + 'static,
         FutC: std::future::Future<Output = ()> + Send,
@@ -196,8 +186,7 @@ impl DiskSpaceMonitor {
 
         tokio::spawn(async move {
             let mut was_critical = false;
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
 
             loop {
                 tokio::select! {
@@ -278,7 +267,11 @@ mod tests {
         assert!(space.is_ok());
         let bytes = space.unwrap();
         // Should have at least 1MB free (very conservative)
-        assert!(bytes > 1024 * 1024, "Expected >1MB free, got {} bytes", bytes);
+        assert!(
+            bytes > 1024 * 1024,
+            "Expected >1MB free, got {} bytes",
+            bytes
+        );
     }
 
     #[test]
@@ -330,12 +323,7 @@ mod tests {
 
         assert!(!monitor.is_running().await);
 
-        monitor
-            .start_monitoring(
-                || async {},
-                || async {},
-            )
-            .await;
+        monitor.start_monitoring(|| async {}, || async {}).await;
 
         // Give it a moment to start
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -351,13 +339,9 @@ mod tests {
     async fn test_disk_monitor_double_start() {
         let monitor = DiskSpaceMonitor::new(PathBuf::from("/tmp"), 1024 * 1024, 1);
 
-        monitor
-            .start_monitoring(|| async {}, || async {})
-            .await;
+        monitor.start_monitoring(|| async {}, || async {}).await;
         // Second start should be a no-op
-        monitor
-            .start_monitoring(|| async {}, || async {})
-            .await;
+        monitor.start_monitoring(|| async {}, || async {}).await;
 
         assert!(monitor.is_running().await);
         monitor.stop_monitoring().await;

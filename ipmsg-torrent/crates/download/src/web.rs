@@ -100,6 +100,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/batch/resume-all", post(resume_all))
         .route("/api/batch/remove-completed", post(remove_completed))
         .route("/api/batch/remove-failed", post(remove_failed))
+        .route("/api/bandwidth", get(get_bandwidth))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -226,6 +227,23 @@ async fn get_status(State(state): State<Arc<WebState>>) -> Json<serde_json::Valu
 async fn get_stats(State(state): State<Arc<WebState>>) -> Json<crate::DownloadStats> {
     let stats = state.manager.get_stats().await;
     Json(stats)
+}
+
+/// Get bandwidth monitoring dashboard
+async fn get_bandwidth(State(state): State<Arc<WebState>>) -> Json<crate::BandwidthDashboard> {
+    let tasks = state.manager.list_tasks().await;
+    let task_speeds: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.state == DownloadState::Downloading)
+        .map(|t| (t.id.clone(), t.name.clone(), t.speed_bps, t.downloaded))
+        .collect();
+
+    let dashboard = state
+        .manager
+        .bandwidth_monitor()
+        .dashboard(task_speeds)
+        .await;
+    Json(dashboard)
 }
 
 /// Pause all running downloads
