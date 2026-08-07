@@ -8,6 +8,7 @@
 pub mod checksum;
 pub mod connection_pool;
 pub mod dht;
+pub mod download_history;
 pub mod ed2k;
 pub mod magnet;
 pub mod metadata_cache;
@@ -25,6 +26,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use task_queue::{load_task_queue, save_task_queue};
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
+
+use download_history::{HistoryEntry, append_entry};
 
 pub use rate_limiter::{DownloadRateController, RateLimiter};
 
@@ -95,6 +98,7 @@ pub struct TaskInfoEvent {
     pub speed_bps: f64,
     pub state: String,
     pub error: Option<String>,
+    pub tags: Vec<String>,
 }
 
 impl TaskInfoEvent {
@@ -109,6 +113,7 @@ impl TaskInfoEvent {
             speed_bps: task.speed_bps,
             state: task.state_label().to_string(),
             error: task.error.clone(),
+            tags: task.tags.clone(),
         }
     }
 }
@@ -127,6 +132,8 @@ pub struct DownloadTask {
     pub save_path: PathBuf,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// User-defined tags for organizing downloads (e.g., "movies", "work", "linux")
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,6 +288,19 @@ impl DownloadManager {
         let _ = self.event_tx.send(event);
     }
 
+    /// Record a completed or failed task to download history.
+    fn record_task_history(task: &DownloadTask, data_dir: &std::path::Path) {
+        if let Some(entry) = HistoryEntry::from_task(task) {
+            let data_dir = data_dir.to_path_buf();
+            // Spawn async to avoid blocking the caller
+            tokio::spawn(async move {
+                if let Err(e) = append_entry(&data_dir, entry) {
+                    tracing::warn!(error = %e, "Failed to record download history");
+                }
+            });
+        }
+    }
+
     /// Create a DownloadManager and restore tasks from disk
     pub async fn new_with_restore(data_dir: PathBuf) -> Self {
         let tasks = load_task_queue(&data_dir).unwrap_or_default();
@@ -377,6 +397,7 @@ impl DownloadManager {
             save_path: self.data_dir.join("downloads"),
             created_at: now,
             updated_at: now,
+            tags: Vec::new(),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -421,6 +442,7 @@ impl DownloadManager {
             save_path: self.data_dir.join("downloads"),
             created_at: now,
             updated_at: now,
+            tags: Vec::new(),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -465,6 +487,7 @@ impl DownloadManager {
             save_path: self.data_dir.join("downloads"),
             created_at: now,
             updated_at: now,
+            tags: Vec::new(),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -507,6 +530,7 @@ impl DownloadManager {
             save_path: self.data_dir.join("downloads"),
             created_at: now,
             updated_at: now,
+            tags: Vec::new(),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -549,6 +573,7 @@ impl DownloadManager {
             save_path: self.data_dir.join("downloads"),
             created_at: now,
             updated_at: now,
+            tags: Vec::new(),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -669,6 +694,7 @@ impl DownloadManager {
                 task.downloaded = task.size;
                 task.speed_bps = 0.0;
                 task.updated_at = chrono::Utc::now();
+                Self::record_task_history(task, &self.data_dir);
             }
         }
 
@@ -970,6 +996,7 @@ impl DownloadManager {
                         task.state = DownloadState::Complete;
                         task.downloaded = task.size;
                         task.speed_bps = 0.0;
+                        Self::record_task_history(task, &data_dir);
                     }
                     Err(e) => {
                         let err_str = e.to_string();
@@ -982,6 +1009,7 @@ impl DownloadManager {
                         } else {
                             task.state = DownloadState::Error;
                             task.error = Some(err_str);
+                            Self::record_task_history(task, &data_dir);
                         }
                         task.speed_bps = 0.0;
                     }
@@ -1357,6 +1385,7 @@ impl DownloadManager {
                                                 task.state = DownloadState::Complete;
                                                 task.downloaded = task.size;
                                                 task.speed_bps = 0.0;
+                                                Self::record_task_history(task, &data_dir_clone);
                                             }
                                             Err(e) => {
                                                 let err_str = e.to_string();
@@ -1367,6 +1396,10 @@ impl DownloadManager {
                                                 } else {
                                                     task.state = DownloadState::Error;
                                                     task.error = Some(err_str);
+                                                    Self::record_task_history(
+                                                        task,
+                                                        &data_dir_clone,
+                                                    );
                                                 }
                                                 task.speed_bps = 0.0;
                                             }
@@ -1646,6 +1679,70 @@ impl DownloadManager {
         count
     }
 
+    /// Add tags to a download task
+    pub async fn add_tags(&self, task_id: &str, tags: Vec<String>) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            for tag in tags {
+                let tag = tag.trim().to_lowercase();
+                if !tag.is_empty() && !task.tags.contains(&tag) {
+                    task.tags.push(tag);
+                }
+            }
+            task.tags.sort();
+            task.tags.dedup();
+            task.updated_at = chrono::Utc::now();
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(task),
+            });
+            drop(tasks);
+            self.persist_tasks().await;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove tags from a download task
+    pub async fn remove_tags(&self, task_id: &str, tags: Vec<String>) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            let tags_to_remove: Vec<String> =
+                tags.iter().map(|t| t.trim().to_lowercase()).collect();
+            task.tags.retain(|t| !tags_to_remove.contains(t));
+            task.updated_at = chrono::Utc::now();
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(task),
+            });
+            drop(tasks);
+            self.persist_tasks().await;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// List all tasks with a specific tag
+    pub async fn list_tasks_by_tag(&self, tag: &str) -> Vec<DownloadTask> {
+        let tag_lower = tag.to_lowercase();
+        self.tasks
+            .lock()
+            .await
+            .iter()
+            .filter(|t| t.tags.contains(&tag_lower))
+            .cloned()
+            .collect()
+    }
+
+    /// Get all unique tags across all tasks
+    pub async fn list_all_tags(&self) -> Vec<String> {
+        let tasks = self.tasks.lock().await;
+        let mut tags: Vec<String> = tasks.iter().flat_map(|t| t.tags.iter().cloned()).collect();
+        tags.sort();
+        tags.dedup();
+        tags
+    }
+
     /// Persist current task list to disk (fire-and-forget)
     async fn persist_tasks(&self) {
         let tasks = self.tasks.lock().await.clone();
@@ -1749,6 +1846,7 @@ mod tests {
                 save_path: std::path::PathBuf::from("/tmp"),
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -1762,6 +1860,7 @@ mod tests {
                 save_path: std::path::PathBuf::from("/tmp"),
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -1775,6 +1874,7 @@ mod tests {
                 save_path: std::path::PathBuf::from("/tmp"),
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
             });
         }
 
@@ -1859,5 +1959,237 @@ mod tests {
         assert_eq!(deserialized.running, 2);
         assert_eq!(deserialized.by_protocol.torrent, 2);
         assert_eq!(deserialized.by_protocol.p2p, 1);
+    }
+
+    #[tokio::test]
+    async fn test_add_tags_to_task() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_add_tags"));
+
+        // Add a task manually
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "tag-test-1".into(),
+                name: "file.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+            });
+        }
+
+        // Add tags
+        let success = dm
+            .add_tags("tag-test-1", vec!["movies".into(), "action".into()])
+            .await;
+        assert!(success);
+
+        // Verify tags were added
+        let task = dm.get_task("tag-test-1").await.unwrap();
+        assert_eq!(task.tags, vec!["action", "movies"]); // sorted
+    }
+
+    #[tokio::test]
+    async fn test_add_tags_nonexistent_task() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_add_tags_nonexist"));
+        let success = dm.add_tags("nonexistent", vec!["tag".into()]).await;
+        assert!(!success);
+    }
+
+    #[tokio::test]
+    async fn test_remove_tags_from_task() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_remove_tags"));
+
+        // Add a task with tags
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "tag-test-2".into(),
+                name: "file.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: vec!["movies".into(), "action".into(), "drama".into()],
+            });
+        }
+
+        // Remove some tags
+        let success = dm
+            .remove_tags("tag-test-2", vec!["action".into(), "drama".into()])
+            .await;
+        assert!(success);
+
+        // Verify tags were removed
+        let task = dm.get_task("tag-test-2").await.unwrap();
+        assert_eq!(task.tags, vec!["movies"]);
+    }
+
+    #[tokio::test]
+    async fn test_list_tasks_by_tag() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_list_by_tag"));
+
+        // Add tasks with different tags
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "t1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: vec!["movies".into(), "action".into()],
+            });
+            tasks.push(DownloadTask {
+                id: "t2".into(),
+                name: "file2.txt".into(),
+                protocol: DownloadProtocol::Ed2k,
+                size: 2000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: vec!["movies".into(), "drama".into()],
+            });
+            tasks.push(DownloadTask {
+                id: "t3".into(),
+                name: "file3.txt".into(),
+                protocol: DownloadProtocol::Xunlei,
+                size: 500,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: vec!["work".into()],
+            });
+        }
+
+        // Filter by "movies" tag
+        let movies = dm.list_tasks_by_tag("movies").await;
+        assert_eq!(movies.len(), 2);
+
+        // Filter by "work" tag
+        let work = dm.list_tasks_by_tag("work").await;
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].id, "t3");
+
+        // Filter by non-existent tag
+        let none = dm.list_tasks_by_tag("nonexistent").await;
+        assert_eq!(none.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_list_all_tags() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_all_tags"));
+
+        // Add tasks with tags
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "t1".into(),
+                name: "file1.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: vec!["movies".into(), "action".into()],
+            });
+            tasks.push(DownloadTask {
+                id: "t2".into(),
+                name: "file2.txt".into(),
+                protocol: DownloadProtocol::Ed2k,
+                size: 2000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: vec!["movies".into(), "drama".into()],
+            });
+        }
+
+        let tags = dm.list_all_tags().await;
+        assert_eq!(tags, vec!["action", "drama", "movies"]); // sorted, deduped
+    }
+
+    #[tokio::test]
+    async fn test_add_duplicate_tags() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_dup_tags"));
+
+        // Add a task
+        {
+            let mut tasks = dm.tasks.lock().await;
+            tasks.push(DownloadTask {
+                id: "dup-tag-1".into(),
+                name: "file.txt".into(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: vec!["movies".into()],
+            });
+        }
+
+        // Add duplicate tag
+        let success = dm.add_tags("dup-tag-1", vec!["movies".into()]).await;
+        assert!(success);
+
+        // Verify no duplicate was added
+        let task = dm.get_task("dup-tag-1").await.unwrap();
+        assert_eq!(task.tags, vec!["movies"]);
+    }
+
+    #[test]
+    fn test_task_with_tags_default_empty() {
+        let task = DownloadTask {
+            id: "test".into(),
+            name: "file.txt".into(),
+            protocol: DownloadProtocol::Torrent,
+            size: 1000,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: std::path::PathBuf::from("/tmp"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            tags: Vec::new(),
+        };
+        assert!(task.tags.is_empty());
     }
 }

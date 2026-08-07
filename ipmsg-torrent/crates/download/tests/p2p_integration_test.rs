@@ -154,6 +154,7 @@ async fn test_p2p_download_progress_calculation() {
         save_path: std::path::PathBuf::from("/tmp"),
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        tags: Vec::new(),
     };
 
     assert_eq!(task.progress(), 75.0);

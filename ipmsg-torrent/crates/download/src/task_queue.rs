@@ -21,6 +21,8 @@ pub struct PersistedTask {
     pub save_path: PathBuf,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -103,6 +105,7 @@ impl From<DownloadTask> for PersistedTask {
             save_path: t.save_path,
             created_at: t.created_at,
             updated_at: t.updated_at,
+            tags: t.tags,
         }
     }
 }
@@ -121,6 +124,7 @@ impl From<PersistedTask> for DownloadTask {
             save_path: t.save_path,
             created_at: t.created_at,
             updated_at: t.updated_at,
+            tags: t.tags,
         }
     }
 }
@@ -218,6 +222,7 @@ mod tests {
             save_path: PathBuf::from("/tmp/downloads"),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            tags: Vec::new(),
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -268,6 +273,7 @@ mod tests {
                 save_path: PathBuf::from("/tmp/dl"),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
+                tags: Vec::new(),
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -281,6 +287,7 @@ mod tests {
                 save_path: PathBuf::from("/tmp/dl"),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
+                tags: Vec::new(),
             },
         ];
 
@@ -323,6 +330,7 @@ mod tests {
             save_path: PathBuf::from("/tmp/dl"),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            tags: Vec::new(),
         };
 
         save_task_queue(&[task], data_dir).unwrap();

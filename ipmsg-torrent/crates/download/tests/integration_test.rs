@@ -168,6 +168,7 @@ fn test_download_task_progress() {
         save_path: PathBuf::from("/tmp"),
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        tags: Vec::new(),
     };
 
     assert_eq!(task.progress(), 50.0);
@@ -189,6 +190,7 @@ fn test_download_task_progress_zero_size() {
         save_path: PathBuf::from("/tmp"),
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        tags: Vec::new(),
     };
 
     assert_eq!(task.progress(), 0.0);

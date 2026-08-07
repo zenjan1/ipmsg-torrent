@@ -46,6 +46,7 @@ pub struct TaskInfo {
     pub speed_bps: f64,
     pub state: String,
     pub error: Option<String>,
+    pub tags: Vec<String>,
 }
 
 impl From<DownloadTask> for TaskInfo {
@@ -62,6 +63,7 @@ impl From<DownloadTask> for TaskInfo {
             speed_bps: task.speed_bps,
             state,
             error: task.error,
+            tags: task.tags,
         }
     }
 }
@@ -88,6 +90,9 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/tasks/:id/pause", post(pause_task))
         .route("/api/tasks/:id/resume", post(resume_task))
         .route("/api/tasks/:id/remove", post(remove_task))
+        .route("/api/tasks/:id/tags", post(add_tags))
+        .route("/api/tasks/:id/tags/remove", post(remove_tags))
+        .route("/api/tags", get(list_all_tags))
         .route("/api/download", post(add_download))
         .route("/api/status", get(get_status))
         .route("/api/stats", get(get_stats))
@@ -263,6 +268,53 @@ async fn remove_failed(State(state): State<Arc<WebState>>) -> Json<TaskResponse>
     })
 }
 
+/// Request to update tags
+#[derive(Debug, Deserialize)]
+pub struct UpdateTagsRequest {
+    pub tags: Vec<String>,
+}
+
+/// Add tags to a task
+async fn add_tags(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<UpdateTagsRequest>,
+) -> Json<TaskResponse> {
+    let success = state.manager.add_tags(&id, req.tags).await;
+    Json(TaskResponse {
+        success,
+        task_id: Some(id),
+        message: if success {
+            "Tags added".to_string()
+        } else {
+            "Task not found".to_string()
+        },
+    })
+}
+
+/// Remove tags from a task
+async fn remove_tags(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<UpdateTagsRequest>,
+) -> Json<TaskResponse> {
+    let success = state.manager.remove_tags(&id, req.tags).await;
+    Json(TaskResponse {
+        success,
+        task_id: Some(id),
+        message: if success {
+            "Tags removed".to_string()
+        } else {
+            "Task not found".to_string()
+        },
+    })
+}
+
+/// List all unique tags
+async fn list_all_tags(State(state): State<Arc<WebState>>) -> Json<Vec<String>> {
+    Json(state.manager.list_all_tags().await)
+}
+
 /// WebSocket upgrade handler
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<WebState>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state))
@@ -424,6 +476,7 @@ mod tests {
                 speed_bps: 1000.0,
                 state: "downloading".into(),
                 error: None,
+                tags: Vec::new(),
             },
         };
         let json = serde_json::to_string(&event).unwrap();

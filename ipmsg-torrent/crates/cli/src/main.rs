@@ -105,6 +105,20 @@ enum Command {
     DlRmFailed,
     /// Show download statistics
     DlStats,
+    /// Add tags to a download task
+    DlTag {
+        task_id: String,
+        tags: Vec<String>,
+    },
+    /// Remove tags from a download task
+    DlUntag {
+        task_id: String,
+        tags: Vec<String>,
+    },
+    /// List all tags or filter by tag
+    DlTags {
+        tag: Option<String>,
+    },
     Block {
         peer: String,
     },
@@ -274,6 +288,28 @@ fn parse_command(input: &str) -> Command {
         "dlrmcompleted" | "dl-rm-completed" => Command::DlRmCompleted,
         "dlrmfailed" | "dl-rm-failed" => Command::DlRmFailed,
         "dlstats" | "dl-stats" => Command::DlStats,
+        "dltag" | "dl-tag" => {
+            if parts.len() >= 3 {
+                let task_id = parts[1].to_string();
+                let tags: Vec<String> = parts[2].split(',').map(|s| s.trim().to_string()).collect();
+                Command::DlTag { task_id, tags }
+            } else {
+                Command::Unknown("/dltag <task_id> <tag1,tag2,...>".to_string())
+            }
+        }
+        "dluntag" | "dl-untag" => {
+            if parts.len() >= 3 {
+                let task_id = parts[1].to_string();
+                let tags: Vec<String> = parts[2].split(',').map(|s| s.trim().to_string()).collect();
+                Command::DlUntag { task_id, tags }
+            } else {
+                Command::Unknown("/dluntag <task_id> <tag1,tag2,...>".to_string())
+            }
+        }
+        "dltags" | "dl-tags" => {
+            let tag = parts.get(1).map(|s| s.to_string());
+            Command::DlTags { tag }
+        }
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -337,6 +373,9 @@ fn command_help() -> String {
         "/dlrmcompleted   - Remove all completed downloads",
         "/dlrmfailed      - Remove all failed downloads",
         "/dlstats         - Show download statistics",
+        "/dltag <id> <tags>   - Add tags to a download (comma-separated)",
+        "/dluntag <id> <tags> - Remove tags from a download",
+        "/dltags [tag]    - List all tags, or filter tasks by tag",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -1274,6 +1313,53 @@ async fn handle_command(
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
         }
+        Command::DlTag { task_id, tags } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            let success = download_manager.add_tags(&task_id, tags.clone()).await;
+            let mut s = state.lock().await;
+            if success {
+                s.add_system_message("main", format!("Added tags to task {}", task_id));
+            } else {
+                s.add_system_message("main", format!("Task {} not found", task_id));
+            }
+        }
+        Command::DlUntag { task_id, tags } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            let success = download_manager.remove_tags(&task_id, tags).await;
+            let mut s = state.lock().await;
+            if success {
+                s.add_system_message("main", format!("Removed tags from task {}", task_id));
+            } else {
+                s.add_system_message("main", format!("Task {} not found", task_id));
+            }
+        }
+        Command::DlTags { tag } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            if let Some(tag) = tag {
+                let tasks = download_manager.list_tasks_by_tag(&tag).await;
+                let mut s = state.lock().await;
+                if tasks.is_empty() {
+                    s.add_system_message("main", format!("No tasks with tag '{}'", tag));
+                } else {
+                    let msg = format!("Tasks with tag '{}':\n{}", tag, format_task_list(&tasks));
+                    s.add_system_message("main", msg);
+                }
+            } else {
+                let tags = download_manager.list_all_tags().await;
+                let mut s = state.lock().await;
+                if tags.is_empty() {
+                    s.add_system_message("main", "No tags found".to_string());
+                } else {
+                    s.add_system_message("main", format!("All tags: {}", tags.join(", ")));
+                }
+            }
+        }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {
                 peer_id: peer.clone(),
@@ -1480,6 +1566,29 @@ fn format_speed(bps: f64) -> String {
         idx += 1;
     }
     format!("{:.1} {}", val, units[idx])
+}
+
+/// Format a list of tasks for display
+fn format_task_list(tasks: &[ipmsg_download::DownloadTask]) -> String {
+    tasks
+        .iter()
+        .map(|t| {
+            let tags_str = if t.tags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", t.tags.join(", "))
+            };
+            format!(
+                "  {} - {} ({:.1}%) - {}{}",
+                t.id,
+                t.name,
+                t.progress(),
+                t.state_label(),
+                tags_str
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Format bytes into human-readable size string

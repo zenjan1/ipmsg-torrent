@@ -1,2 +1,6 @@
 [target.wasm32-unknown-unknown]
 rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+
+# 限制编译并行度，避免 OOM (7.2G RAM)
+[build]
+jobs = 2
