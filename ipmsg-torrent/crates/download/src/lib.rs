@@ -4606,6 +4606,121 @@ impl DownloadManager {
         }
     }
 
+    /// Clone (duplicate) an existing download task.
+    ///
+    /// Creates a new task with the same source URL, metadata (tags, group, priority,
+    /// speed limit, mirrors, checksum, retry policy, etc.) but fresh progress.
+    /// The cloned task starts in Queued state and is automatically spawned.
+    ///
+    /// Returns the new task ID on success.
+    /// Returns an error if the source task doesn't exist or has no source URL.
+    pub async fn clone_task(&self, task_id: &str) -> Result<String, DownloadManagerError> {
+        let source_task = {
+            let tasks = self.tasks.lock().await;
+            tasks
+                .iter()
+                .find(|t| t.id == task_id)
+                .cloned()
+                .ok_or_else(|| DownloadManagerError::TaskNotFound(task_id.to_string()))?
+        };
+
+        let source_url = source_task
+            .source_url
+            .as_ref()
+            .ok_or_else(|| {
+                DownloadManagerError::Io("Cannot clone task: no source URL".to_string())
+            })?
+            .clone();
+
+        // Build the new task with fresh state but preserved metadata
+        let new_task_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+
+        let mut new_task = DownloadTask {
+            id: new_task_id.clone(),
+            name: source_task.name.clone(),
+            protocol: source_task.protocol,
+            size: source_task.size,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: source_task.save_path.clone(),
+            created_at: now,
+            updated_at: now,
+            tags: source_task.tags.clone(),
+            priority: source_task.priority,
+            schedule: source_task.schedule,
+            bandwidth_weight: source_task.bandwidth_weight,
+            queue_position: None,   // fresh position
+            depends_on: Vec::new(), // don't copy dependencies
+            notes: source_task.notes.clone(),
+            group: source_task.group.clone(),
+            speed_limit_bps: source_task.speed_limit_bps,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: Some(source_url.clone()),
+            expected_checksum: source_task.expected_checksum.clone(),
+            checksum_algorithm: source_task.checksum_algorithm,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: source_task.mirror_urls.clone(),
+            retry_policy: source_task.retry_policy,
+            cooldown: None,
+        };
+
+        // Append " (copy)" to name if it doesn't already end with it
+        if !new_task.name.ends_with(" (copy)") {
+            new_task.name = format!("{} (copy)", new_task.name);
+        }
+
+        self.tasks.lock().await.push(new_task.clone());
+        self.persist_tasks().await;
+        self.emit_event(TaskEvent::Added {
+            task: TaskInfoEvent::from_task(&new_task),
+        });
+
+        // Re-download using the source URL
+        let add_result = self.add_url(&source_url).await;
+        match add_result {
+            Ok(actual_id) => {
+                // The add_url created its own task; remove our placeholder
+                // and update the actual task with cloned metadata
+                {
+                    let mut tasks = self.tasks.lock().await;
+                    // Remove the placeholder we just added
+                    tasks.retain(|t| t.id != new_task_id);
+                    // Update the actual task with cloned metadata
+                    if let Some(actual) = tasks.iter_mut().find(|t| t.id == actual_id) {
+                        actual.tags = new_task.tags;
+                        actual.priority = new_task.priority;
+                        actual.schedule = new_task.schedule;
+                        actual.bandwidth_weight = new_task.bandwidth_weight;
+                        actual.notes = new_task.notes;
+                        actual.group = new_task.group;
+                        actual.speed_limit_bps = new_task.speed_limit_bps;
+                        actual.expected_checksum = new_task.expected_checksum;
+                        actual.checksum_algorithm = new_task.checksum_algorithm;
+                        actual.mirror_urls = new_task.mirror_urls;
+                        actual.retry_policy = new_task.retry_policy;
+                        actual.name = new_task.name;
+                        actual.save_path = new_task.save_path;
+                        actual.updated_at = chrono::Utc::now();
+                        self.emit_event(TaskEvent::Updated {
+                            task: TaskInfoEvent::from_task(actual),
+                        });
+                    }
+                }
+                self.persist_tasks().await;
+                Ok(actual_id)
+            }
+            Err(_) => {
+                // If add_url fails, keep the placeholder as a queued task
+                Ok(new_task_id)
+            }
+        }
+    }
+
     /// Set or clear user notes/description for a download task.
     /// Pass None or empty string to clear notes.
     /// Returns true if the task was found and updated.
@@ -8594,6 +8709,132 @@ mod tests {
             !dm.set_task_notes("nonexistent", Some("notes".to_string()))
                 .await
         );
+    }
+
+    #[tokio::test]
+    async fn test_clone_task_basic() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_clone_basic"));
+        let id = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+
+        // Set some metadata on the original task
+        dm.set_task_group(&id, Some("movies".to_string())).await;
+        dm.add_tags(&id, vec!["tag1".to_string(), "tag2".to_string()])
+            .await;
+        dm.set_task_notes(&id, Some("my notes".to_string())).await;
+
+        // Clone the task
+        let new_id = dm.clone_task(&id).await.unwrap();
+        assert_ne!(new_id, id);
+
+        // Verify the cloned task has the same metadata
+        let cloned = dm.get_task(&new_id).await.unwrap();
+        let original = dm.get_task(&id).await.unwrap();
+
+        assert!(cloned.name.contains("(copy)"));
+        assert_eq!(cloned.group, original.group);
+        assert_eq!(cloned.tags, original.tags);
+        assert_eq!(cloned.notes, original.notes);
+        assert_eq!(cloned.protocol, original.protocol);
+        assert_eq!(cloned.priority, original.priority);
+        assert_eq!(cloned.bandwidth_weight, original.bandwidth_weight);
+        assert_eq!(cloned.downloaded, 0);
+        assert_eq!(cloned.state, DownloadState::Queued);
+        assert_eq!(cloned.active_time_seconds, 0.0);
+        assert!(cloned.depends_on.is_empty()); // dependencies not copied
+    }
+
+    #[tokio::test]
+    async fn test_clone_task_not_found() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_clone_nf"));
+        let result = dm.clone_task("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_clone_task_no_source_url() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_clone_no_url"));
+        // Create a task without source_url by directly inserting
+        {
+            let task = DownloadTask {
+                id: "no-url-task".to_string(),
+                name: "No URL Task".to_string(),
+                protocol: DownloadProtocol::P2P,
+                size: 1024,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from("/tmp"),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                tags: Vec::new(),
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: None,
+                depends_on: Vec::new(),
+                notes: None,
+                group: None,
+                speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
+                source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
+                mirror_urls: Vec::new(),
+                retry_policy: None,
+                cooldown: None,
+            };
+            dm.tasks.lock().await.push(task);
+        }
+
+        let result = dm.clone_task("no-url-task").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no source URL"));
+    }
+
+    #[tokio::test]
+    async fn test_clone_task_preserves_speed_limit() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_clone_speed"));
+        let id = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=SpeedTest")
+            .await
+            .unwrap();
+
+        // Set speed limit on original
+        dm.set_task_speed_limit_per_task(&id, Some(1_000_000)).await;
+
+        // Clone
+        let new_id = dm.clone_task(&id).await.unwrap();
+
+        // Verify speed limit preserved
+        let cloned = dm.get_task(&new_id).await.unwrap();
+        assert_eq!(cloned.speed_limit_bps, Some(1_000_000));
+    }
+
+    #[tokio::test]
+    async fn test_clone_task_name_suffix() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_clone_name"));
+        let id = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .await
+            .unwrap();
+
+        // First clone
+        let new_id = dm.clone_task(&id).await.unwrap();
+        let cloned = dm.get_task(&new_id).await.unwrap();
+        assert!(cloned.name.ends_with(" (copy)"));
+
+        // Clone the clone - should not add double " (copy)"
+        let new_id2 = dm.clone_task(&new_id).await.unwrap();
+        let cloned2 = dm.get_task(&new_id2).await.unwrap();
+        assert!(cloned2.name.ends_with(" (copy)"));
+        assert!(!cloned2.name.contains(" (copy) (copy)"));
     }
 
     #[tokio::test]

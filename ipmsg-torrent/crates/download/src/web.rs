@@ -177,6 +177,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/retry-policy", get(get_retry_policy))
         .route("/api/retry-policy", post(set_retry_policy))
         .route("/api/torrent-files/:task_id", get(get_torrent_files))
+        .route("/api/tasks/:id/clone", post(clone_task))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -250,6 +251,25 @@ async fn remove_task(
             "Failed to remove task".to_string()
         },
     })
+}
+
+/// Clone (duplicate) an existing download task
+async fn clone_task(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<TaskResponse> {
+    match state.manager.clone_task(&id).await {
+        Ok(new_id) => Json(TaskResponse {
+            success: true,
+            task_id: Some(new_id),
+            message: "Task cloned successfully".to_string(),
+        }),
+        Err(e) => Json(TaskResponse {
+            success: false,
+            task_id: None,
+            message: format!("Failed to clone task: {}", e),
+        }),
+    }
 }
 
 /// Add a new download

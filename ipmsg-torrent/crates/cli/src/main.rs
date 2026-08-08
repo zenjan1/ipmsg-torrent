@@ -274,6 +274,11 @@ enum Command {
     },
     /// List all download groups
     DlGroups,
+    /// Clone (duplicate) an existing download task
+    DlClone {
+        /// Task ID to clone
+        task_id: String,
+    },
     /// Set or clear mirror/fallback URLs for a download task
     DlMirror {
         /// Task ID to set mirrors for
@@ -856,6 +861,17 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dlgroups" | "dl-groups" | "dlgrps" => Command::DlGroups,
+        "dlclone" | "dl-clone" | "dlcp" => {
+            // /dlclone <task_id>
+            let args: Vec<&str> = input.splitn(2, ' ').collect();
+            if args.len() >= 2 {
+                Command::DlClone {
+                    task_id: args[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlclone <task_id>".to_string())
+            }
+        }
         "dlarule" | "dl-auto-rule" | "dlar" => {
             // /dlarule <add|list|del> [args...]
             let args: Vec<&str> = input.splitn(2, ' ').collect();
@@ -1121,6 +1137,7 @@ fn command_help() -> String {
         "/dlnotes <id> [text|clear] - Set or clear task notes/description",
         "/dlgroup <id> [group|clear] - Set or clear task group",
         "/dlgroups           - List all download groups",
+        "/dlclone <id>       - Clone (duplicate) a download task",
         "/dlmirror <id> <urls> - Set mirror URLs (comma-separated, 'clear' to remove)",
         "/dlmirrors <id>     - List mirrors for a task",
         "/dlchecksum <id> <hash> [algo] - Set checksum for verification (algo: md5/sha1/sha256/ed2k)",
@@ -3860,6 +3877,25 @@ async fn handle_command(
                     lines.push_str(&format!("  • {} ({} tasks)\n", g, count));
                 }
                 s.add_system_message("main", lines.trim_end().to_string());
+            }
+        }
+        Command::DlClone { task_id } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match download_manager.clone_task(&task_id).await {
+                Ok(new_id) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("✅ Task cloned successfully. New task ID: {}", new_id),
+                    );
+                }
+                Err(e) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("❌ Failed to clone task: {}", e));
+                }
             }
         }
         Command::DlAutoRule { subcommand, args } => {
