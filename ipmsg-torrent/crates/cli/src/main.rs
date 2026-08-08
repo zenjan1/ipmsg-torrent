@@ -345,6 +345,12 @@ enum Command {
         /// "list" to show files, or selection string like "0,2,4" or "except:1,3" or "all"
         selection: Option<String>,
     },
+    /// Conflict detection strategy (get/set/check)
+    DlConflict {
+        /// Subcommand: "get", "set <strategy>", "check <save_path>"
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -966,6 +972,24 @@ fn parse_command(input: &str) -> Command {
                 Command::DlFiles { task_id, selection }
             }
         }
+        "dlconflict" | "dl-conflict" | "dlcf" => {
+            // /dlconflict <get|set|check> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlconflict <get|set|check> [args...]".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlConflict {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1149,6 +1173,7 @@ fn command_help() -> String {
         "/dlpreset [cmd]    - Download presets (list|show|add|del|apply)",
         "/dlretry <task_id> [none|fixed|exp|linear <secs>] - Per-task retry policy",
         "/dlfiles <task_id> [list|all|0,2,4|except:1,3] - View/select torrent files",
+        "/dlconflict <get|set|check> - Conflict detection (get strategy / set skip|rename|overwrite / check path)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -2769,6 +2794,71 @@ async fn handle_command(
             } else {
                 let mut s = state.lock().await;
                 s.add_system_message("main", format!("Task {} not found", task_id));
+            }
+        }
+        Command::DlConflict { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "get" => {
+                    let strategy = download_manager.get_conflict_strategy().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("🛡️ Conflict detection strategy: {}", strategy),
+                    );
+                }
+                "set" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlconflict set <skip|rename|overwrite>".to_string(),
+                        );
+                        return;
+                    }
+                    match args[0].parse::<ipmsg_download::conflict_detection::ConflictStrategy>() {
+                        Ok(strategy) => {
+                            download_manager.set_conflict_strategy(strategy).await;
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Conflict strategy set to: {}", strategy),
+                            );
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("❌ {}", e));
+                        }
+                    }
+                }
+                "check" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlconflict check <save_path>".to_string(),
+                        );
+                        return;
+                    }
+                    let save_path = std::path::PathBuf::from(&args[0]);
+                    let report = download_manager
+                        .check_conflicts("new", "check", &save_path)
+                        .await;
+                    let output =
+                        ipmsg_download::conflict_detection::format_conflict_report(&report);
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", output);
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlconflict <get|set|check> [args...]".to_string(),
+                    );
+                }
             }
         }
         Command::DlTag { task_id, tags } => {

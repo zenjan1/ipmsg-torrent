@@ -153,6 +153,9 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/auto-cleanup", post(set_auto_cleanup))
         .route("/api/dedup", get(get_dedup_config))
         .route("/api/dedup", post(set_dedup_config))
+        .route("/api/conflict", get(get_conflict_strategy))
+        .route("/api/conflict", post(set_conflict_strategy))
+        .route("/api/conflict/check", post(check_conflict))
         .route("/api/speed-history", get(get_all_speed_history))
         .route("/api/speed-history/:id", get(get_task_speed_history))
         .route(
@@ -411,6 +414,67 @@ async fn set_dedup_config(
 ) -> impl axum::response::IntoResponse {
     state.manager.set_url_dedup(config).await;
     Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get conflict detection strategy
+async fn get_conflict_strategy(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let strategy = state.manager.get_conflict_strategy().await;
+    Json(serde_json::json!({
+        "strategy": strategy.to_string()
+    }))
+}
+
+/// Set conflict detection strategy
+async fn set_conflict_strategy(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let strategy_str = body
+        .get("strategy")
+        .and_then(|v| v.as_str())
+        .unwrap_or("skip");
+    match strategy_str.parse::<crate::conflict_detection::ConflictStrategy>() {
+        Ok(strategy) => {
+            state.manager.set_conflict_strategy(strategy).await;
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({"status": "ok"})),
+            )
+        }
+        Err(e) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// Check for file path conflicts
+async fn check_conflict(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let task_id = body
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("new");
+    let task_name = body
+        .get("task_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let save_path_str = body.get("save_path").and_then(|v| v.as_str()).unwrap_or("");
+    let save_path = std::path::PathBuf::from(save_path_str);
+    let report = state
+        .manager
+        .check_conflicts(task_id, task_name, &save_path)
+        .await;
+    Json(serde_json::json!({
+        "task_id": report.task_id,
+        "task_name": report.task_name,
+        "target_path": report.target_path.to_string_lossy(),
+        "resolved_path": report.resolved_path.to_string_lossy(),
+        "action": format!("{:?}", report.action),
+        "conflict": report.conflict.map(|c| format!("{:?}", c))
+    }))
 }
 
 /// Get speed history for a specific task

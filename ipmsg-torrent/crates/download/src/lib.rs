@@ -706,6 +706,8 @@ pub struct DownloadManager {
     download_presets: Arc<Mutex<Vec<download_presets::DownloadPreset>>>,
     /// Cooldown configuration for failed task retry backoff
     cooldown_config: Arc<tokio::sync::RwLock<download_cooldown::CooldownConfig>>,
+    /// Conflict detection strategy for file path conflicts
+    conflict_strategy: Arc<tokio::sync::RwLock<conflict_detection::ConflictStrategy>>,
 }
 
 impl DownloadManager {
@@ -746,6 +748,9 @@ impl DownloadManager {
             download_presets: Arc::new(Mutex::new(Vec::new())),
             cooldown_config: Arc::new(tokio::sync::RwLock::new(
                 download_cooldown::CooldownConfig::default(),
+            )),
+            conflict_strategy: Arc::new(tokio::sync::RwLock::new(
+                conflict_detection::ConflictStrategy::default(),
             )),
         };
         dm.start_scheduler();
@@ -920,6 +925,9 @@ impl DownloadManager {
             cooldown_config: Arc::new(tokio::sync::RwLock::new(
                 download_cooldown::CooldownConfig::default(),
             )),
+            conflict_strategy: Arc::new(tokio::sync::RwLock::new(
+                conflict_detection::ConflictStrategy::default(),
+            )),
         };
         // Restore audit log from disk
         if let Some(loaded_log) = audit_log::load_audit_log(&dm.data_dir) {
@@ -957,6 +965,10 @@ impl DownloadManager {
         // Restore URL deduplication configuration from disk
         if let Some(dedup_cfg) = url_dedup::load_dedup_config(&dm.data_dir) {
             *dm.url_dedup.write().await = dedup_cfg;
+        }
+        // Restore conflict detection strategy from disk
+        if let Some(strategy) = load_conflict_strategy(&dm.data_dir) {
+            *dm.conflict_strategy.write().await = strategy;
         }
         // Restore max concurrent downloads setting from disk
         if let Some(max_concurrent) = load_max_concurrent(&dm.data_dir) {
@@ -2112,6 +2124,59 @@ impl DownloadManager {
         } else {
             None
         }
+    }
+
+    /// Set the conflict detection strategy.
+    /// Persists the configuration to disk for automatic restoration on restart.
+    pub async fn set_conflict_strategy(&self, strategy: conflict_detection::ConflictStrategy) {
+        *self.conflict_strategy.write().await = strategy;
+        if let Err(e) = save_conflict_strategy(&strategy, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist conflict strategy");
+        }
+    }
+
+    /// Get the current conflict detection strategy.
+    pub async fn get_conflict_strategy(&self) -> conflict_detection::ConflictStrategy {
+        *self.conflict_strategy.read().await
+    }
+
+    /// Check for file path conflicts for a proposed save path.
+    /// Returns a ConflictReport describing any conflicts and the resolved action.
+    pub async fn check_conflicts(
+        &self,
+        task_id: &str,
+        task_name: &str,
+        save_path: &std::path::Path,
+    ) -> conflict_detection::ConflictReport {
+        let tasks = self.tasks.lock().await;
+        let existing: Vec<conflict_detection::TaskPathInfo> = tasks
+            .iter()
+            .map(|t| conflict_detection::TaskPathInfo {
+                id: t.id.clone(),
+                name: t.name.clone(),
+                save_path: t.save_path.clone(),
+            })
+            .collect();
+        let new_task = conflict_detection::TaskPathInfo {
+            id: task_id.to_string(),
+            name: task_name.to_string(),
+            save_path: save_path.to_path_buf(),
+        };
+        conflict_detection::detect_conflicts(&new_task, &existing, true)
+    }
+
+    /// Resolve a conflict report using the current strategy.
+    /// Returns the final path to use (may differ from original if renamed).
+    pub async fn resolve_conflict_report(
+        &self,
+        report: &mut conflict_detection::ConflictReport,
+    ) -> std::path::PathBuf {
+        let strategy = self.get_conflict_strategy().await;
+        let tasks = self.tasks.lock().await;
+        let existing_paths: Vec<std::path::PathBuf> =
+            tasks.iter().map(|t| t.save_path.clone()).collect();
+        conflict_detection::resolve_conflict(report, strategy, &existing_paths);
+        report.resolved_path.clone()
     }
 
     /// Log an audit event
@@ -5371,6 +5436,33 @@ fn load_max_concurrent(data_dir: &std::path::Path) -> Option<usize> {
     let json = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&json).ok()?;
     v.get("max_concurrent")?.as_u64().map(|n| n as usize)
+}
+
+/// Save conflict detection strategy to disk (atomic write).
+fn save_conflict_strategy(
+    strategy: &conflict_detection::ConflictStrategy,
+    data_dir: &std::path::Path,
+) -> Result<(), std::io::Error> {
+    let path = data_dir.join("conflict_strategy.json");
+    let json = serde_json::to_string(&serde_json::json!({ "strategy": strategy.to_string() }))?;
+    let tmp = data_dir.join("conflict_strategy.json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(tmp, path)
+}
+
+/// Load conflict detection strategy from disk.
+/// Returns `None` if no config file exists.
+fn load_conflict_strategy(
+    data_dir: &std::path::Path,
+) -> Option<conflict_detection::ConflictStrategy> {
+    let path = data_dir.join("conflict_strategy.json");
+    if !path.exists() {
+        return None;
+    }
+    let json = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&json).ok()?;
+    let s = v.get("strategy")?.as_str()?;
+    s.parse().ok()
 }
 
 /// Parse an ed2k:// link and add it as a download task.
@@ -10045,5 +10137,116 @@ mod max_concurrent_tests {
         // Apply non-existent preset
         let applied = dm.apply_preset_to_task(&task_id, "nonexistent").await;
         assert!(!applied);
+    }
+
+    #[tokio::test]
+    async fn test_conflict_strategy_persistence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Default strategy is Skip
+        let strategy = dm.get_conflict_strategy().await;
+        assert_eq!(strategy, conflict_detection::ConflictStrategy::Skip);
+
+        // Set to Rename
+        dm.set_conflict_strategy(conflict_detection::ConflictStrategy::Rename)
+            .await;
+        let strategy = dm.get_conflict_strategy().await;
+        assert_eq!(strategy, conflict_detection::ConflictStrategy::Rename);
+
+        // Verify file was written
+        let config_path = temp_dir.path().join("conflict_strategy.json");
+        assert!(config_path.exists());
+
+        // Create new DM with restore and verify it loads the persisted strategy
+        let dm2 = DownloadManager::new_with_restore(temp_dir.path().to_path_buf()).await;
+        let strategy2 = dm2.get_conflict_strategy().await;
+        assert_eq!(strategy2, conflict_detection::ConflictStrategy::Rename);
+    }
+
+    #[tokio::test]
+    async fn test_check_conflicts_no_conflict() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        let save_path = temp_dir.path().join("downloads").join("file.txt");
+        let report = dm.check_conflicts("task1", "Test Task", &save_path).await;
+
+        assert!(report.conflict.is_none());
+        assert_eq!(report.action, conflict_detection::ConflictAction::None);
+    }
+
+    #[tokio::test]
+    async fn test_check_conflicts_task_conflict() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Add first task
+        let sources = vec![xunlei::XunleiSource::Http {
+            url: "https://example.com/file1.zip".to_string(),
+            cookies: None,
+            referer: None,
+        }];
+        dm.add_xunlei("file1.zip".to_string(), 1024, sources)
+            .await
+            .unwrap();
+
+        let tasks = dm.list_tasks().await;
+        let task1_path = tasks[0].save_path.clone();
+
+        // Check conflict with same path
+        let report = dm
+            .check_conflicts("task2", "Test Task 2", &task1_path)
+            .await;
+
+        assert!(report.conflict.is_some());
+        assert_eq!(report.action, conflict_detection::ConflictAction::Skipped);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_conflict_with_rename() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Set strategy to Rename
+        dm.set_conflict_strategy(conflict_detection::ConflictStrategy::Rename)
+            .await;
+
+        // Create a file on disk
+        let file_path = temp_dir.path().join("existing.txt");
+        tokio::fs::write(&file_path, "test data").await.unwrap();
+
+        // Check conflict with existing file
+        let mut report = dm.check_conflicts("task1", "Test Task", &file_path).await;
+
+        // Resolve the conflict
+        let resolved_path = dm.resolve_conflict_report(&mut report).await;
+
+        assert_eq!(report.action, conflict_detection::ConflictAction::Renamed);
+        assert_ne!(resolved_path, file_path);
+        assert!(resolved_path.to_string_lossy().contains("existing(1)"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_conflict_with_overwrite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Set strategy to Overwrite
+        dm.set_conflict_strategy(conflict_detection::ConflictStrategy::Overwrite)
+            .await;
+
+        // Create a file on disk
+        let file_path = temp_dir.path().join("existing.txt");
+        tokio::fs::write(&file_path, "test data").await.unwrap();
+
+        // Check conflict with existing file
+        let mut report = dm.check_conflicts("task1", "Test Task", &file_path).await;
+
+        // Resolve the conflict
+        let resolved_path = dm.resolve_conflict_report(&mut report).await;
+
+        assert_eq!(report.action, conflict_detection::ConflictAction::Overwrite);
+        assert_eq!(resolved_path, file_path);
     }
 }
