@@ -117,6 +117,10 @@ enum Command {
     DlStats,
     /// Show download queue health report
     DlHealth,
+    /// Show speed history for a task or all tasks
+    DlSpeedHistory {
+        task_id: Option<String>,
+    },
     /// Add tags to a download task
     DlTag {
         task_id: String,
@@ -487,6 +491,16 @@ fn parse_command(input: &str) -> Command {
         "dlrmfailed" | "dl-rm-failed" => Command::DlRmFailed,
         "dlstats" | "dl-stats" => Command::DlStats,
         "dlhealth" | "dl-health" | "dlh" => Command::DlHealth,
+        "dlspeedhist" | "dl-speed-hist" | "dlsh" => {
+            // /dlsh [task_id]
+            let args = &parts[1..];
+            let task_id = if args.is_empty() {
+                None
+            } else {
+                Some(args[0].to_string())
+            };
+            Command::DlSpeedHistory { task_id }
+        }
         "dltag" | "dl-tag" => {
             if parts.len() >= 3 {
                 let task_id = parts[1].to_string();
@@ -965,6 +979,7 @@ fn command_help() -> String {
         "/dlrmfailed      - Remove all failed downloads",
         "/dlstats         - Show download statistics",
         "/dlhealth        - Show download queue health report",
+        "/dlspeedhist [id] - Show speed history (all tasks or specific task)",
         "/dltag <id> <tags>   - Add tags to a download (comma-separated)",
         "/dluntag <id> <tags> - Remove tags from a download",
         "/dltags [tag]    - List all tags, or filter tasks by tag",
@@ -1984,6 +1999,46 @@ async fn handle_command(
             let msg = report.format_report();
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
+        }
+        Command::DlSpeedHistory { task_id } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match task_id {
+                Some(id) => match download_manager.get_task_speed_history(&id).await {
+                    Some(summary) => {
+                        let msg = summary.format_summary();
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                    None => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("No speed history for task {}", id));
+                    }
+                },
+                None => {
+                    let summaries = download_manager.get_all_speed_history_summaries().await;
+                    if summaries.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No speed history for any task".to_string());
+                    } else {
+                        let mut msg = String::from("Speed History Summary:\n");
+                        for summary in summaries {
+                            msg.push_str(&format!(
+                                "  Task {}: {:.1} KB/s (avg 5m: {:.1} KB/s, peak: {:.1} KB/s, {} samples)\n",
+                                summary.task_id,
+                                summary.latest_speed / 1024.0,
+                                summary.avg_5min / 1024.0,
+                                summary.peak_speed / 1024.0,
+                                summary.sample_count,
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+            }
         }
         Command::DlTag { task_id, tags } => {
             let s = state.lock().await;

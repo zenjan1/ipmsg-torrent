@@ -27,6 +27,7 @@ pub mod rate_limiter;
 pub mod rss_feed;
 pub mod save_path_manager;
 pub mod segment_download;
+pub mod speed_history;
 pub mod task_export;
 pub mod task_queue;
 pub mod torrent;
@@ -625,6 +626,8 @@ pub struct DownloadManager {
     eta_estimator: Arc<EtaEstimator>,
     /// Auto-categorization rules for downloads
     categorize_rules: Arc<Mutex<Vec<auto_categorize::CategorizeRule>>>,
+    /// Per-task speed history tracking
+    speed_history: Arc<Mutex<speed_history::SpeedHistoryManager>>,
 }
 
 impl DownloadManager {
@@ -655,6 +658,7 @@ impl DownloadManager {
             rss_feed_manager: None,
             eta_estimator: Arc::new(EtaEstimator::new()),
             categorize_rules: Arc::new(Mutex::new(Vec::new())),
+            speed_history: Arc::new(Mutex::new(speed_history::SpeedHistoryManager::new(360))),
         };
         dm.start_scheduler();
         dm
@@ -817,6 +821,7 @@ impl DownloadManager {
             rss_feed_manager: None,
             eta_estimator: Arc::new(EtaEstimator::new()),
             categorize_rules: Arc::new(Mutex::new(Vec::new())),
+            speed_history: Arc::new(Mutex::new(speed_history::SpeedHistoryManager::new(360))),
         };
         // Restore post-download hooks from disk
         if let Err(e) = dm.hook_manager.load() {
@@ -2935,6 +2940,7 @@ impl DownloadManager {
         let max_auto_retries = self.max_auto_retries.clone();
         let auto_retry_base_delay_secs = self.auto_retry_base_delay_secs.clone();
         let eta_estimator = self.eta_estimator.clone();
+        let speed_history = self.speed_history.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -3011,6 +3017,12 @@ impl DownloadManager {
 
                     // Update ETA estimator with current speed
                     eta_estimator.update_speed(&task_id, avg_speed).await;
+
+                    // Update speed history with current speed
+                    {
+                        let mut speed_history = speed_history.lock().await;
+                        speed_history.add_sample(&task_id, avg_speed, current_downloaded);
+                    }
 
                     // Update bandwidth monitor with aggregate speed
                     {
@@ -3658,6 +3670,42 @@ impl DownloadManager {
         drop(tasks);
 
         queue_health::analyze_queue_health(&health_data, config)
+    }
+
+    /// Get speed history summary for a task
+    pub async fn get_task_speed_history(
+        &self,
+        task_id: &str,
+    ) -> Option<speed_history::SpeedHistorySummary> {
+        let speed_history = self.speed_history.lock().await;
+        speed_history.get_summary(task_id)
+    }
+
+    /// Get speed history for all tasks
+    pub async fn get_all_speed_history_summaries(&self) -> Vec<speed_history::SpeedHistorySummary> {
+        let speed_history = self.speed_history.lock().await;
+        speed_history
+            .list_task_ids()
+            .into_iter()
+            .filter_map(|id| speed_history.get_summary(id))
+            .collect()
+    }
+
+    /// Clear speed history for a task
+    pub async fn clear_task_speed_history(&self, task_id: &str) -> bool {
+        let mut speed_history = self.speed_history.lock().await;
+        if let Some(history) = speed_history.get_mut(task_id) {
+            history.clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove speed history for a task
+    pub async fn remove_task_speed_history(&self, task_id: &str) -> bool {
+        let mut speed_history = self.speed_history.lock().await;
+        speed_history.remove(task_id)
     }
 
     /// Pause all running downloads.

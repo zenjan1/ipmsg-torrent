@@ -6,7 +6,7 @@ use crate::{DownloadManager, DownloadState, DownloadTask};
 use axum::{
     Json, Router,
     extract::{
-        State,
+        Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
@@ -149,6 +149,12 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/auto-rules", post(add_auto_rule))
         .route("/api/auto-rules/:id/remove", post(remove_auto_rule))
         .route("/api/health", get(get_queue_health))
+        .route("/api/speed-history", get(get_all_speed_history))
+        .route("/api/speed-history/:id", get(get_task_speed_history))
+        .route(
+            "/api/speed-history/:id/clear",
+            post(clear_task_speed_history),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -321,6 +327,43 @@ async fn get_queue_health(
     let config = crate::queue_health::HealthMonitorConfig::default();
     let report = state.manager.get_queue_health_report(&config).await;
     Json(report)
+}
+
+/// Get speed history summary for all tasks
+async fn get_all_speed_history(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::speed_history::SpeedHistorySummary>> {
+    let summaries = state.manager.get_all_speed_history_summaries().await;
+    Json(summaries)
+}
+
+/// Get speed history for a specific task
+async fn get_task_speed_history(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_task_speed_history(&task_id).await;
+    match summary {
+        Some(s) => Json(serde_json::json!({
+            "found": true,
+            "summary": s,
+        }))
+        .into_response(),
+        None => Json(serde_json::json!({
+            "found": false,
+            "summary": null,
+        }))
+        .into_response(),
+    }
+}
+
+/// Clear speed history for a task
+async fn clear_task_speed_history(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> impl axum::response::IntoResponse {
+    let removed = state.manager.clear_task_speed_history(&task_id).await;
+    Json(serde_json::json!({ "cleared": removed }))
 }
 
 /// Get bandwidth monitoring dashboard
