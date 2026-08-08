@@ -671,8 +671,7 @@ async fn set_task_speed(
     let speed_limit = body
         .get("speed_limit_bps")
         .and_then(|v| v.as_u64())
-        .map(|v| if v == 0 { None } else { Some(v) })
-        .flatten();
+        .filter(|&v| v != 0);
     state
         .manager
         .set_task_speed_limit_per_task(&task_id, speed_limit)

@@ -9,9 +9,10 @@ use std::process::Stdio;
 use tokio::process::Command;
 
 /// What to do when all downloads finish
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AutoShutdownAction {
     /// Do nothing (default)
+    #[default]
     Disabled,
     /// Exit the application with code 0
     Exit,
@@ -20,12 +21,6 @@ pub enum AutoShutdownAction {
         /// Command to execute, e.g., "notify-send 'All downloads done'"
         command: String,
     },
-}
-
-impl Default for AutoShutdownAction {
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 impl AutoShutdownAction {

@@ -101,6 +101,10 @@ enum Command {
         timeout: String,
         max_retries: u32,
     },
+    /// Set maximum concurrent downloads (0 = unlimited)
+    DlConcurrent {
+        max: usize,
+    },
     /// Pause all running downloads
     DlPauseAll,
     /// Resume all paused downloads
@@ -203,6 +207,11 @@ enum Command {
     DlImport {
         /// Input file path (e.g., /tmp/tasks.json)
         path: String,
+    },
+    /// Download URL using multi-segment parallel connections (like aria2/IDM)
+    DlSegment {
+        /// HTTP/HTTPS URL to download
+        url: String,
     },
     /// Configure auto-shutdown when all downloads complete
     DlAutoshutdown {
@@ -423,6 +432,16 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dltimeout <timeout> [max_retries]".to_string())
             }
         }
+        "dlconcurrent" | "dl-concurrent" => {
+            if parts.len() >= 2 {
+                match parts[1].parse::<usize>() {
+                    Ok(max) => Command::DlConcurrent { max },
+                    Err(_) => Command::Unknown("/dlconcurrent <number>".to_string()),
+                }
+            } else {
+                Command::Unknown("/dlconcurrent <number>".to_string())
+            }
+        }
         "dlpauseall" | "dl-pause-all" => Command::DlPauseAll,
         "dlresumeall" | "dl-resume-all" => Command::DlResumeAll,
         "dlrmcompleted" | "dl-rm-completed" => Command::DlRmCompleted,
@@ -622,6 +641,17 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlimp <input_path>".to_string())
             }
         }
+        "dlsegment" | "dl-segment" | "dlseg" => {
+            // /dlsegment <url> - Download URL using multi-segment parallel connections
+            let args: Vec<&str> = input.splitn(2, ' ').collect();
+            if args.len() >= 2 && !args[1].trim().is_empty() {
+                Command::DlSegment {
+                    url: args[1].trim().to_string(),
+                }
+            } else {
+                Command::Unknown("/dlsegment <url>".to_string())
+            }
+        }
         "dlautoshutdown" | "dl-auto-shutdown" | "dlas" => {
             // /dlautoshutdown <disabled|exit|shell:<command>>
             let args: Vec<&str> = input.splitn(2, ' ').collect();
@@ -784,6 +814,7 @@ fn command_help() -> String {
         "/dlspeed <limit>   - Set global download speed limit (e.g., 100KB/s, 1MB/s, 0=unlimited)",
         "/dltaskspeed <id> <limit> - Set per-task speed limit (0=use global default)",
         "/dltimeout <timeout> [max_retries] - Set download timeout (e.g., 30s, 5m, 0=disable)",
+        "/dlconcurrent <n> - Set max concurrent downloads (0=unlimited)",
         "/dlpauseall      - Pause all running downloads",
         "/dlresumeall     - Resume all paused downloads",
         "/dlrmcompleted   - Remove all completed downloads",
@@ -801,6 +832,7 @@ fn command_help() -> String {
         "/dlddeps <id> <dep1,dep2,...|none> - Set task dependencies",
         "/dlexport <path> [desc] - Export tasks to JSON file",
         "/dlimp <path>      - Import tasks from JSON export file",
+        "/dlsegment <url>   - Download URL using multi-segment parallel connections",
         "/dlextract <path>  - Extract download URLs from arbitrary text file",
         "/dlautoshutdown <disabled|exit|shell:<cmd>> - Auto-shutdown when all downloads complete",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
@@ -1716,6 +1748,19 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlConcurrent { max } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            download_manager.set_max_concurrent(max);
+            let mut s = state.lock().await;
+            let msg = if max == 0 {
+                "Maximum concurrent downloads set to unlimited".to_string()
+            } else {
+                format!("Maximum concurrent downloads set to {}", max)
+            };
+            s.add_system_message("main", msg);
+        }
         Command::DlPauseAll => {
             let s = state.lock().await;
             let download_manager = s.download_manager.clone();
@@ -2608,6 +2653,28 @@ async fn handle_command(
 
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
+        }
+        Command::DlSegment { url } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match download_manager.add_http_multisegment(&url).await {
+                Ok(task_id) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("✅ Multi-segment download added (id: {})", &task_id[..8]),
+                    );
+                }
+                Err(e) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("❌ Multi-segment download failed: {}", e),
+                    );
+                }
+            }
         }
         Command::DlAutoshutdown { action } => {
             let s = state.lock().await;
@@ -3547,6 +3614,26 @@ mod save_path_tests {
                 assert_eq!(path, "/tmp/tasks.json");
             }
             other => panic!("Expected DlImport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsegment() {
+        match parse_command("/dlsegment https://example.com/file.zip") {
+            Command::DlSegment { url } => {
+                assert_eq!(url, "https://example.com/file.zip");
+            }
+            other => panic!("Expected DlSegment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsegment_alias() {
+        match parse_command("/dlseg https://example.com/file.zip") {
+            Command::DlSegment { url } => {
+                assert_eq!(url, "https://example.com/file.zip");
+            }
+            other => panic!("Expected DlSegment, got {:?}", other),
         }
     }
 

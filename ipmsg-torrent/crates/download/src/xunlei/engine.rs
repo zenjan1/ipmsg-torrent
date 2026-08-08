@@ -126,6 +126,7 @@ impl XunleiEngine {
         // the existing file content (blocks already written at their offsets).
         let file = tokio::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(&output_path)
             .await

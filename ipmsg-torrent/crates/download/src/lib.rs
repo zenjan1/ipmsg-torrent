@@ -20,6 +20,7 @@ pub mod progress;
 pub mod proxy;
 pub mod rate_limiter;
 pub mod save_path_manager;
+pub mod segment_download;
 pub mod task_export;
 pub mod task_queue;
 pub mod torrent;
@@ -31,7 +32,7 @@ use chrono::Timelike;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use task_queue::{load_task_queue, save_task_queue};
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -498,6 +499,11 @@ enum TaskParams {
         file_size: u64,
         from_peer: String,
     },
+    SegmentHttp {
+        url: String,
+        file_name: String,
+        file_size: u64,
+    },
 }
 
 /// Stored task info for resume
@@ -532,7 +538,7 @@ pub struct DownloadManager {
     data_dir: PathBuf,
     dht: Arc<dht::DhtManager>,
     /// Maximum concurrent downloads (0 = unlimited)
-    max_concurrent: usize,
+    max_concurrent: Arc<AtomicUsize>,
     /// Global download rate limiter
     rate_limiter: Arc<DownloadRateController>,
     /// Timeout in seconds for stalled downloads (0 = disabled)
@@ -571,7 +577,7 @@ impl DownloadManager {
             task_generation: Arc::new(Mutex::new(HashMap::new())),
             data_dir,
             dht: Arc::new(dht::DhtManager::new()),
-            max_concurrent: 0, // 0 = unlimited
+            max_concurrent: Arc::new(AtomicUsize::new(0)), // 0 = unlimited
             rate_limiter: Arc::new(DownloadRateController::new(0, 0)),
             timeout_secs: Arc::new(AtomicU64::new(0)),
             max_retries: Arc::new(AtomicU32::new(3)),
@@ -668,7 +674,7 @@ impl DownloadManager {
             task_generation: Arc::new(Mutex::new(HashMap::new())),
             data_dir,
             dht: Arc::new(dht::DhtManager::new()),
-            max_concurrent: 0,
+            max_concurrent: Arc::new(AtomicUsize::new(0)),
             rate_limiter: Arc::new(DownloadRateController::new(0, 0)),
             timeout_secs: Arc::new(AtomicU64::new(0)),
             max_retries: Arc::new(AtomicU32::new(3)),
@@ -701,6 +707,11 @@ impl DownloadManager {
         {
             dm.save_path_manager.set_config(save_path_cfg).await;
         }
+        // Restore max concurrent downloads setting from disk
+        if let Some(max_concurrent) = load_max_concurrent(&dm.data_dir) {
+            dm.max_concurrent
+                .store(max_concurrent, std::sync::atomic::Ordering::Relaxed);
+        }
         dm.start_scheduler();
         dm
     }
@@ -716,7 +727,7 @@ impl DownloadManager {
         let data_dir = self.data_dir.clone();
         let dht = self.dht.clone();
         let rate_limiter = self.rate_limiter.clone();
-        let max_concurrent = self.max_concurrent;
+        let max_concurrent = self.max_concurrent.clone();
         let notifier = self.notifier.clone();
         let auto_shutdown_config = self.auto_shutdown.clone();
         let proxy_config = self.proxy_config.clone();
@@ -773,10 +784,11 @@ impl DownloadManager {
                     .ok();
 
                 // Check if we can start a new task
-                let can_start = if max_concurrent == 0 {
+                let max_concurrent_val = max_concurrent.load(std::sync::atomic::Ordering::Relaxed);
+                let can_start = if max_concurrent_val == 0 {
                     true
                 } else {
-                    running.lock().await.len() < max_concurrent
+                    running.lock().await.len() < max_concurrent_val
                 };
 
                 if can_start {
@@ -795,7 +807,7 @@ impl DownloadManager {
                                     && t.depends_on
                                         .iter()
                                         .all(|dep| completed_ids.contains(dep.as_str()))
-                                    && t.retry_after.map_or(true, |ra| ra <= chrono::Utc::now())
+                                    && t.retry_after.is_none_or(|ra| ra <= chrono::Utc::now())
                             })
                             .max_by(|a, b| {
                                 a.priority.cmp(&b.priority).then_with(|| {
@@ -1052,6 +1064,25 @@ impl DownloadManager {
                                     TaskParams::P2P { .. } => {
                                         Err("P2P resume not yet supported".to_string())
                                     }
+                                    TaskParams::SegmentHttp {
+                                        url,
+                                        file_name,
+                                        file_size,
+                                    } => {
+                                        let download_dir = data_dir_clone.join("downloads");
+                                        let mut downloader =
+                                            segment_download::SegmentDownloader::new(
+                                                url,
+                                                file_name,
+                                                file_size,
+                                                download_dir,
+                                            );
+                                        downloader.set_rate_limiter(task_rate_limiter.clone());
+                                        downloader
+                                            .download(Some(cancel_clone))
+                                            .await
+                                            .map_err(|e| e.to_string())
+                                    }
                                 };
 
                                 // Update task state
@@ -1148,9 +1179,20 @@ impl DownloadManager {
         });
     }
 
-    /// Set maximum concurrent downloads (0 = unlimited)
-    pub fn set_max_concurrent(&mut self, max: usize) {
-        self.max_concurrent = max;
+    /// Set maximum concurrent downloads (0 = unlimited).
+    /// Persists the setting to disk for restart restoration.
+    pub fn set_max_concurrent(&self, max: usize) {
+        self.max_concurrent
+            .store(max, std::sync::atomic::Ordering::Relaxed);
+        if let Err(e) = save_max_concurrent(max, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist max_concurrent");
+        }
+    }
+
+    /// Get maximum concurrent downloads (0 = unlimited)
+    pub fn get_max_concurrent(&self) -> usize {
+        self.max_concurrent
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Set global download speed limit in bytes/sec (0 = unlimited).
@@ -1172,7 +1214,7 @@ impl DownloadManager {
     /// running, the new limiter will be used on the next engine spawn (pause+resume).
     pub async fn set_task_speed_limit_per_task(&self, task_id: &str, bytes_per_sec: Option<u64>) {
         // Normalize: Some(0) means "clear the limit" (same as None)
-        let normalized = bytes_per_sec.and_then(|v| if v == 0 { None } else { Some(v) });
+        let normalized = bytes_per_sec.filter(|&v| v != 0);
 
         // Update the task record
         {
@@ -1493,10 +1535,13 @@ impl DownloadManager {
 
     /// Check if we can start a new task
     pub async fn can_start_task(&self) -> bool {
-        if self.max_concurrent == 0 {
+        let max_concurrent = self
+            .max_concurrent
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if max_concurrent == 0 {
             return true;
         }
-        self.running_count().await < self.max_concurrent
+        self.running_count().await < max_concurrent
     }
 
     /// Find a task with the given source URL (for deduplication).
@@ -1519,7 +1564,7 @@ impl DownloadManager {
             .map_err(|e| DownloadManagerError::Protocol(e.to_string()))?;
 
         // Check for duplicate by info_hash
-        let info_hash = hex::encode(&meta.info_hash);
+        let info_hash = hex::encode(meta.info_hash);
         if let Some(existing_id) = self.find_duplicate_by_source(&info_hash).await {
             return Err(DownloadManagerError::DuplicateTask(existing_id));
         }
@@ -1642,7 +1687,7 @@ impl DownloadManager {
         servers: Vec<std::net::SocketAddr>,
     ) -> Result<String, DownloadManagerError> {
         // Check for duplicate by ed2k hash
-        let hash_str = hex::encode(&file_hash.0);
+        let hash_str = hex::encode(file_hash.0);
         if let Some(existing_id) = self.find_duplicate_by_source(&hash_str).await {
             return Err(DownloadManagerError::DuplicateTask(existing_id));
         }
@@ -1706,10 +1751,10 @@ impl DownloadManager {
             xunlei::XunleiSource::Http { url, .. } => Some(url.clone()),
             _ => None,
         });
-        if let Some(ref url) = source_url {
-            if let Some(existing_id) = self.find_duplicate_by_source(url).await {
-                return Err(DownloadManagerError::DuplicateTask(existing_id));
-            }
+        if let Some(url) = source_url.as_ref()
+            && let Some(existing_id) = self.find_duplicate_by_source(url).await
+        {
+            return Err(DownloadManagerError::DuplicateTask(existing_id));
         }
 
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -1991,6 +2036,106 @@ impl DownloadManager {
         }];
 
         self.add_xunlei(file_name, content_length, sources).await
+    }
+
+    /// Add an HTTP multi-segment download task (splits URL into parallel segments)
+    pub async fn add_http_multisegment(&self, url: &str) -> Result<String, DownloadManagerError> {
+        // HEAD request to get file size and name
+        let proxy_cfg = self.proxy_config.read().await.clone();
+        let client = if let Some(ref pcfg) = proxy_cfg {
+            pcfg.build_client(std::time::Duration::from_secs(15))
+                .map_err(|e| DownloadManagerError::Io(e.to_string()))?
+        } else {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(|e| DownloadManagerError::Io(e.to_string()))?
+        };
+
+        let head_resp = client
+            .head(url)
+            .send()
+            .await
+            .map_err(|e| DownloadManagerError::Io(format!("HEAD request failed: {e}")))?;
+
+        if !head_resp.status().is_success() {
+            return Err(DownloadManagerError::Io(format!(
+                "HEAD returned {}",
+                head_resp.status()
+            )));
+        }
+
+        let content_length = head_resp
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        // Extract filename from URL
+        let file_name = url
+            .split('/')
+            .next_back()
+            .unwrap_or("download")
+            .split('?')
+            .next()
+            .unwrap_or("download")
+            .to_string();
+        let file_name = if file_name.is_empty() {
+            "download".to_string()
+        } else {
+            file_name
+        };
+
+        // Check for duplicate by URL
+        if let Some(existing_id) = self.find_duplicate_by_source(url).await {
+            return Err(DownloadManagerError::DuplicateTask(existing_id));
+        }
+
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+
+        let task = DownloadTask {
+            id: task_id.clone(),
+            name: file_name.clone(),
+            protocol: DownloadProtocol::Xunlei,
+            size: content_length,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: self.save_path_manager.get_save_path("").await,
+            created_at: now,
+            updated_at: now,
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: Some(url.to_string()),
+        };
+
+        self.tasks.lock().await.push(task.clone());
+        self.persist_tasks().await;
+        self.emit_event(TaskEvent::Added {
+            task: TaskInfoEvent::from_task(&task),
+        });
+
+        let params = TaskParams::SegmentHttp {
+            url: url.to_string(),
+            file_name,
+            file_size: content_length,
+        };
+
+        self.spawn_task(task_id.clone(), params).await;
+
+        Ok(task_id)
     }
 
     /// Import multiple URLs from a list of strings.
@@ -2278,6 +2423,27 @@ impl DownloadManager {
                     // This branch is only reached if resume_task is called on a P2P task,
                     // which is not yet supported (P2P resume requires peer reconnection).
                     Err("P2P resume not yet supported via DownloadManager".to_string())
+                }
+                TaskParams::SegmentHttp {
+                    url,
+                    file_name,
+                    file_size,
+                } => {
+                    let download_dir = data_dir.join("downloads");
+                    let mut downloader = segment_download::SegmentDownloader::new(
+                        url,
+                        file_name,
+                        file_size,
+                        download_dir,
+                    );
+                    // Apply rate limiting
+                    if let Some(ref limiter) = rate_limiter {
+                        downloader.set_rate_limiter(limiter.per_task().clone());
+                    }
+                    downloader
+                        .download(Some(cancel_clone))
+                        .await
+                        .map_err(|e| e.to_string())
                 }
             };
 
@@ -2737,6 +2903,25 @@ impl DownloadManager {
                                         }
                                         TaskParams::P2P { .. } => {
                                             Err("P2P resume not yet supported".to_string())
+                                        }
+                                        TaskParams::SegmentHttp {
+                                            url,
+                                            file_name,
+                                            file_size,
+                                        } => {
+                                            let download_dir = data_dir_clone.join("downloads");
+                                            let mut downloader =
+                                                segment_download::SegmentDownloader::new(
+                                                    url,
+                                                    file_name,
+                                                    file_size,
+                                                    download_dir,
+                                                );
+                                            downloader.set_rate_limiter(task_rate_limiter);
+                                            downloader
+                                                .download(Some(cancel_clone))
+                                                .await
+                                                .map_err(|e| e.to_string())
                                         }
                                     };
 
@@ -3724,6 +3909,25 @@ fn extract_display_name(url: &str) -> String {
         }
     }
     url.to_string()
+}
+
+/// Save maximum concurrent downloads setting to disk.
+fn save_max_concurrent(max: usize, data_dir: &std::path::Path) -> Result<(), std::io::Error> {
+    let path = data_dir.join("max_concurrent.json");
+    let json = serde_json::to_string(&serde_json::json!({ "max_concurrent": max }))?;
+    std::fs::write(path, json)
+}
+
+/// Load maximum concurrent downloads setting from disk.
+/// Returns `None` if no config file exists.
+fn load_max_concurrent(data_dir: &std::path::Path) -> Option<usize> {
+    let path = data_dir.join("max_concurrent.json");
+    if !path.exists() {
+        return None;
+    }
+    let json = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&json).ok()?;
+    v.get("max_concurrent")?.as_u64().map(|n| n as usize)
 }
 
 /// Parse an ed2k:// link and add it as a download task.
@@ -7050,5 +7254,63 @@ mod url_extraction_tests {
         assert_eq!(urls[0], "https://first.com");
         assert_eq!(urls[1], "https://second.com");
         assert_eq!(urls[2], "https://third.com");
+    }
+}
+
+#[cfg(test)]
+mod max_concurrent_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_save_load_max_concurrent() {
+        let tmp = tempdir().unwrap();
+        save_max_concurrent(5, tmp.path()).unwrap();
+        let loaded = load_max_concurrent(tmp.path()).unwrap();
+        assert_eq!(loaded, 5);
+    }
+
+    #[test]
+    fn test_load_max_concurrent_missing() {
+        let tmp = tempdir().unwrap();
+        let loaded = load_max_concurrent(tmp.path());
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_save_max_concurrent_zero() {
+        let tmp = tempdir().unwrap();
+        save_max_concurrent(0, tmp.path()).unwrap();
+        let loaded = load_max_concurrent(tmp.path()).unwrap();
+        assert_eq!(loaded, 0);
+    }
+
+    #[test]
+    fn test_save_max_concurrent_overwrite() {
+        let tmp = tempdir().unwrap();
+        save_max_concurrent(3, tmp.path()).unwrap();
+        save_max_concurrent(10, tmp.path()).unwrap();
+        let loaded = load_max_concurrent(tmp.path()).unwrap();
+        assert_eq!(loaded, 10);
+    }
+
+    #[tokio::test]
+    async fn test_manager_set_get_max_concurrent() {
+        let tmp = tempdir().unwrap();
+        let dm = DownloadManager::new(tmp.path().to_path_buf());
+        assert_eq!(dm.get_max_concurrent(), 0);
+        dm.set_max_concurrent(7);
+        assert_eq!(dm.get_max_concurrent(), 7);
+        // Verify persisted
+        let loaded = load_max_concurrent(tmp.path()).unwrap();
+        assert_eq!(loaded, 7);
+    }
+
+    #[tokio::test]
+    async fn test_manager_restore_max_concurrent() {
+        let tmp = tempdir().unwrap();
+        save_max_concurrent(4, tmp.path()).unwrap();
+        let dm = DownloadManager::new_with_restore(tmp.path().to_path_buf()).await;
+        assert_eq!(dm.get_max_concurrent(), 4);
     }
 }
