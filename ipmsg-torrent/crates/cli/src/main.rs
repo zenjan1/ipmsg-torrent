@@ -243,6 +243,11 @@ enum Command {
         /// File path containing text with embedded URLs
         path: String,
     },
+    /// Scrape a web page and extract all downloadable links
+    DlScrape {
+        /// URL of the web page to scrape
+        url: String,
+    },
     /// Export download tasks to a JSON file
     DlExport {
         /// Output file path (e.g., /tmp/tasks.json)
@@ -806,6 +811,17 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlextract <file_path>".to_string())
             }
         }
+        "dllinks" | "dl-links" | "dlscrape" | "dl-scrape" => {
+            // /dllinks <url> - Scrape web page and extract download links
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                Command::DlScrape {
+                    url: args[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dllinks <url>".to_string())
+            }
+        }
         "dlexport" | "dl-export" => {
             // /dlexport <output_path> [description]
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1254,6 +1270,7 @@ fn command_help() -> String {
         "/dlimp <path>      - Import tasks from JSON export file",
         "/dlsegment <url>   - Download URL using multi-segment parallel connections",
         "/dlextract <path>  - Extract download URLs from arbitrary text file",
+        "/dllinks <url>     - Scrape web page and extract download links",
         "/dlautoshutdown <disabled|exit|shell:<cmd>> - Auto-shutdown when all downloads complete",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/dlpath <path>       - Set download save path (absolute path)",
@@ -4273,6 +4290,70 @@ async fn handle_command(
 
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
+        }
+        Command::DlScrape { url } => {
+            // Fetch the page and extract links
+            match ipmsg_download::DownloadManager::scrape_url_for_links(&url).await {
+                Ok(result) => {
+                    if result.links.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("⚠️ No download links found on {}", url),
+                        );
+                        return;
+                    }
+
+                    let mut msg = format!(
+                        "🔗 Found {} download link(s) on {}\n",
+                        result.links.len(),
+                        url
+                    );
+
+                    // Show protocol breakdown
+                    for (proto, count) in &result.protocol_counts {
+                        if *count > 0 {
+                            msg.push_str(&format!("  {} : {}\n", proto, count));
+                        }
+                    }
+                    msg.push('\n');
+
+                    // Show first 20 links
+                    for (i, link) in result.links.iter().take(20).enumerate() {
+                        let filename = link.filename.as_deref().unwrap_or("(unknown)");
+                        let dl_marker = if link.has_download_attr {
+                            " ⬇️"
+                        } else {
+                            ""
+                        };
+                        msg.push_str(&format!(
+                            "  {}. [{}] {}{}\n",
+                            i + 1,
+                            link.protocol,
+                            filename,
+                            dl_marker
+                        ));
+                        if let Some(text) = &link.text {
+                            msg.push_str(&format!("     Text: {}\n", text));
+                        }
+                        msg.push_str(&format!("     URL: {}\n", link.url));
+                    }
+
+                    if result.links.len() > 20 {
+                        msg.push_str(&format!(
+                            "\n  ... and {} more links",
+                            result.links.len() - 20
+                        ));
+                    }
+
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                Err(e) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("❌ {}", e));
+                }
+            }
         }
         Command::DlExport { path, description } => {
             let s = state.lock().await;

@@ -5,6 +5,12 @@
 //! - Domain: Match any URL from the same domain
 //! - PathPrefix: Match URLs with the same path prefix (e.g., /downloads/file.*)
 //! - Smart: Combine domain + filename matching
+//!
+//! Also provides DuplicatePolicy to control behavior when duplicates are detected:
+//! - Reject: Return an error (default, current behavior)
+//! - Skip: Silently ignore the duplicate, return existing task ID
+//! - Allow: Allow duplicate tasks to coexist
+//! - PauseExisting: Pause the existing task and add the new one
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -52,6 +58,48 @@ impl std::str::FromStr for DedupMode {
     }
 }
 
+/// Policy for handling duplicate download tasks
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicatePolicy {
+    /// Reject the duplicate with an error (default behavior)
+    #[default]
+    Reject,
+    /// Silently skip the duplicate, return the existing task ID
+    Skip,
+    /// Allow duplicate tasks to coexist (no dedup check)
+    Allow,
+    /// Pause the existing task and add the new one
+    PauseExisting,
+}
+
+impl std::fmt::Display for DuplicatePolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DuplicatePolicy::Reject => write!(f, "reject"),
+            DuplicatePolicy::Skip => write!(f, "skip"),
+            DuplicatePolicy::Allow => write!(f, "allow"),
+            DuplicatePolicy::PauseExisting => write!(f, "pause_existing"),
+        }
+    }
+}
+
+impl std::str::FromStr for DuplicatePolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "reject" => Ok(DuplicatePolicy::Reject),
+            "skip" => Ok(DuplicatePolicy::Skip),
+            "allow" => Ok(DuplicatePolicy::Allow),
+            "pause_existing" | "pauseexisting" | "pause" => Ok(DuplicatePolicy::PauseExisting),
+            _ => Err(format!(
+                "invalid duplicate policy: {s} (valid: reject, skip, allow, pause_existing)"
+            )),
+        }
+    }
+}
+
 /// Configuration for URL deduplication
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DedupConfig {
@@ -63,6 +111,8 @@ pub struct DedupConfig {
     pub strip_fragment: bool,
     /// Whether dedup is enabled
     pub enabled: bool,
+    /// Policy for handling duplicate tasks
+    pub duplicate_policy: DuplicatePolicy,
 }
 
 impl Default for DedupConfig {
@@ -72,6 +122,7 @@ impl Default for DedupConfig {
             strip_query: true,
             strip_fragment: true,
             enabled: true,
+            duplicate_policy: DuplicatePolicy::Reject,
         }
     }
 }
@@ -268,6 +319,40 @@ mod tests {
         assert!(config.strip_query);
         assert!(config.strip_fragment);
         assert!(config.enabled);
+        assert_eq!(config.duplicate_policy, DuplicatePolicy::Reject);
+    }
+
+    #[test]
+    fn test_duplicate_policy_display() {
+        assert_eq!(DuplicatePolicy::Reject.to_string(), "reject");
+        assert_eq!(DuplicatePolicy::Skip.to_string(), "skip");
+        assert_eq!(DuplicatePolicy::Allow.to_string(), "allow");
+        assert_eq!(DuplicatePolicy::PauseExisting.to_string(), "pause_existing");
+    }
+
+    #[test]
+    fn test_duplicate_policy_from_str() {
+        assert_eq!(
+            "reject".parse::<DuplicatePolicy>().unwrap(),
+            DuplicatePolicy::Reject
+        );
+        assert_eq!(
+            "skip".parse::<DuplicatePolicy>().unwrap(),
+            DuplicatePolicy::Skip
+        );
+        assert_eq!(
+            "allow".parse::<DuplicatePolicy>().unwrap(),
+            DuplicatePolicy::Allow
+        );
+        assert_eq!(
+            "pause_existing".parse::<DuplicatePolicy>().unwrap(),
+            DuplicatePolicy::PauseExisting
+        );
+        assert_eq!(
+            "pause".parse::<DuplicatePolicy>().unwrap(),
+            DuplicatePolicy::PauseExisting
+        );
+        assert!("invalid".parse::<DuplicatePolicy>().is_err());
     }
 
     #[test]
@@ -277,6 +362,7 @@ mod tests {
             strip_query: true,
             strip_fragment: true,
             enabled: true,
+            duplicate_policy: DuplicatePolicy::Reject,
         };
 
         let url1 = "https://example.com/file.zip?token=abc";
@@ -301,6 +387,7 @@ mod tests {
             strip_query: false,
             strip_fragment: true,
             enabled: true,
+            duplicate_policy: DuplicatePolicy::Reject,
         };
 
         let url1 = "https://example.com/file.zip?token=abc";
@@ -322,6 +409,7 @@ mod tests {
             strip_query: true,
             strip_fragment: true,
             enabled: true,
+            duplicate_policy: DuplicatePolicy::Reject,
         };
 
         let url1 = "https://example.com/file1.zip";
@@ -350,6 +438,7 @@ mod tests {
             strip_query: true,
             strip_fragment: true,
             enabled: true,
+            duplicate_policy: DuplicatePolicy::Reject,
         };
 
         let url1 = "https://example.com/downloads/file1.zip";
@@ -379,6 +468,7 @@ mod tests {
             strip_query: true,
             strip_fragment: true,
             enabled: true,
+            duplicate_policy: DuplicatePolicy::Reject,
         };
 
         let url1 = "https://example.com/files/document.pdf";
@@ -422,6 +512,7 @@ mod tests {
             strip_query: true,
             strip_fragment: true,
             enabled: true,
+            duplicate_policy: DuplicatePolicy::Reject,
         };
 
         let existing = vec![
@@ -455,6 +546,7 @@ mod tests {
             strip_query: true,
             strip_fragment: true,
             enabled: true,
+            duplicate_policy: DuplicatePolicy::Reject,
         };
 
         let existing = vec![
@@ -484,6 +576,7 @@ mod tests {
             strip_query: true,
             strip_fragment: true,
             enabled: false,
+            duplicate_policy: DuplicatePolicy::Reject,
         };
 
         let existing = vec!["https://example.com/file1.zip".to_string()];
@@ -502,6 +595,7 @@ mod tests {
             strip_query: true,
             strip_fragment: true,
             enabled: true,
+            duplicate_policy: DuplicatePolicy::Reject,
         };
 
         let magnet = "magnet:?xt=urn:btih:abc123&dn=test";
@@ -522,6 +616,7 @@ mod tests {
             strip_query: false,
             strip_fragment: true,
             enabled: true,
+            duplicate_policy: DuplicatePolicy::Skip,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -531,6 +626,7 @@ mod tests {
         assert!(!deserialized.strip_query);
         assert!(deserialized.strip_fragment);
         assert!(deserialized.enabled);
+        assert_eq!(deserialized.duplicate_policy, DuplicatePolicy::Skip);
     }
 
     #[test]
@@ -544,6 +640,7 @@ mod tests {
             strip_query: false,
             strip_fragment: true,
             enabled: true,
+            duplicate_policy: DuplicatePolicy::PauseExisting,
         };
 
         save_dedup_config(&config, &temp_dir).unwrap();
@@ -553,6 +650,7 @@ mod tests {
         assert!(!loaded.strip_query);
         assert!(loaded.strip_fragment);
         assert!(loaded.enabled);
+        assert_eq!(loaded.duplicate_policy, DuplicatePolicy::PauseExisting);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

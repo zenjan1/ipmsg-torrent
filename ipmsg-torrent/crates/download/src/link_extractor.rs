@@ -84,8 +84,8 @@ fn extract_filename_from_url(url: &str) -> Option<String> {
             if !last_segment.is_empty() {
                 // URL-decode the filename
                 return Some(
-                    percent_encoding::percent_decode_str(last_segment)
-                        .decode_utf8_lossy()
+                    urlencoding::decode(last_segment)
+                        .unwrap_or(std::borrow::Cow::Borrowed(last_segment))
                         .into_owned(),
                 );
             }
@@ -110,14 +110,17 @@ fn extract_filename_from_text(text: &str) -> Option<String> {
         return None;
     }
 
-    // If the text looks like a filename (contains a dot, no spaces in last segment)
-    if let Some(last_word) = trimmed.split_whitespace().last() {
-        if last_word.contains('.') && !last_word.starts_with('.') && last_word.len() < 256 {
+    // Search through all words for one that looks like a filename
+    for word in trimmed.split_whitespace() {
+        if word.contains('.') && !word.starts_with('.') && word.len() < 256 {
             // Check it has a reasonable extension
-            if let Some(ext_pos) = last_word.rfind('.') {
-                let ext = &last_word[ext_pos + 1..];
-                if !ext.is_empty() && ext.len() <= 10 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
-                    return Some(last_word.to_string());
+            if let Some(ext_pos) = word.rfind('.') {
+                let ext = &word[ext_pos + 1..];
+                if !ext.is_empty()
+                    && ext.len() <= 10
+                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                {
+                    return Some(word.to_string());
                 }
             }
         }
@@ -132,12 +135,12 @@ pub fn extract_links_from_html(html: &str, base_url: Option<&str>) -> Vec<Extrac
 
     // Extract <a ...>...</a> tags with href attributes
     // This regex handles common HTML patterns
-    let anchor_re = regex::Regex::new(
-        r"(?is)<a\s[^>]*?href\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|(\S+?))[^>]*?(?:\s+download(?:\s*=\s*(?:\"[^\"]*\"|'[^']*')))?[^>]*?>(.*?)</a>"
+    let anchor_re = regex_lite::Regex::new(
+        r#"(?is)<a\s[^>]*?href\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+?))[^>]*?(?:\s+download(?:\s*=\s*(?:"[^"]*"|'[^']*')))?[^>]*?>(.*?)</a>"#
     ).unwrap();
 
     // Check for download attribute separately
-    let download_attr_re = regex::Regex::new(r"(?i)\bdownload\b").unwrap();
+    let download_attr_re = regex_lite::Regex::new(r"(?i)\bdownload\b").unwrap();
 
     for cap in anchor_re.captures_iter(html) {
         let href = cap
@@ -192,11 +195,7 @@ pub fn extract_links_from_html(html: &str, base_url: Option<&str>) -> Vec<Extrac
 }
 
 /// Extract bare protocol URLs from text (ed2k://, magnet:)
-fn extract_bare_protocols(
-    text: &str,
-    links: &mut Vec<ExtractedLink>,
-    seen: &mut HashSet<String>,
-) {
+fn extract_bare_protocols(text: &str, links: &mut Vec<ExtractedLink>, seen: &mut HashSet<String>) {
     let protocols = ["ed2k://", "magnet:"];
     for proto in &protocols {
         let mut search_from = 0;
@@ -227,7 +226,7 @@ fn extract_bare_protocols(
 
 /// Strip HTML tags from a string
 fn strip_html_tags(html: &str) -> String {
-    let tag_re = regex::Regex::new(r"<[^>]+>").unwrap();
+    let tag_re = regex_lite::Regex::new(r"<[^>]+>").unwrap();
     let stripped = tag_re.replace_all(html, "");
     // Decode common HTML entities
     stripped
@@ -280,7 +279,10 @@ impl ExtractionResult {
 
     /// Filter links by protocol
     pub fn links_by_protocol(&self, protocol: LinkProtocol) -> Vec<&ExtractedLink> {
-        self.links.iter().filter(|l| l.protocol == protocol).collect()
+        self.links
+            .iter()
+            .filter(|l| l.protocol == protocol)
+            .collect()
     }
 
     /// Get only links that look like actual files (have filename extensions)
@@ -318,9 +320,18 @@ mod tests {
 
     #[test]
     fn test_classify_protocol() {
-        assert_eq!(classify_protocol("https://example.com/file.zip"), LinkProtocol::Https);
-        assert_eq!(classify_protocol("http://example.com/file.zip"), LinkProtocol::Http);
-        assert_eq!(classify_protocol("ftp://ftp.example.com/file.zip"), LinkProtocol::Ftp);
+        assert_eq!(
+            classify_protocol("https://example.com/file.zip"),
+            LinkProtocol::Https
+        );
+        assert_eq!(
+            classify_protocol("http://example.com/file.zip"),
+            LinkProtocol::Http
+        );
+        assert_eq!(
+            classify_protocol("ftp://ftp.example.com/file.zip"),
+            LinkProtocol::Ftp
+        );
         assert_eq!(
             classify_protocol("ed2k://|file|test.avi|1234|abcd|/"),
             LinkProtocol::Ed2k
@@ -395,11 +406,11 @@ mod tests {
 
     #[test]
     fn test_extract_links_skip_javascript_and_hash() {
-        let html = r#"
+        let html = r##"
             <a href="javascript:void(0)">Click</a>
             <a href="#section">Jump</a>
             <a href="https://example.com/real.zip">Real Link</a>
-        "#;
+        "##;
         let links = extract_links_from_html(html, None);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].url, "https://example.com/real.zip");
@@ -438,10 +449,7 @@ mod tests {
     #[test]
     fn test_strip_html_tags() {
         assert_eq!(strip_html_tags("<b>bold</b> text"), "bold text");
-        assert_eq!(
-            strip_html_tags("a &amp; b &lt; c"),
-            "a & b < c"
-        );
+        assert_eq!(strip_html_tags("a &amp; b &lt; c"), "a & b < c");
     }
 
     #[test]

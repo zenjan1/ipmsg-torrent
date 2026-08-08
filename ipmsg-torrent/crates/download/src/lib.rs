@@ -25,6 +25,7 @@ pub mod download_report;
 pub mod download_stats;
 pub mod ed2k;
 pub mod eta_estimator;
+pub mod link_extractor;
 pub mod magnet;
 pub mod metadata_cache;
 pub mod mirror_health;
@@ -2232,6 +2233,50 @@ impl DownloadManager {
         dedup.clone()
     }
 
+    /// Handle duplicate task detection based on the configured duplicate policy.
+    /// Returns Ok(Some(task_id)) if the task should be skipped (existing task ID),
+    /// Ok(None) if the task should be allowed to proceed, or Err if rejected.
+    async fn handle_duplicate(
+        &self,
+        existing_task_id: &str,
+        new_source: &str,
+    ) -> Result<Option<String>, DownloadManagerError> {
+        let dedup_config = self.get_url_dedup().await;
+        let policy = dedup_config.duplicate_policy;
+
+        match policy {
+            url_dedup::DuplicatePolicy::Reject => Err(DownloadManagerError::DuplicateTask(
+                existing_task_id.to_string(),
+            )),
+            url_dedup::DuplicatePolicy::Skip => {
+                tracing::info!(
+                    existing_task_id = %existing_task_id,
+                    source = %new_source,
+                    "Skipping duplicate task (policy: skip)"
+                );
+                Ok(Some(existing_task_id.to_string()))
+            }
+            url_dedup::DuplicatePolicy::Allow => {
+                tracing::info!(
+                    existing_task_id = %existing_task_id,
+                    source = %new_source,
+                    "Allowing duplicate task (policy: allow)"
+                );
+                Ok(None)
+            }
+            url_dedup::DuplicatePolicy::PauseExisting => {
+                tracing::info!(
+                    existing_task_id = %existing_task_id,
+                    source = %new_source,
+                    "Pausing existing task before adding duplicate (policy: pause_existing)"
+                );
+                // Use the existing pause_task method
+                self.pause_task(existing_task_id).await;
+                Ok(None)
+            }
+        }
+    }
+
     /// Check if a URL is a duplicate of any existing task based on current dedup config.
     /// Returns the task ID if a duplicate is found, None otherwise.
     pub async fn find_duplicate_by_url(&self, url: &str) -> Option<String> {
@@ -2288,6 +2333,59 @@ impl DownloadManager {
     pub async fn is_shortened_url(&self, url: &str) -> bool {
         let config = self.get_url_expander().await;
         url_expander::is_shortened_url(url, &config)
+    }
+
+    /// Extract download links from HTML content.
+    /// If `base_url` is provided, relative URLs are resolved against it.
+    pub fn extract_links_from_html(
+        html: &str,
+        base_url: Option<&str>,
+    ) -> link_extractor::ExtractionResult {
+        let links = link_extractor::extract_links_from_html(html, base_url);
+        link_extractor::build_extraction_result(base_url.unwrap_or("<unknown>"), links)
+    }
+
+    /// Fetch a web page and extract all downloadable links.
+    /// Resolves relative URLs against the page URL.
+    pub async fn scrape_url_for_links(
+        url: &str,
+    ) -> Result<link_extractor::ExtractionResult, String> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .user_agent("ipmsg-torrent/1.0")
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+        let resp = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {} for {url}", resp.status()));
+        }
+
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read response body: {e}"))?;
+
+        let links = link_extractor::extract_links_from_html(&body, Some(url));
+        let mut result = link_extractor::build_extraction_result(url, links);
+        result.source_url = url.to_string();
+        // Store content type for informational purposes
+        if !content_type.is_empty() {
+            result.protocol_counts.insert("content_type".to_string(), 0);
+        }
+        Ok(result)
     }
 
     /// Add a URL rewrite rule.
@@ -3014,7 +3112,10 @@ impl DownloadManager {
         // Check for duplicate by info_hash
         let info_hash = hex::encode(meta.info_hash);
         if let Some(existing_id) = self.find_duplicate_by_source(&info_hash).await {
-            return Err(DownloadManagerError::DuplicateTask(existing_id));
+            match self.handle_duplicate(&existing_id, &info_hash).await? {
+                Some(task_id) => return Ok(task_id), // Skip policy: return existing task ID
+                None => {} // Allow or PauseExisting policy: continue to create new task
+            }
         }
 
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -3087,7 +3188,10 @@ impl DownloadManager {
 
         // Check for duplicate by magnet URI
         if let Some(existing_id) = self.find_duplicate_by_source(magnet_uri).await {
-            return Err(DownloadManagerError::DuplicateTask(existing_id));
+            match self.handle_duplicate(&existing_id, magnet_uri).await? {
+                Some(task_id) => return Ok(task_id), // Skip policy: return existing task ID
+                None => {} // Allow or PauseExisting policy: continue to create new task
+            }
         }
 
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -3162,7 +3266,10 @@ impl DownloadManager {
         // Check for duplicate by ed2k hash
         let hash_str = hex::encode(file_hash.0);
         if let Some(existing_id) = self.find_duplicate_by_source(&hash_str).await {
-            return Err(DownloadManagerError::DuplicateTask(existing_id));
+            match self.handle_duplicate(&existing_id, &hash_str).await? {
+                Some(task_id) => return Ok(task_id), // Skip policy: return existing task ID
+                None => {} // Allow or PauseExisting policy: continue to create new task
+            }
         }
 
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -3232,10 +3339,13 @@ impl DownloadManager {
             xunlei::XunleiSource::Http { url, .. } => Some(url.clone()),
             _ => None,
         });
-        if let Some(url) = source_url.as_ref()
-            && let Some(existing_id) = self.find_duplicate_by_source(url).await
-        {
-            return Err(DownloadManagerError::DuplicateTask(existing_id));
+        if let Some(url) = source_url.as_ref() {
+            if let Some(existing_id) = self.find_duplicate_by_source(url).await {
+                match self.handle_duplicate(&existing_id, url).await? {
+                    Some(task_id) => return Ok(task_id), // Skip policy: return existing task ID
+                    None => {} // Allow or PauseExisting policy: continue to create new task
+                }
+            }
         }
 
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -10281,6 +10391,7 @@ mod max_concurrent_tests {
             strip_query: true,
             strip_fragment: true,
             enabled: true,
+            duplicate_policy: url_dedup::DuplicatePolicy::Reject,
         };
         dm.set_url_dedup(config).await;
 
@@ -10349,6 +10460,7 @@ mod max_concurrent_tests {
             strip_query: true,
             strip_fragment: true,
             enabled: true,
+            duplicate_policy: url_dedup::DuplicatePolicy::Reject,
         };
         dm.set_url_dedup(config).await;
 
@@ -10414,6 +10526,7 @@ mod max_concurrent_tests {
             strip_query: true,
             strip_fragment: true,
             enabled: false, // Disabled
+            duplicate_policy: url_dedup::DuplicatePolicy::Reject,
         };
         dm.set_url_dedup(config).await;
 
@@ -10924,5 +11037,130 @@ mod max_concurrent_tests {
 
         assert_eq!(report.action, conflict_detection::ConflictAction::Overwrite);
         assert_eq!(resolved_path, file_path);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_policy_reject() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Set policy to Reject (default)
+        let mut config = dm.get_url_dedup().await;
+        config.duplicate_policy = url_dedup::DuplicatePolicy::Reject;
+        dm.set_url_dedup(config).await;
+
+        // Add first task
+        let magnet_uri = "magnet:?xt=urn:btih:1234567890123456789012345678901234567890&dn=test";
+        let result1 = dm.add_magnet(magnet_uri).await;
+        assert!(result1.is_ok());
+        let task_id1 = result1.unwrap();
+
+        // Try to add duplicate - should fail with DuplicateTask error
+        let result2 = dm.add_magnet(magnet_uri).await;
+        assert!(result2.is_err());
+        match result2 {
+            Err(DownloadManagerError::DuplicateTask(id)) => {
+                assert_eq!(id, task_id1);
+            }
+            _ => panic!("Expected DuplicateTask error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_policy_skip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Set policy to Skip
+        let mut config = dm.get_url_dedup().await;
+        config.duplicate_policy = url_dedup::DuplicatePolicy::Skip;
+        dm.set_url_dedup(config).await;
+
+        // Add first task
+        let magnet_uri = "magnet:?xt=urn:btih:1234567890123456789012345678901234567890&dn=test";
+        let result1 = dm.add_magnet(magnet_uri).await;
+        assert!(result1.is_ok());
+        let task_id1 = result1.unwrap();
+
+        // Try to add duplicate - should succeed and return existing task ID
+        let result2 = dm.add_magnet(magnet_uri).await;
+        assert!(result2.is_ok());
+        let task_id2 = result2.unwrap();
+        assert_eq!(task_id1, task_id2);
+
+        // Verify only one task exists
+        let tasks = dm.list_tasks().await;
+        assert_eq!(tasks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_policy_allow() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Set policy to Allow
+        let mut config = dm.get_url_dedup().await;
+        config.duplicate_policy = url_dedup::DuplicatePolicy::Allow;
+        dm.set_url_dedup(config).await;
+
+        // Add first task
+        let magnet_uri = "magnet:?xt=urn:btih:1234567890123456789012345678901234567890&dn=test";
+        let result1 = dm.add_magnet(magnet_uri).await;
+        assert!(result1.is_ok());
+        let task_id1 = result1.unwrap();
+
+        // Try to add duplicate - should succeed and create new task
+        let result2 = dm.add_magnet(magnet_uri).await;
+        assert!(result2.is_ok());
+        let task_id2 = result2.unwrap();
+        assert_ne!(task_id1, task_id2);
+
+        // Verify two tasks exist
+        let tasks = dm.list_tasks().await;
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_policy_pause_existing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Set policy to PauseExisting
+        let mut config = dm.get_url_dedup().await;
+        config.duplicate_policy = url_dedup::DuplicatePolicy::PauseExisting;
+        dm.set_url_dedup(config).await;
+
+        // Add first task
+        let magnet_uri = "magnet:?xt=urn:btih:1234567890123456789012345678901234567890&dn=test";
+        let result1 = dm.add_magnet(magnet_uri).await;
+        assert!(result1.is_ok());
+        let task_id1 = result1.unwrap();
+
+        // Manually set task to Downloading state for testing
+        {
+            let mut tasks = dm.tasks.lock().await;
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id1) {
+                task.state = DownloadState::Downloading;
+            }
+        }
+
+        // Verify task is in Downloading state
+        let tasks_before = dm.list_tasks().await;
+        let task_before = tasks_before.iter().find(|t| t.id == task_id1).unwrap();
+        assert_eq!(task_before.state, DownloadState::Downloading);
+
+        // Try to add duplicate - should succeed and pause existing task
+        let result2 = dm.add_magnet(magnet_uri).await;
+        assert!(result2.is_ok());
+        let task_id2 = result2.unwrap();
+        assert_ne!(task_id1, task_id2);
+
+        // Verify existing task is now paused
+        let tasks_after = dm.list_tasks().await;
+        let task_after = tasks_after.iter().find(|t| t.id == task_id1).unwrap();
+        assert_eq!(task_after.state, DownloadState::Paused);
+
+        // Verify two tasks exist
+        assert_eq!(tasks_after.len(), 2);
     }
 }

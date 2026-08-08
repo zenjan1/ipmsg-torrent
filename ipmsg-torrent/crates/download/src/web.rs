@@ -209,6 +209,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/url-expander", post(set_url_expander))
         .route("/api/url-expander/expand", post(expand_url_handler))
         .route("/api/url-expander/validate", post(validate_url_handler))
+        .route("/api/extract-links", post(extract_links_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -692,6 +693,46 @@ async fn validate_url_handler(
             "success": false,
             "error": e.to_string()
         })),
+    }
+}
+
+/// Extract download links from HTML content or fetch a URL and extract links
+async fn extract_links_handler(
+    State(_state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    // Support two modes:
+    // 1. { "url": "..." } - fetch the page and extract links
+    // 2. { "html": "...", "base_url": "..." } - extract from provided HTML
+    if let Some(url) = req.get("url").and_then(|v| v.as_str()) {
+        match crate::DownloadManager::scrape_url_for_links(url).await {
+            Ok(result) => Json(serde_json::json!({
+                "success": true,
+                "source_url": result.source_url,
+                "links": result.links,
+                "total": result.links.len(),
+                "protocol_counts": result.protocol_counts
+            })),
+            Err(e) => Json(serde_json::json!({
+                "success": false,
+                "error": e
+            })),
+        }
+    } else if let Some(html) = req.get("html").and_then(|v| v.as_str()) {
+        let base_url = req.get("base_url").and_then(|v| v.as_str());
+        let result = crate::DownloadManager::extract_links_from_html(html, base_url);
+        Json(serde_json::json!({
+            "success": true,
+            "source_url": result.source_url,
+            "links": result.links,
+            "total": result.links.len(),
+            "protocol_counts": result.protocol_counts
+        }))
+    } else {
+        Json(serde_json::json!({
+            "success": false,
+            "error": "Provide 'url' to fetch a page or 'html' with optional 'base_url'"
+        }))
     }
 }
 
