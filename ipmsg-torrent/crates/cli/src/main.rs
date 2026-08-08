@@ -156,6 +156,12 @@ enum Command {
         /// "daily", "weekly", "monthly"
         period: String,
     },
+    /// URL expansion and validation
+    DlUrlExpand {
+        /// "status", "enable", "disable", "expand <url>", "validate <url>"
+        action: String,
+        url: Option<String>,
+    },
     /// Add tags to a download task
     DlTag {
         task_id: String,
@@ -620,6 +626,14 @@ fn parse_command(input: &str) -> Command {
                 "daily".to_string()
             };
             Command::DlReport { period }
+        }
+        "dlurlx" | "dl-urlx" | "dlux" => {
+            let action = parts
+                .get(1)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "status".to_string());
+            let url = parts.get(2).map(|s| s.to_string());
+            Command::DlUrlExpand { action, url }
         }
         "dltag" | "dl-tag" => {
             if parts.len() >= 3 {
@@ -1225,6 +1239,7 @@ fn command_help() -> String {
         "/dldcap [cmd]      - Daily data cap (status|set <limit>|enable|disable|reset)",
         "/dlstats2 [cmd]    - Download statistics (show|reset)",
         "/dlreport [period]  - Generate download report (daily|weekly|monthly)",
+        "/dlurlx [cmd]       - URL expansion & validation (status|enable|disable|expand|validate)",
         "/dltag <id> <tags>   - Add tags to a download (comma-separated)",
         "/dluntag <id> <tags> - Remove tags from a download",
         "/dltags [tag]    - List all tags, or filter tasks by tag",
@@ -2706,6 +2721,134 @@ async fn handle_command(
             let md = ipmsg_download::download_report::format_report_markdown(&report, &config);
             let mut s = state.lock().await;
             s.add_system_message("main", md);
+        }
+        Command::DlUrlExpand { action, url } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match action.as_str() {
+                "status" => {
+                    let config = download_manager.get_url_expander().await;
+                    let msg = format!(
+                        "🔗 URL Expander Status:\n  Expansion: {}\n  Validation: {}\n  Max redirects: {}\n  Timeout: {}s\n  Block on unreachable: {}\n  Custom shorteners: {}",
+                        if config.expansion_enabled {
+                            "✅ enabled"
+                        } else {
+                            "❌ disabled"
+                        },
+                        if config.validation_enabled {
+                            "✅ enabled"
+                        } else {
+                            "❌ disabled"
+                        },
+                        config.max_redirects,
+                        config.timeout_secs,
+                        config.block_on_unreachable,
+                        if config.custom_shorteners.is_empty() {
+                            "none".to_string()
+                        } else {
+                            config.custom_shorteners.join(", ")
+                        }
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "enable" => {
+                    let mut config = download_manager.get_url_expander().await;
+                    config.expansion_enabled = true;
+                    config.validation_enabled = true;
+                    download_manager.set_url_expander(config).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ URL expansion and validation enabled".to_string(),
+                    );
+                }
+                "disable" => {
+                    let mut config = download_manager.get_url_expander().await;
+                    config.expansion_enabled = false;
+                    config.validation_enabled = false;
+                    download_manager.set_url_expander(config).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "❌ URL expansion and validation disabled".to_string(),
+                    );
+                }
+                "expand" => {
+                    if let Some(target_url) = url {
+                        let config = download_manager.get_url_expander().await;
+                        match ipmsg_download::url_expander::expand_url(&target_url, &config).await {
+                            Ok(result) => {
+                                let msg = if result.was_expanded {
+                                    format!(
+                                        "🔗 URL expanded:\n  Original: {}\n  Expanded: {}\n  Redirects: {}",
+                                        result.original, result.expanded, result.redirect_count
+                                    )
+                                } else {
+                                    format!("🔗 URL not shortened: {}", result.original)
+                                };
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", msg);
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Expansion failed: {e}"));
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlurlx expand <url>".to_string());
+                    }
+                }
+                "validate" => {
+                    if let Some(target_url) = url {
+                        let config = download_manager.get_url_expander().await;
+                        match ipmsg_download::url_expander::validate_url(&target_url, &config).await
+                        {
+                            Ok(result) => {
+                                let status_icon = if result.reachable { "✅" } else { "❌" };
+                                let msg = format!(
+                                    "{} URL validation:\n  URL: {}\n  Reachable: {}\n  Status: {}\n  Content-Type: {}\n  Content-Length: {}\n  Response time: {}ms\n  Was shortened: {}\n  Final URL: {}",
+                                    status_icon,
+                                    target_url,
+                                    result.reachable,
+                                    result
+                                        .status_code
+                                        .map(|c| c.to_string())
+                                        .unwrap_or_else(|| "N/A".to_string()),
+                                    result.content_type.unwrap_or_else(|| "N/A".to_string()),
+                                    result
+                                        .content_length
+                                        .map(|l| format!("{l} bytes"))
+                                        .unwrap_or_else(|| "N/A".to_string()),
+                                    result.response_time_ms,
+                                    result.was_shortened,
+                                    result.final_url.unwrap_or_else(|| "same".to_string())
+                                );
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", msg);
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Validation failed: {e}"));
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlurlx validate <url>".to_string());
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlurlx [status|enable|disable|expand <url>|validate <url>]"
+                            .to_string(),
+                    );
+                }
+            }
         }
         Command::DlAudit { args } => {
             let s = state.lock().await;
@@ -6304,5 +6447,44 @@ mod save_path_tests {
     fn test_help_contains_report() {
         let help = command_help();
         assert!(help.contains("/dlreport"));
+    }
+
+    #[test]
+    fn test_parse_dlurlx_status() {
+        match parse_command("/dlurlx status") {
+            Command::DlUrlExpand { action, url } => {
+                assert_eq!(action, "status");
+                assert!(url.is_none());
+            }
+            other => panic!("Expected DlUrlExpand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlurlx_expand() {
+        match parse_command("/dlurlx expand https://bit.ly/abc") {
+            Command::DlUrlExpand { action, url } => {
+                assert_eq!(action, "expand");
+                assert_eq!(url.unwrap(), "https://bit.ly/abc");
+            }
+            other => panic!("Expected DlUrlExpand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlurlx_default() {
+        match parse_command("/dlux") {
+            Command::DlUrlExpand { action, url } => {
+                assert_eq!(action, "status");
+                assert!(url.is_none());
+            }
+            other => panic!("Expected DlUrlExpand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_url_expander() {
+        let help = command_help();
+        assert!(help.contains("/dlurlx"));
     }
 }

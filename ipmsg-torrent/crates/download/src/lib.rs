@@ -44,6 +44,7 @@ pub mod task_export;
 pub mod task_queue;
 pub mod torrent;
 pub mod url_dedup;
+pub mod url_expander;
 pub mod url_pattern;
 pub mod url_rewrite;
 pub mod web;
@@ -733,6 +734,8 @@ pub struct DownloadManager {
     data_cap: Arc<Mutex<data_cap::DataCapManager>>,
     /// Download statistics manager for analytics
     stats_manager: Arc<Mutex<download_stats::StatsManager>>,
+    /// URL expander configuration for expanding shortened URLs
+    url_expander: Arc<tokio::sync::RwLock<url_expander::UrlExpanderConfig>>,
 }
 
 impl DownloadManager {
@@ -785,6 +788,9 @@ impl DownloadManager {
             path_template: Arc::new(path_template::PathTemplateManager::new()),
             data_cap: Arc::new(Mutex::new(data_cap::DataCapManager::new())),
             stats_manager: Arc::new(Mutex::new(download_stats::StatsManager::new())),
+            url_expander: Arc::new(tokio::sync::RwLock::new(
+                url_expander::UrlExpanderConfig::default(),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -969,6 +975,9 @@ impl DownloadManager {
             path_template: Arc::new(path_template::PathTemplateManager::new()),
             data_cap: Arc::new(Mutex::new(data_cap::DataCapManager::new())),
             stats_manager: Arc::new(Mutex::new(download_stats::StatsManager::new())),
+            url_expander: Arc::new(tokio::sync::RwLock::new(
+                url_expander::UrlExpanderConfig::default(),
+            )),
         };
         // Restore data cap config from disk
         if let Some(loaded_cap) = data_cap::load_data_cap(&dm.data_dir) {
@@ -1014,6 +1023,10 @@ impl DownloadManager {
         // Restore URL deduplication configuration from disk
         if let Some(dedup_cfg) = url_dedup::load_dedup_config(&dm.data_dir) {
             *dm.url_dedup.write().await = dedup_cfg;
+        }
+        // Restore URL expander configuration from disk
+        if let Some(expander_cfg) = url_expander::load_url_expander_config(&dm.data_dir) {
+            *dm.url_expander.write().await = expander_cfg;
         }
         // Restore conflict detection strategy from disk
         if let Some(strategy) = load_conflict_strategy(&dm.data_dir) {
@@ -2240,6 +2253,41 @@ impl DownloadManager {
         } else {
             None
         }
+    }
+
+    /// Set URL expander configuration. Persists to disk.
+    pub async fn set_url_expander(&self, config: url_expander::UrlExpanderConfig) {
+        *self.url_expander.write().await = config.clone();
+        if let Err(e) = url_expander::save_url_expander_config(&config, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist URL expander config");
+        }
+    }
+
+    /// Get current URL expander configuration.
+    pub async fn get_url_expander(&self) -> url_expander::UrlExpanderConfig {
+        self.url_expander.read().await.clone()
+    }
+
+    /// Expand a shortened URL and validate it is reachable.
+    /// Returns the expanded URL and validation result.
+    pub async fn expand_and_validate_url(
+        &self,
+        url: &str,
+    ) -> Result<
+        (
+            url_expander::ExpansionResult,
+            url_expander::ValidationResult,
+        ),
+        url_expander::UrlExpanderError,
+    > {
+        let config = self.get_url_expander().await;
+        url_expander::expand_and_validate(url, &config).await
+    }
+
+    /// Check if a URL appears to be from a known URL shortener.
+    pub async fn is_shortened_url(&self, url: &str) -> bool {
+        let config = self.get_url_expander().await;
+        url_expander::is_shortened_url(url, &config)
     }
 
     /// Add a URL rewrite rule.

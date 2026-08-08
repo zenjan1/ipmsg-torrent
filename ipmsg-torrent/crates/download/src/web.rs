@@ -205,6 +205,10 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/stats/download", get(get_download_stats))
         .route("/api/stats/download/reset", post(reset_download_stats))
         .route("/api/report/download", get(get_download_report))
+        .route("/api/url-expander", get(get_url_expander))
+        .route("/api/url-expander", post(set_url_expander))
+        .route("/api/url-expander/expand", post(expand_url_handler))
+        .route("/api/url-expander/validate", post(validate_url_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -563,6 +567,132 @@ async fn get_download_report(
         },
         "markdown": markdown
     }))
+}
+
+/// Get URL expander configuration
+async fn get_url_expander(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let config = state.manager.get_url_expander().await;
+    Json(serde_json::json!({
+        "success": true,
+        "config": {
+            "expansion_enabled": config.expansion_enabled,
+            "validation_enabled": config.validation_enabled,
+            "max_redirects": config.max_redirects,
+            "timeout_secs": config.timeout_secs,
+            "custom_shorteners": config.custom_shorteners,
+            "block_on_unreachable": config.block_on_unreachable
+        }
+    }))
+}
+
+/// Set URL expander configuration
+async fn set_url_expander(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let mut config = state.manager.get_url_expander().await;
+
+    if let Some(v) = req.get("expansion_enabled").and_then(|v| v.as_bool()) {
+        config.expansion_enabled = v;
+    }
+    if let Some(v) = req.get("validation_enabled").and_then(|v| v.as_bool()) {
+        config.validation_enabled = v;
+    }
+    if let Some(v) = req.get("max_redirects").and_then(|v| v.as_u64()) {
+        config.max_redirects = v as u32;
+    }
+    if let Some(v) = req.get("timeout_secs").and_then(|v| v.as_u64()) {
+        config.timeout_secs = v;
+    }
+    if let Some(v) = req.get("block_on_unreachable").and_then(|v| v.as_bool()) {
+        config.block_on_unreachable = v;
+    }
+    if let Some(arr) = req.get("custom_shorteners").and_then(|v| v.as_array()) {
+        config.custom_shorteners = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+
+    state.manager.set_url_expander(config.clone()).await;
+
+    Json(serde_json::json!({
+        "success": true,
+        "config": {
+            "expansion_enabled": config.expansion_enabled,
+            "validation_enabled": config.validation_enabled,
+            "max_redirects": config.max_redirects,
+            "timeout_secs": config.timeout_secs,
+            "custom_shorteners": config.custom_shorteners,
+            "block_on_unreachable": config.block_on_unreachable
+        }
+    }))
+}
+
+/// Expand a shortened URL
+async fn expand_url_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let url = match req.get("url").and_then(|v| v.as_str()) {
+        Some(u) => u,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Missing 'url' field"
+            }));
+        }
+    };
+
+    let config = state.manager.get_url_expander().await;
+    match crate::url_expander::expand_url(url, &config).await {
+        Ok(result) => Json(serde_json::json!({
+            "success": true,
+            "original": result.original,
+            "expanded": result.expanded,
+            "was_expanded": result.was_expanded,
+            "redirect_count": result.redirect_count
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
+/// Validate a URL is reachable
+async fn validate_url_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let url = match req.get("url").and_then(|v| v.as_str()) {
+        Some(u) => u,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Missing 'url' field"
+            }));
+        }
+    };
+
+    let config = state.manager.get_url_expander().await;
+    match crate::url_expander::validate_url(url, &config).await {
+        Ok(result) => Json(serde_json::json!({
+            "success": true,
+            "reachable": result.reachable,
+            "status_code": result.status_code,
+            "content_length": result.content_length,
+            "content_type": result.content_type,
+            "was_shortened": result.was_shortened,
+            "final_url": result.final_url,
+            "response_time_ms": result.response_time_ms,
+            "error": result.error
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
 }
 
 async fn preview_path_template(
