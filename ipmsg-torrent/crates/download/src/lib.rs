@@ -35,6 +35,7 @@ pub mod rss_feed;
 pub mod save_path_manager;
 pub mod segment_download;
 pub mod speed_history;
+pub mod task_activity;
 pub mod task_export;
 pub mod task_queue;
 pub mod torrent;
@@ -50,6 +51,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use task_activity::{ActivityEvent, ActivityEventType, ActivityLogManager};
 use task_queue::{load_task_queue, save_task_queue};
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -181,6 +183,8 @@ pub struct TaskInfoEvent {
     pub retry_policy: Option<RetryPolicy>,
     /// Cooldown state (for WebSocket push)
     pub cooldown: Option<download_cooldown::CooldownState>,
+    /// Sequential download mode for torrents (download pieces in order for streaming)
+    pub sequential_mode: bool,
 }
 
 impl TaskInfoEvent {
@@ -214,6 +218,7 @@ impl TaskInfoEvent {
             mirror_urls: task.mirror_urls.clone(),
             retry_policy: task.retry_policy,
             cooldown: task.cooldown.clone(),
+            sequential_mode: task.sequential_mode,
         }
     }
 }
@@ -328,6 +333,8 @@ pub struct DownloadTask {
     pub retry_policy: Option<RetryPolicy>,
     /// Cooldown state for exponential backoff retry tracking
     pub cooldown: Option<download_cooldown::CooldownState>,
+    /// Sequential download mode for torrents (download pieces in order for streaming)
+    pub sequential_mode: bool,
 }
 
 /// Per-task retry policy configuration
@@ -711,6 +718,8 @@ pub struct DownloadManager {
     conflict_strategy: Arc<tokio::sync::RwLock<conflict_detection::ConflictStrategy>>,
     /// Per-domain concurrent download limit configuration
     domain_limit: Arc<tokio::sync::RwLock<domain_limit::DomainLimitConfig>>,
+    /// Per-task activity log manager
+    activity_log: Arc<Mutex<ActivityLogManager>>,
 }
 
 impl DownloadManager {
@@ -758,6 +767,7 @@ impl DownloadManager {
             domain_limit: Arc::new(tokio::sync::RwLock::new(
                 domain_limit::DomainLimitConfig::default(),
             )),
+            activity_log: Arc::new(Mutex::new(ActivityLogManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -937,10 +947,15 @@ impl DownloadManager {
             domain_limit: Arc::new(tokio::sync::RwLock::new(
                 domain_limit::DomainLimitConfig::default(),
             )),
+            activity_log: Arc::new(Mutex::new(ActivityLogManager::new())),
         };
         // Restore audit log from disk
         if let Some(loaded_log) = audit_log::load_audit_log(&dm.data_dir) {
             *dm.audit_log.lock().await = loaded_log;
+        }
+        // Restore per-task activity logs from disk
+        if let Some(loaded_activity) = task_activity::load_activity_logs(&dm.data_dir) {
+            *dm.activity_log.lock().await = loaded_activity;
         }
         // Restore post-download hooks from disk
         if let Err(e) = dm.hook_manager.load() {
@@ -1247,6 +1262,14 @@ impl DownloadManager {
                                     .cloned()
                                     .unwrap_or_else(|| rate_limiter.per_task().clone())
                             };
+                            // Capture sequential_mode from task for torrent engine
+                            let sequential_mode: bool = {
+                                let t = tasks.lock().await;
+                                t.iter()
+                                    .find(|t| t.id == task_id)
+                                    .map(|t| t.sequential_mode)
+                                    .unwrap_or(false)
+                            };
 
                             tokio::spawn(async move {
                                 let result: Result<(), String> = match params {
@@ -1266,6 +1289,7 @@ impl DownloadManager {
                                                             task_rate_limiter.clone(),
                                                         );
                                                         engine.set_proxy_config(proxy_config_clone);
+                                                        engine.set_sequential_mode(sequential_mode);
                                                         engine
                                                             .download(Some(cancel_clone))
                                                             .await
@@ -1380,6 +1404,7 @@ impl DownloadManager {
                                                     torrent::TorrentEngine::new(meta, download_dir);
                                                 engine.set_rate_limiter(task_rate_limiter.clone());
                                                 engine.set_proxy_config(proxy_config_clone);
+                                                engine.set_sequential_mode(sequential_mode);
                                                 engine
                                                     .download(Some(cancel_clone))
                                                     .await
@@ -1799,6 +1824,7 @@ impl DownloadManager {
                         mirror_urls: Vec::new(),
                         retry_policy: None,
                         cooldown: None,
+                        sequential_mode: false,
                         current_session_start: None,
                     };
 
@@ -1839,6 +1865,7 @@ impl DownloadManager {
                             mirror_urls: Vec::new(),
                             retry_policy: None,
                             cooldown: None,
+                            sequential_mode: false,
                         },
                     });
                     notify.notify_one();
@@ -2339,6 +2366,70 @@ impl DownloadManager {
         }
     }
 
+    /// Log an activity event for a specific task
+    pub async fn log_task_activity(
+        &self,
+        task_id: &str,
+        task_name: &str,
+        event_type: ActivityEventType,
+        message: impl Into<String>,
+    ) {
+        let event = ActivityEvent::new(event_type, message);
+        let mut log = self.activity_log.lock().await;
+        log.log_event(task_id, task_name, event);
+        // Persist to disk (best-effort)
+        if let Err(e) = task_activity::save_activity_logs(&log, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist activity log");
+        }
+    }
+
+    /// Log an activity event with a numeric value
+    pub async fn log_task_activity_with_value(
+        &self,
+        task_id: &str,
+        task_name: &str,
+        event_type: ActivityEventType,
+        message: impl Into<String>,
+        value: f64,
+    ) {
+        let event = ActivityEvent::new(event_type, message).with_value(value);
+        let mut log = self.activity_log.lock().await;
+        log.log_event(task_id, task_name, event);
+        if let Err(e) = task_activity::save_activity_logs(&log, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist activity log");
+        }
+    }
+
+    /// Get activity log for a specific task
+    pub async fn get_task_activity(&self, task_id: &str) -> Option<task_activity::TaskActivityLog> {
+        let log = self.activity_log.lock().await;
+        log.get(task_id).cloned()
+    }
+
+    /// Get activity summaries for all tracked tasks
+    pub async fn get_all_activity_summaries(&self) -> Vec<task_activity::TaskActivitySummary> {
+        let log = self.activity_log.lock().await;
+        log.all_summaries()
+    }
+
+    /// Clear activity log for a specific task
+    pub async fn clear_task_activity(&self, task_id: &str) {
+        let mut log = self.activity_log.lock().await;
+        log.clear_task(task_id);
+        if let Err(e) = task_activity::save_activity_logs(&log, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist activity log after clear");
+        }
+    }
+
+    /// Remove activity log for a task (when task is deleted)
+    pub async fn remove_task_activity(&self, task_id: &str) {
+        let mut log = self.activity_log.lock().await;
+        log.remove(task_id);
+        if let Err(e) = task_activity::save_activity_logs(&log, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist activity log after remove");
+        }
+    }
+
     /// Get the save path manager for download directory configuration.
     pub fn save_path_manager(&self) -> &Arc<SavePathManager> {
         &self.save_path_manager
@@ -2616,6 +2707,7 @@ impl DownloadManager {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -2693,6 +2785,7 @@ impl DownloadManager {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -2762,6 +2855,7 @@ impl DownloadManager {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -2834,6 +2928,7 @@ impl DownloadManager {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -2900,6 +2995,7 @@ impl DownloadManager {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -3194,6 +3290,7 @@ impl DownloadManager {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -3392,6 +3489,15 @@ impl DownloadManager {
         let max_auto_retries_clone = self.max_auto_retries.clone();
         let auto_retry_base_delay_secs_clone = self.auto_retry_base_delay_secs.clone();
 
+        // Capture sequential_mode from task for torrent engine
+        let sequential_mode: bool = {
+            let t = tasks.lock().await;
+            t.iter()
+                .find(|t| t.id == task_id)
+                .map(|t| t.sequential_mode)
+                .unwrap_or(false)
+        };
+
         tokio::spawn(async move {
             let result: Result<(), String> = match params {
                 TaskParams::Torrent { torrent_path } => {
@@ -3405,6 +3511,7 @@ impl DownloadManager {
                                     engine.set_rate_limiter(limiter.per_task().clone());
                                 }
                                 engine.set_proxy_config(proxy_config_for_spawn);
+                                engine.set_sequential_mode(sequential_mode);
                                 engine
                                     .download(Some(cancel_clone))
                                     .await
@@ -3523,6 +3630,7 @@ impl DownloadManager {
                             // Start torrent download
                             let mut engine = torrent::TorrentEngine::new(meta, download_dir);
                             engine.set_proxy_config(proxy_config.read().await.clone());
+                            engine.set_sequential_mode(sequential_mode);
                             engine
                                 .download(Some(cancel_clone))
                                 .await
@@ -3907,6 +4015,14 @@ impl DownloadManager {
                                         .cloned()
                                         .unwrap_or_else(|| rate_limiter.per_task().clone())
                                 };
+                                // Capture sequential_mode from task
+                                let sequential_mode: bool = {
+                                    let t = tasks.lock().await;
+                                    t.iter()
+                                        .find(|t| t.id == task_id)
+                                        .map(|t| t.sequential_mode)
+                                        .unwrap_or(false)
+                                };
 
                                 tokio::spawn(async move {
                                     let result: Result<(), String> = match params {
@@ -3927,6 +4043,9 @@ impl DownloadManager {
                                                             );
                                                             engine.set_proxy_config(
                                                                 proxy_config_clone,
+                                                            );
+                                                            engine.set_sequential_mode(
+                                                                sequential_mode,
                                                             );
                                                             engine
                                                                 .download(Some(cancel_clone))
@@ -4048,6 +4167,7 @@ impl DownloadManager {
                                                         task_rate_limiter.clone(),
                                                     );
                                                     engine.set_proxy_config(proxy_config_clone);
+                                                    engine.set_sequential_mode(sequential_mode);
                                                     engine
                                                         .download(Some(cancel_clone))
                                                         .await
@@ -4841,6 +4961,7 @@ impl DownloadManager {
             mirror_urls: source_task.mirror_urls.clone(),
             retry_policy: source_task.retry_policy,
             cooldown: None,
+            sequential_mode: false,
         };
 
         // Append " (copy)" to name if it doesn't already end with it
@@ -5048,6 +5169,36 @@ impl DownloadManager {
             .iter()
             .find(|t| t.id == task_id)
             .and_then(|t| t.retry_policy)
+    }
+
+    /// Set sequential download mode for a torrent task.
+    /// When enabled, pieces are downloaded in order (0, 1, 2, ...)
+    /// instead of rarest-first. Useful for streaming media while downloading.
+    /// Returns true if the task was found and updated.
+    pub async fn set_sequential_mode(&self, task_id: &str, enabled: bool) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            task.sequential_mode = enabled;
+            task.updated_at = chrono::Utc::now();
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(task),
+            });
+            drop(tasks);
+            self.persist_tasks().await;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get sequential download mode for a torrent task.
+    pub async fn get_sequential_mode(&self, task_id: &str) -> bool {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .map(|t| t.sequential_mode)
+            .unwrap_or(false)
     }
 
     /// Set expected checksum for a download task
@@ -5710,6 +5861,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5742,6 +5894,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5774,6 +5927,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -5898,6 +6052,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -5957,6 +6112,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -6009,6 +6165,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6041,6 +6198,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6073,6 +6231,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -6128,6 +6287,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6160,6 +6320,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -6205,6 +6366,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -6250,6 +6412,7 @@ mod tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
         assert!(task.tags.is_empty());
@@ -6289,6 +6452,7 @@ mod tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -6345,6 +6509,7 @@ mod tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -6393,6 +6558,7 @@ mod tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -6441,6 +6607,7 @@ mod tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -6489,6 +6656,7 @@ mod tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -6544,6 +6712,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6576,6 +6745,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6608,6 +6778,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             },
         ];
@@ -6655,6 +6826,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6687,6 +6859,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6719,6 +6892,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             },
         ];
@@ -6762,6 +6936,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6794,6 +6969,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6826,6 +7002,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             },
         ];
@@ -6871,6 +7048,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6903,6 +7081,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -6946,6 +7125,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6978,6 +7158,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7010,6 +7191,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -7058,6 +7240,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7090,6 +7273,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7122,6 +7306,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -7246,6 +7431,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -7298,6 +7484,7 @@ mod tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -7445,6 +7632,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -7514,6 +7702,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -7564,6 +7753,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7596,6 +7786,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7628,6 +7819,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -7704,6 +7896,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -7753,6 +7946,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -7799,6 +7993,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -7877,6 +8072,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -7932,6 +8128,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7964,6 +8161,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -8013,6 +8211,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -8045,6 +8244,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -8094,6 +8294,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -8126,6 +8327,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -8158,6 +8360,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -8205,6 +8408,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -8237,6 +8441,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -8269,6 +8474,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -8317,6 +8523,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -8349,6 +8556,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -8381,6 +8589,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
                 current_session_start: None,
             });
         }
@@ -8990,6 +9199,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
             };
             dm.tasks.lock().await.push(task);
         }
@@ -9593,6 +9803,7 @@ mod max_concurrent_tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -9645,6 +9856,7 @@ mod max_concurrent_tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -9696,6 +9908,7 @@ mod max_concurrent_tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         };
 
@@ -9752,6 +9965,7 @@ mod max_concurrent_tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         });
         drop(tasks);
@@ -9818,6 +10032,7 @@ mod max_concurrent_tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         });
         drop(tasks);
@@ -9882,6 +10097,7 @@ mod max_concurrent_tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             current_session_start: None,
         });
         drop(tasks);

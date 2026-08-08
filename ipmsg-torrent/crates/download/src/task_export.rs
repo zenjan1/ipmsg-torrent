@@ -148,6 +148,7 @@ impl ExportedTask {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
         }
     }
 }
@@ -275,6 +276,7 @@ mod tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
         }
     }
 

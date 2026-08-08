@@ -173,6 +173,7 @@ async fn test_p2p_download_progress_calculation() {
         mirror_urls: Vec::new(),
         retry_policy: None,
         cooldown: None,
+        sequential_mode: false,
     };
 
     assert_eq!(task.progress(), 75.0);

@@ -49,6 +49,8 @@ pub struct TaskInfo {
     pub tags: Vec<String>,
     /// Task IDs this task depends on (for dependency visualization)
     pub depends_on: Vec<String>,
+    /// Sequential download mode for torrents
+    pub sequential_mode: bool,
 }
 
 impl From<DownloadTask> for TaskInfo {
@@ -67,6 +69,7 @@ impl From<DownloadTask> for TaskInfo {
             error: task.error,
             tags: task.tags,
             depends_on: task.depends_on,
+            sequential_mode: task.sequential_mode,
         }
     }
 }
@@ -183,6 +186,8 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/retry-policy", post(set_retry_policy))
         .route("/api/torrent-files/:task_id", get(get_torrent_files))
         .route("/api/tasks/:id/clone", post(clone_task))
+        .route("/api/sequential-mode", get(get_sequential_mode))
+        .route("/api/sequential-mode", post(set_sequential_mode))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -275,6 +280,46 @@ async fn clone_task(
             message: format!("Failed to clone task: {}", e),
         }),
     }
+}
+
+/// Request to set sequential download mode
+#[derive(Debug, Deserialize)]
+pub struct SequentialModeRequest {
+    pub task_id: String,
+    pub enabled: bool,
+}
+
+/// Get sequential download mode for a task
+async fn get_sequential_mode(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    if let Some(task_id) = params.get("task_id") {
+        let enabled = state.manager.get_sequential_mode(task_id).await;
+        Json(serde_json::json!({ "task_id": task_id, "sequential_mode": enabled }))
+    } else {
+        Json(serde_json::json!({ "error": "task_id parameter required" }))
+    }
+}
+
+/// Set sequential download mode for a task
+async fn set_sequential_mode(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SequentialModeRequest>,
+) -> Json<TaskResponse> {
+    let success = state
+        .manager
+        .set_sequential_mode(&req.task_id, req.enabled)
+        .await;
+    Json(TaskResponse {
+        success,
+        task_id: Some(req.task_id),
+        message: if success {
+            "Sequential mode updated".to_string()
+        } else {
+            "Task not found".to_string()
+        },
+    })
 }
 
 /// Add a new download
@@ -1894,6 +1939,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -2405,6 +2451,7 @@ mod tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

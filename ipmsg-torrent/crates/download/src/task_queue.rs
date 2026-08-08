@@ -51,6 +51,10 @@ pub struct PersistedTask {
     pub mirror_urls: Vec<String>,
     #[serde(default)]
     pub retry_policy: Option<crate::RetryPolicy>,
+    #[serde(default)]
+    pub sequential_mode: bool,
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 fn default_bandwidth_weight() -> u8 {
@@ -152,6 +156,8 @@ impl From<DownloadTask> for PersistedTask {
             checksum_algorithm: t.checksum_algorithm,
             mirror_urls: t.mirror_urls.clone(),
             retry_policy: t.retry_policy,
+            sequential_mode: t.sequential_mode,
+            notes: t.notes,
         }
     }
 }
@@ -176,7 +182,6 @@ impl From<PersistedTask> for DownloadTask {
             bandwidth_weight: t.bandwidth_weight,
             queue_position: t.queue_position,
             depends_on: t.depends_on,
-            notes: None,
             group: t.group,
             speed_limit_bps: t.speed_limit_bps,
             auto_retry_count: t.auto_retry_count,
@@ -189,6 +194,8 @@ impl From<PersistedTask> for DownloadTask {
             current_session_start: None,
             retry_policy: t.retry_policy,
             cooldown: None,
+            sequential_mode: t.sequential_mode,
+            notes: t.notes,
         }
     }
 }
@@ -305,6 +312,7 @@ mod tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -374,6 +382,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -406,6 +415,7 @@ mod tests {
                 mirror_urls: Vec::new(),
                 retry_policy: None,
                 cooldown: None,
+                sequential_mode: false,
             },
         ];
 
@@ -467,6 +477,7 @@ mod tests {
             mirror_urls: Vec::new(),
             retry_policy: None,
             cooldown: None,
+            sequential_mode: false,
         };
 
         save_task_queue(&[task], data_dir).unwrap();
@@ -475,5 +486,96 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].state, DownloadState::Error);
         assert_eq!(loaded[0].error, Some("Connection timeout".to_string()));
+    }
+
+    #[test]
+    fn test_notes_persistence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let task = DownloadTask {
+            id: "notes-task".to_string(),
+            name: "noted_file.txt".to_string(),
+            protocol: DownloadProtocol::Xunlei,
+            size: 1024,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp/dl"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: crate::DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: Some("This is a test note with 中文 characters".to_string()),
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].notes,
+            Some("This is a test note with 中文 characters".to_string())
+        );
+
+        // Test None notes
+        let task2 = DownloadTask {
+            id: "no-notes-task".to_string(),
+            name: "no_notes.txt".to_string(),
+            protocol: DownloadProtocol::Xunlei,
+            size: 512,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp/dl"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: crate::DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+        };
+
+        save_task_queue(&[task2], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+
+        // Find the task with no notes
+        let loaded_task2 = loaded.iter().find(|t| t.id == "no-notes-task").unwrap();
+        assert_eq!(loaded_task2.notes, None);
     }
 }

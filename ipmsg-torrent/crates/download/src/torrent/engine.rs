@@ -170,6 +170,9 @@ pub struct TorrentEngine {
     file_selection: FileSelection,
     /// Byte ranges to download based on file selection (piece_index -> should_download)
     selected_pieces: HashSet<u32>,
+    /// Sequential download mode: download pieces in order (0, 1, 2, ...)
+    /// instead of rarest-first. Useful for streaming media while downloading.
+    sequential_mode: bool,
 }
 
 impl TorrentEngine {
@@ -248,6 +251,7 @@ impl TorrentEngine {
             proxy_config: None,
             file_selection: FileSelection::all(),
             selected_pieces,
+            sequential_mode: false,
         }
     }
 
@@ -312,6 +316,18 @@ impl TorrentEngine {
     /// Set proxy configuration for peer connections
     pub fn set_proxy_config(&mut self, config: Option<crate::proxy::ProxyConfig>) {
         self.proxy_config = config;
+    }
+
+    /// Enable or disable sequential download mode.
+    /// When enabled, pieces are downloaded in order (0, 1, 2, ...)
+    /// instead of rarest-first. Useful for streaming media while downloading.
+    pub fn set_sequential_mode(&mut self, enabled: bool) {
+        self.sequential_mode = enabled;
+    }
+
+    /// Check if sequential download mode is enabled.
+    pub fn is_sequential_mode(&self) -> bool {
+        self.sequential_mode
     }
 
     fn generate_peer_id() -> [u8; 20] {
@@ -460,20 +476,27 @@ impl TorrentEngine {
         // Check if we're in endgame mode (less than 5% pieces remaining)
         let endgame_mode = needed_pieces.len() < (self.pieces.len() / 20).max(1);
 
-        // Calculate piece rarity (how many peers have each piece)
-        let mut piece_counts: HashMap<u32, usize> = HashMap::new();
-        for &piece_idx in &needed_pieces {
-            let count = self
-                .peers
-                .values()
-                .filter(|p| p.available_pieces.contains(&piece_idx))
-                .count();
-            piece_counts.insert(piece_idx, count);
-        }
-
-        // Sort by rarity (fewest peers first)
-        let mut rarest_pieces: Vec<_> = piece_counts.into_iter().collect();
-        rarest_pieces.sort_by_key(|(_, count)| *count);
+        // Build ordered piece list based on mode
+        let ordered_pieces: Vec<u32> = if self.sequential_mode {
+            // Sequential mode: pieces in ascending order (0, 1, 2, ...)
+            let mut pieces: Vec<u32> = needed_pieces;
+            pieces.sort();
+            pieces
+        } else {
+            // Rarest-first mode: sort by piece rarity
+            let mut piece_counts: HashMap<u32, usize> = HashMap::new();
+            for &piece_idx in &needed_pieces {
+                let count = self
+                    .peers
+                    .values()
+                    .filter(|p| p.available_pieces.contains(&piece_idx))
+                    .count();
+                piece_counts.insert(piece_idx, count);
+            }
+            let mut rarest: Vec<_> = piece_counts.into_iter().collect();
+            rarest.sort_by_key(|(_, count)| *count);
+            rarest.into_iter().map(|(idx, _)| idx).collect()
+        };
 
         // Sort peers by score (highest first)
         let mut peer_scores: Vec<_> = self
@@ -500,8 +523,8 @@ impl TorrentEngine {
                 continue;
             }
 
-            // Find a piece this peer has that we need (rarest first)
-            for (piece_idx, _) in &rarest_pieces {
+            // Find a piece this peer has that we need (ordered by mode)
+            for piece_idx in &ordered_pieces {
                 if !peer_state.available_pieces.contains(piece_idx) {
                     continue;
                 }
