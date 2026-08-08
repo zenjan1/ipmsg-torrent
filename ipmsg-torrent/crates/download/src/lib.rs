@@ -10,6 +10,7 @@ pub mod auto_categorize;
 pub mod auto_cleanup;
 pub mod auto_shutdown;
 pub mod bandwidth_monitor;
+pub mod bandwidth_schedule;
 pub mod checksum;
 pub mod connection_pool;
 pub mod dht;
@@ -34,6 +35,7 @@ pub mod task_export;
 pub mod task_queue;
 pub mod torrent;
 pub mod url_dedup;
+pub mod url_pattern;
 pub mod web;
 pub mod xunlei;
 
@@ -57,6 +59,11 @@ use rss_feed::FeedSubscriptionManager;
 pub use bandwidth_monitor::{
     BandwidthDashboard, BandwidthMonitor as BandwidthMonitorType, BandwidthSample, BandwidthStats,
     BandwidthTrendSummary, MovingAvgPoint, TaskBandwidth, TrendDirection, TrendStats, WindowTrend,
+};
+pub use bandwidth_schedule::{
+    BandwidthScheduleError, BandwidthScheduleManager, BandwidthScheduleRule,
+    load_bandwidth_schedule, parse_days, parse_speed_limit, parse_time, parse_time_window,
+    save_bandwidth_schedule,
 };
 pub use eta_estimator::{EtaConfidence, EtaEstimate, EtaEstimator};
 pub use mirror_health::{MirrorHealth, MirrorHealthConfig, MirrorSummary};
@@ -638,6 +645,8 @@ pub struct DownloadManager {
     url_dedup: Arc<tokio::sync::RwLock<url_dedup::DedupConfig>>,
     /// Audit log for tracking all download lifecycle events
     audit_log: Arc<Mutex<AuditLog>>,
+    /// Bandwidth schedule manager for time-based speed limits
+    bandwidth_schedule: Arc<Mutex<BandwidthScheduleManager>>,
 }
 
 impl DownloadManager {
@@ -674,6 +683,7 @@ impl DownloadManager {
             )),
             url_dedup: Arc::new(tokio::sync::RwLock::new(url_dedup::DedupConfig::default())),
             audit_log: Arc::new(Mutex::new(AuditLog::new())),
+            bandwidth_schedule: Arc::new(Mutex::new(BandwidthScheduleManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -842,6 +852,7 @@ impl DownloadManager {
             )),
             url_dedup: Arc::new(tokio::sync::RwLock::new(url_dedup::DedupConfig::default())),
             audit_log: Arc::new(Mutex::new(AuditLog::new())),
+            bandwidth_schedule: Arc::new(Mutex::new(BandwidthScheduleManager::new())),
         };
         // Restore audit log from disk
         if let Some(loaded_log) = audit_log::load_audit_log(&dm.data_dir) {
@@ -885,7 +896,12 @@ impl DownloadManager {
             dm.max_concurrent
                 .store(max_concurrent, std::sync::atomic::Ordering::Relaxed);
         }
+        // Restore bandwidth schedule from disk
+        if let Ok(Some(schedule)) = load_bandwidth_schedule(&dm.data_dir).await {
+            *dm.bandwidth_schedule.lock().await = schedule;
+        }
         dm.start_scheduler();
+        dm.start_bandwidth_scheduler();
         dm
     }
 
@@ -1363,6 +1379,58 @@ impl DownloadManager {
                 }
             }
         });
+    }
+
+    /// Start the bandwidth schedule checker that adjusts speed limits based on time of day
+    fn start_bandwidth_scheduler(&self) {
+        let schedule = self.bandwidth_schedule.clone();
+        let rate_limiter = self.rate_limiter.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let schedule_mgr = schedule.lock().await;
+                if let Some(limit) = schedule_mgr.current_speed_limit() {
+                    rate_limiter.set_global_limit(limit).await;
+                } else {
+                    rate_limiter.set_global_limit(0).await;
+                }
+            }
+        });
+    }
+
+    /// Add a bandwidth schedule rule
+    pub async fn add_bandwidth_schedule_rule(&self, rule: BandwidthScheduleRule) {
+        self.bandwidth_schedule.lock().await.add_rule(rule);
+        if let Err(e) =
+            save_bandwidth_schedule(&*self.bandwidth_schedule.lock().await, &self.data_dir).await
+        {
+            tracing::warn!(error = %e, "Failed to save bandwidth schedule");
+        }
+    }
+
+    /// Remove a bandwidth schedule rule
+    pub async fn remove_bandwidth_schedule_rule(&self, id: &str) -> bool {
+        let removed = self.bandwidth_schedule.lock().await.remove_rule(id);
+        if removed {
+            if let Err(e) =
+                save_bandwidth_schedule(&*self.bandwidth_schedule.lock().await, &self.data_dir)
+                    .await
+            {
+                tracing::warn!(error = %e, "Failed to save bandwidth schedule");
+            }
+        }
+        removed
+    }
+
+    /// List all bandwidth schedule rules
+    pub async fn list_bandwidth_schedule_rules(&self) -> Vec<BandwidthScheduleRule> {
+        self.bandwidth_schedule.lock().await.list_rules().to_vec()
+    }
+
+    /// Get the current speed limit from bandwidth schedule
+    pub async fn get_current_bandwidth_schedule_limit(&self) -> Option<u64> {
+        self.bandwidth_schedule.lock().await.current_speed_limit()
     }
 
     /// Set maximum concurrent downloads (0 = unlimited).
@@ -2730,6 +2798,41 @@ impl DownloadManager {
         }
 
         results
+    }
+
+    /// Import URLs from a pattern string, expanding ranges like `{01-99}`.
+    /// Patterns are expanded first, then each URL is imported via `import_urls`.
+    /// Returns the import results plus the expansion metadata.
+    pub async fn import_pattern(
+        &self,
+        pattern: &str,
+    ) -> (Vec<ImportResult>, url_pattern::PatternExpansionResult) {
+        use url_pattern::{PatternConfig, expand_pattern_with_config};
+
+        let config = PatternConfig::default();
+        let expansion = match expand_pattern_with_config(pattern, &config) {
+            Ok(urls) => url_pattern::PatternExpansionResult {
+                urls: urls.clone(),
+                pattern: pattern.to_string(),
+                count: urls.len(),
+                truncated: false,
+            },
+            Err(_) => url_pattern::PatternExpansionResult {
+                urls: Vec::new(),
+                pattern: pattern.to_string(),
+                count: 0,
+                truncated: false,
+            },
+        };
+
+        if expansion.urls.is_empty() {
+            // Not a valid pattern or no URLs generated — try as a plain URL
+            let results = self.import_urls(&[pattern.to_string()]).await;
+            return (results, expansion);
+        }
+
+        let results = self.import_urls(&expansion.urls).await;
+        (results, expansion)
     }
 
     /// Spawn the actual download task

@@ -316,6 +316,12 @@ enum Command {
         /// Subcommand: "status", "recent [n]", "task <task_id>", "clear"
         args: Vec<String>,
     },
+    /// Manage bandwidth schedule rules (time-based speed limits)
+    DlBwSchedule {
+        /// Subcommand: "add", "list", "del", "status"
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -856,6 +862,19 @@ fn parse_command(input: &str) -> Command {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlAudit { args }
         }
+        "dlbwsched" | "dl-bw-sched" | "dlbws" => {
+            let subcommand = if parts.len() >= 2 {
+                parts[1].to_string()
+            } else {
+                "status".to_string()
+            };
+            let args: Vec<String> = if parts.len() >= 3 {
+                parts[2].split_whitespace().map(|s| s.to_string()).collect()
+            } else {
+                vec![]
+            };
+            Command::DlBwSchedule { subcommand, args }
+        }
         "dlarules" | "dl-auto-rules" | "dlars" => Command::DlAutoRule {
             subcommand: "list".to_string(),
             args: vec![],
@@ -1038,6 +1057,7 @@ fn command_help() -> String {
         "/dlrss <list|add|remove|enable|disable|poll> - Manage RSS/Atom feed subscriptions",
         "/dleta [task_id]   - Show ETA estimates for active downloads",
         "/dlaudit [cmd]     - Audit log (status|recent [n]|task <id>|clear)",
+        "/dlbwsched [cmd]   - Bandwidth schedule (status|list|add|del)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -2232,6 +2252,149 @@ async fn handle_command(
                     "main",
                     "Usage: /dlaudit [status|recent [n]|task <task_id>|clear]".to_string(),
                 );
+            }
+        }
+        Command::DlBwSchedule { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "status" | "" => {
+                    // Show current active rule
+                    let rules = download_manager.list_bandwidth_schedule_rules().await;
+                    let current_limit = download_manager
+                        .get_current_bandwidth_schedule_limit()
+                        .await;
+                    let mut output = "📅 Bandwidth Schedule Status:\n".to_string();
+                    output.push_str(&format!("  Rules: {}\n", rules.len()));
+                    output.push_str(&format!(
+                        "  Current limit: {}\n",
+                        current_limit
+                            .map(|l| if l == 0 {
+                                "unlimited".to_string()
+                            } else {
+                                format!("{} B/s", l)
+                            })
+                            .unwrap_or_else(|| "no matching rule (default)".to_string())
+                    ));
+                    if let Some(rule) = rules.iter().find(|r| r.matches_now()) {
+                        output.push_str(&format!(
+                            "  Active rule: {} ({})\n",
+                            rule.name,
+                            rule.format_speed_limit()
+                        ));
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", output);
+                }
+                "list" => {
+                    let rules = download_manager.list_bandwidth_schedule_rules().await;
+                    let mut output = "📅 Bandwidth Schedule Rules:\n".to_string();
+                    for rule in rules.iter() {
+                        output.push_str(&format!(
+                            "  [{}] {} {} {} {} (priority: {}, days: {})\n",
+                            rule.id,
+                            rule.name,
+                            rule.format_time_window(),
+                            rule.format_speed_limit(),
+                            if rule.enabled { "✅" } else { "❌" },
+                            rule.priority,
+                            rule.format_days()
+                        ));
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", output);
+                }
+                "add" => {
+                    // /dlbwsched add <name> <time_window> <speed_limit> [days]
+                    if args.len() < 3 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlbwsched add <name> <HH:MM-HH:MM> <speed> [days]".to_string(),
+                        );
+                        return;
+                    }
+                    let name = &args[0];
+                    let time_window = &args[1];
+                    let speed_str = &args[2];
+                    let days_str = if args.len() >= 4 {
+                        Some(&args[3])
+                    } else {
+                        None
+                    };
+
+                    let Some((sh, sm, eh, em)) = ipmsg_download::parse_time_window(time_window)
+                    else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Invalid time window format. Use HH:MM-HH:MM (e.g., 09:00-17:00)"
+                                .to_string(),
+                        );
+                        return;
+                    };
+                    let Some(speed_limit) = ipmsg_download::parse_speed_limit(speed_str) else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Invalid speed limit. Use formats like: 100KB/s, 5MB/s, 1GB/s, or 0/unlimited".to_string());
+                        return;
+                    };
+                    let days = if let Some(d) = days_str {
+                        match ipmsg_download::parse_days(d) {
+                            Some(days) => days,
+                            None => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Invalid days. Use: mon,tue,wed,thu,fri,sat,sun".to_string(),
+                                );
+                                return;
+                            }
+                        }
+                    } else {
+                        Vec::new()
+                    };
+
+                    let id = format!("rule_{}", chrono::Utc::now().timestamp());
+                    let rule = ipmsg_download::BandwidthScheduleRule::new(
+                        id,
+                        name,
+                        sh,
+                        sm,
+                        eh,
+                        em,
+                        speed_limit,
+                    )
+                    .with_days(days);
+                    download_manager.add_bandwidth_schedule_rule(rule).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("✅ Added bandwidth schedule rule: {}", name),
+                    );
+                }
+                "del" | "remove" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlbwsched del <rule_id>".to_string());
+                        return;
+                    }
+                    let rule_id = &args[0];
+                    let removed = download_manager
+                        .remove_bandwidth_schedule_rule(rule_id)
+                        .await;
+                    let mut s = state.lock().await;
+                    if removed {
+                        s.add_system_message("main", format!("🗑️ Removed rule {}", rule_id));
+                    } else {
+                        s.add_system_message("main", format!("Rule {} not found", rule_id));
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Usage: /dlbwsched [status|list|add <name> <HH:MM-HH:MM> <speed> [days]|del <rule_id>]".to_string());
+                }
             }
         }
         Command::DlTag { task_id, tags } => {

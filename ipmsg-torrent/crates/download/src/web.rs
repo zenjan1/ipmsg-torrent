@@ -161,6 +161,12 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/audit-log", get(get_audit_log))
         .route("/api/audit-log/clear", post(clear_audit_log))
+        .route("/api/bandwidth-schedule", get(get_bandwidth_schedule))
+        .route("/api/bandwidth-schedule", post(add_bandwidth_schedule_rule))
+        .route(
+            "/api/bandwidth-schedule/:id",
+            post(remove_bandwidth_schedule_rule),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1386,6 +1392,47 @@ async fn clear_audit_log(State(state): State<Arc<WebState>>) -> Json<TaskRespons
     Json(TaskResponse {
         success: true,
         message: "Audit log cleared".to_string(),
+        task_id: None,
+    })
+}
+
+/// Get bandwidth schedule rules
+async fn get_bandwidth_schedule(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::BandwidthScheduleRule>> {
+    let rules = state.manager.list_bandwidth_schedule_rules().await;
+    Json(rules)
+}
+
+/// Add a bandwidth schedule rule
+async fn add_bandwidth_schedule_rule(
+    State(state): State<Arc<WebState>>,
+    Json(rule): Json<crate::BandwidthScheduleRule>,
+) -> Json<TaskResponse> {
+    state
+        .manager
+        .add_bandwidth_schedule_rule(rule.clone())
+        .await;
+    Json(TaskResponse {
+        success: true,
+        message: format!("Added bandwidth schedule rule: {}", rule.name),
+        task_id: Some(rule.id),
+    })
+}
+
+/// Remove a bandwidth schedule rule
+async fn remove_bandwidth_schedule_rule(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<TaskResponse> {
+    let removed = state.manager.remove_bandwidth_schedule_rule(&id).await;
+    Json(TaskResponse {
+        success: removed,
+        message: if removed {
+            format!("Removed rule {}", id)
+        } else {
+            format!("Rule {} not found", id)
+        },
         task_id: None,
     })
 }
