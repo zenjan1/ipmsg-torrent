@@ -14,6 +14,7 @@ pub mod bandwidth_schedule;
 pub mod checksum;
 pub mod conflict_detection;
 pub mod connection_pool;
+pub mod data_cap;
 pub mod dht;
 pub mod disk_monitor;
 pub mod domain_limit;
@@ -726,6 +727,8 @@ pub struct DownloadManager {
     url_rewrite: Arc<Mutex<url_rewrite::UrlRewriteManager>>,
     /// Path template manager for auto-organizing downloads
     path_template: Arc<path_template::PathTemplateManager>,
+    /// Daily data cap manager for limiting bandwidth usage
+    data_cap: Arc<Mutex<data_cap::DataCapManager>>,
 }
 
 impl DownloadManager {
@@ -776,6 +779,7 @@ impl DownloadManager {
             activity_log: Arc::new(Mutex::new(ActivityLogManager::new())),
             url_rewrite: Arc::new(Mutex::new(url_rewrite::UrlRewriteManager::new())),
             path_template: Arc::new(path_template::PathTemplateManager::new()),
+            data_cap: Arc::new(Mutex::new(data_cap::DataCapManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -958,7 +962,12 @@ impl DownloadManager {
             activity_log: Arc::new(Mutex::new(ActivityLogManager::new())),
             url_rewrite: Arc::new(Mutex::new(url_rewrite::UrlRewriteManager::new())),
             path_template: Arc::new(path_template::PathTemplateManager::new()),
+            data_cap: Arc::new(Mutex::new(data_cap::DataCapManager::new())),
         };
+        // Restore data cap config from disk
+        if let Some(loaded_cap) = data_cap::load_data_cap(&dm.data_dir) {
+            *dm.data_cap.lock().await = loaded_cap;
+        }
         // Restore audit log from disk
         if let Some(loaded_log) = audit_log::load_audit_log(&dm.data_dir) {
             *dm.audit_log.lock().await = loaded_log;
@@ -2348,6 +2357,82 @@ impl DownloadManager {
     /// Get path template summary for status display.
     pub async fn get_path_template_summary(&self) -> path_template::PathTemplateConfig {
         self.path_template.get_config().await
+    }
+
+    // ── Data Cap ──────────────────────────────────────────────────────
+
+    /// Set the daily data cap configuration.
+    /// Persists to disk for automatic restoration on restart.
+    pub async fn set_data_cap_config(&self, config: data_cap::DataCapConfig) {
+        let mut dc = self.data_cap.lock().await;
+        dc.set_config(config);
+        if let Err(e) = data_cap::save_data_cap(&dc, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist data cap config");
+        }
+    }
+
+    /// Get the current data cap status (usage, remaining, cap reached).
+    pub async fn get_data_cap_status(&self) -> data_cap::DataCapStatus {
+        let dc = self.data_cap.lock().await;
+        dc.status()
+    }
+
+    /// Enable or disable the daily data cap.
+    pub async fn set_data_cap_enabled(&self, enabled: bool) {
+        let mut dc = self.data_cap.lock().await;
+        dc.set_enabled(enabled);
+        if let Err(e) = data_cap::save_data_cap(&dc, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist data cap config");
+        }
+    }
+
+    /// Set the daily data limit in bytes.
+    pub async fn set_data_cap_limit(&self, bytes: u64) {
+        let mut dc = self.data_cap.lock().await;
+        dc.set_daily_limit(bytes);
+        if let Err(e) = data_cap::save_data_cap(&dc, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist data cap config");
+        }
+    }
+
+    /// Record bytes downloaded for data cap tracking.
+    /// Returns true if this caused the daily cap to be reached.
+    pub async fn record_data_cap_usage(&self, task_id: &str, bytes: u64) -> bool {
+        let mut dc = self.data_cap.lock().await;
+        dc.record_download(task_id, bytes)
+    }
+
+    /// Check if downloads should be paused due to data cap.
+    pub async fn should_pause_for_data_cap(&self) -> bool {
+        let dc = self.data_cap.lock().await;
+        dc.should_pause_downloads()
+    }
+
+    /// Mark that data-cap auto-pause has been applied.
+    pub async fn mark_data_cap_paused(&self) {
+        let mut dc = self.data_cap.lock().await;
+        dc.mark_auto_paused();
+        if let Err(e) = data_cap::save_data_cap(&dc, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist data cap state");
+        }
+    }
+
+    /// Clear the data-cap auto-pause flag (e.g., after midnight or manual resume).
+    pub async fn clear_data_cap_paused(&self) {
+        let mut dc = self.data_cap.lock().await;
+        dc.clear_auto_paused();
+        if let Err(e) = data_cap::save_data_cap(&dc, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist data cap state");
+        }
+    }
+
+    /// Reset today's data cap usage manually.
+    pub async fn reset_data_cap_today(&self) {
+        let mut dc = self.data_cap.lock().await;
+        dc.reset_today();
+        if let Err(e) = data_cap::save_data_cap(&dc, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist data cap reset");
+        }
     }
 
     /// Set the conflict detection strategy.

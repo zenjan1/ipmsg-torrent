@@ -141,6 +141,11 @@ enum Command {
         /// "status", "set <template>", "enable", "disable", "preview <filename> <protocol>"
         args: Vec<String>,
     },
+    /// Configure daily data cap with auto-pause
+    DlDataCap {
+        /// "status", "set <limit>", "enable", "disable", "reset"
+        args: Vec<String>,
+    },
     /// Add tags to a download task
     DlTag {
         task_id: String,
@@ -582,6 +587,10 @@ fn parse_command(input: &str) -> Command {
         "dlpathtemplate" | "dl-pathtemplate" | "dlpt" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlPathTemplate { args }
+        }
+        "dldcap" | "dl-dcap" | "dldc" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlDataCap { args }
         }
         "dltag" | "dl-tag" => {
             if parts.len() >= 3 {
@@ -1184,6 +1193,7 @@ fn command_help() -> String {
         "/dlcleanup [cmd]  - Auto-cleanup completed/failed (status|enable|disable|set|run)",
         "/dldedup [cmd]     - URL dedup policy (status|set <mode>|enable|disable)",
         "/dlrewrite [cmd]   - URL rewrite rules (status|add|del|preview|enable|disable)",
+        "/dldcap [cmd]      - Daily data cap (status|set <limit>|enable|disable|reset)",
         "/dltag <id> <tags>   - Add tags to a download (comma-separated)",
         "/dluntag <id> <tags> - Remove tags from a download",
         "/dltags [tag]    - List all tags, or filter tasks by tag",
@@ -2555,6 +2565,70 @@ async fn handle_command(
                         s.add_system_message(
                             "main",
                             "Usage: /dlpt [status|set <template>|enable|disable|preview <filename> <protocol>]".to_string(),
+                        );
+                    }
+                }
+            }
+        }
+        Command::DlDataCap { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if args.is_empty() || args[0] == "status" {
+                let status = download_manager.get_data_cap_status().await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", status.format_display());
+            } else {
+                match args[0].as_str() {
+                    "enable" => {
+                        download_manager.set_data_cap_enabled(true).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Daily data cap enabled".to_string());
+                    }
+                    "disable" => {
+                        download_manager.set_data_cap_enabled(false).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Daily data cap disabled".to_string());
+                    }
+                    "set" => {
+                        if args.len() >= 2 {
+                            match ipmsg_download::data_cap::parse_size(&args[1]) {
+                                Some(bytes) => {
+                                    download_manager.set_data_cap_limit(bytes).await;
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!(
+                                            "✅ Daily data cap set to {}",
+                                            ipmsg_download::data_cap::format_bytes(bytes)
+                                        ),
+                                    );
+                                }
+                                None => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "❌ Invalid size format. Use: 1GB, 500MB, 100KB"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "Usage: /dldcap set <limit>".to_string());
+                        }
+                    }
+                    "reset" => {
+                        download_manager.reset_data_cap_today().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Today's data cap usage reset".to_string());
+                    }
+                    _ => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dldcap [status|set <limit>|enable|disable|reset]".to_string(),
                         );
                     }
                 }
@@ -6049,5 +6123,41 @@ mod save_path_tests {
     fn test_help_contains_checksum() {
         let help = command_help();
         assert!(help.contains("/dlchecksum"));
+    }
+
+    #[test]
+    fn test_parse_dldcap() {
+        match parse_command("/dldcap status") {
+            Command::DlDataCap { args } => {
+                assert_eq!(args, vec!["status"]);
+            }
+            other => panic!("Expected DlDataCap, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dldcap_alias() {
+        match parse_command("/dldc set 1GB") {
+            Command::DlDataCap { args } => {
+                assert_eq!(args, vec!["set", "1GB"]);
+            }
+            other => panic!("Expected DlDataCap, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dldcap_enable() {
+        match parse_command("/dl-dcap enable") {
+            Command::DlDataCap { args } => {
+                assert_eq!(args, vec!["enable"]);
+            }
+            other => panic!("Expected DlDataCap, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_dcap() {
+        let help = command_help();
+        assert!(help.contains("/dldcap"));
     }
 }

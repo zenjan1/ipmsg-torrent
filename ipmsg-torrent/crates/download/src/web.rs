@@ -198,6 +198,10 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/path-template", post(set_path_template))
         .route("/api/path-template/enable", post(set_path_template_enabled))
         .route("/api/path-template/preview", post(preview_path_template))
+        .route("/api/data-cap", get(get_data_cap_status))
+        .route("/api/data-cap", post(set_data_cap_config))
+        .route("/api/data-cap/enable", post(set_data_cap_enabled))
+        .route("/api/data-cap/reset", post(reset_data_cap_today))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -323,6 +327,18 @@ pub struct PathTemplatePreviewRequest {
     pub template: String,
     pub filename: String,
     pub protocol: String,
+}
+
+/// Request to set data cap configuration
+#[derive(Debug, Deserialize)]
+pub struct DataCapConfigRequest {
+    pub daily_limit_bytes: u64,
+}
+
+/// Request to enable/disable data cap
+#[derive(Debug, Deserialize)]
+pub struct DataCapEnabledRequest {
+    pub enabled: bool,
 }
 
 /// Get sequential download mode for a task
@@ -458,6 +474,39 @@ async fn set_path_template_enabled(
 }
 
 /// Preview path template
+/// Get data cap status
+async fn get_data_cap_status(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::data_cap::DataCapStatus> {
+    let status = state.manager.get_data_cap_status().await;
+    Json(status)
+}
+
+/// Set data cap configuration
+async fn set_data_cap_config(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<DataCapConfigRequest>,
+) -> Json<serde_json::Value> {
+    let config = crate::data_cap::DataCapConfig::new(true, req.daily_limit_bytes);
+    state.manager.set_data_cap_config(config).await;
+    Json(serde_json::json!({"success": true}))
+}
+
+/// Enable or disable data cap
+async fn set_data_cap_enabled(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<DataCapEnabledRequest>,
+) -> Json<serde_json::Value> {
+    state.manager.set_data_cap_enabled(req.enabled).await;
+    Json(serde_json::json!({"success": true}))
+}
+
+/// Reset today's data cap usage
+async fn reset_data_cap_today(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    state.manager.reset_data_cap_today().await;
+    Json(serde_json::json!({"success": true}))
+}
+
 async fn preview_path_template(
     State(_state): State<Arc<WebState>>,
     Json(req): Json<PathTemplatePreviewRequest>,
@@ -3029,5 +3078,109 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
         assert_eq!(json["path"], "video/movie");
+    }
+
+    #[tokio::test]
+    async fn test_get_data_cap_status() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/data-cap")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["config"]["enabled"], false);
+        assert_eq!(json["cap_reached"], false);
+    }
+
+    #[tokio::test]
+    async fn test_set_data_cap_config() {
+        let state = test_state();
+        let app = create_router(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/data-cap")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"daily_limit_bytes":1073741824}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true);
+
+        // Verify it took effect
+        let status = state.manager.get_data_cap_status().await;
+        assert_eq!(status.config.daily_limit_bytes, 1073741824);
+    }
+
+    #[tokio::test]
+    async fn test_set_data_cap_enabled() {
+        let state = test_state();
+        let app = create_router(state.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/data-cap/enable")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let status = state.manager.get_data_cap_status().await;
+        assert_eq!(status.config.enabled, true);
+    }
+
+    #[tokio::test]
+    async fn test_reset_data_cap_today() {
+        let state = test_state();
+
+        // Set a limit and record some usage
+        state.manager.set_data_cap_limit(1000).await;
+        state.manager.set_data_cap_enabled(true).await;
+        state.manager.record_data_cap_usage("task-1", 500).await;
+
+        let app = create_router(state.clone());
+
+        // Reset
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/data-cap/reset")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let status = state.manager.get_data_cap_status().await;
+        assert_eq!(status.today_usage.bytes_downloaded, 0);
     }
 }
