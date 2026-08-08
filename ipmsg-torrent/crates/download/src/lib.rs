@@ -17,6 +17,7 @@ pub mod ed2k;
 pub mod eta_estimator;
 pub mod magnet;
 pub mod metadata_cache;
+pub mod mirror_health;
 pub mod notification;
 pub mod post_hooks;
 pub mod progress;
@@ -53,6 +54,7 @@ pub use bandwidth_monitor::{
     BandwidthTrendSummary, MovingAvgPoint, TaskBandwidth, TrendDirection, TrendStats, WindowTrend,
 };
 pub use eta_estimator::{EtaConfidence, EtaEstimate, EtaEstimator};
+pub use mirror_health::{MirrorHealth, MirrorHealthConfig, MirrorSummary};
 pub use notification::{
     NotificationChannel, NotificationConfig, NotificationError, NotificationEvent,
 };
@@ -3988,6 +3990,52 @@ impl DownloadManager {
             .iter()
             .find(|t| t.id == task_id)
             .map(|t| t.mirror_urls.clone())
+    }
+
+    /// Check health of all mirrors for a task and return a summary.
+    pub async fn check_mirror_health(&self, task_id: &str) -> Option<MirrorSummary> {
+        let tasks = self.tasks.lock().await;
+        let task = tasks.iter().find(|t| t.id == task_id)?;
+        let config = MirrorHealthConfig::default();
+        let summary = mirror_health::check_all_mirrors(
+            task_id,
+            task.source_url.as_deref(),
+            &task.mirror_urls,
+            &config,
+        )
+        .await;
+        Some(summary)
+    }
+
+    /// Switch to the best performing mirror for a task.
+    /// Returns the new active URL if switched, or None if no switch needed.
+    pub async fn switch_to_best_mirror(&self, task_id: &str) -> Option<String> {
+        let summary = self.check_mirror_health(task_id).await?;
+        if !summary.should_switch {
+            return None;
+        }
+        let recommended = summary.recommended_url.clone()?;
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            // Move current source to mirrors, set recommended as new source
+            if let Some(ref current) = task.source_url
+                && !task.mirror_urls.contains(current)
+            {
+                task.mirror_urls.push(current.clone());
+            }
+            // Remove recommended from mirrors
+            task.mirror_urls.retain(|u| u != &recommended);
+            task.source_url = Some(recommended.clone());
+            task.updated_at = chrono::Utc::now();
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(task),
+            });
+            drop(tasks);
+            self.persist_tasks().await;
+            Some(recommended)
+        } else {
+            None
+        }
     }
 
     /// Set or clear the group for a download task.
