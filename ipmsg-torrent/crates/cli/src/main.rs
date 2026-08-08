@@ -121,6 +121,11 @@ enum Command {
     DlSpeedHistory {
         task_id: Option<String>,
     },
+    /// Configure auto-cleanup of completed/failed downloads
+    DlCleanup {
+        /// "status", "enable", "disable", "set <completed_retention> [failed_retention]"
+        args: Vec<String>,
+    },
     /// Add tags to a download task
     DlTag {
         task_id: String,
@@ -500,6 +505,10 @@ fn parse_command(input: &str) -> Command {
                 Some(args[0].to_string())
             };
             Command::DlSpeedHistory { task_id }
+        }
+        "dlcleanup" | "dl-cleanup" | "dlcl" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlCleanup { args }
         }
         "dltag" | "dl-tag" => {
             if parts.len() >= 3 {
@@ -980,6 +989,7 @@ fn command_help() -> String {
         "/dlstats         - Show download statistics",
         "/dlhealth        - Show download queue health report",
         "/dlspeedhist [id] - Show speed history (all tasks or specific task)",
+        "/dlcleanup [cmd]  - Auto-cleanup completed/failed (status|enable|disable|set|run)",
         "/dltag <id> <tags>   - Add tags to a download (comma-separated)",
         "/dluntag <id> <tags> - Remove tags from a download",
         "/dltags [tag]    - List all tags, or filter tasks by tag",
@@ -2038,6 +2048,59 @@ async fn handle_command(
                         s.add_system_message("main", msg);
                     }
                 }
+            }
+        }
+        Command::DlCleanup { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if args.is_empty() || args[0] == "status" {
+                let config = download_manager.get_auto_cleanup().await;
+                let msg = config.display();
+                let mut s = state.lock().await;
+                s.add_system_message("main", msg);
+            } else if args[0] == "enable" {
+                let mut config = download_manager.get_auto_cleanup().await;
+                config.enabled = true;
+                download_manager.set_auto_cleanup(config.clone()).await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", "✅ Auto-cleanup enabled".to_string());
+            } else if args[0] == "disable" {
+                let mut config = download_manager.get_auto_cleanup().await;
+                config.enabled = false;
+                download_manager.set_auto_cleanup(config).await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", "🚫 Auto-cleanup disabled".to_string());
+            } else if args[0] == "set" && args.len() >= 2 {
+                use ipmsg_download::auto_cleanup::parse_duration_secs;
+                let completed = parse_duration_secs(&args[1]);
+                let failed = if args.len() >= 3 {
+                    parse_duration_secs(&args[2])
+                } else {
+                    None
+                };
+                let config = ipmsg_download::auto_cleanup::AutoCleanupConfig {
+                    enabled: true,
+                    completed_retention_secs: completed,
+                    failed_retention_secs: failed,
+                    check_interval_secs: 300,
+                };
+                download_manager.set_auto_cleanup(config.clone()).await;
+                let msg = config.display();
+                let mut s = state.lock().await;
+                s.add_system_message("main", format!("✅ {}", msg));
+            } else if args[0] == "run" {
+                let count = download_manager.run_auto_cleanup().await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", format!("🧹 Auto-cleanup removed {} tasks", count));
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    "Usage: /dlcleanup [status|enable|disable|set <retention> [failed_retention]|run]"
+                        .to_string(),
+                );
             }
         }
         Command::DlTag { task_id, tags } => {

@@ -149,6 +149,8 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/auto-rules", post(add_auto_rule))
         .route("/api/auto-rules/:id/remove", post(remove_auto_rule))
         .route("/api/health", get(get_queue_health))
+        .route("/api/auto-cleanup", get(get_auto_cleanup))
+        .route("/api/auto-cleanup", post(set_auto_cleanup))
         .route("/api/speed-history", get(get_all_speed_history))
         .route("/api/speed-history/:id", get(get_task_speed_history))
         .route(
@@ -335,6 +337,23 @@ async fn get_all_speed_history(
 ) -> Json<Vec<crate::speed_history::SpeedHistorySummary>> {
     let summaries = state.manager.get_all_speed_history_summaries().await;
     Json(summaries)
+}
+
+/// Get auto-cleanup configuration
+async fn get_auto_cleanup(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::auto_cleanup::AutoCleanupConfig> {
+    let config = state.manager.get_auto_cleanup().await;
+    Json(config)
+}
+
+/// Set auto-cleanup configuration
+async fn set_auto_cleanup(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::auto_cleanup::AutoCleanupConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_auto_cleanup(config).await;
+    Json(serde_json::json!({"status": "ok"}))
 }
 
 /// Get speed history for a specific task

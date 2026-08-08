@@ -6,6 +6,7 @@
 //! - Xunlei P2SP (HTTP/FTP + P2P hybrid)
 
 pub mod auto_categorize;
+pub mod auto_cleanup;
 pub mod auto_shutdown;
 pub mod bandwidth_monitor;
 pub mod checksum;
@@ -628,6 +629,8 @@ pub struct DownloadManager {
     categorize_rules: Arc<Mutex<Vec<auto_categorize::CategorizeRule>>>,
     /// Per-task speed history tracking
     speed_history: Arc<Mutex<speed_history::SpeedHistoryManager>>,
+    /// Auto-cleanup configuration for completed/failed tasks
+    auto_cleanup: Arc<tokio::sync::RwLock<auto_cleanup::AutoCleanupConfig>>,
 }
 
 impl DownloadManager {
@@ -659,6 +662,9 @@ impl DownloadManager {
             eta_estimator: Arc::new(EtaEstimator::new()),
             categorize_rules: Arc::new(Mutex::new(Vec::new())),
             speed_history: Arc::new(Mutex::new(speed_history::SpeedHistoryManager::new(360))),
+            auto_cleanup: Arc::new(tokio::sync::RwLock::new(
+                auto_cleanup::AutoCleanupConfig::default(),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -822,6 +828,9 @@ impl DownloadManager {
             eta_estimator: Arc::new(EtaEstimator::new()),
             categorize_rules: Arc::new(Mutex::new(Vec::new())),
             speed_history: Arc::new(Mutex::new(speed_history::SpeedHistoryManager::new(360))),
+            auto_cleanup: Arc::new(tokio::sync::RwLock::new(
+                auto_cleanup::AutoCleanupConfig::default(),
+            )),
         };
         // Restore post-download hooks from disk
         if let Err(e) = dm.hook_manager.load() {
@@ -841,6 +850,10 @@ impl DownloadManager {
         // Restore auto-shutdown configuration from disk
         if let Ok(Some(shutdown_cfg)) = auto_shutdown::load_auto_shutdown_config(&dm.data_dir) {
             *dm.auto_shutdown.write().await = shutdown_cfg;
+        }
+        // Restore auto-cleanup configuration from disk
+        if let Ok(Some(cleanup_cfg)) = auto_cleanup::load_auto_cleanup_config(&dm.data_dir) {
+            *dm.auto_cleanup.write().await = cleanup_cfg;
         }
         // Restore save-path configuration from disk
         if let Ok(Some(save_path_cfg)) =
@@ -1632,6 +1645,57 @@ impl DownloadManager {
     pub async fn get_auto_shutdown(&self) -> AutoShutdownConfig {
         let shutdown = self.auto_shutdown.read().await;
         shutdown.clone()
+    }
+
+    /// Set auto-cleanup configuration.
+    /// Persists the configuration to disk for automatic restoration on restart.
+    pub async fn set_auto_cleanup(&self, config: auto_cleanup::AutoCleanupConfig) {
+        *self.auto_cleanup.write().await = config.clone();
+        if let Err(e) = auto_cleanup::save_auto_cleanup_config(&self.data_dir, &config) {
+            tracing::warn!(error = %e, "Failed to persist auto-cleanup config");
+        }
+    }
+
+    /// Get current auto-cleanup configuration.
+    pub async fn get_auto_cleanup(&self) -> auto_cleanup::AutoCleanupConfig {
+        let cleanup = self.auto_cleanup.read().await;
+        cleanup.clone()
+    }
+
+    /// Run auto-cleanup: remove completed/failed tasks based on retention config.
+    /// Returns the number of tasks removed.
+    pub async fn run_auto_cleanup(&self) -> usize {
+        let config = self.get_auto_cleanup().await;
+        if !config.enabled {
+            return 0;
+        }
+
+        let now = chrono::Utc::now();
+        let tasks = self.tasks.lock().await;
+        let cleanup_data: Vec<auto_cleanup::TaskCleanupData> = tasks
+            .iter()
+            .map(|t| auto_cleanup::TaskCleanupData {
+                id: t.id.clone(),
+                state: match t.state {
+                    DownloadState::Complete => auto_cleanup::TaskCleanupState::Complete,
+                    DownloadState::Error => auto_cleanup::TaskCleanupState::Error,
+                    _ => auto_cleanup::TaskCleanupState::Other,
+                },
+                updated_at: t.updated_at,
+            })
+            .collect();
+        drop(tasks);
+
+        let to_remove = auto_cleanup::tasks_to_cleanup(&cleanup_data, &config, now);
+        let count = to_remove.len();
+
+        for task_id in to_remove {
+            if self.remove_task(&task_id).await {
+                tracing::info!(task_id = %task_id, "Auto-cleaned task");
+            }
+        }
+
+        count
     }
 
     /// Get the save path manager for download directory configuration.
