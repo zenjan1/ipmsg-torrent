@@ -43,6 +43,9 @@ pub struct ExportedTask {
     /// User-defined group for organizing downloads
     #[serde(default)]
     pub group: Option<String>,
+    /// Mirror/fallback URLs
+    #[serde(default)]
+    pub mirror_urls: Vec<String>,
 }
 
 fn default_bandwidth_weight() -> u8 {
@@ -100,6 +103,7 @@ impl From<DownloadTask> for ExportedTask {
             depends_on: t.depends_on,
             source_url: None,
             group: t.group,
+            mirror_urls: t.mirror_urls,
         }
     }
 }
@@ -141,6 +145,7 @@ impl ExportedTask {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             current_session_start: None,
+            mirror_urls: Vec::new(),
         }
     }
 }
@@ -265,6 +270,7 @@ mod tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             current_session_start: None,
+            mirror_urls: Vec::new(),
         }
     }
 
@@ -441,6 +447,7 @@ mod tests {
                 depends_on: Vec::new(),
                 source_url: Some("http://example.com/file1.txt".to_string()),
                 group: None,
+                mirror_urls: Vec::new(),
             },
             ExportedTask {
                 name: "file2.txt".to_string(),
@@ -460,6 +467,7 @@ mod tests {
                 depends_on: Vec::new(),
                 source_url: Some("ed2k://|file|file2.txt|2048|HASH|/".to_string()),
                 group: None,
+                mirror_urls: Vec::new(),
             },
         ];
 
@@ -504,6 +512,7 @@ mod tests {
             depends_on: vec!["dep-1".to_string()],
             source_url: None,
             group: None,
+            mirror_urls: Vec::new(),
         };
 
         let task = exported.into_task("new-id".to_string());

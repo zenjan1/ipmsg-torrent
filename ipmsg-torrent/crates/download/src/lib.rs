@@ -5,6 +5,7 @@
 //! - eDonkey/eMule (ed2k links)
 //! - Xunlei P2SP (HTTP/FTP + P2P hybrid)
 
+pub mod auto_categorize;
 pub mod auto_shutdown;
 pub mod bandwidth_monitor;
 pub mod checksum;
@@ -155,6 +156,8 @@ pub struct TaskInfoEvent {
     pub eta_seconds: Option<f64>,
     /// Total time spent actively downloading (seconds)
     pub active_time_seconds: f64,
+    /// Mirror/fallback URLs to try if the primary source fails
+    pub mirror_urls: Vec<String>,
 }
 
 impl TaskInfoEvent {
@@ -185,6 +188,7 @@ impl TaskInfoEvent {
             checksum_status: None,
             eta_seconds: task.eta_seconds(),
             active_time_seconds: task.active_time_seconds,
+            mirror_urls: task.mirror_urls.clone(),
         }
     }
 }
@@ -293,6 +297,8 @@ pub struct DownloadTask {
     pub active_time_seconds: f64,
     /// Timestamp when current download session started (for real-time tracking)
     pub current_session_start: Option<chrono::DateTime<chrono::Utc>>,
+    /// Mirror/fallback URLs to try if the primary source fails (HTTP/Xunlei only)
+    pub mirror_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -614,6 +620,8 @@ pub struct DownloadManager {
     rss_feed_manager: Option<Arc<FeedSubscriptionManager>>,
     /// ETA estimator for download time prediction
     eta_estimator: Arc<EtaEstimator>,
+    /// Auto-categorization rules for downloads
+    categorize_rules: Arc<Mutex<Vec<auto_categorize::CategorizeRule>>>,
 }
 
 impl DownloadManager {
@@ -643,6 +651,7 @@ impl DownloadManager {
             hook_manager: Arc::new(HookManager::new(data_dir)),
             rss_feed_manager: None,
             eta_estimator: Arc::new(EtaEstimator::new()),
+            categorize_rules: Arc::new(Mutex::new(Vec::new())),
         };
         dm.start_scheduler();
         dm
@@ -804,11 +813,15 @@ impl DownloadManager {
             hook_manager: Arc::new(HookManager::new(data_dir)),
             rss_feed_manager: None,
             eta_estimator: Arc::new(EtaEstimator::new()),
+            categorize_rules: Arc::new(Mutex::new(Vec::new())),
         };
         // Restore post-download hooks from disk
         if let Err(e) = dm.hook_manager.load() {
             tracing::warn!(error = %e, "Failed to load post-download hooks");
         }
+        // Restore auto-categorization rules from disk
+        let rules = auto_categorize::load_rules(&dm.data_dir).await;
+        *dm.categorize_rules.lock().await = rules;
         // Restore proxy configuration from disk
         if let Ok(Some(proxy_cfg)) = proxy::load_proxy_config(&dm.data_dir) {
             *dm.proxy_config.write().await = Some(proxy_cfg);
@@ -1425,6 +1438,7 @@ impl DownloadManager {
                         expected_checksum: None,
                         checksum_algorithm: None,
                         active_time_seconds: 0.0,
+                        mirror_urls: Vec::new(),
                         current_session_start: None,
                     };
 
@@ -1462,6 +1476,7 @@ impl DownloadManager {
                             checksum_status: None,
                             eta_seconds: None,
                             active_time_seconds: 0.0,
+                            mirror_urls: Vec::new(),
                         },
                     });
                     notify.notify_one();
@@ -1885,6 +1900,7 @@ impl DownloadManager {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -1950,6 +1966,7 @@ impl DownloadManager {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -2016,6 +2033,7 @@ impl DownloadManager {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -2085,6 +2103,7 @@ impl DownloadManager {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -2148,6 +2167,7 @@ impl DownloadManager {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -2439,6 +2459,7 @@ impl DownloadManager {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -2822,6 +2843,19 @@ impl DownloadManager {
                         if was_cancelled {
                             task.state = DownloadState::Paused;
                         } else {
+                            // Rotate mirror URLs: move failed primary to end, promote first mirror
+                            if !task.mirror_urls.is_empty() {
+                                if let Some(ref source_url) = task.source_url.clone() {
+                                    task.mirror_urls.push(source_url.clone());
+                                    let next_mirror = task.mirror_urls.remove(0);
+                                    task.source_url = Some(next_mirror);
+                                    tracing::info!(
+                                        task_id = %task_id_clone,
+                                        new_source = ?task.source_url,
+                                        "Rotated to mirror URL after primary failure"
+                                    );
+                                }
+                            }
                             // Check if auto-retry is enabled and not exhausted
                             let max_retries = max_auto_retries_clone.load(Ordering::Relaxed);
                             let base_delay =
@@ -3886,6 +3920,35 @@ impl DownloadManager {
         }
     }
 
+    /// Set mirror/fallback URLs for a download task.
+    /// These URLs are tried in order if the primary source fails.
+    /// Only applicable to HTTP/Xunlei downloads.
+    /// Returns true if the task was found and updated.
+    pub async fn set_mirrors(&self, task_id: &str, urls: Vec<String>) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            task.mirror_urls = urls.into_iter().filter(|u| !u.is_empty()).collect();
+            task.updated_at = chrono::Utc::now();
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(task),
+            });
+            drop(tasks);
+            self.persist_tasks().await;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the mirror/fallback URLs for a download task.
+    pub async fn get_mirrors(&self, task_id: &str) -> Option<Vec<String>> {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .map(|t| t.mirror_urls.clone())
+    }
+
     /// Set or clear the group for a download task.
     /// Pass None or empty string to remove from group.
     /// Returns true if the task was found and updated.
@@ -3971,6 +4034,49 @@ impl DownloadManager {
         groups.sort();
         groups
     }
+
+    /// Add a new auto-categorization rule.
+    pub async fn add_categorize_rule(
+        &self,
+        rule: auto_categorize::CategorizeRule,
+    ) -> Result<(), auto_categorize::CategorizeError> {
+        let mut rules = self.categorize_rules.lock().await;
+        rules.push(rule);
+        auto_categorize::save_rules(&self.data_dir, &rules)
+            .await
+            .map_err(|e| auto_categorize::CategorizeError::Io(e.to_string()))
+    }
+
+    /// List all auto-categorization rules.
+    pub async fn list_categorize_rules(&self) -> Vec<auto_categorize::CategorizeRule> {
+        self.categorize_rules.lock().await.clone()
+    }
+
+    /// Remove an auto-categorization rule by ID.
+    pub async fn remove_categorize_rule(&self, rule_id: &str) -> bool {
+        let mut rules = self.categorize_rules.lock().await;
+        let original_len = rules.len();
+        rules.retain(|r| r.id != rule_id);
+        if rules.len() != original_len {
+            if let Err(e) = auto_categorize::save_rules(&self.data_dir, &rules).await {
+                tracing::error!(error = %e, "Failed to save categorize rules");
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Apply auto-categorization rules to a URL/filename and return the matching action.
+    pub async fn apply_auto_categorize(
+        &self,
+        url: &str,
+        filename: &str,
+    ) -> Option<auto_categorize::CategorizeAction> {
+        let rules = self.categorize_rules.lock().await;
+        auto_categorize::apply_rules(&rules, url, filename).cloned()
+    }
+
     fn would_create_cycle(
         &self,
         tasks: &[DownloadTask],
@@ -4459,6 +4565,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -4488,6 +4595,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -4517,6 +4625,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -4638,6 +4747,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -4694,6 +4804,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -4743,6 +4854,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -4772,6 +4884,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -4801,6 +4914,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -4853,6 +4967,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -4882,6 +4997,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -4924,6 +5040,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -4966,6 +5083,7 @@ mod tests {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
         assert!(task.tags.is_empty());
@@ -5002,6 +5120,7 @@ mod tests {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -5055,6 +5174,7 @@ mod tests {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -5100,6 +5220,7 @@ mod tests {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -5145,6 +5266,7 @@ mod tests {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -5190,6 +5312,7 @@ mod tests {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -5242,6 +5365,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             },
             DownloadTask {
@@ -5271,6 +5395,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             },
             DownloadTask {
@@ -5300,6 +5425,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             },
         ];
@@ -5344,6 +5470,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             },
             DownloadTask {
@@ -5373,6 +5500,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             },
             DownloadTask {
@@ -5402,6 +5530,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             },
         ];
@@ -5442,6 +5571,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             },
             DownloadTask {
@@ -5471,6 +5601,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             },
             DownloadTask {
@@ -5500,6 +5631,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             },
         ];
@@ -5542,6 +5674,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5571,6 +5704,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -5611,6 +5745,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5640,6 +5775,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5669,6 +5805,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -5714,6 +5851,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5743,6 +5881,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5772,6 +5911,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -5893,6 +6033,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -5942,6 +6083,7 @@ mod tests {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -6086,6 +6228,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -6152,6 +6295,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -6199,6 +6343,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6228,6 +6373,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6257,6 +6403,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -6330,6 +6477,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -6376,6 +6524,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -6419,6 +6568,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -6494,6 +6644,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -6546,6 +6697,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6575,6 +6727,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -6621,6 +6774,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6650,6 +6804,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -6696,6 +6851,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6725,6 +6881,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6754,6 +6911,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -6798,6 +6956,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6827,6 +6986,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6856,6 +7016,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -6901,6 +7062,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6930,6 +7092,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6959,6 +7122,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
                 current_session_start: None,
             });
         }
@@ -8042,6 +8206,7 @@ mod max_concurrent_tests {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -8091,6 +8256,7 @@ mod max_concurrent_tests {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 
@@ -8139,6 +8305,7 @@ mod max_concurrent_tests {
             expected_checksum: None,
             checksum_algorithm: None,
             active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
             current_session_start: None,
         };
 

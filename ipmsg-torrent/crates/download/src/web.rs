@@ -145,6 +145,9 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/feeds/:id/poll", post(poll_feed))
         .route("/api/eta", get(get_all_eta))
         .route("/api/eta/:id", get(get_task_eta))
+        .route("/api/auto-rules", get(list_auto_rules))
+        .route("/api/auto-rules", post(add_auto_rule))
+        .route("/api/auto-rules/:id/remove", post(remove_auto_rule))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1134,6 +1137,97 @@ async fn get_task_eta(
     }
 }
 
+/// Request to add an auto-categorization rule
+#[derive(Debug, Deserialize)]
+struct AddAutoRuleRequest {
+    name: String,
+    pattern: String,
+    pattern_type: String, // "contains", "wildcard", "exact"
+    match_url: bool,
+    match_filename: bool,
+    tags: Vec<String>,
+    group: Option<String>,
+    priority: u32,
+}
+
+/// List all auto-categorization rules
+async fn list_auto_rules(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let rules = state.manager.list_categorize_rules().await;
+    let rules_json: Vec<serde_json::Value> = rules
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "name": r.name,
+                "pattern": match &r.pattern {
+                    crate::auto_categorize::CategorizePattern::Contains(s) => serde_json::json!({"type": "contains", "value": s}),
+                    crate::auto_categorize::CategorizePattern::Wildcard(s) => serde_json::json!({"type": "wildcard", "value": s}),
+                    crate::auto_categorize::CategorizePattern::Exact(s) => serde_json::json!({"type": "exact", "value": s}),
+                },
+                "match_url": r.match_url,
+                "match_filename": r.match_filename,
+                "tags": r.action.tags,
+                "group": r.action.group,
+                "enabled": r.enabled,
+                "priority": r.priority,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({"rules": rules_json}))
+}
+
+/// Add a new auto-categorization rule
+async fn add_auto_rule(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AddAutoRuleRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let pattern = match req.pattern_type.as_str() {
+        "contains" => crate::auto_categorize::CategorizePattern::Contains(req.pattern),
+        "wildcard" => crate::auto_categorize::CategorizePattern::Wildcard(req.pattern),
+        "exact" => crate::auto_categorize::CategorizePattern::Exact(req.pattern),
+        _ => {
+            return Ok(Json(
+                serde_json::json!({"error": "Invalid pattern_type. Use 'contains', 'wildcard', or 'exact'"}),
+            ));
+        }
+    };
+
+    let rule = crate::auto_categorize::CategorizeRule {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: req.name,
+        pattern,
+        match_url: req.match_url,
+        match_filename: req.match_filename,
+        action: crate::auto_categorize::CategorizeAction {
+            tags: req.tags,
+            group: req.group,
+        },
+        enabled: true,
+        priority: req.priority,
+    };
+
+    match state.manager.add_categorize_rule(rule).await {
+        Ok(()) => Ok(Json(
+            serde_json::json!({"success": true, "message": "Rule added"}),
+        )),
+        Err(e) => Ok(Json(
+            serde_json::json!({"error": format!("Failed to add rule: {}", e)}),
+        )),
+    }
+}
+
+/// Remove an auto-categorization rule
+async fn remove_auto_rule(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    if state.manager.remove_categorize_rule(&id).await {
+        Json(serde_json::json!({"success": true, "message": "Rule removed"}))
+    } else {
+        Json(serde_json::json!({"error": "Rule not found"}))
+    }
+}
+
 /// WebSocket upgrade handler
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<WebState>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state))
@@ -1311,6 +1405,7 @@ mod tests {
                 checksum_status: None,
                 eta_seconds: None,
                 active_time_seconds: 0.0,
+                mirror_urls: Vec::new(),
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -1795,6 +1890,7 @@ mod tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             current_session_start: None,
+            mirror_urls: Vec::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

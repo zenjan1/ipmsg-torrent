@@ -258,6 +258,18 @@ enum Command {
     },
     /// List all download groups
     DlGroups,
+    /// Set or clear mirror/fallback URLs for a download task
+    DlMirror {
+        /// Task ID to set mirrors for
+        task_id: String,
+        /// Comma-separated mirror URLs (empty or "clear" to remove mirrors)
+        urls: Vec<String>,
+    },
+    /// List mirror URLs for a download task
+    DlMirrorList {
+        /// Task ID to list mirrors for
+        task_id: String,
+    },
     /// Set checksum for a download task
     DlChecksum {
         task_id: String,
@@ -277,6 +289,11 @@ enum Command {
     /// Show ETA estimates for active downloads
     DlEta {
         task_id: Option<String>,
+    },
+    /// Manage auto-categorization rules
+    DlAutoRule {
+        subcommand: String,
+        args: Vec<String>,
     },
     Block {
         peer: String,
@@ -775,6 +792,66 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dlgroups" | "dl-groups" | "dlgrps" => Command::DlGroups,
+        "dlarule" | "dl-auto-rule" | "dlar" => {
+            // /dlarule <add|list|del> [args...]
+            let args: Vec<&str> = input.splitn(2, ' ').collect();
+            if args.len() >= 2 {
+                let rest = args[1].trim();
+                let sub_parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                let subcommand = sub_parts[0].to_string();
+                let sub_args = if sub_parts.len() > 1 {
+                    sub_parts[1].to_string()
+                } else {
+                    String::new()
+                };
+                Command::DlAutoRule {
+                    subcommand,
+                    args: vec![sub_args],
+                }
+            } else {
+                Command::Unknown("/dlarule <add|list|del> [args...]".to_string())
+            }
+        }
+        "dlarules" | "dl-auto-rules" | "dlars" => Command::DlAutoRule {
+            subcommand: "list".to_string(),
+            args: vec![],
+        },
+        "dlmirror" | "dl-mirror" | "dlmir" => {
+            // /dlmirror <task_id> <url1,url2,...|clear>
+            let args: Vec<&str> = input.splitn(3, ' ').collect();
+            if args.len() >= 2 {
+                let urls = if args.len() >= 3 {
+                    let raw = args[2].trim();
+                    if raw.eq_ignore_ascii_case("clear") || raw.is_empty() {
+                        Vec::new()
+                    } else {
+                        raw.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    }
+                } else {
+                    Vec::new()
+                };
+                Command::DlMirror {
+                    task_id: args[1].to_string(),
+                    urls,
+                }
+            } else {
+                Command::Unknown("/dlmirror <task_id> <url1,url2,...|clear>".to_string())
+            }
+        }
+        "dlmirrors" | "dl-mirror-list" | "dlmirr" => {
+            // /dlmirrors <task_id>
+            let args: Vec<&str> = input.splitn(2, ' ').collect();
+            if args.len() >= 2 {
+                Command::DlMirrorList {
+                    task_id: args[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlmirrors <task_id>".to_string())
+            }
+        }
         "dlchecksum" | "dl-cs" | "dlcs" => {
             // /dlchecksum <task_id> <checksum> [algorithm]
             let args: Vec<&str> = input.splitn(4, ' ').collect();
@@ -906,6 +983,8 @@ fn command_help() -> String {
         "/dlnotes <id> [text|clear] - Set or clear task notes/description",
         "/dlgroup <id> [group|clear] - Set or clear task group",
         "/dlgroups           - List all download groups",
+        "/dlmirror <id> <urls> - Set mirror URLs (comma-separated, 'clear' to remove)",
+        "/dlmirrors <id>     - List mirrors for a task",
         "/dlchecksum <id> <hash> [algo] - Set checksum for verification (algo: md5/sha1/sha256/ed2k)",
         "/dlhook <list|add|remove|enable|disable> - Manage post-download hooks",
         "/dlrss <list|add|remove|enable|disable|poll> - Manage RSS/Atom feed subscriptions",
@@ -2998,6 +3077,187 @@ async fn handle_command(
                     lines.push_str(&format!("  • {} ({} tasks)\n", g, count));
                 }
                 s.add_system_message("main", lines.trim_end().to_string());
+            }
+        }
+        Command::DlAutoRule { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "add" => {
+                    // /dlarule add <name> <pattern> <tags> [group]
+                    // Example: /dlarule add "Video Files" "*.mp4" "video,media" "Media"
+                    let arg_str = args.first().map(|s| s.as_str()).unwrap_or("");
+                    let parts: Vec<&str> = arg_str.splitn(5, ' ').collect();
+                    if parts.len() < 3 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlarule add <name> <pattern> <tags> [group]\nExample: /dlarule add \"Video Files\" \"*.mp4\" \"video,media\" \"Media\"".to_string(),
+                        );
+                    } else {
+                        let name = parts[0].trim_matches('"').to_string();
+                        let pattern_str = parts[1].trim_matches('"').to_string();
+                        let tags_str = parts[2].trim_matches('"');
+                        let tags: Vec<String> = tags_str
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        let group = parts.get(3).map(|s| s.trim_matches('"').to_string());
+
+                        let pattern = if pattern_str.contains('*') || pattern_str.contains('?') {
+                            ipmsg_download::auto_categorize::CategorizePattern::Wildcard(
+                                pattern_str,
+                            )
+                        } else {
+                            ipmsg_download::auto_categorize::CategorizePattern::Contains(
+                                pattern_str,
+                            )
+                        };
+
+                        let rule = ipmsg_download::auto_categorize::CategorizeRule {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            name,
+                            pattern,
+                            match_url: true,
+                            match_filename: true,
+                            action: ipmsg_download::auto_categorize::CategorizeAction {
+                                tags,
+                                group,
+                            },
+                            enabled: true,
+                            priority: 0,
+                        };
+
+                        match download_manager.add_categorize_rule(rule).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "✅ Auto-categorization rule added".to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to add rule: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "list" | "ls" => {
+                    let rules = download_manager.list_categorize_rules().await;
+                    let mut s = state.lock().await;
+                    if rules.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "📋 No auto-categorization rules. Use /dlarule add to create one."
+                                .to_string(),
+                        );
+                    } else {
+                        let mut lines = "📋 Auto-categorization Rules:\n".to_string();
+                        for (i, rule) in rules.iter().enumerate() {
+                            let pattern_desc = match &rule.pattern {
+                                ipmsg_download::auto_categorize::CategorizePattern::Contains(s) => {
+                                    format!("contains '{}'", s)
+                                }
+                                ipmsg_download::auto_categorize::CategorizePattern::Wildcard(s) => {
+                                    format!("wildcard '{}'", s)
+                                }
+                                ipmsg_download::auto_categorize::CategorizePattern::Exact(s) => {
+                                    format!("exact '{}'", s)
+                                }
+                            };
+                            let status = if rule.enabled { "✅" } else { "❌" };
+                            lines.push_str(&format!(
+                                "  {}. {} [{}] {} → tags: {:?}",
+                                i + 1,
+                                status,
+                                rule.name,
+                                pattern_desc,
+                                rule.action.tags
+                            ));
+                            if let Some(ref g) = rule.action.group {
+                                lines.push_str(&format!(", group: {}", g));
+                            }
+                            lines.push('\n');
+                        }
+                        s.add_system_message("main", lines.trim_end().to_string());
+                    }
+                }
+                "del" | "remove" | "rm" => {
+                    // /dlarule del <rule_id>
+                    let rule_id = args.first().map(|s| s.trim()).unwrap_or("");
+                    if rule_id.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlarule del <rule_id>".to_string());
+                    } else if download_manager.remove_categorize_rule(rule_id).await {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("✅ Rule {} removed", rule_id));
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("❌ Rule {} not found", rule_id));
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlarule <add|list|del> [args...]".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlMirror { task_id, urls } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if download_manager.set_mirrors(&task_id, urls.clone()).await {
+                let mut s = state.lock().await;
+                if urls.is_empty() {
+                    s.add_system_message(
+                        "main",
+                        format!("🪞 Mirrors cleared for task {}", task_id),
+                    );
+                } else {
+                    s.add_system_message(
+                        "main",
+                        format!("✅ Set {} mirror(s) for task {}", urls.len(), task_id),
+                    );
+                }
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message("main", format!("❌ Task {} not found", task_id));
+            }
+        }
+        Command::DlMirrorList { task_id } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let mut s = state.lock().await;
+            match download_manager.get_mirrors(&task_id).await {
+                Some(mirrors) if !mirrors.is_empty() => {
+                    let mut lines = format!("🪞 Mirrors for task {}:\n", task_id);
+                    for (i, url) in mirrors.iter().enumerate() {
+                        lines.push_str(&format!("  {}. {}\n", i + 1, url));
+                    }
+                    s.add_system_message("main", lines.trim_end().to_string());
+                }
+                Some(_) => {
+                    s.add_system_message(
+                        "main",
+                        format!("🪞 No mirrors configured for task {}", task_id),
+                    );
+                }
+                None => {
+                    s.add_system_message("main", format!("❌ Task {} not found", task_id));
+                }
             }
         }
         Command::DlChecksum {
