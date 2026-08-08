@@ -151,6 +151,11 @@ enum Command {
         /// "show", "reset"
         action: String,
     },
+    /// Generate download report
+    DlReport {
+        /// "daily", "weekly", "monthly"
+        period: String,
+    },
     /// Add tags to a download task
     DlTag {
         task_id: String,
@@ -607,6 +612,14 @@ fn parse_command(input: &str) -> Command {
                     action: "show".to_string(),
                 }
             }
+        }
+        "dlreport" | "dl-report" | "dlrpt" => {
+            let period = if parts.len() >= 2 {
+                parts[1].to_string()
+            } else {
+                "daily".to_string()
+            };
+            Command::DlReport { period }
         }
         "dltag" | "dl-tag" => {
             if parts.len() >= 3 {
@@ -1211,6 +1224,7 @@ fn command_help() -> String {
         "/dlrewrite [cmd]   - URL rewrite rules (status|add|del|preview|enable|disable)",
         "/dldcap [cmd]      - Daily data cap (status|set <limit>|enable|disable|reset)",
         "/dlstats2 [cmd]    - Download statistics (show|reset)",
+        "/dlreport [period]  - Generate download report (daily|weekly|monthly)",
         "/dltag <id> <tags>   - Add tags to a download (comma-separated)",
         "/dluntag <id> <tags> - Remove tags from a download",
         "/dltags [tag]    - List all tags, or filter tasks by tag",
@@ -2672,6 +2686,26 @@ async fn handle_command(
                     s.add_system_message("main", "Usage: /dlstats2 [show|reset]".to_string());
                 }
             }
+        }
+        Command::DlReport { period } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            use ipmsg_download::download_report::{ReportConfig, ReportPeriod};
+            let config = ReportConfig {
+                period: match period.as_str() {
+                    "weekly" | "week" | "w" => ReportPeriod::Weekly,
+                    "monthly" | "month" | "m" => ReportPeriod::Monthly,
+                    _ => ReportPeriod::Daily,
+                },
+                ..Default::default()
+            };
+
+            let report = download_manager.generate_download_report(&config).await;
+            let md = ipmsg_download::download_report::format_report_markdown(&report, &config);
+            let mut s = state.lock().await;
+            s.add_system_message("main", md);
         }
         Command::DlAudit { args } => {
             let s = state.lock().await;
@@ -6234,5 +6268,41 @@ mod save_path_tests {
     fn test_help_contains_stats2() {
         let help = command_help();
         assert!(help.contains("/dlstats2"));
+    }
+
+    #[test]
+    fn test_parse_dlreport_daily() {
+        match parse_command("/dlreport daily") {
+            Command::DlReport { period } => {
+                assert_eq!(period, "daily");
+            }
+            other => panic!("Expected DlReport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlreport_weekly() {
+        match parse_command("/dl-report weekly") {
+            Command::DlReport { period } => {
+                assert_eq!(period, "weekly");
+            }
+            other => panic!("Expected DlReport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlreport_default() {
+        match parse_command("/dlrpt") {
+            Command::DlReport { period } => {
+                assert_eq!(period, "daily");
+            }
+            other => panic!("Expected DlReport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_report() {
+        let help = command_help();
+        assert!(help.contains("/dlreport"));
     }
 }

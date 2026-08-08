@@ -204,6 +204,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/data-cap/reset", post(reset_data_cap_today))
         .route("/api/stats/download", get(get_download_stats))
         .route("/api/stats/download/reset", post(reset_download_stats))
+        .route("/api/report/download", get(get_download_report))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -521,6 +522,47 @@ async fn get_download_stats(
 async fn reset_download_stats(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     state.manager.reset_download_stats().await;
     Json(serde_json::json!({"success": true}))
+}
+
+#[derive(Deserialize)]
+struct ReportQuery {
+    period: Option<String>,
+}
+
+async fn get_download_report(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(query): axum::extract::Query<ReportQuery>,
+) -> Json<serde_json::Value> {
+    use crate::download_report::{ReportConfig, ReportPeriod};
+    let period = match query.period.as_deref() {
+        Some("weekly") | Some("week") => ReportPeriod::Weekly,
+        Some("monthly") | Some("month") => ReportPeriod::Monthly,
+        _ => ReportPeriod::Daily,
+    };
+    let config = ReportConfig {
+        period,
+        ..Default::default()
+    };
+    let report = state.manager.generate_download_report(&config).await;
+    let markdown = crate::download_report::format_report_markdown(&report, &config);
+    Json(serde_json::json!({
+        "success": true,
+        "report": {
+            "period": report.period.to_string(),
+            "period_start": report.period_start.to_rfc3339(),
+            "period_end": report.period_end.to_rfc3339(),
+            "total_downloads": report.total_downloads,
+            "completed_downloads": report.completed_downloads,
+            "failed_downloads": report.failed_downloads,
+            "total_bytes": report.total_bytes,
+            "avg_speed_bps": report.avg_speed_bps,
+            "success_rate": report.success_rate,
+            "by_protocol": report.by_protocol,
+            "top_by_size": report.top_by_size,
+            "hourly": report.hourly,
+        },
+        "markdown": markdown
+    }))
 }
 
 async fn preview_path_template(

@@ -21,6 +21,7 @@ pub mod domain_limit;
 pub mod download_cooldown;
 pub mod download_history;
 pub mod download_presets;
+pub mod download_report;
 pub mod download_stats;
 pub mod ed2k;
 pub mod eta_estimator;
@@ -2452,6 +2453,53 @@ impl DownloadManager {
     pub async fn reset_download_stats(&self) {
         let mut sm = self.stats_manager.lock().await;
         sm.reset();
+    }
+
+    // ── Download Reports ────────────────────────────────────────────
+
+    /// Generate a download report for the given configuration.
+    pub async fn generate_download_report(
+        &self,
+        config: &download_report::ReportConfig,
+    ) -> download_report::DownloadReport {
+        let tasks = self.list_tasks().await;
+        let task_data: Vec<download_report::ReportTaskData> = tasks
+            .iter()
+            .map(|t| {
+                let state_str = match t.state {
+                    DownloadState::Complete => "Complete".to_string(),
+                    DownloadState::Error => "Error".to_string(),
+                    DownloadState::Downloading => "Downloading".to_string(),
+                    DownloadState::Paused => "Paused".to_string(),
+                    DownloadState::Queued => "Queued".to_string(),
+                };
+                // Use updated_at as proxy for completion/failure time
+                let completed_at = if t.state == DownloadState::Complete {
+                    Some(t.updated_at)
+                } else {
+                    None
+                };
+                let failed_at = if t.state == DownloadState::Error {
+                    Some(t.updated_at)
+                } else {
+                    None
+                };
+                download_report::ReportTaskData {
+                    id: t.id.clone(),
+                    name: t.name.clone(),
+                    protocol: format!("{:?}", t.protocol),
+                    state: state_str,
+                    bytes_downloaded: t.downloaded,
+                    total_bytes: t.size,
+                    created_at: t.created_at,
+                    completed_at,
+                    failed_at,
+                    tags: t.tags.clone(),
+                    group: t.group.clone(),
+                }
+            })
+            .collect();
+        download_report::generate_report(&task_data, config)
     }
 
     /// Set the conflict detection strategy.
