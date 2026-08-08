@@ -187,6 +187,11 @@ enum Command {
         /// File path containing URLs (one per line), or inline URLs separated by spaces
         source: String,
     },
+    /// Extract download URLs from arbitrary text content
+    DlExtract {
+        /// File path containing text with embedded URLs
+        path: String,
+    },
     /// Export download tasks to a JSON file
     DlExport {
         /// Output file path (e.g., /tmp/tasks.json)
@@ -583,6 +588,17 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlbatch <file_path>".to_string())
             }
         }
+        "dlextract" | "dl-extract" => {
+            // /dlextract <file_path> - Extract download URLs from arbitrary text
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                Command::DlExtract {
+                    path: args[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlextract <file_path>".to_string())
+            }
+        }
         "dlexport" | "dl-export" => {
             // /dlexport <output_path> [description]
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -785,6 +801,7 @@ fn command_help() -> String {
         "/dlddeps <id> <dep1,dep2,...|none> - Set task dependencies",
         "/dlexport <path> [desc] - Export tasks to JSON file",
         "/dlimp <path>      - Import tasks from JSON export file",
+        "/dlextract <path>  - Extract download URLs from arbitrary text file",
         "/dlautoshutdown <disabled|exit|shell:<cmd>> - Auto-shutdown when all downloads complete",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/dlpath <path>       - Set download save path (absolute path)",
@@ -2441,6 +2458,70 @@ async fn handle_command(
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
         }
+        Command::DlExtract { path } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            // Read text content from file
+            let content = match tokio::fs::read_to_string(&path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("❌ Failed to read {}: {}", path, e));
+                    return;
+                }
+            };
+
+            // Extract URLs from text
+            let urls = ipmsg_download::extract_urls_from_text(&content);
+
+            if urls.is_empty() {
+                let mut s = state.lock().await;
+                s.add_system_message("main", "⚠️ No download URLs found in file".to_string());
+                return;
+            }
+
+            let results = download_manager.import_urls(&urls).await;
+            let added = results
+                .iter()
+                .filter(|r| matches!(r.outcome, ipmsg_download::ImportOutcome::Added(_)))
+                .count();
+            let skipped = results
+                .iter()
+                .filter(|r| matches!(r.outcome, ipmsg_download::ImportOutcome::SkippedDuplicate))
+                .count();
+            let failed = results
+                .iter()
+                .filter(|r| matches!(r.outcome, ipmsg_download::ImportOutcome::Failed(_)))
+                .count();
+
+            let mut msg = format!(
+                "🔍 Extracted {} URLs from {}\n📥 Imported: {} added",
+                urls.len(),
+                path,
+                added
+            );
+            if skipped > 0 {
+                msg.push_str(&format!(", {} skipped (duplicate)", skipped));
+            }
+            if failed > 0 {
+                msg.push_str(&format!(", {} failed", failed));
+                // Show first few failures
+                for r in results
+                    .iter()
+                    .filter(|r| matches!(r.outcome, ipmsg_download::ImportOutcome::Failed(_)))
+                    .take(3)
+                {
+                    if let ipmsg_download::ImportOutcome::Failed(e) = &r.outcome {
+                        msg.push_str(&format!("\n  ❌ {} - {}", r.url, e));
+                    }
+                }
+            }
+
+            let mut s = state.lock().await;
+            s.add_system_message("main", msg);
+        }
         Command::DlExport { path, description } => {
             let s = state.lock().await;
             let download_manager = s.download_manager.clone();
@@ -3470,9 +3551,28 @@ mod save_path_tests {
     }
 
     #[test]
-    fn test_help_contains_export_import() {
+    fn test_parse_dlextract() {
+        match parse_command("/dlextract /tmp/notes.txt") {
+            Command::DlExtract { path } => {
+                assert_eq!(path, "/tmp/notes.txt");
+            }
+            other => panic!("Expected DlExtract, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlextract_alias() {
+        match parse_command("/dl-extract /tmp/notes.txt") {
+            Command::DlExtract { path } => {
+                assert_eq!(path, "/tmp/notes.txt");
+            }
+            other => panic!("Expected DlExtract, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_extract() {
         let help = command_help();
-        assert!(help.contains("/dlexport"));
-        assert!(help.contains("/dlimp"));
+        assert!(help.contains("/dlextract"));
     }
 }

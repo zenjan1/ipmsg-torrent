@@ -165,6 +165,7 @@ async fn test_p2p_download_progress_calculation() {
         speed_limit_bps: None,
         auto_retry_count: 0,
         retry_after: None,
+        source_url: None,
     };
 
     assert_eq!(task.progress(), 75.0);

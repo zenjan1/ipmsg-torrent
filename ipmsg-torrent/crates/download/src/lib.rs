@@ -136,6 +136,8 @@ pub struct TaskInfoEvent {
     pub auto_retry_count: u32,
     /// Earliest time this task should be retried (for exponential backoff)
     pub retry_after: Option<chrono::DateTime<chrono::Utc>>,
+    /// Original source URL for deduplication (ed2k://, magnet:, http://, etc.)
+    pub source_url: Option<String>,
 }
 
 impl TaskInfoEvent {
@@ -160,6 +162,7 @@ impl TaskInfoEvent {
             speed_limit_bps: task.speed_limit_bps,
             auto_retry_count: task.auto_retry_count,
             retry_after: task.retry_after,
+            source_url: task.source_url.clone(),
         }
     }
 }
@@ -258,6 +261,8 @@ pub struct DownloadTask {
     pub auto_retry_count: u32,
     /// Earliest time this task should be retried (for exponential backoff)
     pub retry_after: Option<chrono::DateTime<chrono::Utc>>,
+    /// Original source URL for deduplication (ed2k://, magnet:, http://, etc.)
+    pub source_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1494,6 +1499,16 @@ impl DownloadManager {
         self.running_count().await < self.max_concurrent
     }
 
+    /// Find a task with the given source URL (for deduplication).
+    /// Returns the task ID if found, None otherwise.
+    async fn find_duplicate_by_source(&self, source_url: &str) -> Option<String> {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .iter()
+            .find(|t| t.source_url.as_deref() == Some(source_url))
+            .map(|t| t.id.clone())
+    }
+
     /// Add a torrent download task
     pub async fn add_torrent(&self, torrent_path: PathBuf) -> Result<String, DownloadManagerError> {
         let data = tokio::fs::read(&torrent_path)
@@ -1502,6 +1517,12 @@ impl DownloadManager {
 
         let meta = torrent::TorrentMeta::from_bytes(&data)
             .map_err(|e| DownloadManagerError::Protocol(e.to_string()))?;
+
+        // Check for duplicate by info_hash
+        let info_hash = hex::encode(&meta.info_hash);
+        if let Some(existing_id) = self.find_duplicate_by_source(&info_hash).await {
+            return Err(DownloadManagerError::DuplicateTask(existing_id));
+        }
 
         let task_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
@@ -1529,6 +1550,7 @@ impl DownloadManager {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url: Some(info_hash),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1552,6 +1574,11 @@ impl DownloadManager {
 
         let magnet = MagnetLink::parse(magnet_uri)
             .map_err(|e| DownloadManagerError::Protocol(e.to_string()))?;
+
+        // Check for duplicate by magnet URI
+        if let Some(existing_id) = self.find_duplicate_by_source(magnet_uri).await {
+            return Err(DownloadManagerError::DuplicateTask(existing_id));
+        }
 
         let task_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
@@ -1584,6 +1611,7 @@ impl DownloadManager {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url: Some(magnet_uri.to_string()),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1613,6 +1641,12 @@ impl DownloadManager {
         file_name: String,
         servers: Vec<std::net::SocketAddr>,
     ) -> Result<String, DownloadManagerError> {
+        // Check for duplicate by ed2k hash
+        let hash_str = hex::encode(&file_hash.0);
+        if let Some(existing_id) = self.find_duplicate_by_source(&hash_str).await {
+            return Err(DownloadManagerError::DuplicateTask(existing_id));
+        }
+
         let task_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
 
@@ -1639,6 +1673,7 @@ impl DownloadManager {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url: Some(hash_str),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1666,6 +1701,17 @@ impl DownloadManager {
         file_size: u64,
         sources: Vec<xunlei::XunleiSource>,
     ) -> Result<String, DownloadManagerError> {
+        // Check for duplicate by first HTTP URL in sources
+        let source_url = sources.iter().find_map(|s| match s {
+            xunlei::XunleiSource::Http { url, .. } => Some(url.clone()),
+            _ => None,
+        });
+        if let Some(ref url) = source_url {
+            if let Some(existing_id) = self.find_duplicate_by_source(url).await {
+                return Err(DownloadManagerError::DuplicateTask(existing_id));
+            }
+        }
+
         let task_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
 
@@ -1692,6 +1738,7 @@ impl DownloadManager {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1719,6 +1766,11 @@ impl DownloadManager {
         file_size: u64,
         from_peer: String,
     ) -> Result<String, DownloadManagerError> {
+        // Check for duplicate by file hash
+        if let Some(existing_id) = self.find_duplicate_by_source(&file_hash).await {
+            return Err(DownloadManagerError::DuplicateTask(existing_id));
+        }
+
         let task_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
 
@@ -1745,6 +1797,7 @@ impl DownloadManager {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url: Some(file_hash.clone()),
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -3566,6 +3619,80 @@ impl DownloadManager {
     }
 }
 
+/// Extract download URLs from arbitrary text content.
+///
+/// Scans text for URLs matching supported protocols (http, https, ftp, ed2k, magnet).
+/// Returns a deduplicated list of URLs in the order they were found.
+///
+/// # Examples
+///
+/// ```
+/// use ipmsg_download::extract_urls_from_text;
+///
+/// let text = "Check out https://example.com/file.zip and ed2k://|file|test.iso|1234|abcd|/";
+/// let urls = extract_urls_from_text(text);
+/// assert_eq!(urls.len(), 2);
+/// assert_eq!(urls[0], "https://example.com/file.zip");
+/// ```
+pub fn extract_urls_from_text(text: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for line in text.lines() {
+        // Skip comment lines
+        if line.trim().starts_with('#') {
+            continue;
+        }
+
+        // Extract URLs from this line
+        extract_urls_from_line(line, &mut urls, &mut seen);
+    }
+
+    urls
+}
+
+/// Extract URLs from a single line of text.
+fn extract_urls_from_line(
+    line: &str,
+    urls: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let mut remaining = line;
+
+    while !remaining.is_empty() {
+        // Find the next URL start
+        let (url_start, protocol_end) = if let Some(pos) = remaining.find("ed2k://") {
+            (pos, pos + 7)
+        } else if let Some(pos) = remaining.find("magnet:") {
+            (pos, pos + 7)
+        } else if let Some(pos) = remaining.find("https://") {
+            (pos, pos + 8)
+        } else if let Some(pos) = remaining.find("http://") {
+            (pos, pos + 7)
+        } else if let Some(pos) = remaining.find("ftp://") {
+            (pos, pos + 6)
+        } else {
+            break;
+        };
+
+        // Find the end of this URL (whitespace or end of string)
+        let url_rest = &remaining[protocol_end..];
+        let url_end = url_rest
+            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '>' || c == ')')
+            .unwrap_or(url_rest.len());
+
+        let full_url = &remaining[url_start..protocol_end + url_end];
+
+        // Validate and add
+        if !full_url.is_empty() && seen.insert(full_url.to_string()) {
+            urls.push(full_url.to_string());
+        }
+
+        // Continue scanning after this URL
+        remaining = &remaining[protocol_end + url_end..];
+    }
+}
+
 /// Extract a display name from a URL for duplicate detection.
 fn extract_display_name(url: &str) -> String {
     if url.starts_with("ed2k://") {
@@ -3633,6 +3760,8 @@ pub enum DownloadManagerError {
     Protocol(String),
     #[error("task not found: {0}")]
     TaskNotFound(String),
+    #[error("duplicate task: {0}")]
+    DuplicateTask(String),
 }
 
 #[cfg(test)]
@@ -3726,6 +3855,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3750,6 +3880,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3774,6 +3905,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -3890,6 +4022,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -3941,6 +4074,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -3985,6 +4119,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4009,6 +4144,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4033,6 +4169,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -4080,6 +4217,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4104,6 +4242,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -4141,6 +4280,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -4178,6 +4318,7 @@ mod tests {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url: None,
         };
         assert!(task.tags.is_empty());
     }
@@ -4209,6 +4350,7 @@ mod tests {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url: None,
         };
 
         // Query match (case-insensitive)
@@ -4257,6 +4399,7 @@ mod tests {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url: None,
         };
 
         let filter = TaskFilter {
@@ -4297,6 +4440,7 @@ mod tests {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url: None,
         };
 
         let filter = TaskFilter {
@@ -4337,6 +4481,7 @@ mod tests {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url: None,
         };
 
         let filter = TaskFilter {
@@ -4377,6 +4522,7 @@ mod tests {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url: None,
         };
 
         // All criteria match
@@ -4424,6 +4570,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -4448,6 +4595,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -4472,6 +4620,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             },
         ];
 
@@ -4511,6 +4660,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -4535,6 +4685,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -4559,6 +4710,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             },
         ];
 
@@ -4594,6 +4746,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             },
             DownloadTask {
                 id: "p2".into(),
@@ -4618,6 +4771,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             },
             DownloadTask {
                 id: "p3".into(),
@@ -4642,6 +4796,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             },
         ];
 
@@ -4679,6 +4834,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4703,6 +4859,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -4738,6 +4895,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4762,6 +4920,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4786,6 +4945,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -4826,6 +4986,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4850,6 +5011,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4874,6 +5036,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -4990,6 +5153,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -5034,6 +5198,7 @@ mod tests {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url: None,
         };
 
         let event = TaskInfoEvent::from_task(&task);
@@ -5173,6 +5338,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -5234,6 +5400,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -5276,6 +5443,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-2".into(),
@@ -5300,6 +5468,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-3".into(),
@@ -5324,6 +5493,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -5392,6 +5562,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -5433,6 +5604,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -5471,6 +5643,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -5541,6 +5714,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -5588,6 +5762,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5612,6 +5787,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -5653,6 +5829,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5677,6 +5854,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -5718,6 +5896,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5742,6 +5921,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -5766,6 +5946,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -5805,6 +5986,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5829,6 +6011,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -5853,6 +6036,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -5893,6 +6077,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5917,6 +6102,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -5941,6 +6127,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             });
         }
 
@@ -6151,11 +6338,11 @@ mod tests {
     async fn test_set_dependencies_success() {
         let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_success"));
         let id1 = dm
-            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile1")
             .await
             .unwrap();
         let id2 = dm
-            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile2")
             .await
             .unwrap();
 
@@ -6198,11 +6385,11 @@ mod tests {
     async fn test_set_dependencies_cycle_detection() {
         let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_cycle"));
         let id1 = dm
-            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile1")
             .await
             .unwrap();
         let id2 = dm
-            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile2")
             .await
             .unwrap();
 
@@ -6229,11 +6416,11 @@ mod tests {
     async fn test_are_dependencies_met_unmet() {
         let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_met_unmet"));
         let id1 = dm
-            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile1")
             .await
             .unwrap();
         let id2 = dm
-            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile2")
             .await
             .unwrap();
 
@@ -6248,11 +6435,11 @@ mod tests {
     async fn test_are_dependencies_met_completed() {
         let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_deps_met_completed"));
         let id1 = dm
-            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile1")
             .await
             .unwrap();
         let id2 = dm
-            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile")
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=TestFile2")
             .await
             .unwrap();
 
@@ -6660,5 +6847,208 @@ mod tests {
         assert_eq!(limiters.len(), 1);
         assert!(!limiters.contains_key(&id1));
         assert!(limiters.contains_key(&id2));
+    }
+
+    // Phase 46: Deduplication tests
+    #[tokio::test]
+    async fn test_dedup_magnet_same_uri() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_dedup_magnet"));
+        let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=DupTest";
+        let id1 = dm.add_magnet(uri).await.unwrap();
+
+        // Adding the same magnet URI again should fail with DuplicateTask
+        let result = dm.add_magnet(uri).await;
+        assert!(matches!(result, Err(DownloadManagerError::DuplicateTask(ref eid)) if eid == &id1));
+    }
+
+    #[tokio::test]
+    async fn test_dedup_magnet_different_uri() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_dedup_magnet_diff"));
+        let uri1 = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=File1";
+        let uri2 = "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&dn=File2";
+        let id1 = dm.add_magnet(uri1).await.unwrap();
+        let id2 = dm.add_magnet(uri2).await.unwrap();
+
+        // Different URIs should succeed
+        assert_ne!(id1, id2);
+        assert_eq!(dm.list_tasks().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_dedup_xunlei_same_http_url() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_dedup_xunlei"));
+        let url = "https://example.com/file.iso";
+        let sources1 = vec![xunlei::XunleiSource::Http {
+            url: url.to_string(),
+            cookies: None,
+            referer: None,
+        }];
+        let id1 = dm
+            .add_xunlei("file.iso".into(), 1024, sources1)
+            .await
+            .unwrap();
+
+        let sources2 = vec![xunlei::XunleiSource::Http {
+            url: url.to_string(),
+            cookies: None,
+            referer: None,
+        }];
+        let result = dm.add_xunlei("file.iso".into(), 1024, sources2).await;
+        assert!(matches!(result, Err(DownloadManagerError::DuplicateTask(ref eid)) if eid == &id1));
+    }
+
+    #[tokio::test]
+    async fn test_dedup_xunlei_different_url() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_dedup_xunlei_diff"));
+        let sources1 = vec![xunlei::XunleiSource::Http {
+            url: "https://example.com/file1.iso".into(),
+            cookies: None,
+            referer: None,
+        }];
+        let sources2 = vec![xunlei::XunleiSource::Http {
+            url: "https://example.com/file2.iso".into(),
+            cookies: None,
+            referer: None,
+        }];
+        let id1 = dm
+            .add_xunlei("file1.iso".into(), 1024, sources1)
+            .await
+            .unwrap();
+        let id2 = dm
+            .add_xunlei("file2.iso".into(), 2048, sources2)
+            .await
+            .unwrap();
+
+        assert_ne!(id1, id2);
+        assert_eq!(dm.list_tasks().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_dedup_p2p_same_hash() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_dedup_p2p"));
+        let hash = "abc123def456";
+        let id1 = dm
+            .add_p2p(hash.into(), "file.txt".into(), 1024, "peer1".into())
+            .await
+            .unwrap();
+
+        let result = dm
+            .add_p2p(hash.into(), "file.txt".into(), 1024, "peer2".into())
+            .await;
+        assert!(matches!(result, Err(DownloadManagerError::DuplicateTask(ref eid)) if eid == &id1));
+    }
+
+    #[tokio::test]
+    async fn test_dedup_source_url_stored() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_dedup_stored"));
+        let uri = "magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&dn=Stored";
+        let id = dm.add_magnet(uri).await.unwrap();
+
+        let tasks = dm.list_tasks().await;
+        let task = tasks.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(task.source_url.as_deref(), Some(uri));
+    }
+}
+
+// ─── Phase 47: URL Extraction Tests ───
+
+#[cfg(test)]
+mod url_extraction_tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_http_urls() {
+        let text = "Download from https://example.com/file.zip or http://backup.com/file.tar.gz";
+        let urls = extract_urls_from_text(text);
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0], "https://example.com/file.zip");
+        assert_eq!(urls[1], "http://backup.com/file.tar.gz");
+    }
+
+    #[test]
+    fn test_extract_ed2k_url() {
+        let text = "ed2k://|file|ubuntu.iso|1234567|abcdef0123456789abcdef0123456789|/";
+        let urls = extract_urls_from_text(text);
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].starts_with("ed2k://"));
+    }
+
+    #[test]
+    fn test_extract_magnet_url() {
+        let text = "magnet:?xt=urn:btih:abc123&dn=TestFile&tr=tracker";
+        let urls = extract_urls_from_text(text);
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].starts_with("magnet:"));
+    }
+
+    #[test]
+    fn test_extract_mixed_urls() {
+        let text = r#"
+        Here are some download links:
+        https://example.com/video.mp4
+        ed2k://|file|movie.mkv|9876543|1234567890abcdef1234567890abcdef|/
+        magnet:?xt=urn:btih:def456&dn=AnotherFile
+        http://old-site.com/archive.zip
+        "#;
+        let urls = extract_urls_from_text(text);
+        assert_eq!(urls.len(), 4);
+    }
+
+    #[test]
+    fn test_extract_deduplicates() {
+        let text = "https://example.com/file.zip and again https://example.com/file.zip";
+        let urls = extract_urls_from_text(text);
+        assert_eq!(urls.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_skips_comments() {
+        let text = r#"
+        # This is a comment with https://example.com/ignored.zip
+        https://example.com/real.zip
+        "#;
+        let urls = extract_urls_from_text(text);
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0], "https://example.com/real.zip");
+    }
+
+    #[test]
+    fn test_extract_handles_punctuation() {
+        let text = "Check (https://example.com/file.zip) or <https://other.com/doc.pdf>";
+        let urls = extract_urls_from_text(text);
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0], "https://example.com/file.zip");
+        assert_eq!(urls[1], "https://other.com/doc.pdf");
+    }
+
+    #[test]
+    fn test_extract_empty_text() {
+        let urls = extract_urls_from_text("");
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn test_extract_no_urls() {
+        let text = "This text has no URLs at all.";
+        let urls = extract_urls_from_text(text);
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn test_extract_ftp_url() {
+        let text = "Download from ftp://ftp.example.com/pub/file.tar.gz";
+        let urls = extract_urls_from_text(text);
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].starts_with("ftp://"));
+    }
+
+    #[test]
+    fn test_extract_preserves_order() {
+        let text = "https://first.com https://second.com https://third.com";
+        let urls = extract_urls_from_text(text);
+        assert_eq!(urls.len(), 3);
+        assert_eq!(urls[0], "https://first.com");
+        assert_eq!(urls[1], "https://second.com");
+        assert_eq!(urls[2], "https://third.com");
     }
 }

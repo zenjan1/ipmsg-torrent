@@ -858,6 +858,7 @@ mod tests {
                 speed_limit_bps: None,
                 auto_retry_count: 0,
                 retry_after: None,
+                source_url: None,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -1337,6 +1338,7 @@ mod tests {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

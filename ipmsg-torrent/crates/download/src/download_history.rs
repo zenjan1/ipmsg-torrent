@@ -247,6 +247,7 @@ mod tests {
             speed_limit_bps: None,
             auto_retry_count: 0,
             retry_after: None,
+            source_url: None,
         }
     }
 
