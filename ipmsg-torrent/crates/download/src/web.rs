@@ -143,6 +143,8 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/feeds/:id/enable", post(enable_feed))
         .route("/api/feeds/:id/disable", post(disable_feed))
         .route("/api/feeds/:id/poll", post(poll_feed))
+        .route("/api/eta", get(get_all_eta))
+        .route("/api/eta/:id", get(get_task_eta))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1059,6 +1061,79 @@ async fn poll_feed(
     }
 }
 
+/// GET /api/eta — Get ETA estimates for all active downloads
+async fn get_all_eta(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let tasks = state.manager.list_tasks().await;
+    let mut results = Vec::new();
+    for task in &tasks {
+        if task.state == crate::DownloadState::Downloading && task.speed_bps > 0.0 {
+            let remaining = task.size.saturating_sub(task.downloaded);
+            if let Some(estimate) = state
+                .manager
+                .eta_estimator()
+                .estimate(&task.id, remaining)
+                .await
+            {
+                results.push(serde_json::json!({
+                    "task_id": task.id,
+                    "task_name": task.name,
+                    "estimated_secs": estimate.estimated_secs,
+                    "optimistic_secs": estimate.optimistic_secs,
+                    "pessimistic_secs": estimate.pessimistic_secs,
+                    "confidence": estimate.confidence.label(),
+                    "smoothed_speed_bps": estimate.smoothed_speed_bps,
+                    "raw_speed_bps": estimate.raw_speed_bps,
+                    "sample_count": estimate.sample_count,
+                    "formatted": estimate.format_eta(),
+                    "range": estimate.format_range()
+                }));
+            }
+        }
+    }
+    Json(serde_json::json!({"eta_estimates": results}))
+}
+
+/// GET /api/eta/:id — Get ETA estimate for a specific task
+async fn get_task_eta(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let task = state
+        .manager
+        .get_task(&id)
+        .await
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if task.state != crate::DownloadState::Downloading || task.speed_bps <= 0.0 {
+        return Ok(Json(
+            serde_json::json!({"error": "Task not actively downloading"}),
+        ));
+    }
+    let remaining = task.size.saturating_sub(task.downloaded);
+    match state
+        .manager
+        .eta_estimator()
+        .estimate(&task.id, remaining)
+        .await
+    {
+        Some(estimate) => Ok(Json(serde_json::json!({
+            "task_id": task.id,
+            "task_name": task.name,
+            "estimated_secs": estimate.estimated_secs,
+            "optimistic_secs": estimate.optimistic_secs,
+            "pessimistic_secs": estimate.pessimistic_secs,
+            "confidence": estimate.confidence.label(),
+            "smoothed_speed_bps": estimate.smoothed_speed_bps,
+            "raw_speed_bps": estimate.raw_speed_bps,
+            "sample_count": estimate.sample_count,
+            "formatted": estimate.format_eta(),
+            "range": estimate.format_range()
+        }))),
+        None => Ok(Json(
+            serde_json::json!({"error": "Insufficient data for ETA estimate"}),
+        )),
+    }
+}
+
 /// WebSocket upgrade handler
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<WebState>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state))
@@ -1234,6 +1309,7 @@ mod tests {
                 expected_checksum: None,
                 checksum_algorithm: None,
                 checksum_status: None,
+                eta_seconds: None,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -1973,5 +2049,49 @@ mod tests {
         // Leak the tempdir so it lives for the test duration
         std::mem::forget(tmp);
         Arc::new(WebState::new(Arc::new(manager)))
+    }
+
+    #[tokio::test]
+    async fn test_get_all_eta_empty() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/eta", get(get_all_eta))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/eta")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["eta_estimates"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_task_eta_not_found() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/eta/:id", get(get_task_eta))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/eta/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

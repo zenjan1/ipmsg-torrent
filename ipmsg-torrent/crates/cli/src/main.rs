@@ -274,6 +274,10 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Show ETA estimates for active downloads
+    DlEta {
+        task_id: Option<String>,
+    },
     Block {
         peer: String,
     },
@@ -812,6 +816,9 @@ fn parse_command(input: &str) -> Command {
                 )
             }
         }
+        "dleta" | "dl-eta" => Command::DlEta {
+            task_id: parts.get(1).map(|s| s.to_string()),
+        },
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -902,6 +909,7 @@ fn command_help() -> String {
         "/dlchecksum <id> <hash> [algo] - Set checksum for verification (algo: md5/sha1/sha256/ed2k)",
         "/dlhook <list|add|remove|enable|disable> - Manage post-download hooks",
         "/dlrss <list|add|remove|enable|disable|poll> - Manage RSS/Atom feed subscriptions",
+        "/dleta [task_id]   - Show ETA estimates for active downloads",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -3514,6 +3522,98 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlEta { task_id } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if let Some(tid) = task_id {
+                // Show ETA for specific task
+                let task = download_manager.get_task(&tid).await;
+                match task {
+                    Some(task) => {
+                        if task.state != ipmsg_download::DownloadState::Downloading {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("Task {} is not downloading", tid),
+                            );
+                            return;
+                        }
+                        let remaining = task.size.saturating_sub(task.downloaded);
+                        match download_manager
+                            .eta_estimator()
+                            .estimate(&task.id, remaining)
+                            .await
+                        {
+                            Some(est) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "⏱️  ETA for '{}':\n  Estimated: {}\n  Range: {}–{}\n  Confidence: {:?}\n  Speed: {:.1} KB/s (smoothed), {:.1} KB/s (raw)\n  Samples: {}",
+                                        task.name,
+                                        est.format_eta(),
+                                        format_duration(est.optimistic_secs),
+                                        format_duration(est.pessimistic_secs),
+                                        est.confidence,
+                                        est.smoothed_speed_bps / 1024.0,
+                                        est.raw_speed_bps / 1024.0,
+                                        est.sample_count
+                                    ),
+                                );
+                            }
+                            None => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Insufficient data for ETA estimate (task: {})", tid),
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("Task {} not found", tid));
+                    }
+                }
+            } else {
+                // Show ETA for all active downloads
+                let tasks = download_manager.list_tasks().await;
+                let mut lines = String::from("⏱️  ETA estimates for active downloads:\n");
+                let mut count = 0;
+                for task in tasks {
+                    if task.state == ipmsg_download::DownloadState::Downloading
+                        && task.speed_bps > 0.0
+                    {
+                        let remaining = task.size.saturating_sub(task.downloaded);
+                        if let Some(est) = download_manager
+                            .eta_estimator()
+                            .estimate(&task.id, remaining)
+                            .await
+                        {
+                            lines.push_str(&format!(
+                                "  {} [{}]: {} ({}–{}) conf={:?} speed={:.1}KB/s\n",
+                                task.name,
+                                &task.id[..8],
+                                est.format_eta(),
+                                format_duration(est.optimistic_secs),
+                                format_duration(est.pessimistic_secs),
+                                est.confidence,
+                                est.smoothed_speed_bps / 1024.0
+                            ));
+                            count += 1;
+                        }
+                    }
+                }
+                if count == 0 {
+                    lines =
+                        "No active downloads with sufficient data for ETA estimation".to_string();
+                }
+                let mut s = state.lock().await;
+                s.add_system_message("main", lines.trim_end().to_string());
+            }
+        }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {
                 peer_id: peer.clone(),
@@ -3756,6 +3856,23 @@ fn format_speed(bps: f64) -> String {
         idx += 1;
     }
     format!("{:.1} {}", val, units[idx])
+}
+
+/// Format seconds into human-readable duration
+fn format_duration(secs: f64) -> String {
+    if secs.is_infinite() || secs.is_nan() || secs < 0.0 {
+        return "?".to_string();
+    }
+    let secs = secs as u64;
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        format!("{}h {}m", hours, mins)
+    }
 }
 
 /// Format a list of tasks for display

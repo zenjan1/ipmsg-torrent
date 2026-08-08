@@ -13,6 +13,7 @@ pub mod dht;
 pub mod disk_monitor;
 pub mod download_history;
 pub mod ed2k;
+pub mod eta_estimator;
 pub mod magnet;
 pub mod metadata_cache;
 pub mod notification;
@@ -49,6 +50,7 @@ pub use bandwidth_monitor::{
     BandwidthDashboard, BandwidthMonitor as BandwidthMonitorType, BandwidthSample, BandwidthStats,
     BandwidthTrendSummary, MovingAvgPoint, TaskBandwidth, TrendDirection, TrendStats, WindowTrend,
 };
+pub use eta_estimator::{EtaConfidence, EtaEstimate, EtaEstimator};
 pub use notification::{
     NotificationChannel, NotificationConfig, NotificationError, NotificationEvent,
 };
@@ -149,6 +151,8 @@ pub struct TaskInfoEvent {
     pub checksum_algorithm: Option<String>,
     /// Checksum verification result (pending, passed, failed)
     pub checksum_status: Option<String>,
+    /// Estimated seconds remaining (from ETA estimator)
+    pub eta_seconds: Option<f64>,
 }
 
 impl TaskInfoEvent {
@@ -177,6 +181,7 @@ impl TaskInfoEvent {
             expected_checksum: task.expected_checksum.clone(),
             checksum_algorithm: task.checksum_algorithm.map(|a| a.name().to_lowercase()),
             checksum_status: None,
+            eta_seconds: task.eta_seconds(),
         }
     }
 }
@@ -586,6 +591,8 @@ pub struct DownloadManager {
     hook_manager: Arc<HookManager>,
     /// RSS/Atom feed subscription manager
     rss_feed_manager: Option<Arc<FeedSubscriptionManager>>,
+    /// ETA estimator for download time prediction
+    eta_estimator: Arc<EtaEstimator>,
 }
 
 impl DownloadManager {
@@ -614,6 +621,7 @@ impl DownloadManager {
             auto_retry_base_delay_secs: Arc::new(AtomicU64::new(30)),
             hook_manager: Arc::new(HookManager::new(data_dir)),
             rss_feed_manager: None,
+            eta_estimator: Arc::new(EtaEstimator::new()),
         };
         dm.start_scheduler();
         dm
@@ -774,6 +782,7 @@ impl DownloadManager {
             auto_retry_base_delay_secs: Arc::new(AtomicU64::new(30)),
             hook_manager: Arc::new(HookManager::new(data_dir)),
             rss_feed_manager: None,
+            eta_estimator: Arc::new(EtaEstimator::new()),
         };
         // Restore post-download hooks from disk
         if let Err(e) = dm.hook_manager.load() {
@@ -1424,6 +1433,7 @@ impl DownloadManager {
                             expected_checksum: None,
                             checksum_algorithm: None,
                             checksum_status: None,
+                            eta_seconds: None,
                         },
                     });
                     notify.notify_one();
@@ -1576,6 +1586,11 @@ impl DownloadManager {
     /// Get the save path manager for download directory configuration.
     pub fn save_path_manager(&self) -> &Arc<SavePathManager> {
         &self.save_path_manager
+    }
+
+    /// Get the ETA estimator for download time prediction.
+    pub fn eta_estimator(&self) -> &Arc<EtaEstimator> {
+        &self.eta_estimator
     }
 
     /// Set proxy configuration for HTTP/HTTPS downloads.
@@ -2836,6 +2851,7 @@ impl DownloadManager {
         let task_rate_limiters = self.task_rate_limiters.clone();
         let max_auto_retries = self.max_auto_retries.clone();
         let auto_retry_base_delay_secs = self.auto_retry_base_delay_secs.clone();
+        let eta_estimator = self.eta_estimator.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -2909,6 +2925,9 @@ impl DownloadManager {
                         task.speed_bps = avg_speed;
                         task.updated_at = chrono::Utc::now();
                     }
+
+                    // Update ETA estimator with current speed
+                    eta_estimator.update_speed(&task_id, avg_speed).await;
 
                     // Update bandwidth monitor with aggregate speed
                     {
@@ -3458,6 +3477,7 @@ impl DownloadManager {
 
         self.running.lock().await.remove(task_id);
         self.task_info.lock().await.remove(task_id);
+        self.eta_estimator.remove_task(task_id).await;
 
         let mut tasks = self.tasks.lock().await;
         let len_before = tasks.len();
