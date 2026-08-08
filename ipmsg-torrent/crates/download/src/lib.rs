@@ -139,6 +139,12 @@ pub struct TaskInfoEvent {
     pub retry_after: Option<chrono::DateTime<chrono::Utc>>,
     /// Original source URL for deduplication (ed2k://, magnet:, http://, etc.)
     pub source_url: Option<String>,
+    /// Expected checksum for post-download verification (hex-encoded hash)
+    pub expected_checksum: Option<String>,
+    /// Checksum algorithm (md5, sha1, sha256, ed2k)
+    pub checksum_algorithm: Option<String>,
+    /// Checksum verification result (pending, passed, failed)
+    pub checksum_status: Option<String>,
 }
 
 impl TaskInfoEvent {
@@ -164,6 +170,9 @@ impl TaskInfoEvent {
             auto_retry_count: task.auto_retry_count,
             retry_after: task.retry_after,
             source_url: task.source_url.clone(),
+            expected_checksum: task.expected_checksum.clone(),
+            checksum_algorithm: task.checksum_algorithm.map(|a| a.name().to_lowercase()),
+            checksum_status: None,
         }
     }
 }
@@ -264,6 +273,10 @@ pub struct DownloadTask {
     pub retry_after: Option<chrono::DateTime<chrono::Utc>>,
     /// Original source URL for deduplication (ed2k://, magnet:, http://, etc.)
     pub source_url: Option<String>,
+    /// Expected checksum for post-download verification (hex-encoded hash)
+    pub expected_checksum: Option<String>,
+    /// Checksum algorithm to use (md5, sha1, sha256, ed2k)
+    pub checksum_algorithm: Option<checksum::ChecksumAlgorithm>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -610,6 +623,33 @@ impl DownloadManager {
     fn emit_event(&self, event: TaskEvent) {
         // Ignore send errors (no active receivers)
         let _ = self.event_tx.send(event);
+    }
+
+    /// Verify checksum after download completion
+    async fn verify_checksum(task: &DownloadTask) -> Option<String> {
+        if let (Some(expected), Some(algo)) = (&task.expected_checksum, task.checksum_algorithm) {
+            match checksum::verify_file(&task.save_path, expected, algo).await {
+                Ok(result) if result.matched => {
+                    tracing::info!(task_id = %task.id, algorithm = %algo.name(), "Checksum verification passed");
+                    None
+                }
+                Ok(result) => {
+                    let msg = format!(
+                        "Checksum verification failed: expected {}, got {}",
+                        result.expected, result.actual
+                    );
+                    tracing::error!(task_id = %task.id, "{}", msg);
+                    Some(msg)
+                }
+                Err(e) => {
+                    let msg = format!("Checksum verification error: {}", e);
+                    tracing::error!(task_id = %task.id, "{}", msg);
+                    Some(msg)
+                }
+            }
+        } else {
+            None
+        }
     }
 
     /// Record a completed or failed task to download history and send notifications.
@@ -1104,6 +1144,11 @@ impl DownloadManager {
                                             task.state = DownloadState::Complete;
                                             task.downloaded = task.size;
                                             task.speed_bps = 0.0;
+                                            if let Some(cs_err) = Self::verify_checksum(task).await
+                                            {
+                                                task.state = DownloadState::Error;
+                                                task.error = Some(cs_err);
+                                            }
                                             Self::record_task_history(
                                                 task,
                                                 &data_dir_clone,
@@ -1596,6 +1641,8 @@ impl DownloadManager {
             auto_retry_count: 0,
             retry_after: None,
             source_url: Some(info_hash),
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1657,6 +1704,8 @@ impl DownloadManager {
             auto_retry_count: 0,
             retry_after: None,
             source_url: Some(magnet_uri.to_string()),
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1719,6 +1768,8 @@ impl DownloadManager {
             auto_retry_count: 0,
             retry_after: None,
             source_url: Some(hash_str),
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1784,6 +1835,8 @@ impl DownloadManager {
             auto_retry_count: 0,
             retry_after: None,
             source_url,
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1843,6 +1896,8 @@ impl DownloadManager {
             auto_retry_count: 0,
             retry_after: None,
             source_url: Some(file_hash.clone()),
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1963,6 +2018,10 @@ impl DownloadManager {
                 task.downloaded = task.size;
                 task.speed_bps = 0.0;
                 task.updated_at = chrono::Utc::now();
+                if let Some(cs_err) = Self::verify_checksum(task).await {
+                    task.state = DownloadState::Error;
+                    task.error = Some(cs_err);
+                }
                 Self::record_task_history(task, &self.data_dir, Some(&self.notifier));
             }
         }
@@ -2119,6 +2178,8 @@ impl DownloadManager {
             auto_retry_count: 0,
             retry_after: None,
             source_url: Some(url.to_string()),
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -2471,6 +2532,10 @@ impl DownloadManager {
                         task.state = DownloadState::Complete;
                         task.downloaded = task.size;
                         task.speed_bps = 0.0;
+                        if let Some(cs_err) = Self::verify_checksum(task).await {
+                            task.state = DownloadState::Error;
+                            task.error = Some(cs_err);
+                        }
                         Self::record_task_history(task, &data_dir, Some(&notifier));
                     }
                     Err(e) => {
@@ -2945,6 +3010,12 @@ impl DownloadManager {
                                                 task.state = DownloadState::Complete;
                                                 task.downloaded = task.size;
                                                 task.speed_bps = 0.0;
+                                                if let Some(cs_err) =
+                                                    Self::verify_checksum(task).await
+                                                {
+                                                    task.state = DownloadState::Error;
+                                                    task.error = Some(cs_err);
+                                                }
                                                 Self::record_task_history(
                                                     task,
                                                     &data_dir_clone,
@@ -3553,6 +3624,42 @@ impl DownloadManager {
         }
     }
 
+    /// Set expected checksum for a download task
+    pub async fn set_task_checksum(
+        &self,
+        task_id: &str,
+        checksum: &str,
+        algorithm: checksum::ChecksumAlgorithm,
+    ) -> Result<(), String> {
+        let checksum_lower = checksum.to_lowercase();
+        if checksum_lower.len() != algorithm.hex_len() {
+            return Err(format!(
+                "Invalid checksum length: expected {} hex chars for {}, got {}",
+                algorithm.hex_len(),
+                algorithm.name(),
+                checksum_lower.len()
+            ));
+        }
+        if !checksum_lower.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err("Checksum must be a hex string".to_string());
+        }
+
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            task.expected_checksum = Some(checksum_lower);
+            task.checksum_algorithm = Some(algorithm);
+            task.updated_at = chrono::Utc::now();
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(task),
+            });
+            drop(tasks);
+            self.persist_tasks().await;
+            Ok(())
+        } else {
+            Err(format!("Task {} not found", task_id))
+        }
+    }
+
     /// List all tasks in a specific group.
     pub async fn list_tasks_by_group(&self, group: &str) -> Vec<DownloadTask> {
         let tasks = self.tasks.lock().await;
@@ -4060,6 +4167,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4085,6 +4194,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4110,6 +4221,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -4227,6 +4340,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -4279,6 +4394,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -4324,6 +4441,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4349,6 +4468,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4374,6 +4495,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -4422,6 +4545,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4447,6 +4572,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -4485,6 +4612,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -4523,6 +4652,8 @@ mod tests {
             auto_retry_count: 0,
             retry_after: None,
             source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
         assert!(task.tags.is_empty());
     }
@@ -4555,6 +4686,8 @@ mod tests {
             auto_retry_count: 0,
             retry_after: None,
             source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         // Query match (case-insensitive)
@@ -4604,6 +4737,8 @@ mod tests {
             auto_retry_count: 0,
             retry_after: None,
             source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         let filter = TaskFilter {
@@ -4645,6 +4780,8 @@ mod tests {
             auto_retry_count: 0,
             retry_after: None,
             source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         let filter = TaskFilter {
@@ -4686,6 +4823,8 @@ mod tests {
             auto_retry_count: 0,
             retry_after: None,
             source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         let filter = TaskFilter {
@@ -4727,6 +4866,8 @@ mod tests {
             auto_retry_count: 0,
             retry_after: None,
             source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         // All criteria match
@@ -4775,6 +4916,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -4800,6 +4943,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -4825,6 +4970,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             },
         ];
 
@@ -4865,6 +5012,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -4890,6 +5039,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -4915,6 +5066,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             },
         ];
 
@@ -4951,6 +5104,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             },
             DownloadTask {
                 id: "p2".into(),
@@ -4976,6 +5131,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             },
             DownloadTask {
                 id: "p3".into(),
@@ -5001,6 +5158,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             },
         ];
 
@@ -5039,6 +5198,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -5064,6 +5225,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -5100,6 +5263,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -5125,6 +5290,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -5150,6 +5317,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -5191,6 +5360,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -5216,6 +5387,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -5241,6 +5414,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -5358,6 +5533,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -5403,6 +5580,8 @@ mod tests {
             auto_retry_count: 0,
             retry_after: None,
             source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         let event = TaskInfoEvent::from_task(&task);
@@ -5543,6 +5722,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -5605,6 +5786,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -5648,6 +5831,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-2".into(),
@@ -5673,6 +5858,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-3".into(),
@@ -5698,6 +5885,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -5767,6 +5956,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -5809,6 +6000,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -5848,6 +6041,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -5919,6 +6114,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -5967,6 +6164,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5992,6 +6191,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -6034,6 +6235,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -6059,6 +6262,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -6101,6 +6306,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -6126,6 +6333,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -6151,6 +6360,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -6191,6 +6402,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -6216,6 +6429,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -6241,6 +6456,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -6282,6 +6499,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -6307,6 +6526,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -6332,6 +6553,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             });
         }
 
@@ -7312,5 +7535,75 @@ mod max_concurrent_tests {
         save_max_concurrent(4, tmp.path()).unwrap();
         let dm = DownloadManager::new_with_restore(tmp.path().to_path_buf()).await;
         assert_eq!(dm.get_max_concurrent(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_set_task_checksum() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_checksum"));
+        let id = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test")
+            .await
+            .unwrap();
+
+        // Set SHA-256 checksum (64 hex chars)
+        let checksum = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let result = dm
+            .set_task_checksum(&id, checksum, checksum::ChecksumAlgorithm::Sha256)
+            .await;
+        assert!(result.is_ok());
+
+        // Verify task has checksum set
+        let tasks = dm.list_tasks().await;
+        let task = tasks.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(task.expected_checksum, Some(checksum.to_lowercase()));
+        assert_eq!(
+            task.checksum_algorithm,
+            Some(checksum::ChecksumAlgorithm::Sha256)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_task_checksum_invalid_length() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_checksum_inv"));
+        let id = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test")
+            .await
+            .unwrap();
+
+        // SHA-256 expects 64 hex chars, but we provide only 32
+        let checksum = "e3b0c44298fc1c149afbf4c8996fb924";
+        let result = dm
+            .set_task_checksum(&id, checksum, checksum::ChecksumAlgorithm::Sha256)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid checksum length"));
+    }
+
+    #[tokio::test]
+    async fn test_set_task_checksum_invalid_hex() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_checksum_hex"));
+        let id = dm
+            .add_magnet("magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test")
+            .await
+            .unwrap();
+
+        // 64 chars but not all hex
+        let checksum = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+        let result = dm
+            .set_task_checksum(&id, checksum, checksum::ChecksumAlgorithm::Sha256)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("hex string"));
+    }
+
+    #[tokio::test]
+    async fn test_set_task_checksum_not_found() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_checksum_nf"));
+        let checksum = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let result = dm
+            .set_task_checksum("nonexistent", checksum, checksum::ChecksumAlgorithm::Sha256)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
     }
 }

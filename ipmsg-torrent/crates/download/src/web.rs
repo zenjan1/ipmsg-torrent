@@ -132,6 +132,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/notifications/history", get(get_notification_history))
         .route("/api/task-speed", get(get_task_speed))
         .route("/api/task-speed", post(set_task_speed))
+        .route("/api/checksum", post(set_checksum))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -686,6 +687,75 @@ async fn set_task_speed(
     )
 }
 
+/// POST /api/checksum
+/// Body: {"task_id": "xxx", "checksum": "hex_hash", "algorithm": "sha256"}
+async fn set_checksum(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let task_id = match body.get("task_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "task_id is required"})),
+            );
+        }
+    };
+    let checksum = match body.get("checksum").and_then(|v| v.as_str()) {
+        Some(cs) if !cs.is_empty() => cs.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "checksum is required"})),
+            );
+        }
+    };
+    let algo_str = body.get("algorithm").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Auto-detect algorithm if not specified
+    let algo = if !algo_str.is_empty() {
+        match crate::checksum::ChecksumAlgorithm::parse(algo_str) {
+            Some(a) => a,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("Unknown algorithm: {}", algo_str)})),
+                );
+            }
+        }
+    } else {
+        match crate::checksum::detect_algorithm(&checksum) {
+            Some(a) => a,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        serde_json::json!({"error": "Cannot auto-detect algorithm from checksum length"}),
+                    ),
+                );
+            }
+        }
+    };
+
+    match state
+        .manager
+        .set_task_checksum(&task_id, &checksum, algo)
+        .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(
+                serde_json::json!({"success": true, "task_id": task_id, "algorithm": algo.name(), "checksum": checksum.to_lowercase()}),
+            ),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
 /// WebSocket upgrade handler
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<WebState>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state))
@@ -858,6 +928,9 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
+                checksum_status: None,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -1338,6 +1411,8 @@ mod tests {
             auto_retry_count: 0,
             retry_after: None,
             source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

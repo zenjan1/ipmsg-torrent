@@ -137,6 +137,8 @@ impl ExportedTask {
             auto_retry_count: 0,
             retry_after: None,
             source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
         }
     }
 }
@@ -257,6 +259,8 @@ mod tests {
             auto_retry_count: 0,
             retry_after: None,
             source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
         }
     }
 

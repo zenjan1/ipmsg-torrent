@@ -180,6 +180,8 @@ fn test_download_task_progress() {
         auto_retry_count: 0,
         retry_after: None,
         source_url: None,
+        expected_checksum: None,
+        checksum_algorithm: None,
     };
 
     assert_eq!(task.progress(), 50.0);
@@ -213,6 +215,8 @@ fn test_download_task_progress_zero_size() {
         auto_retry_count: 0,
         retry_after: None,
         source_url: None,
+        expected_checksum: None,
+        checksum_algorithm: None,
     };
 
     assert_eq!(task.progress(), 0.0);

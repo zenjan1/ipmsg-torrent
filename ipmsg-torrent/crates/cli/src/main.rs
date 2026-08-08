@@ -258,6 +258,12 @@ enum Command {
     },
     /// List all download groups
     DlGroups,
+    /// Set checksum for a download task
+    DlChecksum {
+        task_id: String,
+        checksum: String,
+        algorithm: Option<String>,
+    },
     Block {
         peer: String,
     },
@@ -755,6 +761,19 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dlgroups" | "dl-groups" | "dlgrps" => Command::DlGroups,
+        "dlchecksum" | "dl-cs" | "dlcs" => {
+            // /dlchecksum <task_id> <checksum> [algorithm]
+            let args: Vec<&str> = input.splitn(4, ' ').collect();
+            if args.len() >= 3 {
+                Command::DlChecksum {
+                    task_id: args[1].to_string(),
+                    checksum: args[2].to_string(),
+                    algorithm: args.get(3).map(|s| s.to_string()),
+                }
+            } else {
+                Command::Unknown("/dlchecksum <task_id> <checksum> [algorithm]".to_string())
+            }
+        }
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -842,6 +861,7 @@ fn command_help() -> String {
         "/dlnotes <id> [text|clear] - Set or clear task notes/description",
         "/dlgroup <id> [group|clear] - Set or clear task group",
         "/dlgroups           - List all download groups",
+        "/dlchecksum <id> <hash> [algo] - Set checksum for verification (algo: md5/sha1/sha256/ed2k)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -2932,6 +2952,68 @@ async fn handle_command(
                 s.add_system_message("main", lines.trim_end().to_string());
             }
         }
+        Command::DlChecksum {
+            task_id,
+            checksum,
+            algorithm,
+        } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            // Try to detect algorithm from checksum length if not specified
+            let algo = if let Some(algo_str) = &algorithm {
+                match ipmsg_download::checksum::ChecksumAlgorithm::parse(algo_str) {
+                    Some(a) => a,
+                    None => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "❌ Unknown algorithm '{}'. Supported: md5, sha1, sha256, ed2k",
+                                algo_str
+                            ),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                // Auto-detect from checksum length
+                match ipmsg_download::checksum::detect_algorithm(&checksum) {
+                    Some(a) => a,
+                    None => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "❌ Cannot auto-detect algorithm from checksum length. Specify algorithm: md5, sha1, sha256, ed2k".to_string(),
+                        );
+                        return;
+                    }
+                }
+            };
+
+            match download_manager
+                .set_task_checksum(&task_id, &checksum, algo)
+                .await
+            {
+                Ok(()) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "✅ Checksum set for task {} ({}: {})",
+                            task_id,
+                            algo.name(),
+                            checksum.to_lowercase()
+                        ),
+                    );
+                }
+                Err(e) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("❌ {}", e));
+                }
+            }
+        }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {
                 peer_id: peer.clone(),
@@ -3661,5 +3743,82 @@ mod save_path_tests {
     fn test_help_contains_extract() {
         let help = command_help();
         assert!(help.contains("/dlextract"));
+    }
+
+    #[test]
+    fn test_parse_dlchecksum_with_algorithm() {
+        match parse_command(
+            "/dlchecksum abc123 deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678 sha256",
+        ) {
+            Command::DlChecksum {
+                task_id,
+                checksum,
+                algorithm,
+            } => {
+                assert_eq!(task_id, "abc123");
+                assert_eq!(
+                    checksum,
+                    "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+                );
+                assert_eq!(algorithm, Some("sha256".to_string()));
+            }
+            other => panic!("Expected DlChecksum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlchecksum_without_algorithm() {
+        match parse_command(
+            "/dlchecksum abc123 deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678",
+        ) {
+            Command::DlChecksum {
+                task_id,
+                checksum,
+                algorithm,
+            } => {
+                assert_eq!(task_id, "abc123");
+                assert_eq!(
+                    checksum,
+                    "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+                );
+                assert_eq!(algorithm, None);
+            }
+            other => panic!("Expected DlChecksum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlchecksum_alias() {
+        match parse_command(
+            "/dlcs abc123 deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678 md5",
+        ) {
+            Command::DlChecksum {
+                task_id,
+                checksum,
+                algorithm,
+            } => {
+                assert_eq!(task_id, "abc123");
+                assert_eq!(
+                    checksum,
+                    "deadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+                );
+                assert_eq!(algorithm, Some("md5".to_string()));
+            }
+            other => panic!("Expected DlChecksum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlchecksum_insufficient_args() {
+        match parse_command("/dlchecksum abc123") {
+            Command::Unknown(_) => {}
+            other => panic!("Expected Unknown for insufficient args, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_checksum() {
+        let help = command_help();
+        assert!(help.contains("/dlchecksum"));
     }
 }

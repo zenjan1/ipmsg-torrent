@@ -43,6 +43,10 @@ pub struct PersistedTask {
     pub retry_after: Option<DateTime<Utc>>,
     #[serde(default)]
     pub source_url: Option<String>,
+    #[serde(default)]
+    pub expected_checksum: Option<String>,
+    #[serde(default)]
+    pub checksum_algorithm: Option<crate::checksum::ChecksumAlgorithm>,
 }
 
 fn default_bandwidth_weight() -> u8 {
@@ -140,6 +144,8 @@ impl From<DownloadTask> for PersistedTask {
             auto_retry_count: t.auto_retry_count,
             retry_after: t.retry_after,
             source_url: t.source_url,
+            expected_checksum: t.expected_checksum,
+            checksum_algorithm: t.checksum_algorithm,
         }
     }
 }
@@ -170,6 +176,8 @@ impl From<PersistedTask> for DownloadTask {
             auto_retry_count: t.auto_retry_count,
             retry_after: t.retry_after,
             source_url: t.source_url,
+            expected_checksum: t.expected_checksum,
+            checksum_algorithm: t.checksum_algorithm,
         }
     }
 }
@@ -279,6 +287,8 @@ mod tests {
             auto_retry_count: 0,
             retry_after: None,
             source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -341,6 +351,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -366,6 +378,8 @@ mod tests {
                 auto_retry_count: 0,
                 retry_after: None,
                 source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
             },
         ];
 
@@ -420,6 +434,8 @@ mod tests {
             auto_retry_count: 0,
             retry_after: None,
             source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();

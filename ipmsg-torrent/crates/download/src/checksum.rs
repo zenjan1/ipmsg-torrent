@@ -7,7 +7,7 @@ use std::path::Path;
 use tokio::io::{AsyncReadExt, BufReader};
 
 /// Supported checksum algorithms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChecksumAlgorithm {
     Md5,
     Sha1,
