@@ -188,6 +188,16 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/tasks/:id/clone", post(clone_task))
         .route("/api/sequential-mode", get(get_sequential_mode))
         .route("/api/sequential-mode", post(set_sequential_mode))
+        .route("/api/url-rewrite", get(get_url_rewrite_summary))
+        .route("/api/url-rewrite/enable", post(set_url_rewrite_enabled))
+        .route("/api/url-rewrite/rules", get(list_url_rewrite_rules))
+        .route("/api/url-rewrite/rules", post(add_url_rewrite_rule))
+        .route("/api/url-rewrite/rules/:id", post(remove_url_rewrite_rule))
+        .route("/api/url-rewrite/preview", post(preview_url_rewrite))
+        .route("/api/path-template", get(get_path_template_config))
+        .route("/api/path-template", post(set_path_template))
+        .route("/api/path-template/enable", post(set_path_template_enabled))
+        .route("/api/path-template/preview", post(preview_path_template))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -289,6 +299,32 @@ pub struct SequentialModeRequest {
     pub enabled: bool,
 }
 
+/// Request to enable/disable URL rewriting
+#[derive(Debug, Deserialize)]
+pub struct UrlRewriteEnabledRequest {
+    pub enabled: bool,
+}
+
+/// Request to preview URL rewrite
+#[derive(Debug, Deserialize)]
+pub struct UrlRewritePreviewRequest {
+    pub url: String,
+}
+
+/// Request to set path template
+#[derive(Debug, Deserialize)]
+pub struct PathTemplateRequest {
+    pub template: String,
+}
+
+/// Request to preview path template
+#[derive(Debug, Deserialize)]
+pub struct PathTemplatePreviewRequest {
+    pub template: String,
+    pub filename: String,
+    pub protocol: String,
+}
+
 /// Get sequential download mode for a task
 async fn get_sequential_mode(
     State(state): State<Arc<WebState>>,
@@ -320,6 +356,126 @@ async fn set_sequential_mode(
             "Task not found".to_string()
         },
     })
+}
+
+/// Get URL rewrite summary (rules + stats)
+async fn get_url_rewrite_summary(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::url_rewrite::UrlRewriteSummary> {
+    let summary = state.manager.get_url_rewrite_summary().await;
+    Json(summary)
+}
+
+/// Enable or disable URL rewriting globally
+async fn set_url_rewrite_enabled(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<UrlRewriteEnabledRequest>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_url_rewrite_enabled(req.enabled).await;
+    Json(serde_json::json!({"status": "ok", "enabled": req.enabled}))
+}
+
+/// List all URL rewrite rules
+async fn list_url_rewrite_rules(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::url_rewrite::UrlRewriteRule>> {
+    let rules = state.manager.list_url_rewrite_rules().await;
+    Json(rules)
+}
+
+/// Add a URL rewrite rule
+async fn add_url_rewrite_rule(
+    State(state): State<Arc<WebState>>,
+    Json(rule): Json<crate::url_rewrite::UrlRewriteRule>,
+) -> impl axum::response::IntoResponse {
+    state.manager.add_url_rewrite_rule(rule.clone()).await;
+    Json(serde_json::json!({"status": "ok", "id": rule.id}))
+}
+
+/// Remove a URL rewrite rule
+async fn remove_url_rewrite_rule(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let removed = state.manager.remove_url_rewrite_rule(&id).await;
+    Json(serde_json::json!({"removed": removed}))
+}
+
+/// Preview URL rewrite without modifying apply counts
+async fn preview_url_rewrite(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<UrlRewritePreviewRequest>,
+) -> Json<serde_json::Value> {
+    match state.manager.preview_url_rewrite(&req.url).await {
+        Some((rewritten, rule_name)) => Json(serde_json::json!({
+            "original": req.url,
+            "rewritten": rewritten,
+            "rule": rule_name,
+            "matched": true
+        })),
+        None => Json(serde_json::json!({
+            "original": req.url,
+            "rewritten": req.url,
+            "matched": false
+        })),
+    }
+}
+
+/// Get path template configuration
+async fn get_path_template_config(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::path_template::PathTemplateConfig> {
+    Json(state.manager.get_path_template_config().await)
+}
+
+/// Set path template
+async fn set_path_template(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<PathTemplateRequest>,
+) -> Json<serde_json::Value> {
+    match state.manager.set_path_template(&req.template).await {
+        Ok(()) => Json(serde_json::json!({
+            "success": true,
+            "message": "Path template set successfully"
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
+/// Enable/disable path template
+async fn set_path_template_enabled(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<UrlRewriteEnabledRequest>,
+) -> Json<serde_json::Value> {
+    state.manager.set_path_template_enabled(req.enabled).await;
+    Json(serde_json::json!({
+        "success": true,
+        "enabled": req.enabled
+    }))
+}
+
+/// Preview path template
+async fn preview_path_template(
+    State(_state): State<Arc<WebState>>,
+    Json(req): Json<PathTemplatePreviewRequest>,
+) -> Json<serde_json::Value> {
+    match crate::DownloadManager::preview_path_template(&req.template, &req.filename, &req.protocol)
+    {
+        Ok(path) => Json(serde_json::json!({
+            "success": true,
+            "template": req.template,
+            "filename": req.filename,
+            "protocol": req.protocol,
+            "path": path
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
 }
 
 /// Add a new download
@@ -2753,5 +2909,125 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_path_template_config() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/path-template")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_set_path_template() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/path-template")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"template":"{category}/{name}"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true);
+    }
+
+    #[tokio::test]
+    async fn test_set_path_template_invalid() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/path-template")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"template":"{unknown}"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], false);
+    }
+
+    #[tokio::test]
+    async fn test_path_template_enable_disable() {
+        let state = test_state();
+        let app = create_router(state.clone());
+
+        // Enable
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/path-template/enable")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify enabled
+        let config = state.manager.get_path_template_config().await;
+        assert!(config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_preview_path_template() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/path-template/preview")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"template":"{category}/{name}","filename":"movie.mp4","protocol":"http"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["path"], "video/movie");
     }
 }

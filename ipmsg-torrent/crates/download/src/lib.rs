@@ -26,6 +26,7 @@ pub mod magnet;
 pub mod metadata_cache;
 pub mod mirror_health;
 pub mod notification;
+pub mod path_template;
 pub mod post_hooks;
 pub mod progress;
 pub mod proxy;
@@ -41,6 +42,7 @@ pub mod task_queue;
 pub mod torrent;
 pub mod url_dedup;
 pub mod url_pattern;
+pub mod url_rewrite;
 pub mod web;
 pub mod xunlei;
 
@@ -720,6 +722,10 @@ pub struct DownloadManager {
     domain_limit: Arc<tokio::sync::RwLock<domain_limit::DomainLimitConfig>>,
     /// Per-task activity log manager
     activity_log: Arc<Mutex<ActivityLogManager>>,
+    /// URL rewrite rules for transforming URLs before download
+    url_rewrite: Arc<Mutex<url_rewrite::UrlRewriteManager>>,
+    /// Path template manager for auto-organizing downloads
+    path_template: Arc<path_template::PathTemplateManager>,
 }
 
 impl DownloadManager {
@@ -768,6 +774,8 @@ impl DownloadManager {
                 domain_limit::DomainLimitConfig::default(),
             )),
             activity_log: Arc::new(Mutex::new(ActivityLogManager::new())),
+            url_rewrite: Arc::new(Mutex::new(url_rewrite::UrlRewriteManager::new())),
+            path_template: Arc::new(path_template::PathTemplateManager::new()),
         };
         dm.start_scheduler();
         dm
@@ -948,6 +956,8 @@ impl DownloadManager {
                 domain_limit::DomainLimitConfig::default(),
             )),
             activity_log: Arc::new(Mutex::new(ActivityLogManager::new())),
+            url_rewrite: Arc::new(Mutex::new(url_rewrite::UrlRewriteManager::new())),
+            path_template: Arc::new(path_template::PathTemplateManager::new()),
         };
         // Restore audit log from disk
         if let Some(loaded_log) = audit_log::load_audit_log(&dm.data_dir) {
@@ -1010,6 +1020,16 @@ impl DownloadManager {
         // Restore download presets from disk
         if let Ok(presets) = download_presets::load_presets(&dm.data_dir) {
             *dm.download_presets.lock().await = presets;
+        }
+        // Restore URL rewrite rules from disk
+        if let Some(rewrite_mgr) = url_rewrite::load_url_rewrite_manager(&dm.data_dir) {
+            *dm.url_rewrite.lock().await = rewrite_mgr;
+        }
+        // Restore path template config from disk
+        if let Ok(Some(template_config)) =
+            path_template::load_path_template_config(&dm.data_dir).await
+        {
+            dm.path_template.replace_config(template_config).await;
         }
         dm.start_scheduler();
         dm.start_bandwidth_scheduler();
@@ -2207,6 +2227,129 @@ impl DownloadManager {
         }
     }
 
+    /// Add a URL rewrite rule.
+    /// Persists rules to disk for automatic restoration on restart.
+    pub async fn add_url_rewrite_rule(&self, rule: url_rewrite::UrlRewriteRule) {
+        let mut mgr = self.url_rewrite.lock().await;
+        mgr.add_rule(rule);
+        if let Err(e) = url_rewrite::save_url_rewrite_manager(&mgr, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist URL rewrite rules");
+        }
+    }
+
+    /// Remove a URL rewrite rule by ID.
+    pub async fn remove_url_rewrite_rule(&self, id: &str) -> bool {
+        let mut mgr = self.url_rewrite.lock().await;
+        let removed = mgr.remove_rule(id);
+        if removed {
+            if let Err(e) = url_rewrite::save_url_rewrite_manager(&mgr, &self.data_dir) {
+                tracing::warn!(error = %e, "Failed to persist URL rewrite rules");
+            }
+        }
+        removed
+    }
+
+    /// List all URL rewrite rules.
+    pub async fn list_url_rewrite_rules(&self) -> Vec<url_rewrite::UrlRewriteRule> {
+        let mgr = self.url_rewrite.lock().await;
+        mgr.list_rules().to_vec()
+    }
+
+    /// Get URL rewrite summary (rules + stats).
+    pub async fn get_url_rewrite_summary(&self) -> url_rewrite::UrlRewriteSummary {
+        let mgr = self.url_rewrite.lock().await;
+        mgr.summary()
+    }
+
+    /// Enable or disable URL rewriting globally.
+    pub async fn set_url_rewrite_enabled(&self, enabled: bool) {
+        let mut mgr = self.url_rewrite.lock().await;
+        mgr.enabled = enabled;
+        if let Err(e) = url_rewrite::save_url_rewrite_manager(&mgr, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist URL rewrite rules");
+        }
+    }
+
+    /// Apply URL rewrite rules to a URL. Returns the rewritten URL.
+    pub async fn rewrite_url(&self, url: &str) -> String {
+        let mut mgr = self.url_rewrite.lock().await;
+        let rewritten = mgr.rewrite_url(url);
+        // Persist to save updated apply_count
+        if rewritten != url {
+            if let Err(e) = url_rewrite::save_url_rewrite_manager(&mgr, &self.data_dir) {
+                tracing::warn!(error = %e, "Failed to persist URL rewrite rules after apply");
+            }
+        }
+        rewritten
+    }
+
+    /// Preview URL rewrite without modifying apply counts.
+    pub async fn preview_url_rewrite(&self, url: &str) -> Option<(String, String)> {
+        let mgr = self.url_rewrite.lock().await;
+        mgr.preview_rewrite(url)
+    }
+
+    /// Set the path template for auto-organizing downloads.
+    /// Persists the configuration to disk for automatic restoration on restart.
+    pub async fn set_path_template(
+        &self,
+        template: &str,
+    ) -> Result<(), path_template::PathTemplateError> {
+        self.path_template.set_template(template).await?;
+        let config = self.path_template.get_config().await;
+        if let Err(e) = path_template::save_path_template_config(&config, &self.data_dir).await {
+            tracing::warn!(error = %e, "Failed to persist path template config");
+        }
+        Ok(())
+    }
+
+    /// Get the current path template config.
+    pub async fn get_path_template_config(&self) -> path_template::PathTemplateConfig {
+        self.path_template.get_config().await
+    }
+
+    /// Enable or disable path templates.
+    pub async fn set_path_template_enabled(&self, enabled: bool) {
+        if enabled {
+            self.path_template.enable().await;
+        } else {
+            self.path_template.disable().await;
+        }
+        let config = self.path_template.get_config().await;
+        if let Err(e) = path_template::save_path_template_config(&config, &self.data_dir).await {
+            tracing::warn!(error = %e, "Failed to persist path template config");
+        }
+    }
+
+    /// Compute the save path for a file using the path template.
+    pub async fn compute_save_path_with_template(
+        &self,
+        base_dir: &std::path::Path,
+        filename: &str,
+        protocol: &str,
+    ) -> Result<std::path::PathBuf, path_template::PathTemplateError> {
+        self.path_template
+            .compute_save_path(base_dir, filename, protocol)
+            .await
+    }
+
+    /// Preview a path template without saving.
+    pub fn preview_path_template(
+        template: &str,
+        filename: &str,
+        protocol: &str,
+    ) -> Result<String, path_template::PathTemplateError> {
+        let parsed = path_template::PathTemplate::parse(template)?;
+        parsed.validate()?;
+        let ctx = path_template::TemplateContext::new(filename, protocol);
+        Ok(parsed.render(&ctx))
+    }
+
+    /// Get path template summary for status display.
+    pub async fn get_path_template_summary(&self) -> path_template::PathTemplateConfig {
+        self.path_template.get_config().await
+    }
+
     /// Set the conflict detection strategy.
     /// Persists the configuration to disk for automatic restoration on restart.
     pub async fn set_conflict_strategy(&self, strategy: conflict_detection::ConflictStrategy) {
@@ -3147,6 +3290,10 @@ impl DownloadManager {
 
     /// Add an HTTP/FTP URL download (auto-detects file size via HEAD)
     pub async fn add_url(&self, url: &str) -> Result<String, DownloadManagerError> {
+        // Apply URL rewrite rules before processing
+        let rewritten_url = self.rewrite_url(url).await;
+        let url = rewritten_url.as_str();
+
         // HEAD request to get file size and name
         let proxy_cfg = self.proxy_config.read().await.clone();
         let client = if let Some(ref pcfg) = proxy_cfg {
@@ -3205,6 +3352,10 @@ impl DownloadManager {
 
     /// Add an HTTP multi-segment download task (splits URL into parallel segments)
     pub async fn add_http_multisegment(&self, url: &str) -> Result<String, DownloadManagerError> {
+        // Apply URL rewrite rules before processing
+        let rewritten_url = self.rewrite_url(url).await;
+        let url = rewritten_url.as_str();
+
         // HEAD request to get file size and name
         let proxy_cfg = self.proxy_config.read().await.clone();
         let client = if let Some(ref pcfg) = proxy_cfg {

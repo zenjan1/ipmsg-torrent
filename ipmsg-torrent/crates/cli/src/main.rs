@@ -131,6 +131,16 @@ enum Command {
         /// "status", "set <mode> [strip_query] [strip_fragment]", "enable", "disable"
         args: Vec<String>,
     },
+    /// Configure URL rewrite rules
+    DlRewrite {
+        /// "status", "add <name> <pattern> <replacement> [priority]", "del <id>", "preview <url>", "enable", "disable"
+        args: Vec<String>,
+    },
+    /// Configure path templates for auto-organizing downloads
+    DlPathTemplate {
+        /// "status", "set <template>", "enable", "disable", "preview <filename> <protocol>"
+        args: Vec<String>,
+    },
     /// Add tags to a download task
     DlTag {
         task_id: String,
@@ -564,6 +574,14 @@ fn parse_command(input: &str) -> Command {
         "dldedup" | "dl-dedup" | "dldd" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlDedup { args }
+        }
+        "dlrewrite" | "dl-rewrite" | "dlrw" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlRewrite { args }
+        }
+        "dlpathtemplate" | "dl-pathtemplate" | "dlpt" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlPathTemplate { args }
         }
         "dltag" | "dl-tag" => {
             if parts.len() >= 3 {
@@ -1165,6 +1183,7 @@ fn command_help() -> String {
         "/dlspeedhist [id] - Show speed history (all tasks or specific task)",
         "/dlcleanup [cmd]  - Auto-cleanup completed/failed (status|enable|disable|set|run)",
         "/dldedup [cmd]     - URL dedup policy (status|set <mode>|enable|disable)",
+        "/dlrewrite [cmd]   - URL rewrite rules (status|add|del|preview|enable|disable)",
         "/dltag <id> <tags>   - Add tags to a download (comma-separated)",
         "/dluntag <id> <tags> - Remove tags from a download",
         "/dltags [tag]    - List all tags, or filter tasks by tag",
@@ -2354,6 +2373,191 @@ async fn handle_command(
                      Modes: exact, domain, path-prefix, smart"
                         .to_string(),
                 );
+            }
+        }
+        Command::DlRewrite { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if args.is_empty() || args[0] == "status" {
+                let summary = download_manager.get_url_rewrite_summary().await;
+                let report = summary.format_report();
+                let mut s = state.lock().await;
+                s.add_system_message("main", report);
+            } else if args[0] == "enable" {
+                download_manager.set_url_rewrite_enabled(true).await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", "✅ URL rewriting enabled".to_string());
+            } else if args[0] == "disable" {
+                download_manager.set_url_rewrite_enabled(false).await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", "🚫 URL rewriting disabled".to_string());
+            } else if args[0] == "add" && args.len() >= 4 {
+                let name = args[1].clone();
+                let pattern_str = args[2].clone();
+                let replacement = args[3].clone();
+                let priority = if args.len() >= 5 {
+                    args[4].parse::<i32>().unwrap_or(0)
+                } else {
+                    0
+                };
+
+                let pattern = ipmsg_download::url_rewrite::parse_pattern(&pattern_str);
+                let rule = ipmsg_download::url_rewrite::UrlRewriteRule {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name,
+                    pattern,
+                    replacement,
+                    enabled: true,
+                    priority,
+                    description: None,
+                    apply_count: 0,
+                };
+
+                download_manager.add_url_rewrite_rule(rule).await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", "✅ URL rewrite rule added".to_string());
+            } else if args[0] == "del" && args.len() >= 2 {
+                let id = args[1].clone();
+                let removed = download_manager.remove_url_rewrite_rule(&id).await;
+                let mut s = state.lock().await;
+                if removed {
+                    s.add_system_message("main", "✅ Rule removed".to_string());
+                } else {
+                    s.add_system_message("main", "❌ Rule not found".to_string());
+                }
+            } else if args[0] == "preview" && args.len() >= 2 {
+                let url = args[1].clone();
+                let result = download_manager.preview_url_rewrite(&url).await;
+                let mut s = state.lock().await;
+                match result {
+                    Some((rewritten, rule_name)) => {
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "Original: {}\nRewritten: {}\nRule: {}",
+                                url, rewritten, rule_name
+                            ),
+                        );
+                    }
+                    None => {
+                        s.add_system_message("main", format!("No rule matches URL: {}", url));
+                    }
+                }
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    "Usage: /dlrewrite [status|enable|disable|add <name> <pattern> <replacement> [priority]|del <id>|preview <url>]\n\
+                     Patterns: wildcard (default), regex:..., exact:..., prefix:..."
+                        .to_string(),
+                );
+            }
+        }
+        Command::DlPathTemplate { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if args.is_empty() {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    "Usage: /dlpt [status|set <template>|enable|disable|preview <filename> <protocol>]\n\
+                     Variables: {category}, {yyyy}, {mm}, {dd}, {name}, {ext}, {protocol}, {filename}"
+                        .to_string(),
+                );
+            } else {
+                match args[0].as_str() {
+                    "status" => {
+                        let config = download_manager.get_path_template_config().await;
+                        let status = if config.enabled {
+                            "Enabled"
+                        } else {
+                            "Disabled"
+                        };
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "Path Template: {}\nStatus: {}\n\nVariables: {{category}}, {{yyyy}}, {{mm}}, {{dd}}, {{name}}, {{ext}}, {{protocol}}, {{filename}}",
+                                config.template, status
+                            ),
+                        );
+                    }
+                    "set" => {
+                        if args.len() >= 2 {
+                            let template = args[1..].join(" ");
+                            match download_manager.set_path_template(&template).await {
+                                Ok(()) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Path template set to: {}", template),
+                                    );
+                                }
+                                Err(e) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message("main", format!("Error: {}", e));
+                                }
+                            }
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "Usage: /dlpt set <template>".to_string());
+                        }
+                    }
+                    "enable" => {
+                        download_manager.set_path_template_enabled(true).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Path template enabled".to_string());
+                    }
+                    "disable" => {
+                        download_manager.set_path_template_enabled(false).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Path template disabled".to_string());
+                    }
+                    "preview" => {
+                        if args.len() >= 3 {
+                            let filename = &args[1];
+                            let protocol = &args[2];
+                            let config = download_manager.get_path_template_config().await;
+                            match ipmsg_download::DownloadManager::preview_path_template(
+                                &config.template,
+                                filename,
+                                protocol,
+                            ) {
+                                Ok(path) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!(
+                                            "Template: {}\nPreview: {} → {}",
+                                            config.template, filename, path
+                                        ),
+                                    );
+                                }
+                                Err(e) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message("main", format!("Error: {}", e));
+                                }
+                            }
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "Usage: /dlpt preview <filename> <protocol>".to_string(),
+                            );
+                        }
+                    }
+                    _ => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpt [status|set <template>|enable|disable|preview <filename> <protocol>]".to_string(),
+                        );
+                    }
+                }
             }
         }
         Command::DlAudit { args } => {
