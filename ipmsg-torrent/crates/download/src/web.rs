@@ -176,6 +176,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/retry-policy", get(get_retry_policy))
         .route("/api/retry-policy", post(set_retry_policy))
+        .route("/api/torrent-files/:task_id", get(get_torrent_files))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1603,6 +1604,50 @@ async fn set_retry_policy(
         }))
     } else {
         Err(StatusCode::NOT_FOUND)
+    }
+}
+
+/// Response for torrent file listing
+#[derive(Debug, Serialize)]
+struct TorrentFilesResponse {
+    task_id: String,
+    files: Vec<crate::torrent::FileEntry>,
+    total_size: u64,
+    selected_size: u64,
+}
+
+/// GET /api/torrent-files/:task_id - List files in a multi-file torrent
+async fn get_torrent_files(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<TorrentFilesResponse>, StatusCode> {
+    // Look for torrent file in data_dir/torrents/<task_id>.torrent
+    let data_dir = state.manager.data_dir();
+    let torrent_path = data_dir
+        .join("torrents")
+        .join(format!("{}.torrent", task_id));
+
+    if !torrent_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let selection = crate::torrent::FileSelection::all();
+    match state
+        .manager
+        .inspect_torrent_files(&torrent_path, &selection)
+        .await
+    {
+        Ok(files) => {
+            let total_size: u64 = files.iter().map(|f| f.size).sum();
+            let selected_size: u64 = files.iter().filter(|f| f.selected).map(|f| f.size).sum();
+            Ok(Json(TorrentFilesResponse {
+                task_id,
+                files,
+                total_size,
+                selected_size,
+            }))
+        }
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 

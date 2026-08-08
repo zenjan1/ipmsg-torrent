@@ -1,5 +1,6 @@
 //! Torrent download engine - coordinates tracker, peers, and piece management
 
+use super::file_selection::FileSelection;
 use super::meta::TorrentMeta;
 use super::peer::{PeerConnection, PeerMessage};
 use super::tracker::{AnnounceEvent, HttpTracker};
@@ -165,6 +166,10 @@ pub struct TorrentEngine {
     rate_limiter: Option<RateLimiter>,
     /// Optional proxy configuration for peer connections
     proxy_config: Option<crate::proxy::ProxyConfig>,
+    /// File selection for multi-file torrents
+    file_selection: FileSelection,
+    /// Byte ranges to download based on file selection (piece_index -> should_download)
+    selected_pieces: HashSet<u32>,
 }
 
 impl TorrentEngine {
@@ -226,6 +231,8 @@ impl TorrentEngine {
             }
         }
 
+        let selected_pieces: HashSet<u32> = (0..pieces.len() as u32).collect();
+
         Self {
             meta: Arc::new(meta),
             peer_id,
@@ -239,7 +246,62 @@ impl TorrentEngine {
             progress,
             rate_limiter: None,
             proxy_config: None,
+            file_selection: FileSelection::all(),
+            selected_pieces,
         }
+    }
+
+    /// Set file selection for multi-file torrents.
+    /// Must be called before `download()`. Returns error if selection is invalid.
+    pub fn set_file_selection(
+        &mut self,
+        selection: FileSelection,
+    ) -> Result<(), super::file_selection::FileSelectionError> {
+        let total_files = self.meta.info.files.len();
+        if total_files > 0 {
+            selection.validate(total_files)?;
+        }
+        // Rebuild selected_pieces based on file selection
+        self.selected_pieces = self.compute_selected_pieces(&selection);
+        self.file_selection = selection;
+        Ok(())
+    }
+
+    /// Get the current file selection.
+    pub fn file_selection(&self) -> &FileSelection {
+        &self.file_selection
+    }
+
+    /// Compute which pieces should be downloaded based on file selection.
+    fn compute_selected_pieces(&self, selection: &FileSelection) -> HashSet<u32> {
+        let mut pieces = HashSet::new();
+        if self.meta.info.files.is_empty() {
+            // Single-file torrent: all pieces selected
+            pieces.extend(0..self.pieces.len() as u32);
+            return pieces;
+        }
+
+        let piece_length = self.meta.info.piece_length;
+        let selected_files = selection.selected_indices(self.meta.info.files.len());
+
+        // Map each selected file's byte range to piece indices
+        let mut file_offset = 0u64;
+        for (file_idx, file) in self.meta.info.files.iter().enumerate() {
+            let file_start = file_offset;
+            let file_end = file_offset + file.length;
+            file_offset = file_end;
+
+            if !selected_files.contains(&file_idx) {
+                continue;
+            }
+
+            let first_piece = (file_start / piece_length) as u32;
+            let last_piece = ((file_end.saturating_sub(1)) / piece_length) as u32;
+            for p in first_piece..=last_piece.min(self.pieces.len() as u32 - 1) {
+                pieces.insert(p);
+            }
+        }
+        pieces
     }
 
     /// Set rate limiter for speed control
@@ -379,11 +441,15 @@ impl TorrentEngine {
     }
 
     async fn request_blocks(&mut self) {
-        // Find pieces we need
+        // Find pieces we need (only selected pieces for multi-file torrents)
         let needed_pieces: Vec<u32> = self
             .pieces
             .iter()
-            .filter(|p| !p.complete && !self.downloaded_pieces.contains(&p.index))
+            .filter(|p| {
+                !p.complete
+                    && !self.downloaded_pieces.contains(&p.index)
+                    && self.selected_pieces.contains(&p.index)
+            })
             .map(|p| p.index)
             .collect();
 
@@ -614,7 +680,10 @@ impl TorrentEngine {
     }
 
     fn is_complete(&self) -> bool {
-        self.downloaded_pieces.len() == self.pieces.len()
+        // For multi-file torrents with selection, only check selected pieces
+        self.selected_pieces
+            .iter()
+            .all(|&idx| self.downloaded_pieces.contains(&idx))
     }
 
     pub fn progress(&self) -> (usize, usize) {

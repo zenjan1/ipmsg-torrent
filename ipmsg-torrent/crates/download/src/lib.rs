@@ -12,6 +12,7 @@ pub mod auto_shutdown;
 pub mod bandwidth_monitor;
 pub mod bandwidth_schedule;
 pub mod checksum;
+pub mod conflict_detection;
 pub mod connection_pool;
 pub mod dht;
 pub mod disk_monitor;
@@ -1616,6 +1617,11 @@ impl DownloadManager {
     /// Get the hook manager for post-download hook management
     pub fn hook_manager(&self) -> &Arc<HookManager> {
         &self.hook_manager
+    }
+
+    /// Get the data directory path
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
     }
 
     /// Get the RSS feed subscription manager (if initialized).
@@ -4687,6 +4693,47 @@ impl DownloadManager {
             .collect();
         groups.sort();
         groups
+    }
+
+    /// Get torrent file entries for a task (for multi-file torrent file selection).
+    /// Returns file entries with selection state, or None if task is not a torrent/magnet.
+    pub async fn get_torrent_file_entries(&self, task_id: &str) -> Option<Vec<torrent::FileEntry>> {
+        let tasks = self.tasks.lock().await;
+        let task = tasks.iter().find(|t| t.id == task_id)?;
+        if task.protocol != DownloadProtocol::Torrent && task.protocol != DownloadProtocol::Magnet {
+            return None;
+        }
+        // For now, return a placeholder with the task's files.
+        // In a full implementation, this would read the parsed TorrentMeta.
+        // Since we can't easily access the parsed meta from here (it's loaded at spawn time),
+        // we provide a utility that parses the torrent file on demand.
+        None
+    }
+
+    /// Parse a torrent file and return file entries with selection info.
+    /// This is a utility method for CLI/API to inspect torrent contents.
+    pub async fn inspect_torrent_files(
+        &self,
+        torrent_path: &std::path::Path,
+        selection: &torrent::FileSelection,
+    ) -> Result<Vec<torrent::FileEntry>, String> {
+        let data = tokio::fs::read(torrent_path)
+            .await
+            .map_err(|e| format!("Failed to read torrent file: {}", e))?;
+        let meta = torrent::TorrentMeta::from_bytes(&data)
+            .map_err(|e| format!("Failed to parse torrent: {}", e))?;
+
+        if meta.info.files.is_empty() {
+            // Single-file torrent
+            return Ok(vec![torrent::FileEntry {
+                index: 0,
+                path: meta.info.name.clone(),
+                size: meta.total_size(),
+                selected: true,
+            }]);
+        }
+
+        Ok(selection.file_entries(&meta))
     }
 
     /// Add a new auto-categorization rule.

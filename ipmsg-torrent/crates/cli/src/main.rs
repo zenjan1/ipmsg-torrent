@@ -334,6 +334,12 @@ enum Command {
         /// "none" to clear, or "fixed|exponential|linear <base_secs>"
         policy_args: Vec<String>,
     },
+    /// View/select files in a multi-file torrent
+    DlFiles {
+        task_id: String,
+        /// "list" to show files, or selection string like "0,2,4" or "except:1,3" or "all"
+        selection: Option<String>,
+    },
     Block {
         peer: String,
     },
@@ -929,6 +935,21 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlfiles" | "dl-files" | "dlfls" => {
+            // /dlfiles <task_id> [list|all|0,2,4|except:1,3]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlfiles <task_id> [list|all|0,2,4|except:1,3]".to_string())
+            } else {
+                let task_id = args[0].clone();
+                let selection = if args.len() > 1 {
+                    Some(args[1..].join(" "))
+                } else {
+                    None
+                };
+                Command::DlFiles { task_id, selection }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1110,6 +1131,7 @@ fn command_help() -> String {
         "/dlbwsched [cmd]   - Bandwidth schedule (status|list|add|del)",
         "/dlpreset [cmd]    - Download presets (list|show|add|del|apply)",
         "/dlretry <task_id> [none|fixed|exp|linear <secs>] - Per-task retry policy",
+        "/dlfiles <task_id> [list|all|0,2,4|except:1,3] - View/select torrent files",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -1139,6 +1161,7 @@ struct SharedState {
     running: bool,
     username: String,
     download_manager: Arc<ipmsg_download::DownloadManager>,
+    data_dir: PathBuf,
 }
 
 impl SharedState {
@@ -1148,7 +1171,7 @@ impl SharedState {
             messages: Vec::new(),
             channel: None,
         };
-        let download_manager = Arc::new(ipmsg_download::DownloadManager::new(data_dir));
+        let download_manager = Arc::new(ipmsg_download::DownloadManager::new(data_dir.clone()));
         Self {
             tabs: vec![main_tab],
             active_tab: 0,
@@ -1161,6 +1184,7 @@ impl SharedState {
             running: true,
             username,
             download_manager,
+            data_dir: data_dir.clone(),
         }
     }
 
@@ -2644,6 +2668,89 @@ async fn handle_command(
                 };
                 s.add_system_message("main", msg);
             } else {
+                s.add_system_message("main", format!("Task {} not found", task_id));
+            }
+        }
+        Command::DlFiles { task_id, selection } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            let data_dir = s.data_dir.clone();
+            drop(s);
+
+            // Get the task to find the torrent file path
+            let tasks = download_manager.list_tasks().await;
+            let task_info = tasks.iter().find(|t| t.id == task_id);
+
+            if let Some(_task_info) = task_info {
+                // For now, we'll try to find the torrent file in the data directory
+                // In a full implementation, we'd store the torrent file path in the task
+                let torrent_path = data_dir
+                    .join("torrents")
+                    .join(format!("{}.torrent", task_id));
+
+                if torrent_path.exists() {
+                    let file_selection = if let Some(sel_str) = selection {
+                        match ipmsg_download::torrent::FileSelection::parse(&sel_str, 1000) {
+                            Ok(sel) => sel,
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("Invalid selection: {}", e));
+                                return;
+                            }
+                        }
+                    } else {
+                        ipmsg_download::torrent::FileSelection::all()
+                    };
+
+                    match download_manager
+                        .inspect_torrent_files(&torrent_path, &file_selection)
+                        .await
+                    {
+                        Ok(entries) => {
+                            let mut output = format!("📁 Torrent Files for task {}:\n", task_id);
+                            output.push_str(&format!("Total files: {}\n\n", entries.len()));
+
+                            for entry in entries.iter() {
+                                let status = if entry.selected { "✅" } else { "⬜" };
+                                let size_str = format_size(entry.size);
+                                output.push_str(&format!(
+                                    "  {} [{}] {} ({})\n",
+                                    status, entry.index, entry.path, size_str
+                                ));
+                            }
+
+                            let selected_size: u64 =
+                                entries.iter().filter(|e| e.selected).map(|e| e.size).sum();
+                            let total_size: u64 = entries.iter().map(|e| e.size).sum();
+
+                            output.push_str(&format!(
+                                "\nSelected: {} / {} ({})",
+                                entries.iter().filter(|e| e.selected).count(),
+                                entries.len(),
+                                format_size(selected_size)
+                            ));
+
+                            if selected_size < total_size {
+                                output.push_str(&format!(" / {} total", format_size(total_size)));
+                            }
+
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", output);
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("Error reading torrent: {}", e));
+                        }
+                    }
+                } else {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("Torrent file not found for task {}", task_id),
+                    );
+                }
+            } else {
+                let mut s = state.lock().await;
                 s.add_system_message("main", format!("Task {} not found", task_id));
             }
         }
