@@ -351,6 +351,12 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Per-domain concurrent download limit (status/enable/disable/set)
+    DlDomainLimit {
+        /// Subcommand: "status", "enable", "disable", "set <domain> <limit>", "default <limit>"
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -990,6 +996,26 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dldomainlimit" | "dl-domainlimit" | "dldl" => {
+            // /dldomainlimit <status|enable|disable|set|default> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dldomainlimit <status|enable|disable|set|default> [args...]".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlDomainLimit {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1174,6 +1200,7 @@ fn command_help() -> String {
         "/dlretry <task_id> [none|fixed|exp|linear <secs>] - Per-task retry policy",
         "/dlfiles <task_id> [list|all|0,2,4|except:1,3] - View/select torrent files",
         "/dlconflict <get|set|check> - Conflict detection (get strategy / set skip|rename|overwrite / check path)",
+        "/dldomainlimit <status|enable|disable|set|default> - Per-domain concurrent download limit",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -2857,6 +2884,155 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlconflict <get|set|check> [args...]".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlDomainLimit { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "status" => {
+                    let summary = download_manager.get_domain_limit_summary().await;
+                    let mut output = String::new();
+                    output.push_str(&format!(
+                        "🌐 Per-domain download limit: {}\n",
+                        if summary.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    ));
+                    output.push_str(&format!("   Default limit: {}\n", summary.default_limit));
+                    output.push_str(&format!("   Total active: {}\n", summary.total_active));
+                    output.push_str(&format!(
+                        "   Domains at limit: {}\n",
+                        summary.domains_at_limit
+                    ));
+                    if !summary.entries.is_empty() {
+                        output.push_str("\n   Active domains:\n");
+                        for entry in &summary.entries {
+                            let limit_str = if entry.limit == 0 {
+                                "unlimited".to_string()
+                            } else {
+                                format!("{}/{}", entry.active, entry.limit)
+                            };
+                            let status = if entry.at_limit { "🔴" } else { "🟢" };
+                            output.push_str(&format!(
+                                "     {} {} ({})\n",
+                                status, entry.domain, limit_str
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", output);
+                }
+                "enable" => {
+                    let mut config = download_manager.get_domain_limit_config().await;
+                    config.enabled = true;
+                    download_manager.set_domain_limit_config(config).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ Per-domain download limit enabled".to_string(),
+                    );
+                }
+                "disable" => {
+                    let mut config = download_manager.get_domain_limit_config().await;
+                    config.enabled = false;
+                    download_manager.set_domain_limit_config(config).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ Per-domain download limit disabled".to_string(),
+                    );
+                }
+                "default" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dldomainlimit default <limit>".to_string(),
+                        );
+                        return;
+                    }
+                    match args[0].parse::<u32>() {
+                        Ok(limit) => {
+                            let mut config = download_manager.get_domain_limit_config().await;
+                            config.default_limit = limit;
+                            download_manager.set_domain_limit_config(config).await;
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Default domain limit set to {}", limit),
+                            );
+                        }
+                        Err(_) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "❌ Invalid limit value".to_string());
+                        }
+                    }
+                }
+                "set" => {
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dldomainlimit set <domain> <limit>".to_string(),
+                        );
+                        return;
+                    }
+                    let domain = &args[0];
+                    match args[1].parse::<u32>() {
+                        Ok(limit) => {
+                            let mut config = download_manager.get_domain_limit_config().await;
+                            config.set_domain_limit(domain, limit);
+                            download_manager.set_domain_limit_config(config).await;
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Domain {} limit set to {}", domain, limit),
+                            );
+                        }
+                        Err(_) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "❌ Invalid limit value".to_string());
+                        }
+                    }
+                }
+                "remove" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dldomainlimit remove <domain>".to_string(),
+                        );
+                        return;
+                    }
+                    let domain = &args[0];
+                    let mut config = download_manager.get_domain_limit_config().await;
+                    if config.remove_domain_limit(domain).is_some() {
+                        download_manager.set_domain_limit_config(config).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Removed domain limit for {}", domain),
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("❌ No override found for domain {}", domain),
+                        );
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dldomainlimit <status|enable|disable|default|set|remove> [args...]".to_string(),
                     );
                 }
             }

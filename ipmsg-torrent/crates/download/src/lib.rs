@@ -16,6 +16,7 @@ pub mod conflict_detection;
 pub mod connection_pool;
 pub mod dht;
 pub mod disk_monitor;
+pub mod domain_limit;
 pub mod download_cooldown;
 pub mod download_history;
 pub mod download_presets;
@@ -708,6 +709,8 @@ pub struct DownloadManager {
     cooldown_config: Arc<tokio::sync::RwLock<download_cooldown::CooldownConfig>>,
     /// Conflict detection strategy for file path conflicts
     conflict_strategy: Arc<tokio::sync::RwLock<conflict_detection::ConflictStrategy>>,
+    /// Per-domain concurrent download limit configuration
+    domain_limit: Arc<tokio::sync::RwLock<domain_limit::DomainLimitConfig>>,
 }
 
 impl DownloadManager {
@@ -751,6 +754,9 @@ impl DownloadManager {
             )),
             conflict_strategy: Arc::new(tokio::sync::RwLock::new(
                 conflict_detection::ConflictStrategy::default(),
+            )),
+            domain_limit: Arc::new(tokio::sync::RwLock::new(
+                domain_limit::DomainLimitConfig::default(),
             )),
         };
         dm.start_scheduler();
@@ -928,6 +934,9 @@ impl DownloadManager {
             conflict_strategy: Arc::new(tokio::sync::RwLock::new(
                 conflict_detection::ConflictStrategy::default(),
             )),
+            domain_limit: Arc::new(tokio::sync::RwLock::new(
+                domain_limit::DomainLimitConfig::default(),
+            )),
         };
         // Restore audit log from disk
         if let Some(loaded_log) = audit_log::load_audit_log(&dm.data_dir) {
@@ -970,6 +979,10 @@ impl DownloadManager {
         if let Some(strategy) = load_conflict_strategy(&dm.data_dir) {
             *dm.conflict_strategy.write().await = strategy;
         }
+        // Restore per-domain download limit config from disk
+        if let Ok(Some(domain_cfg)) = domain_limit::load_domain_limit_config(&dm.data_dir) {
+            *dm.domain_limit.write().await = domain_cfg;
+        }
         // Restore max concurrent downloads setting from disk
         if let Some(max_concurrent) = load_max_concurrent(&dm.data_dir) {
             dm.max_concurrent
@@ -1007,6 +1020,7 @@ impl DownloadManager {
         let task_rate_limiters = self.task_rate_limiters.clone();
         let max_auto_retries = self.max_auto_retries.clone();
         let auto_retry_base_delay_secs = self.auto_retry_base_delay_secs.clone();
+        let domain_limit = self.domain_limit.clone();
 
         // Spawn schedule checker (runs every 60 seconds)
         let schedule_check_tasks = self.tasks.clone();
@@ -1066,6 +1080,7 @@ impl DownloadManager {
 
                 if can_start {
                     // Find the highest-priority queued task with all dependencies satisfied
+                    // Also respects per-domain concurrent download limits
                     let next_task_id = {
                         let tasks_lock = tasks.lock().await;
                         let completed_ids: std::collections::HashSet<&str> = tasks_lock
@@ -1073,6 +1088,24 @@ impl DownloadManager {
                             .filter(|t| t.state == DownloadState::Complete)
                             .map(|t| t.id.as_str())
                             .collect();
+                        // Count active downloads per domain for domain limiting
+                        let domain_cfg = domain_limit.read().await;
+                        let active_domain_counts: std::collections::HashMap<String, u32> =
+                            if domain_cfg.enabled {
+                                let mut counts = std::collections::HashMap::new();
+                                for t in tasks_lock.iter() {
+                                    if t.state == DownloadState::Downloading
+                                        && let Some(ref url) = t.source_url
+                                        && let Some(domain) = domain_limit::extract_domain(url)
+                                    {
+                                        *counts.entry(domain).or_insert(0) += 1;
+                                    }
+                                }
+                                counts
+                            } else {
+                                std::collections::HashMap::new()
+                            };
+                        drop(domain_cfg);
                         tasks_lock
                             .iter()
                             .filter(|t| {
@@ -1081,6 +1114,27 @@ impl DownloadManager {
                                         .iter()
                                         .all(|dep| completed_ids.contains(dep.as_str()))
                                     && t.retry_after.is_none_or(|ra| ra <= chrono::Utc::now())
+                                    && {
+                                        // Check per-domain limit
+                                        let domain_cfg_sync = domain_limit.blocking_read();
+                                        if !domain_cfg_sync.enabled {
+                                            return true;
+                                        }
+                                        if let Some(ref url) = t.source_url {
+                                            if let Some(domain) = domain_limit::extract_domain(url)
+                                            {
+                                                domain_limit::can_start_domain_download(
+                                                    &domain_cfg_sync,
+                                                    &domain,
+                                                    &active_domain_counts,
+                                                )
+                                            } else {
+                                                true // Non-HTTP URLs (magnet/ed2k) have no domain
+                                            }
+                                        } else {
+                                            true // No source URL, allow
+                                        }
+                                    }
                             })
                             .max_by(|a, b| {
                                 a.priority.cmp(&b.priority).then_with(|| {
@@ -2177,6 +2231,61 @@ impl DownloadManager {
             tasks.iter().map(|t| t.save_path.clone()).collect();
         conflict_detection::resolve_conflict(report, strategy, &existing_paths);
         report.resolved_path.clone()
+    }
+
+    /// Set the per-domain concurrent download limit configuration.
+    /// Persists to disk automatically.
+    pub async fn set_domain_limit_config(&self, config: domain_limit::DomainLimitConfig) {
+        *self.domain_limit.write().await = config.clone();
+        if let Err(e) = domain_limit::save_domain_limit_config(&config, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist domain limit config");
+        }
+    }
+
+    /// Get the current per-domain download limit configuration.
+    pub async fn get_domain_limit_config(&self) -> domain_limit::DomainLimitConfig {
+        self.domain_limit.read().await.clone()
+    }
+
+    /// Get a summary of per-domain download counts and limits.
+    pub async fn get_domain_limit_summary(&self) -> domain_limit::DomainLimitSummary {
+        let config = self.domain_limit.read().await.clone();
+        let tasks = self.tasks.lock().await;
+
+        let mut domain_counts: HashMap<String, u32> = HashMap::new();
+        for task in tasks.iter() {
+            if task.state == DownloadState::Downloading
+                && let Some(ref url) = task.source_url
+                && let Some(domain) = domain_limit::extract_domain(url)
+            {
+                *domain_counts.entry(domain).or_insert(0) += 1;
+            }
+        }
+
+        let mut entries: Vec<domain_limit::DomainLimitEntry> = domain_counts
+            .into_iter()
+            .map(|(domain, active)| {
+                let limit = config.get_limit(&domain);
+                domain_limit::DomainLimitEntry {
+                    domain,
+                    active,
+                    limit,
+                    at_limit: limit > 0 && active >= limit,
+                }
+            })
+            .collect();
+        entries.sort_by_key(|e| std::cmp::Reverse(e.active));
+
+        let total_active: u32 = entries.iter().map(|e| e.active).sum();
+        let domains_at_limit = entries.iter().filter(|e| e.at_limit).count() as u32;
+
+        domain_limit::DomainLimitSummary {
+            enabled: config.enabled,
+            default_limit: config.default_limit,
+            total_active,
+            domains_at_limit,
+            entries,
+        }
     }
 
     /// Log an audit event

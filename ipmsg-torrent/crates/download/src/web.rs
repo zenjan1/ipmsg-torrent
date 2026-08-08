@@ -156,6 +156,8 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/conflict", get(get_conflict_strategy))
         .route("/api/conflict", post(set_conflict_strategy))
         .route("/api/conflict/check", post(check_conflict))
+        .route("/api/domain-limit", get(get_domain_limit))
+        .route("/api/domain-limit", post(set_domain_limit))
         .route("/api/speed-history", get(get_all_speed_history))
         .route("/api/speed-history/:id", get(get_task_speed_history))
         .route(
@@ -475,6 +477,51 @@ async fn check_conflict(
         "action": format!("{:?}", report.action),
         "conflict": report.conflict.map(|c| format!("{:?}", c))
     }))
+}
+
+/// Get per-domain download limit configuration and status
+async fn get_domain_limit(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let summary = state.manager.get_domain_limit_summary().await;
+    Json(
+        serde_json::to_value(&summary)
+            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})),
+    )
+}
+
+/// Set per-domain download limit configuration
+async fn set_domain_limit(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let mut config = state.manager.get_domain_limit_config().await;
+
+    // Update enabled flag if provided
+    if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
+        config.enabled = enabled;
+    }
+
+    // Update default_limit if provided
+    if let Some(limit) = body.get("default_limit").and_then(|v| v.as_u64()) {
+        config.default_limit = limit as u32;
+    }
+
+    // Add domain override if provided
+    if let Some(domain) = body.get("domain").and_then(|v| v.as_str())
+        && let Some(limit) = body.get("limit").and_then(|v| v.as_u64())
+    {
+        config.set_domain_limit(domain, limit as u32);
+    }
+
+    // Remove domain override if requested
+    if let Some(domain) = body.get("remove_domain").and_then(|v| v.as_str()) {
+        config.remove_domain_limit(domain);
+    }
+
+    state.manager.set_domain_limit_config(config).await;
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({"status": "ok"})),
+    )
 }
 
 /// Get speed history for a specific task
