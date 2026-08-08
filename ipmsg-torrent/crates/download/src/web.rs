@@ -148,6 +148,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/auto-rules", get(list_auto_rules))
         .route("/api/auto-rules", post(add_auto_rule))
         .route("/api/auto-rules/:id/remove", post(remove_auto_rule))
+        .route("/api/health", get(get_queue_health))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -311,6 +312,15 @@ async fn get_status(State(state): State<Arc<WebState>>) -> Json<serde_json::Valu
 async fn get_stats(State(state): State<Arc<WebState>>) -> Json<crate::DownloadStats> {
     let stats = state.manager.get_stats().await;
     Json(stats)
+}
+
+/// Get queue health report
+async fn get_queue_health(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::queue_health::QueueHealthReport> {
+    let config = crate::queue_health::HealthMonitorConfig::default();
+    let report = state.manager.get_queue_health_report(&config).await;
+    Json(report)
 }
 
 /// Get bandwidth monitoring dashboard
@@ -1450,6 +1460,30 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_queue_health() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let report: crate::queue_health::QueueHealthReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report.summary.total_tasks, 0);
+        assert_eq!(report.summary.health_score, 100);
     }
 
     #[tokio::test]

@@ -21,6 +21,7 @@ pub mod notification;
 pub mod post_hooks;
 pub mod progress;
 pub mod proxy;
+pub mod queue_health;
 pub mod rate_limiter;
 pub mod rss_feed;
 pub mod save_path_manager;
@@ -2844,17 +2845,17 @@ impl DownloadManager {
                             task.state = DownloadState::Paused;
                         } else {
                             // Rotate mirror URLs: move failed primary to end, promote first mirror
-                            if !task.mirror_urls.is_empty() {
-                                if let Some(ref source_url) = task.source_url.clone() {
-                                    task.mirror_urls.push(source_url.clone());
-                                    let next_mirror = task.mirror_urls.remove(0);
-                                    task.source_url = Some(next_mirror);
-                                    tracing::info!(
-                                        task_id = %task_id_clone,
-                                        new_source = ?task.source_url,
-                                        "Rotated to mirror URL after primary failure"
-                                    );
-                                }
+                            if !task.mirror_urls.is_empty()
+                                && let Some(ref source_url) = task.source_url.clone()
+                            {
+                                task.mirror_urls.push(source_url.clone());
+                                let next_mirror = task.mirror_urls.remove(0);
+                                task.source_url = Some(next_mirror);
+                                tracing::info!(
+                                    task_id = %task_id_clone,
+                                    new_source = ?task.source_url,
+                                    "Rotated to mirror URL after primary failure"
+                                );
                             }
                             // Check if auto-retry is enabled and not exhausted
                             let max_retries = max_auto_retries_clone.load(Ordering::Relaxed);
@@ -3615,6 +3616,46 @@ impl DownloadManager {
         }
 
         stats
+    }
+
+    /// Analyze queue health and return a diagnostic report.
+    pub async fn get_queue_health_report(
+        &self,
+        config: &queue_health::HealthMonitorConfig,
+    ) -> queue_health::QueueHealthReport {
+        let tasks = self.tasks.lock().await;
+        let now = chrono::Utc::now();
+
+        let health_data: Vec<queue_health::TaskHealthData> = tasks
+            .iter()
+            .map(|t| {
+                let secs_since_progress = t
+                    .current_session_start
+                    .map(|s| (now - s).num_seconds().max(0) as f64)
+                    .unwrap_or(0.0);
+
+                queue_health::TaskHealthData {
+                    task_id: t.id.clone(),
+                    name: t.name.clone(),
+                    state: match t.state {
+                        DownloadState::Downloading => "Downloading".to_string(),
+                        DownloadState::Queued => "Queued".to_string(),
+                        DownloadState::Paused => "Paused".to_string(),
+                        DownloadState::Error => "Error".to_string(),
+                        DownloadState::Complete => "Complete".to_string(),
+                    },
+                    speed_bps: t.speed_bps,
+                    seconds_since_progress: secs_since_progress,
+                    auto_retry_count: t.auto_retry_count,
+                    has_mirrors: !t.mirror_urls.is_empty(),
+                    size: t.size,
+                    downloaded: t.downloaded,
+                }
+            })
+            .collect();
+        drop(tasks);
+
+        queue_health::analyze_queue_health(&health_data, config)
     }
 
     /// Pause all running downloads.

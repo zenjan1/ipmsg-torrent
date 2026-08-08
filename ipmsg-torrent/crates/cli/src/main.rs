@@ -115,6 +115,8 @@ enum Command {
     DlRmFailed,
     /// Show download statistics
     DlStats,
+    /// Show download queue health report
+    DlHealth,
     /// Add tags to a download task
     DlTag {
         task_id: String,
@@ -484,6 +486,7 @@ fn parse_command(input: &str) -> Command {
         "dlrmcompleted" | "dl-rm-completed" => Command::DlRmCompleted,
         "dlrmfailed" | "dl-rm-failed" => Command::DlRmFailed,
         "dlstats" | "dl-stats" => Command::DlStats,
+        "dlhealth" | "dl-health" | "dlh" => Command::DlHealth,
         "dltag" | "dl-tag" => {
             if parts.len() >= 3 {
                 let task_id = parts[1].to_string();
@@ -961,6 +964,7 @@ fn command_help() -> String {
         "/dlrmcompleted   - Remove all completed downloads",
         "/dlrmfailed      - Remove all failed downloads",
         "/dlstats         - Show download statistics",
+        "/dlhealth        - Show download queue health report",
         "/dltag <id> <tags>   - Add tags to a download (comma-separated)",
         "/dluntag <id> <tags> - Remove tags from a download",
         "/dltags [tag]    - List all tags, or filter tasks by tag",
@@ -1968,6 +1972,16 @@ async fn handle_command(
                 stats.by_protocol.magnet,
                 stats.by_protocol.p2p,
             );
+            let mut s = state.lock().await;
+            s.add_system_message("main", msg);
+        }
+        Command::DlHealth => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            let config = ipmsg_download::queue_health::HealthMonitorConfig::default();
+            let report = download_manager.get_queue_health_report(&config).await;
+            let msg = report.format_report();
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
         }
