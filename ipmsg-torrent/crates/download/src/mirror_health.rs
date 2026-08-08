@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_should_switch_logic() {
-        let config = MirrorHealthConfig {
+        let _config = MirrorHealthConfig {
             auto_switch: true,
             switch_threshold: 0.3,
             ..Default::default()

@@ -16,6 +16,7 @@ pub mod connection_pool;
 pub mod dht;
 pub mod disk_monitor;
 pub mod download_history;
+pub mod download_presets;
 pub mod ed2k;
 pub mod eta_estimator;
 pub mod magnet;
@@ -173,6 +174,8 @@ pub struct TaskInfoEvent {
     pub active_time_seconds: f64,
     /// Mirror/fallback URLs to try if the primary source fails
     pub mirror_urls: Vec<String>,
+    /// Per-task retry policy (None = use global default)
+    pub retry_policy: Option<RetryPolicy>,
 }
 
 impl TaskInfoEvent {
@@ -204,6 +207,7 @@ impl TaskInfoEvent {
             eta_seconds: task.eta_seconds(),
             active_time_seconds: task.active_time_seconds,
             mirror_urls: task.mirror_urls.clone(),
+            retry_policy: task.retry_policy,
         }
     }
 }
@@ -314,6 +318,50 @@ pub struct DownloadTask {
     pub current_session_start: Option<chrono::DateTime<chrono::Utc>>,
     /// Mirror/fallback URLs to try if the primary source fails (HTTP/Xunlei only)
     pub mirror_urls: Vec<String>,
+    /// Per-task retry policy (None = use global default)
+    pub retry_policy: Option<RetryPolicy>,
+}
+
+/// Per-task retry policy configuration
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct RetryPolicy {
+    /// Maximum retry attempts (0 = no retries)
+    pub max_retries: u32,
+    /// Backoff strategy for retry delays
+    pub backoff: RetryBackoff,
+}
+
+/// Backoff strategy for retry delays
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub enum RetryBackoff {
+    /// Fixed delay between retries (seconds)
+    Fixed(u64),
+    /// Exponential backoff: base * 2^retry_count (seconds)
+    Exponential { base_secs: u64 },
+    /// Linear backoff: base * retry_count (seconds)
+    Linear { base_secs: u64 },
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            backoff: RetryBackoff::Exponential { base_secs: 30 },
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// Calculate delay for the given retry attempt
+    pub fn calculate_delay(&self, retry_count: u32) -> u64 {
+        match self.backoff {
+            RetryBackoff::Fixed(secs) => secs,
+            RetryBackoff::Exponential { base_secs } => {
+                (base_secs * 2u64.pow(retry_count)).min(3600)
+            }
+            RetryBackoff::Linear { base_secs } => base_secs * (retry_count as u64 + 1),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -647,6 +695,8 @@ pub struct DownloadManager {
     audit_log: Arc<Mutex<AuditLog>>,
     /// Bandwidth schedule manager for time-based speed limits
     bandwidth_schedule: Arc<Mutex<BandwidthScheduleManager>>,
+    /// Download presets for reusable task configurations
+    download_presets: Arc<Mutex<Vec<download_presets::DownloadPreset>>>,
 }
 
 impl DownloadManager {
@@ -684,6 +734,7 @@ impl DownloadManager {
             url_dedup: Arc::new(tokio::sync::RwLock::new(url_dedup::DedupConfig::default())),
             audit_log: Arc::new(Mutex::new(AuditLog::new())),
             bandwidth_schedule: Arc::new(Mutex::new(BandwidthScheduleManager::new())),
+            download_presets: Arc::new(Mutex::new(Vec::new())),
         };
         dm.start_scheduler();
         dm
@@ -853,6 +904,7 @@ impl DownloadManager {
             url_dedup: Arc::new(tokio::sync::RwLock::new(url_dedup::DedupConfig::default())),
             audit_log: Arc::new(Mutex::new(AuditLog::new())),
             bandwidth_schedule: Arc::new(Mutex::new(BandwidthScheduleManager::new())),
+            download_presets: Arc::new(Mutex::new(Vec::new())),
         };
         // Restore audit log from disk
         if let Some(loaded_log) = audit_log::load_audit_log(&dm.data_dir) {
@@ -899,6 +951,10 @@ impl DownloadManager {
         // Restore bandwidth schedule from disk
         if let Ok(Some(schedule)) = load_bandwidth_schedule(&dm.data_dir).await {
             *dm.bandwidth_schedule.lock().await = schedule;
+        }
+        // Restore download presets from disk
+        if let Ok(presets) = download_presets::load_presets(&dm.data_dir) {
+            *dm.download_presets.lock().await = presets;
         }
         dm.start_scheduler();
         dm.start_bandwidth_scheduler();
@@ -1318,18 +1374,33 @@ impl DownloadManager {
                                                 }
                                             } else {
                                                 // Check if auto-retry is enabled and not exhausted
-                                                let max_retries =
-                                                    max_auto_retries_clone.load(Ordering::Relaxed);
-                                                let base_delay = auto_retry_base_delay_secs_clone
-                                                    .load(Ordering::Relaxed);
+                                                // Use per-task retry policy if available, otherwise global defaults
+                                                let (max_retries, delay_secs) =
+                                                    if let Some(ref policy) = task.retry_policy {
+                                                        (
+                                                            policy.max_retries,
+                                                            policy.calculate_delay(
+                                                                task.auto_retry_count,
+                                                            ),
+                                                        )
+                                                    } else {
+                                                        let global_max = max_auto_retries_clone
+                                                            .load(Ordering::Relaxed);
+                                                        let global_base =
+                                                            auto_retry_base_delay_secs_clone
+                                                                .load(Ordering::Relaxed);
+                                                        (
+                                                            global_max,
+                                                            (global_base
+                                                                * 2u64.pow(task.auto_retry_count))
+                                                            .min(3600),
+                                                        )
+                                                    };
 
                                                 if max_retries > 0
                                                     && task.auto_retry_count < max_retries
                                                 {
-                                                    // Schedule retry with exponential backoff
-                                                    let delay_secs = (base_delay
-                                                        * 2u64.pow(task.auto_retry_count))
-                                                    .min(3600);
+                                                    // Schedule retry with calculated delay
                                                     let retry_after = chrono::Utc::now()
                                                         + chrono::Duration::seconds(
                                                             delay_secs as i64,
@@ -1431,6 +1502,99 @@ impl DownloadManager {
     /// Get the current speed limit from bandwidth schedule
     pub async fn get_current_bandwidth_schedule_limit(&self) -> Option<u64> {
         self.bandwidth_schedule.lock().await.current_speed_limit()
+    }
+
+    // ========== Download Presets ==========
+
+    /// Add a download preset. Persists to disk.
+    pub async fn add_download_preset(&self, preset: download_presets::DownloadPreset) {
+        let mut presets = self.download_presets.lock().await;
+        // Remove existing preset with same id if any
+        presets.retain(|p| p.id != preset.id);
+        presets.push(preset);
+        if let Err(e) = download_presets::save_presets(&presets, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist download presets");
+        }
+    }
+
+    /// List all download presets
+    pub async fn list_download_presets(&self) -> Vec<download_presets::DownloadPreset> {
+        self.download_presets.lock().await.clone()
+    }
+
+    /// Remove a download preset by id. Returns true if removed.
+    pub async fn remove_download_preset(&self, id: &str) -> bool {
+        let mut presets = self.download_presets.lock().await;
+        let len_before = presets.len();
+        presets.retain(|p| p.id != id);
+        let removed = presets.len() < len_before;
+        if removed {
+            if let Err(e) = download_presets::save_presets(&presets, &self.data_dir) {
+                tracing::warn!(error = %e, "Failed to persist download presets");
+            }
+        }
+        removed
+    }
+
+    /// Get a download preset by id
+    pub async fn get_download_preset(&self, id: &str) -> Option<download_presets::DownloadPreset> {
+        self.download_presets
+            .lock()
+            .await
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+    }
+
+    /// Apply a preset to a task. Updates task tags, group, priority, speed limit, bandwidth weight.
+    /// Returns true if the preset was found and applied.
+    pub async fn apply_preset_to_task(&self, task_id: &str, preset_id: &str) -> bool {
+        let preset = match self.get_download_preset(preset_id).await {
+            Some(p) => p,
+            None => return false,
+        };
+        if !preset.enabled {
+            return false;
+        }
+
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            // Apply tags (merge, don't replace)
+            for tag in &preset.tags {
+                if !task.tags.contains(tag) {
+                    task.tags.push(tag.clone());
+                }
+            }
+            // Apply group if preset has one
+            if let Some(ref group) = preset.group {
+                task.group = Some(group.clone());
+            }
+            // Apply priority
+            task.priority = match preset.priority {
+                1 => DownloadPriority::Low,
+                3 => DownloadPriority::High,
+                _ => DownloadPriority::Normal,
+            };
+            // Apply speed limit
+            task.speed_limit_bps = preset.speed_limit_bps;
+            // Apply bandwidth weight
+            task.bandwidth_weight = preset.bandwidth_weight;
+            // Apply save path if preset has one
+            if let Some(ref path) = preset.save_path {
+                task.save_path = path.clone();
+            }
+            // Apply max retries if preset has one
+            if let Some(retries) = preset.max_retries {
+                task.retry_policy = Some(RetryPolicy {
+                    max_retries: retries,
+                    backoff: RetryBackoff::Exponential { base_secs: 30 },
+                });
+            }
+            task.updated_at = chrono::Utc::now();
+            true
+        } else {
+            false
+        }
     }
 
     /// Set maximum concurrent downloads (0 = unlimited).
@@ -1547,6 +1711,7 @@ impl DownloadManager {
                         checksum_algorithm: None,
                         active_time_seconds: 0.0,
                         mirror_urls: Vec::new(),
+                        retry_policy: None,
                         current_session_start: None,
                     };
 
@@ -1585,6 +1750,7 @@ impl DownloadManager {
                             eta_seconds: None,
                             active_time_seconds: 0.0,
                             mirror_urls: Vec::new(),
+                            retry_policy: None,
                         },
                     });
                     notify.notify_one();
@@ -2149,6 +2315,7 @@ impl DownloadManager {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -2224,6 +2391,7 @@ impl DownloadManager {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -2291,6 +2459,7 @@ impl DownloadManager {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -2361,6 +2530,7 @@ impl DownloadManager {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -2425,6 +2595,7 @@ impl DownloadManager {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -2717,6 +2888,7 @@ impl DownloadManager {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -4432,6 +4604,32 @@ impl DownloadManager {
         }
     }
 
+    /// Set per-task retry policy. Pass None to use global defaults.
+    pub async fn set_task_retry_policy(&self, task_id: &str, policy: Option<RetryPolicy>) -> bool {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            task.retry_policy = policy;
+            task.updated_at = chrono::Utc::now();
+            self.emit_event(TaskEvent::Updated {
+                task: TaskInfoEvent::from_task(task),
+            });
+            drop(tasks);
+            self.persist_tasks().await;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get per-task retry policy. Returns None if using global defaults.
+    pub async fn get_task_retry_policy(&self, task_id: &str) -> Option<RetryPolicy> {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .and_then(|t| t.retry_policy)
+    }
+
     /// Set expected checksum for a download task
     pub async fn set_task_checksum(
         &self,
@@ -5022,6 +5220,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5052,6 +5251,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5082,6 +5282,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -5204,6 +5405,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -5261,6 +5463,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -5311,6 +5514,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5341,6 +5545,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5371,6 +5576,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -5424,6 +5630,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5454,6 +5661,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -5497,6 +5705,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -5540,6 +5749,7 @@ mod tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
         assert!(task.tags.is_empty());
@@ -5577,6 +5787,7 @@ mod tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -5631,6 +5842,7 @@ mod tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -5677,6 +5889,7 @@ mod tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -5723,6 +5936,7 @@ mod tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -5769,6 +5983,7 @@ mod tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -5822,6 +6037,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -5852,6 +6068,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -5882,6 +6099,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             },
         ];
@@ -5927,6 +6145,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -5957,6 +6176,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -5987,6 +6207,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             },
         ];
@@ -6028,6 +6249,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6058,6 +6280,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6088,6 +6311,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             },
         ];
@@ -6131,6 +6355,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6161,6 +6386,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -6202,6 +6428,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6232,6 +6459,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6262,6 +6490,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -6308,6 +6537,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6338,6 +6568,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6368,6 +6599,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -6490,6 +6722,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -6540,6 +6773,7 @@ mod tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -6685,6 +6919,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -6752,6 +6987,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -6800,6 +7036,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6830,6 +7067,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6860,6 +7098,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -6934,6 +7173,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -6981,6 +7221,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -7025,6 +7266,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -7101,6 +7343,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -7154,6 +7397,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7184,6 +7428,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -7231,6 +7476,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7261,6 +7507,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -7308,6 +7555,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7338,6 +7586,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7368,6 +7617,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -7413,6 +7663,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7443,6 +7694,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7473,6 +7725,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -7519,6 +7772,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7549,6 +7803,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7579,6 +7834,7 @@ mod tests {
                 checksum_algorithm: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
                 current_session_start: None,
             });
         }
@@ -8663,6 +8919,7 @@ mod max_concurrent_tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -8713,6 +8970,7 @@ mod max_concurrent_tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -8762,6 +9020,7 @@ mod max_concurrent_tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         };
 
@@ -8816,6 +9075,7 @@ mod max_concurrent_tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         });
         drop(tasks);
@@ -8880,6 +9140,7 @@ mod max_concurrent_tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         });
         drop(tasks);
@@ -8942,6 +9203,7 @@ mod max_concurrent_tests {
             checksum_algorithm: None,
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             current_session_start: None,
         });
         drop(tasks);
@@ -8951,5 +9213,360 @@ mod max_concurrent_tests {
             .find_duplicate_by_url("https://example.com/file.zip")
             .await;
         assert_eq!(dup, None);
+    }
+
+    #[tokio::test]
+    async fn test_set_get_task_retry_policy() {
+        let temp_dir = tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Add a task
+        let sources = vec![xunlei::XunleiSource::Http {
+            url: "https://example.com/file.zip".to_string(),
+            cookies: None,
+            referer: None,
+        }];
+        dm.add_xunlei("file.zip".to_string(), 1024, sources)
+            .await
+            .unwrap();
+
+        let tasks = dm.list_tasks().await;
+        let task_id = tasks[0].id.clone();
+
+        // Initially, retry policy should be None (use global defaults)
+        let policy = dm.get_task_retry_policy(&task_id).await;
+        assert!(policy.is_none());
+
+        // Set a custom retry policy
+        let custom_policy = RetryPolicy {
+            max_retries: 10,
+            backoff: RetryBackoff::Linear { base_secs: 60 },
+        };
+        let success = dm
+            .set_task_retry_policy(&task_id, Some(custom_policy))
+            .await;
+        assert!(success);
+
+        // Verify the policy was set
+        let policy = dm.get_task_retry_policy(&task_id).await;
+        assert!(policy.is_some());
+        let policy = policy.unwrap();
+        assert_eq!(policy.max_retries, 10);
+        match policy.backoff {
+            RetryBackoff::Linear { base_secs } => assert_eq!(base_secs, 60),
+            _ => panic!("Expected Linear backoff"),
+        }
+
+        // Clear the policy
+        let success = dm.set_task_retry_policy(&task_id, None).await;
+        assert!(success);
+
+        let policy = dm.get_task_retry_policy(&task_id).await;
+        assert!(policy.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_retry_policy_nonexistent_task() {
+        let temp_dir = tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        let policy = RetryPolicy {
+            max_retries: 5,
+            backoff: RetryBackoff::Exponential { base_secs: 30 },
+        };
+
+        // Setting policy for non-existent task should return false
+        let success = dm.set_task_retry_policy("nonexistent", Some(policy)).await;
+        assert!(!success);
+
+        // Getting policy for non-existent task should return None
+        let policy = dm.get_task_retry_policy("nonexistent").await;
+        assert!(policy.is_none());
+    }
+
+    #[test]
+    fn test_retry_policy_calculate_delay() {
+        // Test Fixed backoff
+        let fixed_policy = RetryPolicy {
+            max_retries: 5,
+            backoff: RetryBackoff::Fixed(60),
+        };
+        assert_eq!(fixed_policy.calculate_delay(0), 60);
+        assert_eq!(fixed_policy.calculate_delay(1), 60);
+        assert_eq!(fixed_policy.calculate_delay(5), 60);
+
+        // Test Exponential backoff
+        let exp_policy = RetryPolicy {
+            max_retries: 5,
+            backoff: RetryBackoff::Exponential { base_secs: 30 },
+        };
+        assert_eq!(exp_policy.calculate_delay(0), 30); // 30 * 2^0 = 30
+        assert_eq!(exp_policy.calculate_delay(1), 60); // 30 * 2^1 = 60
+        assert_eq!(exp_policy.calculate_delay(2), 120); // 30 * 2^2 = 120
+        assert_eq!(exp_policy.calculate_delay(5), 960); // 30 * 2^5 = 960
+        assert_eq!(exp_policy.calculate_delay(10), 3600); // Capped at 3600
+
+        // Test Linear backoff
+        let linear_policy = RetryPolicy {
+            max_retries: 5,
+            backoff: RetryBackoff::Linear { base_secs: 30 },
+        };
+        assert_eq!(linear_policy.calculate_delay(0), 30); // 30 * (0+1) = 30
+        assert_eq!(linear_policy.calculate_delay(1), 60); // 30 * (1+1) = 60
+        assert_eq!(linear_policy.calculate_delay(2), 90); // 30 * (2+1) = 90
+        assert_eq!(linear_policy.calculate_delay(5), 180); // 30 * (5+1) = 180
+    }
+
+    #[test]
+    fn test_retry_policy_default() {
+        let default_policy = RetryPolicy::default();
+        assert_eq!(default_policy.max_retries, 3);
+        match default_policy.backoff {
+            RetryBackoff::Exponential { base_secs } => assert_eq!(base_secs, 30),
+            _ => panic!("Expected Exponential backoff as default"),
+        }
+    }
+
+    // ========== Download Presets Tests ==========
+
+    #[tokio::test]
+    async fn test_add_and_list_download_presets() {
+        let temp_dir = tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Initially empty
+        let presets = dm.list_download_presets().await;
+        assert!(presets.is_empty());
+
+        // Add a preset
+        let mut preset =
+            download_presets::DownloadPreset::new("fast".to_string(), "Fast Downloads".to_string());
+        preset.tags = vec!["fast".to_string(), "priority".to_string()];
+        preset.priority = 3;
+        preset.speed_limit_bps = Some(1_048_576);
+
+        dm.add_download_preset(preset.clone()).await;
+
+        // List should have 1
+        let presets = dm.list_download_presets().await;
+        assert_eq!(presets.len(), 1);
+        assert_eq!(presets[0].id, "fast");
+        assert_eq!(presets[0].name, "Fast Downloads");
+        assert_eq!(presets[0].priority, 3);
+        assert_eq!(presets[0].speed_limit_bps, Some(1_048_576));
+        assert_eq!(presets[0].tags.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_remove_download_preset() {
+        let temp_dir = tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        let preset = download_presets::DownloadPreset::new("temp".to_string(), "Temp".to_string());
+        dm.add_download_preset(preset).await;
+
+        assert_eq!(dm.list_download_presets().await.len(), 1);
+
+        // Remove existing
+        let removed = dm.remove_download_preset("temp").await;
+        assert!(removed);
+        assert!(dm.list_download_presets().await.is_empty());
+
+        // Remove non-existent
+        let removed = dm.remove_download_preset("nonexistent").await;
+        assert!(!removed);
+    }
+
+    #[tokio::test]
+    async fn test_get_download_preset() {
+        let temp_dir = tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        let preset =
+            download_presets::DownloadPreset::new("media".to_string(), "Media".to_string());
+        dm.add_download_preset(preset).await;
+
+        let found = dm.get_download_preset("media").await;
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "Media");
+
+        let not_found = dm.get_download_preset("nonexistent").await;
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_apply_preset_to_task() {
+        let temp_dir = tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Add a task
+        let sources = vec![xunlei::XunleiSource::Http {
+            url: "https://example.com/file.zip".to_string(),
+            cookies: None,
+            referer: None,
+        }];
+        dm.add_xunlei("file.zip".to_string(), 1024, sources)
+            .await
+            .unwrap();
+
+        let tasks = dm.list_tasks().await;
+        let task_id = tasks[0].id.clone();
+
+        // Create and add a preset
+        let mut preset =
+            download_presets::DownloadPreset::new("vip".to_string(), "VIP Downloads".to_string());
+        preset.tags = vec!["vip".to_string(), "important".to_string()];
+        preset.group = Some("premium".to_string());
+        preset.priority = 3;
+        preset.speed_limit_bps = Some(2_097_152);
+        preset.bandwidth_weight = 8;
+        preset.max_retries = Some(10);
+
+        dm.add_download_preset(preset).await;
+
+        // Apply preset
+        let applied = dm.apply_preset_to_task(&task_id, "vip").await;
+        assert!(applied);
+
+        // Verify task was updated
+        let tasks = dm.list_tasks().await;
+        let task = tasks.iter().find(|t| t.id == task_id).unwrap();
+        assert!(task.tags.contains(&"vip".to_string()));
+        assert!(task.tags.contains(&"important".to_string()));
+        assert_eq!(task.group, Some("premium".to_string()));
+        assert_eq!(task.priority, DownloadPriority::High);
+        assert_eq!(task.speed_limit_bps, Some(2_097_152));
+        assert_eq!(task.bandwidth_weight, 8);
+        assert!(task.retry_policy.is_some());
+        assert_eq!(task.retry_policy.unwrap().max_retries, 10);
+    }
+
+    #[tokio::test]
+    async fn test_apply_preset_disabled() {
+        let temp_dir = tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Add a task
+        let sources = vec![xunlei::XunleiSource::Http {
+            url: "https://example.com/file.zip".to_string(),
+            cookies: None,
+            referer: None,
+        }];
+        dm.add_xunlei("file.zip".to_string(), 1024, sources)
+            .await
+            .unwrap();
+
+        let tasks = dm.list_tasks().await;
+        let task_id = tasks[0].id.clone();
+
+        // Create a disabled preset
+        let mut preset =
+            download_presets::DownloadPreset::new("disabled".to_string(), "Disabled".to_string());
+        preset.enabled = false;
+        preset.priority = 3;
+
+        dm.add_download_preset(preset).await;
+
+        // Apply disabled preset should fail
+        let applied = dm.apply_preset_to_task(&task_id, "disabled").await;
+        assert!(!applied);
+
+        // Task should remain unchanged
+        let tasks = dm.list_tasks().await;
+        let task = tasks.iter().find(|t| t.id == task_id).unwrap();
+        assert_eq!(task.priority, DownloadPriority::Normal);
+    }
+
+    #[tokio::test]
+    async fn test_preset_persistence() {
+        let temp_dir = tempdir().unwrap();
+
+        // Create DM and add presets
+        {
+            let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+            let mut preset1 =
+                download_presets::DownloadPreset::new("a".to_string(), "Preset A".to_string());
+            preset1.tags = vec!["tag1".to_string()];
+            let preset2 =
+                download_presets::DownloadPreset::new("b".to_string(), "Preset B".to_string());
+
+            dm.add_download_preset(preset1).await;
+            dm.add_download_preset(preset2).await;
+
+            assert_eq!(dm.list_download_presets().await.len(), 2);
+        }
+
+        // Restore DM - presets should be loaded from disk
+        {
+            let dm = DownloadManager::new_with_restore(temp_dir.path().to_path_buf()).await;
+            let presets = dm.list_download_presets().await;
+            assert_eq!(presets.len(), 2);
+            assert_eq!(presets[0].id, "a");
+            assert_eq!(presets[1].id, "b");
+            assert_eq!(presets[0].tags, vec!["tag1".to_string()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_preset_replaces_existing() {
+        let temp_dir = tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Add preset with id "test"
+        let preset1 =
+            download_presets::DownloadPreset::new("test".to_string(), "Version 1".to_string());
+        dm.add_download_preset(preset1).await;
+
+        assert_eq!(dm.list_download_presets().await.len(), 1);
+        assert_eq!(
+            dm.get_download_preset("test").await.unwrap().name,
+            "Version 1"
+        );
+
+        // Add another preset with same id - should replace
+        let preset2 =
+            download_presets::DownloadPreset::new("test".to_string(), "Version 2".to_string());
+        dm.add_download_preset(preset2).await;
+
+        // Should still be 1 preset, but with updated name
+        let presets = dm.list_download_presets().await;
+        assert_eq!(presets.len(), 1);
+        assert_eq!(presets[0].name, "Version 2");
+    }
+
+    #[tokio::test]
+    async fn test_apply_preset_nonexistent_task() {
+        let temp_dir = tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        let preset = download_presets::DownloadPreset::new("test".to_string(), "Test".to_string());
+        dm.add_download_preset(preset).await;
+
+        // Apply to non-existent task
+        let applied = dm.apply_preset_to_task("nonexistent", "test").await;
+        assert!(!applied);
+    }
+
+    #[tokio::test]
+    async fn test_apply_nonexistent_preset() {
+        let temp_dir = tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // Add a task
+        let sources = vec![xunlei::XunleiSource::Http {
+            url: "https://example.com/file.zip".to_string(),
+            cookies: None,
+            referer: None,
+        }];
+        dm.add_xunlei("file.zip".to_string(), 1024, sources)
+            .await
+            .unwrap();
+
+        let tasks = dm.list_tasks().await;
+        let task_id = tasks[0].id.clone();
+
+        // Apply non-existent preset
+        let applied = dm.apply_preset_to_task(&task_id, "nonexistent").await;
+        assert!(!applied);
     }
 }

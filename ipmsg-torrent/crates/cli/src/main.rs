@@ -322,6 +322,18 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Manage download presets
+    DlPreset {
+        /// Subcommand: "list", "add", "del", "apply", "show"
+        subcommand: String,
+        args: Vec<String>,
+    },
+    /// Set per-task retry policy
+    DlRetryPolicy {
+        task_id: String,
+        /// "none" to clear, or "fixed|exponential|linear <base_secs>"
+        policy_args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -875,10 +887,48 @@ fn parse_command(input: &str) -> Command {
             };
             Command::DlBwSchedule { subcommand, args }
         }
+        "dlpreset" | "dl-preset" | "dlpr" => {
+            let subcommand = if parts.len() >= 2 {
+                parts[1].to_string()
+            } else {
+                "list".to_string()
+            };
+            let args: Vec<String> = if parts.len() >= 3 {
+                parts[2..]
+                    .join(" ")
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect()
+            } else {
+                vec![]
+            };
+            Command::DlPreset { subcommand, args }
+        }
         "dlarules" | "dl-auto-rules" | "dlars" => Command::DlAutoRule {
             subcommand: "list".to_string(),
             args: vec![],
         },
+        "dlretry" | "dl-retry" | "dlrp" => {
+            // /dlretry <task_id> [none|fixed <secs>|exponential <secs>|linear <secs>]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlretry <task_id> [none|fixed <secs>|exponential <secs>|linear <secs>]"
+                        .to_string(),
+                )
+            } else {
+                let task_id = args[0].clone();
+                let policy_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    vec![]
+                };
+                Command::DlRetryPolicy {
+                    task_id,
+                    policy_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1058,6 +1108,8 @@ fn command_help() -> String {
         "/dleta [task_id]   - Show ETA estimates for active downloads",
         "/dlaudit [cmd]     - Audit log (status|recent [n]|task <id>|clear)",
         "/dlbwsched [cmd]   - Bandwidth schedule (status|list|add|del)",
+        "/dlpreset [cmd]    - Download presets (list|show|add|del|apply)",
+        "/dlretry <task_id> [none|fixed|exp|linear <secs>] - Per-task retry policy",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -2395,6 +2447,204 @@ async fn handle_command(
                     let mut s = state.lock().await;
                     s.add_system_message("main", "Usage: /dlbwsched [status|list|add <name> <HH:MM-HH:MM> <speed> [days]|del <rule_id>]".to_string());
                 }
+            }
+        }
+        Command::DlPreset { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "list" | "" => {
+                    let presets = download_manager.list_download_presets().await;
+                    let mut output = "📋 Download Presets:\n".to_string();
+                    if presets.is_empty() {
+                        output.push_str("  (no presets configured)\n");
+                    } else {
+                        for preset in presets.iter() {
+                            let status = if preset.enabled { "✅" } else { "❌" };
+                            output.push_str(&format!(
+                                "  {} [{}] {} (priority: {}, tags: [{}])\n",
+                                status,
+                                preset.id,
+                                preset.name,
+                                match preset.priority {
+                                    1 => "Low",
+                                    3 => "High",
+                                    _ => "Normal",
+                                },
+                                preset.tags.join(", ")
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", output);
+                }
+                "show" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpreset show <preset_id>".to_string(),
+                        );
+                        return;
+                    }
+                    let preset_id = &args[0];
+                    if let Some(preset) = download_manager.get_download_preset(preset_id).await {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", preset.display());
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("Preset '{}' not found", preset_id));
+                    }
+                }
+                "add" => {
+                    // /dlpreset add <id> <name> [tags] [group] [priority] [speed_limit]
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpreset add <id> <name> [tags] [group] [priority] [speed_limit]".to_string(),
+                        );
+                        return;
+                    }
+                    let id = &args[0];
+                    let name = &args[1];
+                    let mut preset = ipmsg_download::download_presets::DownloadPreset::new(
+                        id.to_string(),
+                        name.to_string(),
+                    );
+                    if args.len() >= 3 {
+                        preset.tags = args[2]
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                    if args.len() >= 4 {
+                        preset.group = Some(args[3].clone());
+                    }
+                    if args.len() >= 5
+                        && let Some(p) = ipmsg_download::download_presets::parse_priority(&args[4])
+                    {
+                        preset.priority = p;
+                    }
+                    if args.len() >= 6
+                        && let Some(speed) = ipmsg_download::parse_speed_limit(&args[5])
+                    {
+                        preset.speed_limit_bps = Some(speed);
+                    }
+                    download_manager.add_download_preset(preset).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("✅ Added preset: {} ({})", name, id));
+                }
+                "del" | "remove" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpreset del <preset_id>".to_string(),
+                        );
+                        return;
+                    }
+                    let preset_id = &args[0];
+                    let removed = download_manager.remove_download_preset(preset_id).await;
+                    let mut s = state.lock().await;
+                    if removed {
+                        s.add_system_message("main", format!("🗑️ Removed preset {}", preset_id));
+                    } else {
+                        s.add_system_message("main", format!("Preset {} not found", preset_id));
+                    }
+                }
+                "apply" => {
+                    // /dlpreset apply <preset_id> <task_id>
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpreset apply <preset_id> <task_id>".to_string(),
+                        );
+                        return;
+                    }
+                    let preset_id = &args[0];
+                    let task_id = &args[1];
+                    let applied = download_manager
+                        .apply_preset_to_task(task_id, preset_id)
+                        .await;
+                    let mut s = state.lock().await;
+                    if applied {
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Applied preset '{}' to task {}", preset_id, task_id),
+                        );
+                    } else {
+                        s.add_system_message("main", "Failed to apply preset (preset not found, disabled, or task not found)".to_string());
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Usage: /dlpreset [list|show <id>|add <id> <name> [tags] [group] [priority] [speed]|del <id>|apply <preset_id> <task_id>]".to_string());
+                }
+            }
+        }
+        Command::DlRetryPolicy {
+            task_id,
+            policy_args,
+        } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let policy = if policy_args.is_empty() || policy_args[0] == "none" {
+                None
+            } else {
+                let backoff_type = &policy_args[0];
+                let base_secs: u64 = policy_args
+                    .get(1)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(30);
+                let backoff = match backoff_type.as_str() {
+                    "fixed" | "f" => ipmsg_download::RetryBackoff::Fixed(base_secs),
+                    "linear" | "l" => ipmsg_download::RetryBackoff::Linear { base_secs },
+                    "exponential" | "exp" | "e" => {
+                        ipmsg_download::RetryBackoff::Exponential { base_secs }
+                    }
+                    _ => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "Unknown backoff type '{}'. Use: fixed, exponential, linear",
+                                backoff_type
+                            ),
+                        );
+                        return;
+                    }
+                };
+                Some(ipmsg_download::RetryPolicy {
+                    max_retries: 5,
+                    backoff,
+                })
+            };
+
+            let success = download_manager
+                .set_task_retry_policy(&task_id, policy)
+                .await;
+            let mut s = state.lock().await;
+            if success {
+                let msg = match policy {
+                    Some(p) => format!(
+                        "✅ Retry policy set for task {}: max_retries={}, backoff={:?}",
+                        task_id, p.max_retries, p.backoff
+                    ),
+                    None => format!(
+                        "✅ Retry policy cleared for task {} (using global defaults)",
+                        task_id
+                    ),
+                };
+                s.add_system_message("main", msg);
+            } else {
+                s.add_system_message("main", format!("Task {} not found", task_id));
             }
         }
         Command::DlTag { task_id, tags } => {

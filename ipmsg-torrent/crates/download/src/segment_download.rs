@@ -767,7 +767,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_progress_file_size_mismatch() {
         let tmp_dir = tempdir().unwrap();
-        let mut downloader = SegmentDownloader::new(
+        let downloader = SegmentDownloader::new(
             "http://example.com/file.zip".to_string(),
             "file.zip".to_string(),
             10 * 1024 * 1024, // 10MB to get 4 segments

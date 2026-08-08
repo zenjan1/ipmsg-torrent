@@ -253,6 +253,7 @@ mod tests {
             active_time_seconds: 0.0,
             current_session_start: None,
             mirror_urls: Vec::new(),
+            retry_policy: None,
         }
     }
 

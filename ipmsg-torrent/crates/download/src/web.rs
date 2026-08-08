@@ -167,6 +167,15 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/bandwidth-schedule/:id",
             post(remove_bandwidth_schedule_rule),
         )
+        .route("/api/download-presets", get(list_download_presets))
+        .route("/api/download-presets", post(add_download_preset))
+        .route("/api/download-presets/:id", post(remove_download_preset))
+        .route(
+            "/api/download-presets/:id/apply/:task_id",
+            post(apply_download_preset),
+        )
+        .route("/api/retry-policy", get(get_retry_policy))
+        .route("/api/retry-policy", post(set_retry_policy))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1437,6 +1446,64 @@ async fn remove_bandwidth_schedule_rule(
     })
 }
 
+/// List all download presets
+async fn list_download_presets(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::download_presets::DownloadPreset>> {
+    let presets = state.manager.list_download_presets().await;
+    Json(presets)
+}
+
+/// Add a download preset
+async fn add_download_preset(
+    State(state): State<Arc<WebState>>,
+    Json(preset): Json<crate::download_presets::DownloadPreset>,
+) -> Json<TaskResponse> {
+    state.manager.add_download_preset(preset.clone()).await;
+    Json(TaskResponse {
+        success: true,
+        message: format!("Added download preset: {}", preset.name),
+        task_id: Some(preset.id),
+    })
+}
+
+/// Remove a download preset
+async fn remove_download_preset(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<TaskResponse> {
+    let removed = state.manager.remove_download_preset(&id).await;
+    Json(TaskResponse {
+        success: removed,
+        message: if removed {
+            format!("Removed preset {}", id)
+        } else {
+            format!("Preset {} not found", id)
+        },
+        task_id: None,
+    })
+}
+
+/// Apply a preset to a task
+async fn apply_download_preset(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path((preset_id, task_id)): axum::extract::Path<(String, String)>,
+) -> Json<TaskResponse> {
+    let applied = state
+        .manager
+        .apply_preset_to_task(&task_id, &preset_id)
+        .await;
+    Json(TaskResponse {
+        success: applied,
+        message: if applied {
+            format!("Applied preset {} to task {}", preset_id, task_id)
+        } else {
+            format!("Failed to apply preset (not found, disabled, or task not found)")
+        },
+        task_id: Some(task_id),
+    })
+}
+
 /// Serve the index HTML page
 async fn index_html() -> &'static str {
     include_str!("web/index.html")
@@ -1455,6 +1522,88 @@ pub async fn start_server(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Request to set per-task retry policy
+#[derive(Debug, Deserialize)]
+struct SetRetryPolicyRequest {
+    task_id: String,
+    /// None to clear (use global defaults)
+    max_retries: Option<u32>,
+    /// "fixed", "exponential", or "linear"
+    backoff_type: Option<String>,
+    /// Base delay in seconds (for exponential/linear) or fixed delay
+    base_secs: Option<u64>,
+}
+
+/// GET /api/retry-policy?task_id=xxx
+async fn get_retry_policy(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let task_id = params.get("task_id").ok_or(StatusCode::BAD_REQUEST)?;
+    let policy = state.manager.get_task_retry_policy(task_id).await;
+    Ok(Json(match policy {
+        Some(p) => serde_json::json!({
+            "task_id": task_id,
+            "max_retries": p.max_retries,
+            "backoff_type": match p.backoff {
+                crate::RetryBackoff::Fixed(_) => "fixed",
+                crate::RetryBackoff::Exponential { .. } => "exponential",
+                crate::RetryBackoff::Linear { .. } => "linear",
+            },
+            "base_secs": match p.backoff {
+                crate::RetryBackoff::Fixed(s) => s,
+                crate::RetryBackoff::Exponential { base_secs } => base_secs,
+                crate::RetryBackoff::Linear { base_secs } => base_secs,
+            },
+        }),
+        None => serde_json::json!({
+            "task_id": task_id,
+            "max_retries": null,
+            "backoff_type": null,
+            "base_secs": null,
+        }),
+    }))
+}
+
+/// POST /api/retry-policy
+async fn set_retry_policy(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SetRetryPolicyRequest>,
+) -> Result<Json<TaskResponse>, StatusCode> {
+    let policy = match (req.max_retries, req.backoff_type, req.base_secs) {
+        (None, _, _) => None,
+        (Some(max_retries), backoff_type, base_secs) => {
+            let backoff = match backoff_type.as_deref() {
+                Some("fixed") => crate::RetryBackoff::Fixed(base_secs.unwrap_or(60)),
+                Some("linear") => crate::RetryBackoff::Linear {
+                    base_secs: base_secs.unwrap_or(30),
+                },
+                _ => crate::RetryBackoff::Exponential {
+                    base_secs: base_secs.unwrap_or(30),
+                },
+            };
+            Some(crate::RetryPolicy {
+                max_retries,
+                backoff,
+            })
+        }
+    };
+
+    if state
+        .manager
+        .set_task_retry_policy(&req.task_id, policy)
+        .await
+    {
+        Ok(Json(TaskResponse {
+            success: true,
+            task_id: Some(req.task_id.clone()),
+            message: "Retry policy updated".to_string(),
+        }))
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
 }
 
 #[cfg(test)]
@@ -1567,6 +1716,7 @@ mod tests {
                 eta_seconds: None,
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -2076,6 +2226,7 @@ mod tests {
             active_time_seconds: 0.0,
             current_session_start: None,
             mirror_urls: Vec::new(),
+            retry_policy: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

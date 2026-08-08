@@ -49,6 +49,8 @@ pub struct PersistedTask {
     pub checksum_algorithm: Option<crate::checksum::ChecksumAlgorithm>,
     #[serde(default)]
     pub mirror_urls: Vec<String>,
+    #[serde(default)]
+    pub retry_policy: Option<crate::RetryPolicy>,
 }
 
 fn default_bandwidth_weight() -> u8 {
@@ -149,6 +151,7 @@ impl From<DownloadTask> for PersistedTask {
             expected_checksum: t.expected_checksum,
             checksum_algorithm: t.checksum_algorithm,
             mirror_urls: t.mirror_urls.clone(),
+            retry_policy: t.retry_policy,
         }
     }
 }
@@ -184,6 +187,7 @@ impl From<PersistedTask> for DownloadTask {
             mirror_urls: t.mirror_urls.clone(),
             active_time_seconds: 0.0,
             current_session_start: None,
+            retry_policy: t.retry_policy,
         }
     }
 }
@@ -298,6 +302,7 @@ mod tests {
             active_time_seconds: 0.0,
             current_session_start: None,
             mirror_urls: Vec::new(),
+            retry_policy: None,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -365,6 +370,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 current_session_start: None,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -395,6 +401,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 current_session_start: None,
                 mirror_urls: Vec::new(),
+                retry_policy: None,
             },
         ];
 
@@ -454,6 +461,7 @@ mod tests {
             active_time_seconds: 0.0,
             current_session_start: None,
             mirror_urls: Vec::new(),
+            retry_policy: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();
