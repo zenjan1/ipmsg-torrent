@@ -21,6 +21,7 @@ pub mod domain_limit;
 pub mod download_cooldown;
 pub mod download_history;
 pub mod download_presets;
+pub mod download_stats;
 pub mod ed2k;
 pub mod eta_estimator;
 pub mod magnet;
@@ -729,6 +730,8 @@ pub struct DownloadManager {
     path_template: Arc<path_template::PathTemplateManager>,
     /// Daily data cap manager for limiting bandwidth usage
     data_cap: Arc<Mutex<data_cap::DataCapManager>>,
+    /// Download statistics manager for analytics
+    stats_manager: Arc<Mutex<download_stats::StatsManager>>,
 }
 
 impl DownloadManager {
@@ -780,6 +783,7 @@ impl DownloadManager {
             url_rewrite: Arc::new(Mutex::new(url_rewrite::UrlRewriteManager::new())),
             path_template: Arc::new(path_template::PathTemplateManager::new()),
             data_cap: Arc::new(Mutex::new(data_cap::DataCapManager::new())),
+            stats_manager: Arc::new(Mutex::new(download_stats::StatsManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -963,6 +967,7 @@ impl DownloadManager {
             url_rewrite: Arc::new(Mutex::new(url_rewrite::UrlRewriteManager::new())),
             path_template: Arc::new(path_template::PathTemplateManager::new()),
             data_cap: Arc::new(Mutex::new(data_cap::DataCapManager::new())),
+            stats_manager: Arc::new(Mutex::new(download_stats::StatsManager::new())),
         };
         // Restore data cap config from disk
         if let Some(loaded_cap) = data_cap::load_data_cap(&dm.data_dir) {
@@ -2433,6 +2438,20 @@ impl DownloadManager {
         if let Err(e) = data_cap::save_data_cap(&dc, &self.data_dir) {
             tracing::warn!(error = %e, "Failed to persist data cap reset");
         }
+    }
+
+    // ── Download Statistics ──────────────────────────────────────────
+
+    /// Get download statistics
+    pub async fn get_download_stats(&self) -> download_stats::DownloadStatistics {
+        let sm = self.stats_manager.lock().await;
+        sm.get_stats().clone()
+    }
+
+    /// Reset download statistics
+    pub async fn reset_download_stats(&self) {
+        let mut sm = self.stats_manager.lock().await;
+        sm.reset();
     }
 
     /// Set the conflict detection strategy.

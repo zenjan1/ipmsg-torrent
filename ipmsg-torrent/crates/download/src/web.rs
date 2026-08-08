@@ -202,6 +202,8 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/data-cap", post(set_data_cap_config))
         .route("/api/data-cap/enable", post(set_data_cap_enabled))
         .route("/api/data-cap/reset", post(reset_data_cap_today))
+        .route("/api/stats/download", get(get_download_stats))
+        .route("/api/stats/download/reset", post(reset_download_stats))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -504,6 +506,20 @@ async fn set_data_cap_enabled(
 /// Reset today's data cap usage
 async fn reset_data_cap_today(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     state.manager.reset_data_cap_today().await;
+    Json(serde_json::json!({"success": true}))
+}
+
+/// Get download statistics
+async fn get_download_stats(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::download_stats::DownloadStatistics> {
+    let stats = state.manager.get_download_stats().await;
+    Json(stats)
+}
+
+/// Reset download statistics
+async fn reset_download_stats(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    state.manager.reset_download_stats().await;
     Json(serde_json::json!({"success": true}))
 }
 
@@ -3182,5 +3198,55 @@ mod tests {
 
         let status = state.manager.get_data_cap_status().await;
         assert_eq!(status.today_usage.bytes_downloaded, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_download_stats() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/stats/download")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("total_downloads").is_some());
+        assert!(json.get("total_completed").is_some());
+        assert!(json.get("total_failed").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_reset_download_stats() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/stats/download/reset")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true);
     }
 }

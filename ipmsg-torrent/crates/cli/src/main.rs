@@ -146,6 +146,11 @@ enum Command {
         /// "status", "set <limit>", "enable", "disable", "reset"
         args: Vec<String>,
     },
+    /// View and manage download statistics
+    DlStats2 {
+        /// "show", "reset"
+        action: String,
+    },
     /// Add tags to a download task
     DlTag {
         task_id: String,
@@ -591,6 +596,17 @@ fn parse_command(input: &str) -> Command {
         "dldcap" | "dl-dcap" | "dldc" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlDataCap { args }
+        }
+        "dlstats2" | "dl-stats2" => {
+            if parts.len() >= 2 {
+                Command::DlStats2 {
+                    action: parts[1].to_string(),
+                }
+            } else {
+                Command::DlStats2 {
+                    action: "show".to_string(),
+                }
+            }
         }
         "dltag" | "dl-tag" => {
             if parts.len() >= 3 {
@@ -1194,6 +1210,7 @@ fn command_help() -> String {
         "/dldedup [cmd]     - URL dedup policy (status|set <mode>|enable|disable)",
         "/dlrewrite [cmd]   - URL rewrite rules (status|add|del|preview|enable|disable)",
         "/dldcap [cmd]      - Daily data cap (status|set <limit>|enable|disable|reset)",
+        "/dlstats2 [cmd]    - Download statistics (show|reset)",
         "/dltag <id> <tags>   - Add tags to a download (comma-separated)",
         "/dluntag <id> <tags> - Remove tags from a download",
         "/dltags [tag]    - List all tags, or filter tasks by tag",
@@ -2631,6 +2648,28 @@ async fn handle_command(
                             "Usage: /dldcap [status|set <limit>|enable|disable|reset]".to_string(),
                         );
                     }
+                }
+            }
+        }
+        Command::DlStats2 { action } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match action.as_str() {
+                "show" => {
+                    let stats = download_manager.get_download_stats().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", stats.format_display());
+                }
+                "reset" => {
+                    download_manager.reset_download_stats().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "✅ Download statistics reset".to_string());
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Usage: /dlstats2 [show|reset]".to_string());
                 }
             }
         }
@@ -6159,5 +6198,41 @@ mod save_path_tests {
     fn test_help_contains_dcap() {
         let help = command_help();
         assert!(help.contains("/dldcap"));
+    }
+
+    #[test]
+    fn test_parse_dlstats2() {
+        match parse_command("/dlstats2 show") {
+            Command::DlStats2 { action } => {
+                assert_eq!(action, "show");
+            }
+            other => panic!("Expected DlStats2, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlstats2_default() {
+        match parse_command("/dlstats2") {
+            Command::DlStats2 { action } => {
+                assert_eq!(action, "show");
+            }
+            other => panic!("Expected DlStats2, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlstats2_reset() {
+        match parse_command("/dl-stats2 reset") {
+            Command::DlStats2 { action } => {
+                assert_eq!(action, "reset");
+            }
+            other => panic!("Expected DlStats2, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_stats2() {
+        let help = command_help();
+        assert!(help.contains("/dlstats2"));
     }
 }
