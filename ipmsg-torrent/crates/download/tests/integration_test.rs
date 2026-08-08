@@ -177,6 +177,8 @@ fn test_download_task_progress() {
         notes: None,
         group: None,
         speed_limit_bps: None,
+        auto_retry_count: 0,
+        retry_after: None,
     };
 
     assert_eq!(task.progress(), 50.0);
@@ -207,6 +209,8 @@ fn test_download_task_progress_zero_size() {
         notes: None,
         group: None,
         speed_limit_bps: None,
+        auto_retry_count: 0,
+        retry_after: None,
     };
 
     assert_eq!(task.progress(), 0.0);

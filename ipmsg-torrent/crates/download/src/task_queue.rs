@@ -37,6 +37,10 @@ pub struct PersistedTask {
     pub group: Option<String>,
     #[serde(default)]
     pub speed_limit_bps: Option<u64>,
+    #[serde(default)]
+    pub auto_retry_count: u32,
+    #[serde(default)]
+    pub retry_after: Option<DateTime<Utc>>,
 }
 
 fn default_bandwidth_weight() -> u8 {
@@ -131,6 +135,8 @@ impl From<DownloadTask> for PersistedTask {
             depends_on: t.depends_on,
             group: t.group,
             speed_limit_bps: t.speed_limit_bps,
+            auto_retry_count: t.auto_retry_count,
+            retry_after: t.retry_after,
         }
     }
 }
@@ -158,6 +164,8 @@ impl From<PersistedTask> for DownloadTask {
             notes: None,
             group: t.group,
             speed_limit_bps: t.speed_limit_bps,
+            auto_retry_count: t.auto_retry_count,
+            retry_after: t.retry_after,
         }
     }
 }
@@ -264,6 +272,8 @@ mod tests {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -323,6 +333,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -345,6 +357,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             },
         ];
 
@@ -396,6 +410,8 @@ mod tests {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();

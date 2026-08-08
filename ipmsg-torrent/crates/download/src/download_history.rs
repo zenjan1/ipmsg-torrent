@@ -245,6 +245,8 @@ mod tests {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         }
     }
 

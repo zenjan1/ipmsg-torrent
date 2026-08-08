@@ -132,6 +132,10 @@ pub struct TaskInfoEvent {
     pub group: Option<String>,
     /// Per-task speed limit in bytes/sec (None = use global per-task limit)
     pub speed_limit_bps: Option<u64>,
+    /// Number of times this task has been auto-retried after failure
+    pub auto_retry_count: u32,
+    /// Earliest time this task should be retried (for exponential backoff)
+    pub retry_after: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl TaskInfoEvent {
@@ -154,6 +158,8 @@ impl TaskInfoEvent {
             notes: task.notes.clone(),
             group: task.group.clone(),
             speed_limit_bps: task.speed_limit_bps,
+            auto_retry_count: task.auto_retry_count,
+            retry_after: task.retry_after,
         }
     }
 }
@@ -248,6 +254,10 @@ pub struct DownloadTask {
     pub group: Option<String>,
     /// Per-task speed limit in bytes/sec (None = use global per-task limit)
     pub speed_limit_bps: Option<u64>,
+    /// Number of times this task has been auto-retried after failure
+    pub auto_retry_count: u32,
+    /// Earliest time this task should be retried (for exponential backoff)
+    pub retry_after: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -540,6 +550,10 @@ pub struct DownloadManager {
     proxy_config: Arc<tokio::sync::RwLock<Option<proxy::ProxyConfig>>>,
     /// Per-task rate limiters (task_id -> RateLimiter)
     task_rate_limiters: Arc<Mutex<HashMap<String, RateLimiter>>>,
+    /// Maximum auto-retry attempts for failed downloads (0 = disabled)
+    max_auto_retries: Arc<AtomicU32>,
+    /// Base delay in seconds for exponential backoff (actual delay = base * 2^retry_count)
+    auto_retry_base_delay_secs: Arc<AtomicU64>,
 }
 
 impl DownloadManager {
@@ -564,6 +578,8 @@ impl DownloadManager {
             save_path_manager: Arc::new(SavePathManager::new(save_path)),
             proxy_config: Arc::new(tokio::sync::RwLock::new(None)),
             task_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
+            max_auto_retries: Arc::new(AtomicU32::new(0)),
+            auto_retry_base_delay_secs: Arc::new(AtomicU64::new(30)),
         };
         dm.start_scheduler();
         dm
@@ -659,6 +675,8 @@ impl DownloadManager {
             save_path_manager: Arc::new(SavePathManager::new(save_path)),
             proxy_config: Arc::new(tokio::sync::RwLock::new(None)),
             task_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
+            max_auto_retries: Arc::new(AtomicU32::new(0)),
+            auto_retry_base_delay_secs: Arc::new(AtomicU64::new(30)),
         };
         // Restore proxy configuration from disk
         if let Ok(Some(proxy_cfg)) = proxy::load_proxy_config(&dm.data_dir) {
@@ -698,6 +716,8 @@ impl DownloadManager {
         let auto_shutdown_config = self.auto_shutdown.clone();
         let proxy_config = self.proxy_config.clone();
         let task_rate_limiters = self.task_rate_limiters.clone();
+        let max_auto_retries = self.max_auto_retries.clone();
+        let auto_retry_base_delay_secs = self.auto_retry_base_delay_secs.clone();
 
         // Spawn schedule checker (runs every 60 seconds)
         let schedule_check_tasks = self.tasks.clone();
@@ -742,7 +762,10 @@ impl DownloadManager {
 
         tokio::spawn(async move {
             loop {
-                notify.notified().await;
+                // Use timeout to periodically check for retry_after tasks
+                tokio::time::timeout(std::time::Duration::from_secs(30), notify.notified())
+                    .await
+                    .ok();
 
                 // Check if we can start a new task
                 let can_start = if max_concurrent == 0 {
@@ -767,6 +790,7 @@ impl DownloadManager {
                                     && t.depends_on
                                         .iter()
                                         .all(|dep| completed_ids.contains(dep.as_str()))
+                                    && t.retry_after.map_or(true, |ra| ra <= chrono::Utc::now())
                             })
                             .max_by(|a, b| {
                                 a.priority.cmp(&b.priority).then_with(|| {
@@ -866,6 +890,9 @@ impl DownloadManager {
                             let notifier_clone = notifier.clone();
                             let proxy_config_clone = proxy_config.read().await.clone();
                             let task_rate_limiters_clone = task_rate_limiters.clone();
+                            let max_auto_retries_clone = max_auto_retries.clone();
+                            let auto_retry_base_delay_secs_clone =
+                                auto_retry_base_delay_secs.clone();
                             // Resolve per-task limiter: use task-specific if set, else global per-task.
                             let task_rate_limiter: RateLimiter = {
                                 let limiters = task_rate_limiters_clone.lock().await;
@@ -1054,13 +1081,45 @@ impl DownloadManager {
                                                     task.state = DownloadState::Paused;
                                                 }
                                             } else {
-                                                task.state = DownloadState::Error;
-                                                task.error = Some(err_str);
-                                                Self::record_task_history(
-                                                    task,
-                                                    &data_dir_clone,
-                                                    Some(&notifier_clone),
-                                                );
+                                                // Check if auto-retry is enabled and not exhausted
+                                                let max_retries =
+                                                    max_auto_retries_clone.load(Ordering::Relaxed);
+                                                let base_delay = auto_retry_base_delay_secs_clone
+                                                    .load(Ordering::Relaxed);
+
+                                                if max_retries > 0
+                                                    && task.auto_retry_count < max_retries
+                                                {
+                                                    // Schedule retry with exponential backoff
+                                                    let delay_secs = (base_delay
+                                                        * 2u64.pow(task.auto_retry_count))
+                                                    .min(3600);
+                                                    let retry_after = chrono::Utc::now()
+                                                        + chrono::Duration::seconds(
+                                                            delay_secs as i64,
+                                                        );
+                                                    task.retry_after = Some(retry_after);
+                                                    task.auto_retry_count += 1;
+                                                    task.state = DownloadState::Queued;
+                                                    task.error = Some(format!(
+                                                        "{} (retry {}/{})",
+                                                        err_str, task.auto_retry_count, max_retries
+                                                    ));
+                                                    tracing::info!(
+                                                        task_id = %task_id_clone,
+                                                        retry_count = task.auto_retry_count,
+                                                        delay_secs = delay_secs,
+                                                        "Scheduling auto-retry"
+                                                    );
+                                                } else {
+                                                    task.state = DownloadState::Error;
+                                                    task.error = Some(err_str);
+                                                    Self::record_task_history(
+                                                        task,
+                                                        &data_dir_clone,
+                                                        Some(&notifier_clone),
+                                                    );
+                                                }
                                             }
                                             task.speed_bps = 0.0;
                                         }
@@ -1167,6 +1226,30 @@ impl DownloadManager {
     /// Set maximum retry attempts for timed-out downloads.
     pub fn set_max_retries(&self, retries: u32) {
         self.max_retries.store(retries, Ordering::Relaxed);
+    }
+
+    /// Set maximum auto-retry attempts for failed downloads (0 = disabled).
+    /// When a download fails, it will be automatically retried with exponential backoff
+    /// up to this many times before staying in Error state.
+    pub fn set_max_auto_retries(&self, retries: u32) {
+        self.max_auto_retries.store(retries, Ordering::Relaxed);
+    }
+
+    /// Get the current max auto-retry setting.
+    pub fn get_max_auto_retries(&self) -> u32 {
+        self.max_auto_retries.load(Ordering::Relaxed)
+    }
+
+    /// Set the base delay in seconds for exponential backoff on auto-retry.
+    /// Actual delay = base_delay * 2^retry_count (capped at 1 hour).
+    pub fn set_auto_retry_base_delay_secs(&self, secs: u64) {
+        self.auto_retry_base_delay_secs
+            .store(secs, Ordering::Relaxed);
+    }
+
+    /// Get the current auto-retry base delay in seconds.
+    pub fn get_auto_retry_base_delay_secs(&self) -> u64 {
+        self.auto_retry_base_delay_secs.load(Ordering::Relaxed)
     }
 
     /// Set notification configuration for download completion/failure events.
@@ -1444,6 +1527,8 @@ impl DownloadManager {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1497,6 +1582,8 @@ impl DownloadManager {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1550,6 +1637,8 @@ impl DownloadManager {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1601,6 +1690,8 @@ impl DownloadManager {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1652,6 +1743,8 @@ impl DownloadManager {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1985,6 +2078,8 @@ impl DownloadManager {
 
         let proxy_config_for_spawn = proxy_config.read().await.clone();
         let my_generation = generation; // capture for completion handler
+        let max_auto_retries_clone = self.max_auto_retries.clone();
+        let auto_retry_base_delay_secs_clone = self.auto_retry_base_delay_secs.clone();
 
         tokio::spawn(async move {
             let result: Result<(), String> = match params {
@@ -2174,9 +2269,35 @@ impl DownloadManager {
                         if was_cancelled {
                             task.state = DownloadState::Paused;
                         } else {
-                            task.state = DownloadState::Error;
-                            task.error = Some(err_str);
-                            Self::record_task_history(task, &data_dir, Some(&notifier));
+                            // Check if auto-retry is enabled and not exhausted
+                            let max_retries = max_auto_retries_clone.load(Ordering::Relaxed);
+                            let base_delay =
+                                auto_retry_base_delay_secs_clone.load(Ordering::Relaxed);
+
+                            if max_retries > 0 && task.auto_retry_count < max_retries {
+                                // Schedule retry with exponential backoff
+                                let delay_secs =
+                                    (base_delay * 2u64.pow(task.auto_retry_count)).min(3600);
+                                let retry_after = chrono::Utc::now()
+                                    + chrono::Duration::seconds(delay_secs as i64);
+                                task.retry_after = Some(retry_after);
+                                task.auto_retry_count += 1;
+                                task.state = DownloadState::Queued;
+                                task.error = Some(format!(
+                                    "{} (retry {}/{})",
+                                    err_str, task.auto_retry_count, max_retries
+                                ));
+                                tracing::info!(
+                                    task_id = %task_id_clone,
+                                    retry_count = task.auto_retry_count,
+                                    delay_secs = delay_secs,
+                                    "Scheduling auto-retry"
+                                );
+                            } else {
+                                task.state = DownloadState::Error;
+                                task.error = Some(err_str);
+                                Self::record_task_history(task, &data_dir, Some(&notifier));
+                            }
                         }
                         task.speed_bps = 0.0;
                     }
@@ -2214,6 +2335,8 @@ impl DownloadManager {
         let bandwidth_monitor = self.bandwidth_monitor.clone();
         let proxy_config = self.proxy_config.clone();
         let task_rate_limiters = self.task_rate_limiters.clone();
+        let max_auto_retries = self.max_auto_retries.clone();
+        let auto_retry_base_delay_secs = self.auto_retry_base_delay_secs.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -2397,6 +2520,9 @@ impl DownloadManager {
                                 let task_id_clone = task_id.clone();
                                 let proxy_config_clone = proxy_config.read().await.clone();
                                 let task_rate_limiters_clone = task_rate_limiters.clone();
+                                let max_auto_retries_clone = max_auto_retries.clone();
+                                let auto_retry_base_delay_secs_clone =
+                                    auto_retry_base_delay_secs.clone();
                                 // Resolve per-task limiter: use task-specific if set, else global per-task.
                                 let task_rate_limiter: RateLimiter = {
                                     let limiters = task_rate_limiters_clone.lock().await;
@@ -2594,13 +2720,48 @@ impl DownloadManager {
                                                         task.state = DownloadState::Paused;
                                                     }
                                                 } else {
-                                                    task.state = DownloadState::Error;
-                                                    task.error = Some(err_str);
-                                                    Self::record_task_history(
-                                                        task,
-                                                        &data_dir_clone,
-                                                        Some(&notifier_clone),
-                                                    );
+                                                    // Check if auto-retry is enabled and not exhausted
+                                                    let max_retries = max_auto_retries_clone
+                                                        .load(Ordering::Relaxed);
+                                                    let base_delay =
+                                                        auto_retry_base_delay_secs_clone
+                                                            .load(Ordering::Relaxed);
+
+                                                    if max_retries > 0
+                                                        && task.auto_retry_count < max_retries
+                                                    {
+                                                        // Schedule retry with exponential backoff
+                                                        let delay_secs = (base_delay
+                                                            * 2u64.pow(task.auto_retry_count))
+                                                        .min(3600);
+                                                        let retry_after = chrono::Utc::now()
+                                                            + chrono::Duration::seconds(
+                                                                delay_secs as i64,
+                                                            );
+                                                        task.retry_after = Some(retry_after);
+                                                        task.auto_retry_count += 1;
+                                                        task.state = DownloadState::Queued;
+                                                        task.error = Some(format!(
+                                                            "{} (retry {}/{})",
+                                                            err_str,
+                                                            task.auto_retry_count,
+                                                            max_retries
+                                                        ));
+                                                        tracing::info!(
+                                                            task_id = %task_id_clone,
+                                                            retry_count = task.auto_retry_count,
+                                                            delay_secs = delay_secs,
+                                                            "Scheduling auto-retry"
+                                                        );
+                                                    } else {
+                                                        task.state = DownloadState::Error;
+                                                        task.error = Some(err_str);
+                                                        Self::record_task_history(
+                                                            task,
+                                                            &data_dir_clone,
+                                                            Some(&notifier_clone),
+                                                        );
+                                                    }
                                                 }
                                                 task.speed_bps = 0.0;
                                             }
@@ -3563,6 +3724,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3585,6 +3748,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3607,6 +3772,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -3721,6 +3888,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -3770,6 +3939,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -3812,6 +3983,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3834,6 +4007,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -3856,6 +4031,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -3901,6 +4078,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -3923,6 +4102,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -3958,6 +4139,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -3993,6 +4176,8 @@ mod tests {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
         assert!(task.tags.is_empty());
     }
@@ -4022,6 +4207,8 @@ mod tests {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
 
         // Query match (case-insensitive)
@@ -4068,6 +4255,8 @@ mod tests {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
 
         let filter = TaskFilter {
@@ -4106,6 +4295,8 @@ mod tests {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
 
         let filter = TaskFilter {
@@ -4144,6 +4335,8 @@ mod tests {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
 
         let filter = TaskFilter {
@@ -4182,6 +4375,8 @@ mod tests {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
 
         // All criteria match
@@ -4227,6 +4422,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -4249,6 +4446,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -4271,6 +4470,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             },
         ];
 
@@ -4308,6 +4509,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -4330,6 +4533,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -4352,6 +4557,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             },
         ];
 
@@ -4385,6 +4592,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             },
             DownloadTask {
                 id: "p2".into(),
@@ -4407,6 +4616,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             },
             DownloadTask {
                 id: "p3".into(),
@@ -4429,6 +4640,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             },
         ];
 
@@ -4464,6 +4677,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4486,6 +4701,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -4519,6 +4736,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4541,6 +4760,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4563,6 +4784,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -4601,6 +4824,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4623,6 +4848,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4645,6 +4872,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -4759,6 +4988,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -4801,6 +5032,8 @@ mod tests {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         };
 
         let event = TaskInfoEvent::from_task(&task);
@@ -4938,6 +5171,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -4997,6 +5232,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -5037,6 +5274,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-2".into(),
@@ -5059,6 +5298,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-3".into(),
@@ -5081,6 +5322,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -5147,6 +5390,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -5186,6 +5431,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -5222,6 +5469,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -5290,6 +5539,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -5335,6 +5586,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5357,6 +5610,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -5396,6 +5651,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5418,6 +5675,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -5457,6 +5716,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5479,6 +5740,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -5501,6 +5764,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -5538,6 +5803,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5560,6 +5827,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -5582,6 +5851,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 
@@ -5620,6 +5891,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -5642,6 +5915,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -5664,6 +5939,8 @@ mod tests {
                 notes: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             });
         }
 

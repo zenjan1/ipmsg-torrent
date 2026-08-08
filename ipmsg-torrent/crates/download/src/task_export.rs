@@ -134,6 +134,8 @@ impl ExportedTask {
             notes: None,
             group: self.group,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         }
     }
 }
@@ -251,6 +253,8 @@ mod tests {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
         }
     }
 

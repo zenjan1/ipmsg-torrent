@@ -856,6 +856,8 @@ mod tests {
                 queue_position: None,
                 group: None,
                 speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -1333,6 +1335,8 @@ mod tests {
             notes: None,
             group: None,
             speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
