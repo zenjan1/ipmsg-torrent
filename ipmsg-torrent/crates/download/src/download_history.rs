@@ -254,6 +254,7 @@ mod tests {
             current_session_start: None,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
         }
     }
 

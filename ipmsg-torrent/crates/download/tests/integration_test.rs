@@ -186,6 +186,7 @@ fn test_download_task_progress() {
         current_session_start: None,
         mirror_urls: Vec::new(),
         retry_policy: None,
+        cooldown: None,
     };
 
     assert_eq!(task.progress(), 50.0);
@@ -225,6 +226,7 @@ fn test_download_task_progress_zero_size() {
         current_session_start: None,
         mirror_urls: Vec::new(),
         retry_policy: None,
+        cooldown: None,
     };
 
     assert_eq!(task.progress(), 0.0);

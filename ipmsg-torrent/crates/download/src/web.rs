@@ -1762,6 +1762,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -2272,6 +2273,7 @@ mod tests {
             current_session_start: None,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

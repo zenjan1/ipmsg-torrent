@@ -16,6 +16,7 @@ pub mod conflict_detection;
 pub mod connection_pool;
 pub mod dht;
 pub mod disk_monitor;
+pub mod download_cooldown;
 pub mod download_history;
 pub mod download_presets;
 pub mod ed2k;
@@ -177,6 +178,8 @@ pub struct TaskInfoEvent {
     pub mirror_urls: Vec<String>,
     /// Per-task retry policy (None = use global default)
     pub retry_policy: Option<RetryPolicy>,
+    /// Cooldown state (for WebSocket push)
+    pub cooldown: Option<download_cooldown::CooldownState>,
 }
 
 impl TaskInfoEvent {
@@ -209,6 +212,7 @@ impl TaskInfoEvent {
             active_time_seconds: task.active_time_seconds,
             mirror_urls: task.mirror_urls.clone(),
             retry_policy: task.retry_policy,
+            cooldown: task.cooldown.clone(),
         }
     }
 }
@@ -321,6 +325,8 @@ pub struct DownloadTask {
     pub mirror_urls: Vec<String>,
     /// Per-task retry policy (None = use global default)
     pub retry_policy: Option<RetryPolicy>,
+    /// Cooldown state for exponential backoff retry tracking
+    pub cooldown: Option<download_cooldown::CooldownState>,
 }
 
 /// Per-task retry policy configuration
@@ -698,6 +704,8 @@ pub struct DownloadManager {
     bandwidth_schedule: Arc<Mutex<BandwidthScheduleManager>>,
     /// Download presets for reusable task configurations
     download_presets: Arc<Mutex<Vec<download_presets::DownloadPreset>>>,
+    /// Cooldown configuration for failed task retry backoff
+    cooldown_config: Arc<tokio::sync::RwLock<download_cooldown::CooldownConfig>>,
 }
 
 impl DownloadManager {
@@ -736,6 +744,9 @@ impl DownloadManager {
             audit_log: Arc::new(Mutex::new(AuditLog::new())),
             bandwidth_schedule: Arc::new(Mutex::new(BandwidthScheduleManager::new())),
             download_presets: Arc::new(Mutex::new(Vec::new())),
+            cooldown_config: Arc::new(tokio::sync::RwLock::new(
+                download_cooldown::CooldownConfig::default(),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -906,6 +917,9 @@ impl DownloadManager {
             audit_log: Arc::new(Mutex::new(AuditLog::new())),
             bandwidth_schedule: Arc::new(Mutex::new(BandwidthScheduleManager::new())),
             download_presets: Arc::new(Mutex::new(Vec::new())),
+            cooldown_config: Arc::new(tokio::sync::RwLock::new(
+                download_cooldown::CooldownConfig::default(),
+            )),
         };
         // Restore audit log from disk
         if let Some(loaded_log) = audit_log::load_audit_log(&dm.data_dir) {
@@ -1718,6 +1732,7 @@ impl DownloadManager {
                         active_time_seconds: 0.0,
                         mirror_urls: Vec::new(),
                         retry_policy: None,
+                        cooldown: None,
                         current_session_start: None,
                     };
 
@@ -1757,6 +1772,7 @@ impl DownloadManager {
                             active_time_seconds: 0.0,
                             mirror_urls: Vec::new(),
                             retry_policy: None,
+                            cooldown: None,
                         },
                     });
                     notify.notify_one();
@@ -1955,6 +1971,109 @@ impl DownloadManager {
         }
 
         count
+    }
+
+    /// Set cooldown configuration for failed task retry backoff.
+    pub async fn set_cooldown_config(&self, config: download_cooldown::CooldownConfig) {
+        *self.cooldown_config.write().await = config.clone();
+        if let Err(e) = download_cooldown::save_cooldown_config(&self.data_dir, &config) {
+            tracing::warn!(error = %e, "Failed to persist cooldown config");
+        }
+    }
+
+    /// Get current cooldown configuration.
+    pub async fn get_cooldown_config(&self) -> download_cooldown::CooldownConfig {
+        let cooldown = self.cooldown_config.read().await;
+        cooldown.clone()
+    }
+
+    /// Tick cooldown: move tasks whose cooldown period has elapsed from Error back to Queued.
+    /// Returns the number of tasks moved back to Queued.
+    pub async fn tick_cooldown(&self) -> usize {
+        let config = self.get_cooldown_config().await;
+        if !config.enabled {
+            return 0;
+        }
+
+        let now = chrono::Utc::now().timestamp() as u64;
+        let mut tasks = self.tasks.lock().await;
+        let mut count = 0;
+
+        for task in tasks.iter_mut() {
+            if task.state != DownloadState::Error {
+                continue;
+            }
+            if let Some(ref cooldown_state) = task.cooldown
+                && download_cooldown::can_retry(cooldown_state, now)
+                && !download_cooldown::max_retries_exceeded(cooldown_state, &config)
+            {
+                task.state = DownloadState::Queued;
+                task.updated_at = chrono::Utc::now();
+                count += 1;
+                tracing::info!(
+                    task_id = %task.id,
+                    attempt = cooldown_state.retry_attempt,
+                    "Cooldown elapsed, task moved back to Queued"
+                );
+            }
+        }
+
+        if count > 0 {
+            drop(tasks);
+            self.persist_tasks().await;
+        }
+
+        count
+    }
+
+    /// Record a failure for a task and apply cooldown backoff.
+    pub async fn record_task_failure(&self, task_id: &str) {
+        let config = self.get_cooldown_config().await;
+        if !config.enabled {
+            return;
+        }
+
+        let now = download_cooldown::now_secs();
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            let cooldown_state = task.cooldown.get_or_insert_with(Default::default);
+            download_cooldown::record_failure(cooldown_state, &config, now);
+            tracing::info!(
+                task_id = %task_id,
+                attempt = cooldown_state.retry_attempt,
+                next_retry_secs = cooldown_state.next_retry_at,
+                "Task failed, cooldown applied"
+            );
+        }
+    }
+
+    /// Reset cooldown state for a task (e.g. when manually resumed or completed).
+    pub async fn reset_task_cooldown(&self, task_id: &str) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id)
+            && let Some(ref mut cooldown_state) = task.cooldown
+        {
+            download_cooldown::reset_cooldown(cooldown_state);
+        }
+    }
+
+    /// Get cooldown status for a task.
+    pub async fn get_cooldown_status(
+        &self,
+        task_id: &str,
+    ) -> Option<download_cooldown::CooldownStatus> {
+        let config = self.get_cooldown_config().await;
+        let tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter().find(|t| t.id == task_id)
+            && let Some(ref cooldown_state) = task.cooldown
+        {
+            return Some(download_cooldown::cooldown_status(
+                task_id,
+                cooldown_state,
+                &config,
+            ));
+        }
+        None
     }
 
     /// Set URL deduplication configuration.
@@ -2322,6 +2441,7 @@ impl DownloadManager {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -2398,6 +2518,7 @@ impl DownloadManager {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -2466,6 +2587,7 @@ impl DownloadManager {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -2537,6 +2659,7 @@ impl DownloadManager {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -2602,6 +2725,7 @@ impl DownloadManager {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -2895,6 +3019,7 @@ impl DownloadManager {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -5268,6 +5393,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5299,6 +5425,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5330,6 +5457,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -5453,6 +5581,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -5511,6 +5640,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -5562,6 +5692,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5593,6 +5724,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5624,6 +5756,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -5678,6 +5811,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -5709,6 +5843,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -5753,6 +5888,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -5797,6 +5933,7 @@ mod tests {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
         assert!(task.tags.is_empty());
@@ -5835,6 +5972,7 @@ mod tests {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -5890,6 +6028,7 @@ mod tests {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -5937,6 +6076,7 @@ mod tests {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -5984,6 +6124,7 @@ mod tests {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -6031,6 +6172,7 @@ mod tests {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -6085,6 +6227,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6116,6 +6259,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6147,6 +6291,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             },
         ];
@@ -6193,6 +6338,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6224,6 +6370,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6255,6 +6402,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             },
         ];
@@ -6297,6 +6445,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6328,6 +6477,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -6359,6 +6509,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             },
         ];
@@ -6403,6 +6554,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6434,6 +6586,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -6476,6 +6629,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6507,6 +6661,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6538,6 +6693,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -6585,6 +6741,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6616,6 +6773,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -6647,6 +6805,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -6770,6 +6929,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -6821,6 +6981,7 @@ mod tests {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -6967,6 +7128,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -7035,6 +7197,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -7084,6 +7247,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7115,6 +7279,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7146,6 +7311,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -7221,6 +7387,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -7269,6 +7436,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -7314,6 +7482,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -7391,6 +7560,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -7445,6 +7615,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7476,6 +7647,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -7524,6 +7696,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7555,6 +7728,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -7603,6 +7777,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7634,6 +7809,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7665,6 +7841,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -7711,6 +7888,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7742,6 +7920,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7773,6 +7952,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -7820,6 +8000,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7851,6 +8032,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -7882,6 +8064,7 @@ mod tests {
                 active_time_seconds: 0.0,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
                 current_session_start: None,
             });
         }
@@ -8967,6 +9150,7 @@ mod max_concurrent_tests {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -9018,6 +9202,7 @@ mod max_concurrent_tests {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -9068,6 +9253,7 @@ mod max_concurrent_tests {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         };
 
@@ -9123,6 +9309,7 @@ mod max_concurrent_tests {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         });
         drop(tasks);
@@ -9188,6 +9375,7 @@ mod max_concurrent_tests {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         });
         drop(tasks);
@@ -9251,6 +9439,7 @@ mod max_concurrent_tests {
             active_time_seconds: 0.0,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
             current_session_start: None,
         });
         drop(tasks);

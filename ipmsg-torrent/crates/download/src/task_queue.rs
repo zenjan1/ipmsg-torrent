@@ -188,6 +188,7 @@ impl From<PersistedTask> for DownloadTask {
             active_time_seconds: 0.0,
             current_session_start: None,
             retry_policy: t.retry_policy,
+            cooldown: None,
         }
     }
 }
@@ -303,6 +304,7 @@ mod tests {
             current_session_start: None,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -371,6 +373,7 @@ mod tests {
                 current_session_start: None,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -402,6 +405,7 @@ mod tests {
                 current_session_start: None,
                 mirror_urls: Vec::new(),
                 retry_policy: None,
+                cooldown: None,
             },
         ];
 
@@ -462,6 +466,7 @@ mod tests {
             current_session_start: None,
             mirror_urls: Vec::new(),
             retry_policy: None,
+            cooldown: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();
