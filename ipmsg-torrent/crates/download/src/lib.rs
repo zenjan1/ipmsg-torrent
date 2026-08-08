@@ -16,6 +16,7 @@ pub mod ed2k;
 pub mod magnet;
 pub mod metadata_cache;
 pub mod notification;
+pub mod post_hooks;
 pub mod progress;
 pub mod proxy;
 pub mod rate_limiter;
@@ -40,6 +41,7 @@ use tokio_util::sync::CancellationToken;
 use bandwidth_monitor::BandwidthMonitor;
 use download_history::{HistoryEntry, append_entry};
 use notification::{NotificationContext, NotificationDispatcher};
+use post_hooks::HookManager;
 
 pub use bandwidth_monitor::{
     BandwidthDashboard, BandwidthMonitor as BandwidthMonitorType, BandwidthSample, BandwidthStats,
@@ -578,6 +580,8 @@ pub struct DownloadManager {
     max_auto_retries: Arc<AtomicU32>,
     /// Base delay in seconds for exponential backoff (actual delay = base * 2^retry_count)
     auto_retry_base_delay_secs: Arc<AtomicU64>,
+    /// Post-download hook manager
+    hook_manager: Arc<HookManager>,
 }
 
 impl DownloadManager {
@@ -588,7 +592,7 @@ impl DownloadManager {
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
-            data_dir,
+            data_dir: data_dir.clone(),
             dht: Arc::new(dht::DhtManager::new()),
             max_concurrent: Arc::new(AtomicUsize::new(0)), // 0 = unlimited
             rate_limiter: Arc::new(DownloadRateController::new(0, 0)),
@@ -604,6 +608,7 @@ impl DownloadManager {
             task_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             max_auto_retries: Arc::new(AtomicU32::new(0)),
             auto_retry_base_delay_secs: Arc::new(AtomicU64::new(30)),
+            hook_manager: Arc::new(HookManager::new(data_dir)),
         };
         dm.start_scheduler();
         dm
@@ -657,6 +662,7 @@ impl DownloadManager {
         task: &DownloadTask,
         data_dir: &std::path::Path,
         notifier: Option<&Arc<NotificationDispatcher>>,
+        hook_manager: Option<&Arc<HookManager>>,
     ) {
         if let Some(entry) = HistoryEntry::from_task(task) {
             let data_dir = data_dir.to_path_buf();
@@ -692,6 +698,39 @@ impl DownloadManager {
                 }
             });
         }
+
+        // Execute post-download hooks
+        if let Some(hook_manager) = hook_manager {
+            let event = match task.state {
+                DownloadState::Complete => NotificationEvent::DownloadComplete,
+                DownloadState::Error => NotificationEvent::DownloadFailed,
+                _ => return,
+            };
+            let ctx = NotificationContext {
+                task_id: task.id.clone(),
+                name: task.name.clone(),
+                size: task.size,
+                downloaded: task.downloaded,
+                protocol: format!("{:?}", task.protocol),
+                save_path: task.save_path.display().to_string(),
+                error: task.error.clone(),
+                event,
+            };
+            let hook_manager = hook_manager.clone();
+            tokio::spawn(async move {
+                let results = hook_manager.execute_hooks(&ctx).await;
+                for result in results {
+                    if !result.success {
+                        tracing::warn!(
+                            hook_id = %result.hook_id,
+                            hook_name = %result.hook_name,
+                            error = ?result.error,
+                            "Post-download hook failed"
+                        );
+                    }
+                }
+            });
+        }
     }
 
     /// Create a DownloadManager and restore tasks from disk
@@ -712,7 +751,7 @@ impl DownloadManager {
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
-            data_dir,
+            data_dir: data_dir.clone(),
             dht: Arc::new(dht::DhtManager::new()),
             max_concurrent: Arc::new(AtomicUsize::new(0)),
             rate_limiter: Arc::new(DownloadRateController::new(0, 0)),
@@ -728,7 +767,12 @@ impl DownloadManager {
             task_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             max_auto_retries: Arc::new(AtomicU32::new(0)),
             auto_retry_base_delay_secs: Arc::new(AtomicU64::new(30)),
+            hook_manager: Arc::new(HookManager::new(data_dir)),
         };
+        // Restore post-download hooks from disk
+        if let Err(e) = dm.hook_manager.load() {
+            tracing::warn!(error = %e, "Failed to load post-download hooks");
+        }
         // Restore proxy configuration from disk
         if let Ok(Some(proxy_cfg)) = proxy::load_proxy_config(&dm.data_dir) {
             *dm.proxy_config.write().await = Some(proxy_cfg);
@@ -769,6 +813,7 @@ impl DownloadManager {
         let rate_limiter = self.rate_limiter.clone();
         let max_concurrent = self.max_concurrent.clone();
         let notifier = self.notifier.clone();
+        let hook_manager = self.hook_manager.clone();
         let auto_shutdown_config = self.auto_shutdown.clone();
         let proxy_config = self.proxy_config.clone();
         let task_rate_limiters = self.task_rate_limiters.clone();
@@ -945,6 +990,7 @@ impl DownloadManager {
                             let notify_clone = notify.clone();
                             let task_id_clone = task_id.clone();
                             let notifier_clone = notifier.clone();
+                            let hook_manager_clone = hook_manager.clone();
                             let proxy_config_clone = proxy_config.read().await.clone();
                             let task_rate_limiters_clone = task_rate_limiters.clone();
                             let max_auto_retries_clone = max_auto_retries.clone();
@@ -1153,6 +1199,7 @@ impl DownloadManager {
                                                 task,
                                                 &data_dir_clone,
                                                 Some(&notifier_clone),
+                                                Some(&hook_manager_clone),
                                             );
                                         }
                                         Err(e) => {
@@ -1199,6 +1246,7 @@ impl DownloadManager {
                                                         task,
                                                         &data_dir_clone,
                                                         Some(&notifier_clone),
+                                                        Some(&hook_manager_clone),
                                                     );
                                                 }
                                             }
@@ -1238,6 +1286,11 @@ impl DownloadManager {
     pub fn get_max_concurrent(&self) -> usize {
         self.max_concurrent
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Get the hook manager for post-download hook management
+    pub fn hook_manager(&self) -> &Arc<HookManager> {
+        &self.hook_manager
     }
 
     /// Set global download speed limit in bytes/sec (0 = unlimited).
@@ -2022,7 +2075,12 @@ impl DownloadManager {
                     task.state = DownloadState::Error;
                     task.error = Some(cs_err);
                 }
-                Self::record_task_history(task, &self.data_dir, Some(&self.notifier));
+                Self::record_task_history(
+                    task,
+                    &self.data_dir,
+                    Some(&self.notifier),
+                    Some(&self.hook_manager),
+                );
             }
         }
 
@@ -2294,6 +2352,7 @@ impl DownloadManager {
         let rate_limiter = Some(self.rate_limiter.clone());
         let task_complete_notify = self.task_complete_notify.clone();
         let notifier = self.notifier.clone();
+        let hook_manager = self.hook_manager.clone();
         let proxy_config = self.proxy_config.clone();
 
         // Store task info for resume
@@ -2536,7 +2595,12 @@ impl DownloadManager {
                             task.state = DownloadState::Error;
                             task.error = Some(cs_err);
                         }
-                        Self::record_task_history(task, &data_dir, Some(&notifier));
+                        Self::record_task_history(
+                            task,
+                            &data_dir,
+                            Some(&notifier),
+                            Some(&hook_manager),
+                        );
                     }
                     Err(e) => {
                         let err_str = e.to_string();
@@ -2580,7 +2644,12 @@ impl DownloadManager {
                             } else {
                                 task.state = DownloadState::Error;
                                 task.error = Some(err_str);
-                                Self::record_task_history(task, &data_dir, Some(&notifier));
+                                Self::record_task_history(
+                                    task,
+                                    &data_dir,
+                                    Some(&notifier),
+                                    Some(&hook_manager),
+                                );
                             }
                         }
                         task.speed_bps = 0.0;
@@ -2616,6 +2685,7 @@ impl DownloadManager {
         let timeout_secs = self.timeout_secs.load(Ordering::Relaxed);
         let max_retries = self.max_retries.load(Ordering::Relaxed);
         let notifier = self.notifier.clone();
+        let hook_manager = self.hook_manager.clone();
         let bandwidth_monitor = self.bandwidth_monitor.clone();
         let proxy_config = self.proxy_config.clone();
         let task_rate_limiters = self.task_rate_limiters.clone();
@@ -2765,6 +2835,7 @@ impl DownloadManager {
                                 let cancel_token = CancellationToken::new();
                                 let cancel_clone = cancel_token.clone();
                                 let notifier_clone = notifier.clone();
+                                let hook_manager_clone = hook_manager.clone();
 
                                 // Register new running task
                                 {
@@ -3020,6 +3091,7 @@ impl DownloadManager {
                                                     task,
                                                     &data_dir_clone,
                                                     Some(&notifier_clone),
+                                                    Some(&hook_manager_clone),
                                                 );
                                             }
                                             Err(e) => {
@@ -3069,6 +3141,7 @@ impl DownloadManager {
                                                             task,
                                                             &data_dir_clone,
                                                             Some(&notifier_clone),
+                                                            Some(&hook_manager_clone),
                                                         );
                                                     }
                                                 }

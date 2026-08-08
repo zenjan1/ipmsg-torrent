@@ -133,6 +133,10 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/task-speed", get(get_task_speed))
         .route("/api/task-speed", post(set_task_speed))
         .route("/api/checksum", post(set_checksum))
+        .route("/api/hooks", get(list_hooks))
+        .route("/api/hooks", post(add_hook))
+        .route("/api/hooks/:id", post(update_hook))
+        .route("/api/hooks/:id/remove", post(remove_hook))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -752,6 +756,141 @@ async fn set_checksum(
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// GET /api/hooks - List all post-download hooks
+async fn list_hooks(State(state): State<Arc<WebState>>) -> Json<Vec<crate::post_hooks::PostHook>> {
+    Json(state.manager.hook_manager().list_hooks())
+}
+
+/// POST /api/hooks - Add a new post-download hook
+async fn add_hook(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "name is required"})),
+            );
+        }
+    };
+    let command = match body.get("command").and_then(|v| v.as_str()) {
+        Some(c) if !c.is_empty() => c.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "command is required"})),
+            );
+        }
+    };
+    let event_str = body
+        .get("event")
+        .and_then(|v| v.as_str())
+        .unwrap_or("on_complete");
+    let event = match event_str {
+        "on_complete" => crate::post_hooks::HookEvent::OnComplete,
+        "on_failure" => crate::post_hooks::HookEvent::OnFailure,
+        "both" => crate::post_hooks::HookEvent::Both,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid event type"})),
+            );
+        }
+    };
+
+    let mut hook = crate::post_hooks::PostHook::new(name, event, command);
+    if let Some(timeout) = body.get("timeout_secs").and_then(|v| v.as_u64()) {
+        hook = hook.with_timeout(timeout);
+    }
+
+    match state.manager.hook_manager().add_hook(hook) {
+        Ok(hook_id) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"success": true, "hook_id": hook_id})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// POST /api/hooks/:id - Update a hook
+async fn update_hook(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let existing = match state.manager.hook_manager().get_hook(&id) {
+        Some(h) => h,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Hook not found"})),
+            );
+        }
+    };
+
+    let mut updated = existing;
+    if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
+        updated.name = name.to_string();
+    }
+    if let Some(command) = body.get("command").and_then(|v| v.as_str()) {
+        updated.command = command.to_string();
+    }
+    if let Some(event_str) = body.get("event").and_then(|v| v.as_str()) {
+        updated.event = match event_str {
+            "on_complete" => crate::post_hooks::HookEvent::OnComplete,
+            "on_failure" => crate::post_hooks::HookEvent::OnFailure,
+            "both" => crate::post_hooks::HookEvent::Both,
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Invalid event type"})),
+                );
+            }
+        };
+    }
+    if let Some(timeout) = body.get("timeout_secs").and_then(|v| v.as_u64()) {
+        updated.timeout_secs = timeout;
+    }
+    if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
+        updated.enabled = enabled;
+    }
+
+    match state.manager.hook_manager().update_hook(&id, updated) {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Hook not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// POST /api/hooks/:id/remove - Remove a hook
+async fn remove_hook(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match state.manager.hook_manager().remove_hook(&id) {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Hook not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
         ),
     }
 }

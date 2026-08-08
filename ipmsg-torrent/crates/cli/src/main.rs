@@ -264,6 +264,11 @@ enum Command {
         checksum: String,
         algorithm: Option<String>,
     },
+    /// Manage post-download hooks
+    DlHook {
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -774,6 +779,19 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlchecksum <task_id> <checksum> [algorithm]".to_string())
             }
         }
+        "dlhook" | "dl-hook" | "dlhk" => {
+            // /dlhook <subcommand> [args...]
+            // Subcommands: list, add, remove, enable, disable
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                Command::DlHook {
+                    subcommand: args[1].to_string(),
+                    args: args[2..].iter().map(|s| s.to_string()).collect(),
+                }
+            } else {
+                Command::Unknown("/dlhook <list|add|remove|enable|disable> [args...]".to_string())
+            }
+        }
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -862,6 +880,7 @@ fn command_help() -> String {
         "/dlgroup <id> [group|clear] - Set or clear task group",
         "/dlgroups           - List all download groups",
         "/dlchecksum <id> <hash> [algo] - Set checksum for verification (algo: md5/sha1/sha256/ed2k)",
+        "/dlhook <list|add|remove|enable|disable> - Manage post-download hooks",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -3011,6 +3030,213 @@ async fn handle_command(
                 Err(e) => {
                     let mut s = state.lock().await;
                     s.add_system_message("main", format!("❌ {}", e));
+                }
+            }
+        }
+        Command::DlHook { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "list" | "ls" => {
+                    let hooks = download_manager.hook_manager().list_hooks();
+                    if hooks.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "No post-download hooks configured".to_string(),
+                        );
+                    } else {
+                        let mut lines = String::from("📋 Post-download hooks:\n");
+                        for hook in hooks {
+                            let status = if hook.enabled { "✅" } else { "❌" };
+                            let event = match hook.event {
+                                ipmsg_download::post_hooks::HookEvent::OnComplete => "complete",
+                                ipmsg_download::post_hooks::HookEvent::OnFailure => "failure",
+                                ipmsg_download::post_hooks::HookEvent::Both => "both",
+                            };
+                            lines.push_str(&format!(
+                                "  {} [{}] {} (event: {}, timeout: {}s)\n",
+                                status,
+                                &hook.id[..8],
+                                hook.name,
+                                event,
+                                hook.timeout_secs
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", lines.trim_end().to_string());
+                    }
+                }
+                "add" => {
+                    // /dlhook add <event> <name> <command...>
+                    // event: complete|failure|both
+                    if args.len() < 3 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlhook add <complete|failure|both> <name> <command...>"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    let event = match args[0].as_str() {
+                        "complete" | "on_complete" => {
+                            ipmsg_download::post_hooks::HookEvent::OnComplete
+                        }
+                        "failure" | "on_failure" => {
+                            ipmsg_download::post_hooks::HookEvent::OnFailure
+                        }
+                        "both" => ipmsg_download::post_hooks::HookEvent::Both,
+                        _ => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "❌ Invalid event. Use: complete, failure, or both".to_string(),
+                            );
+                            return;
+                        }
+                    };
+                    let name = args[1].clone();
+                    let command = args[2..].join(" ");
+                    let hook =
+                        ipmsg_download::post_hooks::PostHook::new(name.clone(), event, command);
+                    match download_manager.hook_manager().add_hook(hook) {
+                        Ok(hook_id) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Added hook '{}' (id: {})", name, &hook_id[..8]),
+                            );
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("❌ Failed to add hook: {}", e));
+                        }
+                    }
+                }
+                "remove" | "rm" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlhook remove <hook_id>".to_string());
+                        return;
+                    }
+                    let hook_id = &args[0];
+                    // Find hook by ID prefix
+                    let hooks = download_manager.hook_manager().list_hooks();
+                    let found = hooks.iter().find(|h| h.id.starts_with(hook_id));
+                    if let Some(hook) = found {
+                        match download_manager.hook_manager().remove_hook(&hook.id) {
+                            Ok(true) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Removed hook '{}'", hook.name),
+                                );
+                            }
+                            Ok(false) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", "❌ Hook not found".to_string());
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to remove hook: {}", e),
+                                );
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "❌ Hook not found".to_string());
+                    }
+                }
+                "enable" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlhook enable <hook_id>".to_string());
+                        return;
+                    }
+                    let hook_id = &args[0];
+                    let hooks = download_manager.hook_manager().list_hooks();
+                    let found = hooks.iter().find(|h| h.id.starts_with(hook_id));
+                    if let Some(hook) = found {
+                        match download_manager
+                            .hook_manager()
+                            .set_hook_enabled(&hook.id, true)
+                        {
+                            Ok(true) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Enabled hook '{}'", hook.name),
+                                );
+                            }
+                            Ok(false) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", "❌ Hook not found".to_string());
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to enable hook: {}", e),
+                                );
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "❌ Hook not found".to_string());
+                    }
+                }
+                "disable" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlhook disable <hook_id>".to_string(),
+                        );
+                        return;
+                    }
+                    let hook_id = &args[0];
+                    let hooks = download_manager.hook_manager().list_hooks();
+                    let found = hooks.iter().find(|h| h.id.starts_with(hook_id));
+                    if let Some(hook) = found {
+                        match download_manager
+                            .hook_manager()
+                            .set_hook_enabled(&hook.id, false)
+                        {
+                            Ok(true) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Disabled hook '{}'", hook.name),
+                                );
+                            }
+                            Ok(false) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", "❌ Hook not found".to_string());
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to disable hook: {}", e),
+                                );
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "❌ Hook not found".to_string());
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlhook <list|add|remove|enable|disable> [args...]".to_string(),
+                    );
                 }
             }
         }
