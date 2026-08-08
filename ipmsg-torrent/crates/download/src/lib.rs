@@ -5,6 +5,7 @@
 //! - eDonkey/eMule (ed2k links)
 //! - Xunlei P2SP (HTTP/FTP + P2P hybrid)
 
+pub mod audit_log;
 pub mod auto_categorize;
 pub mod auto_cleanup;
 pub mod auto_shutdown;
@@ -32,9 +33,11 @@ pub mod speed_history;
 pub mod task_export;
 pub mod task_queue;
 pub mod torrent;
+pub mod url_dedup;
 pub mod web;
 pub mod xunlei;
 
+use audit_log::{AuditEventType, AuditLog, AuditLogEntry};
 use auto_shutdown::AutoShutdownConfig;
 use chrono::Timelike;
 use std::collections::HashMap;
@@ -631,6 +634,10 @@ pub struct DownloadManager {
     speed_history: Arc<Mutex<speed_history::SpeedHistoryManager>>,
     /// Auto-cleanup configuration for completed/failed tasks
     auto_cleanup: Arc<tokio::sync::RwLock<auto_cleanup::AutoCleanupConfig>>,
+    /// URL deduplication configuration
+    url_dedup: Arc<tokio::sync::RwLock<url_dedup::DedupConfig>>,
+    /// Audit log for tracking all download lifecycle events
+    audit_log: Arc<Mutex<AuditLog>>,
 }
 
 impl DownloadManager {
@@ -665,6 +672,8 @@ impl DownloadManager {
             auto_cleanup: Arc::new(tokio::sync::RwLock::new(
                 auto_cleanup::AutoCleanupConfig::default(),
             )),
+            url_dedup: Arc::new(tokio::sync::RwLock::new(url_dedup::DedupConfig::default())),
+            audit_log: Arc::new(Mutex::new(AuditLog::new())),
         };
         dm.start_scheduler();
         dm
@@ -831,7 +840,13 @@ impl DownloadManager {
             auto_cleanup: Arc::new(tokio::sync::RwLock::new(
                 auto_cleanup::AutoCleanupConfig::default(),
             )),
+            url_dedup: Arc::new(tokio::sync::RwLock::new(url_dedup::DedupConfig::default())),
+            audit_log: Arc::new(Mutex::new(AuditLog::new())),
         };
+        // Restore audit log from disk
+        if let Some(loaded_log) = audit_log::load_audit_log(&dm.data_dir) {
+            *dm.audit_log.lock().await = loaded_log;
+        }
         // Restore post-download hooks from disk
         if let Err(e) = dm.hook_manager.load() {
             tracing::warn!(error = %e, "Failed to load post-download hooks");
@@ -860,6 +875,10 @@ impl DownloadManager {
             save_path_manager::load_save_path_config(&dm.data_dir).await
         {
             dm.save_path_manager.set_config(save_path_cfg).await;
+        }
+        // Restore URL deduplication configuration from disk
+        if let Some(dedup_cfg) = url_dedup::load_dedup_config(&dm.data_dir) {
+            *dm.url_dedup.write().await = dedup_cfg;
         }
         // Restore max concurrent downloads setting from disk
         if let Some(max_concurrent) = load_max_concurrent(&dm.data_dir) {
@@ -1698,6 +1717,95 @@ impl DownloadManager {
         count
     }
 
+    /// Set URL deduplication configuration.
+    /// Persists the configuration to disk for automatic restoration on restart.
+    pub async fn set_url_dedup(&self, config: url_dedup::DedupConfig) {
+        *self.url_dedup.write().await = config.clone();
+        if let Err(e) = url_dedup::save_dedup_config(&config, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist URL dedup config");
+        }
+    }
+
+    /// Get current URL deduplication configuration.
+    pub async fn get_url_dedup(&self) -> url_dedup::DedupConfig {
+        let dedup = self.url_dedup.read().await;
+        dedup.clone()
+    }
+
+    /// Check if a URL is a duplicate of any existing task based on current dedup config.
+    /// Returns the task ID if a duplicate is found, None otherwise.
+    pub async fn find_duplicate_by_url(&self, url: &str) -> Option<String> {
+        let dedup_config = self.get_url_dedup().await;
+        if !dedup_config.enabled {
+            return None;
+        }
+
+        let tasks = self.tasks.lock().await;
+        let existing_urls: Vec<String> =
+            tasks.iter().filter_map(|t| t.source_url.clone()).collect();
+
+        if let Some(idx) = url_dedup::find_duplicate_url(url, &existing_urls, &dedup_config) {
+            // Find the task with this URL
+            tasks
+                .iter()
+                .find(|t| t.source_url.as_deref() == Some(existing_urls[idx].as_str()))
+                .map(|t| t.id.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Log an audit event
+    pub async fn log_audit_event(
+        &self,
+        event_type: AuditEventType,
+        task_id: Option<String>,
+        task_name: Option<String>,
+        protocol: Option<String>,
+        details: Option<String>,
+    ) {
+        let entry = AuditLogEntry::new(event_type, task_id, task_name, protocol, details);
+        let mut log = self.audit_log.lock().await;
+        log.log(entry);
+        // Persist to disk (best-effort, don't block on errors)
+        if let Err(e) = audit_log::save_audit_log(&log, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist audit log");
+        }
+    }
+
+    /// Get all audit log entries
+    pub async fn get_audit_entries(&self) -> Vec<AuditLogEntry> {
+        let log = self.audit_log.lock().await;
+        log.entries().cloned().collect()
+    }
+
+    /// Get recent audit log entries
+    pub async fn get_recent_audit_entries(&self, n: usize) -> Vec<AuditLogEntry> {
+        let log = self.audit_log.lock().await;
+        log.recent(n).into_iter().cloned().collect()
+    }
+
+    /// Get audit log entries filtered by task ID
+    pub async fn get_audit_entries_by_task(&self, task_id: &str) -> Vec<AuditLogEntry> {
+        let log = self.audit_log.lock().await;
+        log.entries_by_task(task_id).into_iter().cloned().collect()
+    }
+
+    /// Get audit log summary
+    pub async fn get_audit_summary(&self) -> String {
+        let log = self.audit_log.lock().await;
+        log.summary().to_string()
+    }
+
+    /// Clear audit log
+    pub async fn clear_audit_log(&self) {
+        let mut log = self.audit_log.lock().await;
+        log.clear();
+        if let Err(e) = audit_log::save_audit_log(&log, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist audit log after clear");
+        }
+    }
+
     /// Get the save path manager for download directory configuration.
     pub fn save_path_manager(&self) -> &Arc<SavePathManager> {
         &self.save_path_manager
@@ -1987,6 +2095,15 @@ impl DownloadManager {
         };
 
         self.spawn_task(task_id.clone(), params).await;
+
+        self.log_audit_event(
+            AuditEventType::TaskAdded,
+            Some(task_id.clone()),
+            Some(task.name.clone()),
+            Some("torrent".to_string()),
+            Some(format!("Size: {} bytes", task.size)),
+        )
+        .await;
 
         Ok(task_id)
     }
@@ -3552,6 +3669,20 @@ impl DownloadManager {
             self.emit_event(TaskEvent::Updated {
                 task: TaskInfoEvent::from_task(task),
             });
+
+            // Log audit event
+            let task_name = task.name.clone();
+            let protocol = format!("{:?}", task.protocol);
+            drop(tasks);
+            self.log_audit_event(
+                AuditEventType::TaskPaused,
+                Some(task_id.to_string()),
+                Some(task_name),
+                Some(protocol),
+                None,
+            )
+            .await;
+
             return true;
         }
         false
@@ -3623,6 +3754,16 @@ impl DownloadManager {
                 self.emit_event(TaskEvent::Updated {
                     task: TaskInfoEvent::from_task(task),
                 });
+
+                // Log audit event
+                self.log_audit_event(
+                    AuditEventType::TaskResumed,
+                    Some(task_id.to_string()),
+                    Some(task.name.clone()),
+                    Some(format!("{:?}", task.protocol)),
+                    None,
+                )
+                .await;
             }
         }
         self.spawn_task(task_id.to_string(), params).await;
@@ -3645,6 +3786,7 @@ impl DownloadManager {
 
         let mut tasks = self.tasks.lock().await;
         let len_before = tasks.len();
+        let removed_task = tasks.iter().find(|t| t.id == task_id).cloned();
         tasks.retain(|t| t.id != task_id);
         let removed = tasks.len() < len_before;
         drop(tasks);
@@ -3653,6 +3795,16 @@ impl DownloadManager {
             self.emit_event(TaskEvent::Removed {
                 task_id: task_id.to_string(),
             });
+            if let Some(task) = &removed_task {
+                self.log_audit_event(
+                    AuditEventType::TaskRemoved,
+                    Some(task_id.to_string()),
+                    Some(task.name.clone()),
+                    Some(format!("{:?}", task.protocol)),
+                    None,
+                )
+                .await;
+            }
         }
         removed
     }
@@ -8514,5 +8666,187 @@ mod max_concurrent_tests {
         task.finalize_active_time();
         assert_eq!(task.active_time_seconds, 0.0);
         assert!(task.current_session_start.is_none());
+    }
+
+    // Phase 60: URL Deduplication Integration Tests
+
+    #[tokio::test]
+    async fn test_url_dedup_exact_mode() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_url_dedup_exact"));
+
+        // Configure exact dedup mode
+        let config = url_dedup::DedupConfig {
+            mode: url_dedup::DedupMode::Exact,
+            strip_query: true,
+            strip_fragment: true,
+            enabled: true,
+        };
+        dm.set_url_dedup(config).await;
+
+        // Add a task with a URL
+        let mut tasks = dm.tasks.lock().await;
+        tasks.push(DownloadTask {
+            id: "test-1".into(),
+            name: "test".into(),
+            protocol: DownloadProtocol::Xunlei,
+            size: 1000,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: std::path::PathBuf::from("/tmp"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: Some("https://example.com/file.zip".into()),
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
+            current_session_start: None,
+        });
+        drop(tasks);
+
+        // Same URL should be detected as duplicate
+        let dup = dm
+            .find_duplicate_by_url("https://example.com/file.zip")
+            .await;
+        assert_eq!(dup, Some("test-1".to_string()));
+
+        // URL with different query should match (strip_query=true)
+        let dup = dm
+            .find_duplicate_by_url("https://example.com/file.zip?token=abc")
+            .await;
+        assert_eq!(dup, Some("test-1".to_string()));
+
+        // Different URL should not match
+        let dup = dm
+            .find_duplicate_by_url("https://example.com/other.zip")
+            .await;
+        assert_eq!(dup, None);
+    }
+
+    #[tokio::test]
+    async fn test_url_dedup_domain_mode() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_url_dedup_domain"));
+
+        let config = url_dedup::DedupConfig {
+            mode: url_dedup::DedupMode::Domain,
+            strip_query: true,
+            strip_fragment: true,
+            enabled: true,
+        };
+        dm.set_url_dedup(config).await;
+
+        let mut tasks = dm.tasks.lock().await;
+        tasks.push(DownloadTask {
+            id: "test-2".into(),
+            name: "test".into(),
+            protocol: DownloadProtocol::Xunlei,
+            size: 1000,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: std::path::PathBuf::from("/tmp"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: Some("https://example.com/file1.zip".into()),
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
+            current_session_start: None,
+        });
+        drop(tasks);
+
+        // Any URL from same domain should match
+        let dup = dm
+            .find_duplicate_by_url("https://example.com/any-file.zip")
+            .await;
+        assert_eq!(dup, Some("test-2".to_string()));
+
+        // URL with www. prefix should also match
+        let dup = dm
+            .find_duplicate_by_url("https://www.example.com/other.zip")
+            .await;
+        assert_eq!(dup, Some("test-2".to_string()));
+
+        // Different domain should not match
+        let dup = dm.find_duplicate_by_url("https://other.com/file.zip").await;
+        assert_eq!(dup, None);
+    }
+
+    #[tokio::test]
+    async fn test_url_dedup_disabled() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_url_dedup_disabled"));
+
+        let config = url_dedup::DedupConfig {
+            mode: url_dedup::DedupMode::Exact,
+            strip_query: true,
+            strip_fragment: true,
+            enabled: false, // Disabled
+        };
+        dm.set_url_dedup(config).await;
+
+        let mut tasks = dm.tasks.lock().await;
+        tasks.push(DownloadTask {
+            id: "test-3".into(),
+            name: "test".into(),
+            protocol: DownloadProtocol::Xunlei,
+            size: 1000,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: std::path::PathBuf::from("/tmp"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: Some("https://example.com/file.zip".into()),
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            mirror_urls: Vec::new(),
+            current_session_start: None,
+        });
+        drop(tasks);
+
+        // When disabled, should never find duplicates
+        let dup = dm
+            .find_duplicate_by_url("https://example.com/file.zip")
+            .await;
+        assert_eq!(dup, None);
     }
 }

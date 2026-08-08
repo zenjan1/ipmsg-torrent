@@ -151,12 +151,16 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/health", get(get_queue_health))
         .route("/api/auto-cleanup", get(get_auto_cleanup))
         .route("/api/auto-cleanup", post(set_auto_cleanup))
+        .route("/api/dedup", get(get_dedup_config))
+        .route("/api/dedup", post(set_dedup_config))
         .route("/api/speed-history", get(get_all_speed_history))
         .route("/api/speed-history/:id", get(get_task_speed_history))
         .route(
             "/api/speed-history/:id/clear",
             post(clear_task_speed_history),
         )
+        .route("/api/audit-log", get(get_audit_log))
+        .route("/api/audit-log/clear", post(clear_audit_log))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -353,6 +357,23 @@ async fn set_auto_cleanup(
     Json(config): Json<crate::auto_cleanup::AutoCleanupConfig>,
 ) -> impl axum::response::IntoResponse {
     state.manager.set_auto_cleanup(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get URL deduplication configuration
+async fn get_dedup_config(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::url_dedup::DedupConfig> {
+    let config = state.manager.get_url_dedup().await;
+    Json(config)
+}
+
+/// Set URL deduplication configuration
+async fn set_dedup_config(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::url_dedup::DedupConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_url_dedup(config).await;
     Json(serde_json::json!({"status": "ok"}))
 }
 
@@ -1346,6 +1367,27 @@ async fn handle_ws(socket: WebSocket, state: Arc<WebState>) {
         _ = send_task => {},
         _ = recv_task => {},
     }
+}
+
+/// Get audit log entries
+async fn get_audit_log(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let entries = state.manager.get_recent_audit_entries(100).await;
+    let summary = state.manager.get_audit_summary().await;
+    Json(serde_json::json!({
+        "entries": entries,
+        "summary": summary,
+        "total": entries.len()
+    }))
+}
+
+/// Clear audit log
+async fn clear_audit_log(State(state): State<Arc<WebState>>) -> Json<TaskResponse> {
+    state.manager.clear_audit_log().await;
+    Json(TaskResponse {
+        success: true,
+        message: "Audit log cleared".to_string(),
+        task_id: None,
+    })
 }
 
 /// Serve the index HTML page

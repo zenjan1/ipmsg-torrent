@@ -126,6 +126,11 @@ enum Command {
         /// "status", "enable", "disable", "set <completed_retention> [failed_retention]"
         args: Vec<String>,
     },
+    /// Configure URL deduplication policy
+    DlDedup {
+        /// "status", "set <mode> [strip_query] [strip_fragment]", "enable", "disable"
+        args: Vec<String>,
+    },
     /// Add tags to a download task
     DlTag {
         task_id: String,
@@ -304,6 +309,11 @@ enum Command {
     /// Manage auto-categorization rules
     DlAutoRule {
         subcommand: String,
+        args: Vec<String>,
+    },
+    /// View and manage download audit log
+    DlAudit {
+        /// Subcommand: "status", "recent [n]", "task <task_id>", "clear"
         args: Vec<String>,
     },
     Block {
@@ -509,6 +519,10 @@ fn parse_command(input: &str) -> Command {
         "dlcleanup" | "dl-cleanup" | "dlcl" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlCleanup { args }
+        }
+        "dldedup" | "dl-dedup" | "dldd" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlDedup { args }
         }
         "dltag" | "dl-tag" => {
             if parts.len() >= 3 {
@@ -838,6 +852,10 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlarule <add|list|del> [args...]".to_string())
             }
         }
+        "dlaudit" | "dl-audit" | "dlaud" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlAudit { args }
+        }
         "dlarules" | "dl-auto-rules" | "dlars" => Command::DlAutoRule {
             subcommand: "list".to_string(),
             args: vec![],
@@ -990,6 +1008,7 @@ fn command_help() -> String {
         "/dlhealth        - Show download queue health report",
         "/dlspeedhist [id] - Show speed history (all tasks or specific task)",
         "/dlcleanup [cmd]  - Auto-cleanup completed/failed (status|enable|disable|set|run)",
+        "/dldedup [cmd]     - URL dedup policy (status|set <mode>|enable|disable)",
         "/dltag <id> <tags>   - Add tags to a download (comma-separated)",
         "/dluntag <id> <tags> - Remove tags from a download",
         "/dltags [tag]    - List all tags, or filter tasks by tag",
@@ -1018,6 +1037,7 @@ fn command_help() -> String {
         "/dlhook <list|add|remove|enable|disable> - Manage post-download hooks",
         "/dlrss <list|add|remove|enable|disable|poll> - Manage RSS/Atom feed subscriptions",
         "/dleta [task_id]   - Show ETA estimates for active downloads",
+        "/dlaudit [cmd]     - Audit log (status|recent [n]|task <id>|clear)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -2100,6 +2120,117 @@ async fn handle_command(
                     "main",
                     "Usage: /dlcleanup [status|enable|disable|set <retention> [failed_retention]|run]"
                         .to_string(),
+                );
+            }
+        }
+        Command::DlDedup { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if args.is_empty() || args[0] == "status" {
+                let config = download_manager.get_url_dedup().await;
+                let status = format!(
+                    "URL Deduplication: {}\nMode: {}\nStrip query params: {}\nStrip fragments: {}",
+                    if config.enabled {
+                        "✅ enabled"
+                    } else {
+                        "🚫 disabled"
+                    },
+                    config.mode,
+                    config.strip_query,
+                    config.strip_fragment
+                );
+                let mut s = state.lock().await;
+                s.add_system_message("main", status);
+            } else if args[0] == "enable" {
+                let mut config = download_manager.get_url_dedup().await;
+                config.enabled = true;
+                download_manager.set_url_dedup(config).await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", "✅ URL deduplication enabled".to_string());
+            } else if args[0] == "disable" {
+                let mut config = download_manager.get_url_dedup().await;
+                config.enabled = false;
+                download_manager.set_url_dedup(config).await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", "🚫 URL deduplication disabled".to_string());
+            } else if args[0] == "set" && args.len() >= 2 {
+                use std::str::FromStr;
+                match ipmsg_download::url_dedup::DedupMode::from_str(&args[1]) {
+                    Ok(mode) => {
+                        let mut config = download_manager.get_url_dedup().await;
+                        config.mode = mode;
+                        config.enabled = true;
+                        if args.len() >= 3 {
+                            config.strip_query = args[2] == "true" || args[2] == "1";
+                        }
+                        if args.len() >= 4 {
+                            config.strip_fragment = args[3] == "true" || args[3] == "1";
+                        }
+                        download_manager.set_url_dedup(config.clone()).await;
+                        let msg = format!(
+                            "✅ Dedup mode set to: {} (strip_query={}, strip_fragment={})",
+                            config.mode, config.strip_query, config.strip_fragment
+                        );
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                    Err(e) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("❌ {}", e));
+                    }
+                }
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    "Usage: /dldedup [status|enable|disable|set <mode> [strip_query] [strip_fragment]]\n\
+                     Modes: exact, domain, path-prefix, smart"
+                        .to_string(),
+                );
+            }
+        }
+        Command::DlAudit { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if args.is_empty() || args[0] == "status" {
+                let summary = download_manager.get_audit_summary().await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", summary);
+            } else if args[0] == "recent" {
+                let n = if args.len() >= 2 {
+                    args[1].parse::<usize>().unwrap_or(20)
+                } else {
+                    20
+                };
+                let entries = download_manager.get_recent_audit_entries(n).await;
+                let mut output = format!("📋 Recent {} audit log entries:\n", entries.len());
+                for entry in entries.iter().rev() {
+                    output.push_str(&format!("{}\n", entry.format_display()));
+                }
+                let mut s = state.lock().await;
+                s.add_system_message("main", output);
+            } else if args[0] == "task" && args.len() >= 2 {
+                let task_id = &args[1];
+                let entries = download_manager.get_audit_entries_by_task(task_id).await;
+                let mut output = format!("📋 Audit log for task {}:\n", task_id);
+                for entry in entries.iter().rev() {
+                    output.push_str(&format!("{}\n", entry.format_display()));
+                }
+                let mut s = state.lock().await;
+                s.add_system_message("main", output);
+            } else if args[0] == "clear" {
+                download_manager.clear_audit_log().await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", "🗑️ Audit log cleared".to_string());
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    "Usage: /dlaudit [status|recent [n]|task <task_id>|clear]".to_string(),
                 );
             }
         }
@@ -4752,6 +4883,69 @@ mod save_path_tests {
     fn test_help_contains_extract() {
         let help = command_help();
         assert!(help.contains("/dlextract"));
+    }
+
+    #[test]
+    fn test_help_contains_audit() {
+        let help = command_help();
+        assert!(help.contains("/dlaudit"));
+    }
+
+    #[test]
+    fn test_parse_dlaudit() {
+        match parse_command("/dlaudit status") {
+            Command::DlAudit { args } => {
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0], "status");
+            }
+            other => panic!("Expected DlAudit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlaudit_recent() {
+        match parse_command("/dlaudit recent 50") {
+            Command::DlAudit { args } => {
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0], "recent");
+                assert_eq!(args[1], "50");
+            }
+            other => panic!("Expected DlAudit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlaudit_task() {
+        match parse_command("/dlaudit task abc123") {
+            Command::DlAudit { args } => {
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0], "task");
+                assert_eq!(args[1], "abc123");
+            }
+            other => panic!("Expected DlAudit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlaudit_clear() {
+        match parse_command("/dlaudit clear") {
+            Command::DlAudit { args } => {
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0], "clear");
+            }
+            other => panic!("Expected DlAudit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlaudit_alias() {
+        match parse_command("/dl-audit status") {
+            Command::DlAudit { args } => {
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0], "status");
+            }
+            other => panic!("Expected DlAudit, got {:?}", other),
+        }
     }
 
     #[test]
