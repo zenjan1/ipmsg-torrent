@@ -153,6 +153,8 @@ pub struct TaskInfoEvent {
     pub checksum_status: Option<String>,
     /// Estimated seconds remaining (from ETA estimator)
     pub eta_seconds: Option<f64>,
+    /// Total time spent actively downloading (seconds)
+    pub active_time_seconds: f64,
 }
 
 impl TaskInfoEvent {
@@ -182,6 +184,7 @@ impl TaskInfoEvent {
             checksum_algorithm: task.checksum_algorithm.map(|a| a.name().to_lowercase()),
             checksum_status: None,
             eta_seconds: task.eta_seconds(),
+            active_time_seconds: task.active_time_seconds,
         }
     }
 }
@@ -286,6 +289,10 @@ pub struct DownloadTask {
     pub expected_checksum: Option<String>,
     /// Checksum algorithm to use (md5, sha1, sha256, ed2k)
     pub checksum_algorithm: Option<checksum::ChecksumAlgorithm>,
+    /// Total time spent actively downloading (seconds, excluding paused time)
+    pub active_time_seconds: f64,
+    /// Timestamp when current download session started (for real-time tracking)
+    pub current_session_start: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -485,6 +492,20 @@ impl DownloadTask {
             DownloadState::Paused => "paused",
             DownloadState::Complete => "complete",
             DownloadState::Error => "error",
+        }
+    }
+
+    /// Accumulate current session time into active_time_seconds and clear session start.
+    /// Call this when transitioning from Downloading to Paused/Complete/Error.
+    pub fn finalize_active_time(&mut self) {
+        if let Some(start) = self.current_session_start.take() {
+            let elapsed = chrono::Utc::now()
+                .signed_duration_since(start)
+                .num_milliseconds() as f64
+                / 1000.0;
+            if elapsed > 0.0 {
+                self.active_time_seconds += elapsed;
+            }
         }
     }
 }
@@ -992,6 +1013,7 @@ impl DownloadManager {
                                 let mut t = tasks.lock().await;
                                 if let Some(task) = t.iter_mut().find(|t| t.id == task_id) {
                                     task.state = DownloadState::Downloading;
+                                    task.current_session_start = Some(chrono::Utc::now());
                                     task.updated_at = chrono::Utc::now();
                                 }
                             }
@@ -1202,11 +1224,13 @@ impl DownloadManager {
                                 if let Some(task) = t.iter_mut().find(|t| t.id == task_id_clone) {
                                     match result {
                                         Ok(()) => {
+                                            task.finalize_active_time();
                                             task.state = DownloadState::Complete;
                                             task.downloaded = task.size;
                                             task.speed_bps = 0.0;
                                             if let Some(cs_err) = Self::verify_checksum(task).await
                                             {
+                                                task.finalize_active_time();
                                                 task.state = DownloadState::Error;
                                                 task.error = Some(cs_err);
                                             }
@@ -1255,6 +1279,7 @@ impl DownloadManager {
                                                         "Scheduling auto-retry"
                                                     );
                                                 } else {
+                                                    task.finalize_active_time();
                                                     task.state = DownloadState::Error;
                                                     task.error = Some(err_str);
                                                     Self::record_task_history(
@@ -1399,6 +1424,8 @@ impl DownloadManager {
                         source_url: Some(source_url),
                         expected_checksum: None,
                         checksum_algorithm: None,
+                        active_time_seconds: 0.0,
+                        current_session_start: None,
                     };
 
                     let task_name = task.name.clone();
@@ -1434,6 +1461,7 @@ impl DownloadManager {
                             checksum_algorithm: None,
                             checksum_status: None,
                             eta_seconds: None,
+                            active_time_seconds: 0.0,
                         },
                     });
                     notify.notify_one();
@@ -1856,6 +1884,8 @@ impl DownloadManager {
             source_url: Some(info_hash),
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1919,6 +1949,8 @@ impl DownloadManager {
             source_url: Some(magnet_uri.to_string()),
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -1983,6 +2015,8 @@ impl DownloadManager {
             source_url: Some(hash_str),
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -2050,6 +2084,8 @@ impl DownloadManager {
             source_url,
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -2111,6 +2147,8 @@ impl DownloadManager {
             source_url: Some(file_hash.clone()),
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -2227,11 +2265,13 @@ impl DownloadManager {
         {
             let mut tasks = self.tasks.lock().await;
             if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                task.finalize_active_time();
                 task.state = DownloadState::Complete;
                 task.downloaded = task.size;
                 task.speed_bps = 0.0;
                 task.updated_at = chrono::Utc::now();
                 if let Some(cs_err) = Self::verify_checksum(task).await {
+                    task.finalize_active_time();
                     task.state = DownloadState::Error;
                     task.error = Some(cs_err);
                 }
@@ -2398,6 +2438,8 @@ impl DownloadManager {
             source_url: Some(url.to_string()),
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         self.tasks.lock().await.push(task.clone());
@@ -2550,6 +2592,7 @@ impl DownloadManager {
             let mut t = tasks.lock().await;
             if let Some(task) = t.iter_mut().find(|t| t.id == task_id) {
                 task.state = DownloadState::Downloading;
+                task.current_session_start = Some(chrono::Utc::now());
                 task.updated_at = chrono::Utc::now();
             }
         }
@@ -2748,10 +2791,12 @@ impl DownloadManager {
             if let Some(task) = t.iter_mut().find(|t| t.id == task_id_clone) {
                 match result {
                     Ok(()) => {
+                        task.finalize_active_time();
                         task.state = DownloadState::Complete;
                         task.downloaded = task.size;
                         task.speed_bps = 0.0;
                         if let Some(cs_err) = Self::verify_checksum(task).await {
+                            task.finalize_active_time();
                             task.state = DownloadState::Error;
                             task.error = Some(cs_err);
                         }
@@ -2802,6 +2847,7 @@ impl DownloadManager {
                                     "Scheduling auto-retry"
                                 );
                             } else {
+                                task.finalize_active_time();
                                 task.state = DownloadState::Error;
                                 task.error = Some(err_str);
                                 Self::record_task_history(
@@ -3025,6 +3071,7 @@ impl DownloadManager {
                                     let mut t = tasks.lock().await;
                                     if let Some(task) = t.iter_mut().find(|t| t.id == task_id) {
                                         task.state = DownloadState::Downloading;
+                                        task.current_session_start = Some(chrono::Utc::now());
                                         task.error = None;
                                         task.updated_at = chrono::Utc::now();
                                     }
@@ -3242,12 +3289,14 @@ impl DownloadManager {
                                     {
                                         match result {
                                             Ok(()) => {
+                                                task.finalize_active_time();
                                                 task.state = DownloadState::Complete;
                                                 task.downloaded = task.size;
                                                 task.speed_bps = 0.0;
                                                 if let Some(cs_err) =
                                                     Self::verify_checksum(task).await
                                                 {
+                                                    task.finalize_active_time();
                                                     task.state = DownloadState::Error;
                                                     task.error = Some(cs_err);
                                                 }
@@ -3299,6 +3348,7 @@ impl DownloadManager {
                                                             "Scheduling auto-retry"
                                                         );
                                                     } else {
+                                                        task.finalize_active_time();
                                                         task.state = DownloadState::Error;
                                                         task.error = Some(err_str);
                                                         Self::record_task_history(
@@ -3382,6 +3432,7 @@ impl DownloadManager {
         if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id)
             && (task.state == DownloadState::Downloading || task.state == DownloadState::Queued)
         {
+            task.finalize_active_time();
             task.state = DownloadState::Paused;
             task.speed_bps = 0.0;
             task.updated_at = chrono::Utc::now();
@@ -4407,6 +4458,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4434,6 +4487,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4461,6 +4516,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -4580,6 +4637,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -4634,6 +4693,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -4681,6 +4742,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4708,6 +4771,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -4735,6 +4800,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -4785,6 +4852,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -4812,6 +4881,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -4852,6 +4923,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -4892,6 +4965,8 @@ mod tests {
             source_url: None,
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
         assert!(task.tags.is_empty());
     }
@@ -4926,6 +5001,8 @@ mod tests {
             source_url: None,
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         // Query match (case-insensitive)
@@ -4977,6 +5054,8 @@ mod tests {
             source_url: None,
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         let filter = TaskFilter {
@@ -5020,6 +5099,8 @@ mod tests {
             source_url: None,
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         let filter = TaskFilter {
@@ -5063,6 +5144,8 @@ mod tests {
             source_url: None,
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         let filter = TaskFilter {
@@ -5106,6 +5189,8 @@ mod tests {
             source_url: None,
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         // All criteria match
@@ -5156,6 +5241,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -5183,6 +5270,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -5210,6 +5299,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             },
         ];
 
@@ -5252,6 +5343,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             },
             DownloadTask {
                 id: "s2".into(),
@@ -5279,6 +5372,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             },
             DownloadTask {
                 id: "s3".into(),
@@ -5306,6 +5401,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             },
         ];
 
@@ -5344,6 +5441,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             },
             DownloadTask {
                 id: "p2".into(),
@@ -5371,6 +5470,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             },
             DownloadTask {
                 id: "p3".into(),
@@ -5398,6 +5499,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             },
         ];
 
@@ -5438,6 +5541,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -5465,6 +5570,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -5503,6 +5610,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -5530,6 +5639,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -5557,6 +5668,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -5600,6 +5713,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "t2".into(),
@@ -5627,6 +5742,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "t3".into(),
@@ -5654,6 +5771,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -5773,6 +5892,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -5820,6 +5941,8 @@ mod tests {
             source_url: None,
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         let event = TaskInfoEvent::from_task(&task);
@@ -5962,6 +6085,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -6026,6 +6151,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -6071,6 +6198,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-2".into(),
@@ -6098,6 +6227,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "prop-3".into(),
@@ -6125,6 +6256,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -6196,6 +6329,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -6240,6 +6375,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -6281,6 +6418,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -6354,6 +6493,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -6404,6 +6545,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -6431,6 +6574,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -6475,6 +6620,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -6502,6 +6649,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -6546,6 +6695,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -6573,6 +6724,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -6600,6 +6753,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -6642,6 +6797,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -6669,6 +6826,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -6696,6 +6855,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -6739,6 +6900,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "q-2".into(),
@@ -6766,6 +6929,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
             tasks.push(DownloadTask {
                 id: "q-3".into(),
@@ -6793,6 +6958,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             });
         }
 
@@ -7115,6 +7282,7 @@ mod tests {
         {
             let mut tasks = dm.tasks.lock().await;
             if let Some(task) = tasks.iter_mut().find(|t| t.id == id1) {
+                task.finalize_active_time();
                 task.state = DownloadState::Complete;
             }
         }
@@ -7843,5 +8011,140 @@ mod max_concurrent_tests {
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn test_finalize_active_time_accumulates() {
+        let mut task = DownloadTask {
+            id: "time-1".into(),
+            name: "test".into(),
+            protocol: DownloadProtocol::Xunlei,
+            size: 1000,
+            downloaded: 0,
+            state: DownloadState::Downloading,
+            error: None,
+            speed_bps: 0.0,
+            save_path: std::path::PathBuf::from("/tmp"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+        };
+
+        // No session started yet
+        assert_eq!(task.active_time_seconds, 0.0);
+        assert!(task.current_session_start.is_none());
+
+        // Start a session
+        task.current_session_start = Some(chrono::Utc::now() - chrono::Duration::seconds(10));
+
+        // Finalize should accumulate time
+        task.finalize_active_time();
+
+        // Should have accumulated ~10 seconds
+        assert!(task.active_time_seconds >= 9.0 && task.active_time_seconds <= 11.0);
+
+        // Session should be cleared
+        assert!(task.current_session_start.is_none());
+    }
+
+    #[test]
+    fn test_finalize_active_time_multiple_sessions() {
+        let mut task = DownloadTask {
+            id: "time-2".into(),
+            name: "test".into(),
+            protocol: DownloadProtocol::Xunlei,
+            size: 1000,
+            downloaded: 0,
+            state: DownloadState::Downloading,
+            error: None,
+            speed_bps: 0.0,
+            save_path: std::path::PathBuf::from("/tmp"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+        };
+
+        // First session: 5 seconds
+        task.active_time_seconds = 5.0;
+        task.current_session_start = Some(chrono::Utc::now() - chrono::Duration::seconds(5));
+        task.finalize_active_time();
+
+        // Should have accumulated ~10 seconds total
+        assert!(task.active_time_seconds >= 9.0 && task.active_time_seconds <= 11.0);
+
+        // Second session: 3 seconds
+        task.current_session_start = Some(chrono::Utc::now() - chrono::Duration::seconds(3));
+        task.finalize_active_time();
+
+        // Should have accumulated ~13 seconds total
+        assert!(task.active_time_seconds >= 12.0 && task.active_time_seconds <= 14.0);
+    }
+
+    #[test]
+    fn test_finalize_active_time_no_session() {
+        let mut task = DownloadTask {
+            id: "time-3".into(),
+            name: "test".into(),
+            protocol: DownloadProtocol::Xunlei,
+            size: 1000,
+            downloaded: 0,
+            state: DownloadState::Downloading,
+            error: None,
+            speed_bps: 0.0,
+            save_path: std::path::PathBuf::from("/tmp"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+        };
+
+        // Finalize with no session should not change anything
+        task.finalize_active_time();
+        assert_eq!(task.active_time_seconds, 0.0);
+        assert!(task.current_session_start.is_none());
     }
 }

@@ -182,6 +182,8 @@ fn test_download_task_progress() {
         source_url: None,
         expected_checksum: None,
         checksum_algorithm: None,
+        active_time_seconds: 0.0,
+        current_session_start: None,
     };
 
     assert_eq!(task.progress(), 50.0);
@@ -217,6 +219,8 @@ fn test_download_task_progress_zero_size() {
         source_url: None,
         expected_checksum: None,
         checksum_algorithm: None,
+        active_time_seconds: 0.0,
+        current_session_start: None,
     };
 
     assert_eq!(task.progress(), 0.0);

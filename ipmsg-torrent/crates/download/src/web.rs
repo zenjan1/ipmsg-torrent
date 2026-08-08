@@ -1310,6 +1310,7 @@ mod tests {
                 checksum_algorithm: None,
                 checksum_status: None,
                 eta_seconds: None,
+                active_time_seconds: 0.0,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -1792,6 +1793,8 @@ mod tests {
             source_url: None,
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

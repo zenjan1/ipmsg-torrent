@@ -178,6 +178,8 @@ impl From<PersistedTask> for DownloadTask {
             source_url: t.source_url,
             expected_checksum: t.expected_checksum,
             checksum_algorithm: t.checksum_algorithm,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         }
     }
 }
@@ -289,6 +291,8 @@ mod tests {
             source_url: None,
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -353,6 +357,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -380,6 +386,8 @@ mod tests {
                 source_url: None,
                 expected_checksum: None,
                 checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
             },
         ];
 
@@ -436,6 +444,8 @@ mod tests {
             source_url: None,
             expected_checksum: None,
             checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();
