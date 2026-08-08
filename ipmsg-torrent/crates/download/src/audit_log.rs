@@ -272,8 +272,7 @@ impl std::fmt::Display for AuditLogSummary {
 /// Save audit log to disk
 pub fn save_audit_log(log: &AuditLog, data_dir: &Path) -> Result<(), std::io::Error> {
     let path = data_dir.join("audit_log.json");
-    let json = serde_json::to_string_pretty(&log.entries)
-        .map_err(std::io::Error::other)?;
+    let json = serde_json::to_string_pretty(&log.entries).map_err(std::io::Error::other)?;
 
     // Atomic write
     let temp_path = path.with_extension("json.tmp");
