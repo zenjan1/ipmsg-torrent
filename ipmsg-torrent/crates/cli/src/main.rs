@@ -269,6 +269,11 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Manage RSS/Atom feed subscriptions
+    DlRss {
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -792,6 +797,21 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlhook <list|add|remove|enable|disable> [args...]".to_string())
             }
         }
+        "dlrss" | "dl-rss" | "dlfeed" => {
+            // /dlrss <subcommand> [args...]
+            // Subcommands: list, add, remove, enable, disable, poll
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                Command::DlRss {
+                    subcommand: args[1].to_string(),
+                    args: args[2..].iter().map(|s| s.to_string()).collect(),
+                }
+            } else {
+                Command::Unknown(
+                    "/dlrss <list|add|remove|enable|disable|poll> [args...]".to_string(),
+                )
+            }
+        }
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -881,6 +901,7 @@ fn command_help() -> String {
         "/dlgroups           - List all download groups",
         "/dlchecksum <id> <hash> [algo] - Set checksum for verification (algo: md5/sha1/sha256/ed2k)",
         "/dlhook <list|add|remove|enable|disable> - Manage post-download hooks",
+        "/dlrss <list|add|remove|enable|disable|poll> - Manage RSS/Atom feed subscriptions",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -3236,6 +3257,259 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlhook <list|add|remove|enable|disable> [args...]".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlRss { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let rss_mgr = download_manager.rss_feed_manager().cloned();
+            let rss_mgr = match rss_mgr {
+                Some(mgr) => mgr,
+                None => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "❌ RSS feed manager not initialized. Call /dlrss init first.".to_string(),
+                    );
+                    return;
+                }
+            };
+
+            match subcommand.as_str() {
+                "list" | "ls" => {
+                    let subs = rss_mgr.list().await;
+                    if subs.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "No RSS feed subscriptions configured".to_string(),
+                        );
+                    } else {
+                        let mut lines = String::from("📡 RSS feed subscriptions:\n");
+                        for sub in subs {
+                            let status = if sub.enabled { "✅" } else { "❌" };
+                            let label = sub.label.as_deref().unwrap_or("(no label)");
+                            let filter = sub.title_filter.as_deref().unwrap_or("*");
+                            let exts = if sub.extensions.is_empty() {
+                                "all".to_string()
+                            } else {
+                                sub.extensions.join(",")
+                            };
+                            let last_poll = sub
+                                .last_poll
+                                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                                .unwrap_or_else(|| "never".to_string());
+                            lines.push_str(&format!(
+                                "  {} [{}] {} ({})\n    filter: {} ext: {} interval: {}s last: {}\n",
+                                status,
+                                &sub.id[..8],
+                                label,
+                                sub.feed_url,
+                                filter,
+                                exts,
+                                sub.poll_interval_secs,
+                                last_poll,
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", lines.trim_end().to_string());
+                    }
+                }
+                "add" => {
+                    // /dlrss add <feed_url> [label] [title_filter] [ext1,ext2,...]
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlrss add <feed_url> [label] [title_filter] [ext1,ext2,...]"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    let feed_url = &args[0];
+                    let label = args.get(1).map(|s| s.as_str());
+                    let title_filter = args.get(2).map(|s| s.as_str());
+                    let extensions: Vec<String> = args
+                        .get(3)
+                        .map(|s| s.split(',').map(|e| e.trim().to_string()).collect())
+                        .unwrap_or_default();
+                    match rss_mgr
+                        .add_subscription(feed_url, label, title_filter, extensions)
+                        .await
+                    {
+                        Ok(id) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Added RSS subscription (id: {})", &id[..8]),
+                            );
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("❌ Failed to add feed: {}", e));
+                        }
+                    }
+                }
+                "remove" | "rm" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlrss remove <sub_id>".to_string());
+                        return;
+                    }
+                    let sub_id = &args[0];
+                    let subs = rss_mgr.list().await;
+                    let found = subs.iter().find(|s| s.id.starts_with(sub_id));
+                    if let Some(sub) = found {
+                        match rss_mgr.remove_subscription(&sub.id).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Removed RSS subscription '{}'", sub.id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Failed to remove: {}", e));
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "❌ Subscription not found".to_string());
+                    }
+                }
+                "enable" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlrss enable <sub_id>".to_string());
+                        return;
+                    }
+                    let sub_id = &args[0];
+                    let subs = rss_mgr.list().await;
+                    let found = subs.iter().find(|s| s.id.starts_with(sub_id));
+                    if let Some(sub) = found {
+                        match rss_mgr.set_enabled(&sub.id, true).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Enabled RSS subscription '{}'", sub.id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Failed to enable: {}", e));
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "❌ Subscription not found".to_string());
+                    }
+                }
+                "disable" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlrss disable <sub_id>".to_string());
+                        return;
+                    }
+                    let sub_id = &args[0];
+                    let subs = rss_mgr.list().await;
+                    let found = subs.iter().find(|s| s.id.starts_with(sub_id));
+                    if let Some(sub) = found {
+                        match rss_mgr.set_enabled(&sub.id, false).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Disabled RSS subscription '{}'", sub.id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to disable: {}", e),
+                                );
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "❌ Subscription not found".to_string());
+                    }
+                }
+                "poll" => {
+                    // /dlrss poll [sub_id] — poll specific sub or all due
+                    if args.is_empty() {
+                        // Poll all due
+                        let results = rss_mgr.poll_all_due().await;
+                        let mut s = state.lock().await;
+                        if results.is_empty() {
+                            s.add_system_message("main", "No feeds due for polling".to_string());
+                        } else {
+                            let mut lines = String::from("📡 Polled feeds:\n");
+                            for (sub_id, items) in results {
+                                lines.push_str(&format!(
+                                    "  [{}] {} items\n",
+                                    &sub_id[..8],
+                                    items.len()
+                                ));
+                                for item in items.iter().take(5) {
+                                    lines.push_str(&format!("    • {}\n", item.title));
+                                }
+                            }
+                            s.add_system_message("main", lines.trim_end().to_string());
+                        }
+                    } else {
+                        let sub_id = &args[0];
+                        let subs = rss_mgr.list().await;
+                        let found = subs.iter().find(|s| s.id.starts_with(sub_id));
+                        if let Some(sub) = found {
+                            match rss_mgr.poll_feed(&sub.id).await {
+                                Ok(items) => {
+                                    let mut s = state.lock().await;
+                                    if items.is_empty() {
+                                        s.add_system_message(
+                                            "main",
+                                            format!("No items found in feed '{}'", sub.id),
+                                        );
+                                    } else {
+                                        let mut lines = format!(
+                                            "📡 Feed '{}' ({} items):\n",
+                                            sub.id,
+                                            items.len()
+                                        );
+                                        for item in items.iter().take(10) {
+                                            lines.push_str(&format!(
+                                                "  • {} ({})\n",
+                                                item.title, item.url
+                                            ));
+                                        }
+                                        s.add_system_message("main", lines.trim_end().to_string());
+                                    }
+                                }
+                                Err(e) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("❌ Failed to poll feed: {}", e),
+                                    );
+                                }
+                            }
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "❌ Subscription not found".to_string());
+                        }
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlrss <list|add|remove|enable|disable|poll> [args...]".to_string(),
                     );
                 }
             }

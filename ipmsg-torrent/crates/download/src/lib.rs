@@ -20,6 +20,7 @@ pub mod post_hooks;
 pub mod progress;
 pub mod proxy;
 pub mod rate_limiter;
+pub mod rss_feed;
 pub mod save_path_manager;
 pub mod segment_download;
 pub mod task_export;
@@ -42,6 +43,7 @@ use bandwidth_monitor::BandwidthMonitor;
 use download_history::{HistoryEntry, append_entry};
 use notification::{NotificationContext, NotificationDispatcher};
 use post_hooks::HookManager;
+use rss_feed::FeedSubscriptionManager;
 
 pub use bandwidth_monitor::{
     BandwidthDashboard, BandwidthMonitor as BandwidthMonitorType, BandwidthSample, BandwidthStats,
@@ -582,6 +584,8 @@ pub struct DownloadManager {
     auto_retry_base_delay_secs: Arc<AtomicU64>,
     /// Post-download hook manager
     hook_manager: Arc<HookManager>,
+    /// RSS/Atom feed subscription manager
+    rss_feed_manager: Option<Arc<FeedSubscriptionManager>>,
 }
 
 impl DownloadManager {
@@ -609,6 +613,7 @@ impl DownloadManager {
             max_auto_retries: Arc::new(AtomicU32::new(0)),
             auto_retry_base_delay_secs: Arc::new(AtomicU64::new(30)),
             hook_manager: Arc::new(HookManager::new(data_dir)),
+            rss_feed_manager: None,
         };
         dm.start_scheduler();
         dm
@@ -768,6 +773,7 @@ impl DownloadManager {
             max_auto_retries: Arc::new(AtomicU32::new(0)),
             auto_retry_base_delay_secs: Arc::new(AtomicU64::new(30)),
             hook_manager: Arc::new(HookManager::new(data_dir)),
+            rss_feed_manager: None,
         };
         // Restore post-download hooks from disk
         if let Err(e) = dm.hook_manager.load() {
@@ -1291,6 +1297,145 @@ impl DownloadManager {
     /// Get the hook manager for post-download hook management
     pub fn hook_manager(&self) -> &Arc<HookManager> {
         &self.hook_manager
+    }
+
+    /// Get the RSS feed subscription manager (if initialized).
+    pub fn rss_feed_manager(&self) -> Option<&Arc<FeedSubscriptionManager>> {
+        self.rss_feed_manager.as_ref()
+    }
+
+    /// Initialize the RSS feed subscription manager and wire up auto-download.
+    ///
+    /// Creates a `FeedSubscriptionManager` that persists to `<data_dir>/rss_feeds.json`.
+    /// When new feed items are discovered, they are automatically queued as downloads
+    /// via `add_url()` (for HTTP/FTP URLs) or `add_magnet()` (for magnet links).
+    pub async fn init_rss_feed_manager(&mut self) -> Result<(), rss_feed::RssFeedError> {
+        let config_path = self.data_dir.join("rss_feeds.json");
+        let mgr = FeedSubscriptionManager::new(&config_path).await?;
+
+        // Wire up auto-download callback.
+        // We use a weak-like pattern: clone the Arc fields we need from self.
+        // The callback spawns a task that calls add_url/add_magnet on a fresh
+        // Arc<DownloadManager>-like handle. Since we don't have an Arc<Self> here,
+        // we use the underlying shared state directly.
+        let dm_tasks = self.tasks.clone();
+        let dm_event_tx = self.event_tx.clone();
+        let dm_task_complete_notify = self.task_complete_notify.clone();
+        let dm_save_path_manager = self.save_path_manager.clone();
+
+        mgr.set_on_new_item(
+            move |item: rss_feed::FeedItem, _sub: &rss_feed::FeedSubscription| {
+                let tasks = dm_tasks.clone();
+                let event_tx = dm_event_tx.clone();
+                let notify = dm_task_complete_notify.clone();
+                let save_path_manager = dm_save_path_manager.clone();
+                let url = item.url.clone();
+                let title = item.title.clone();
+                let size = item.size.unwrap_or(0);
+
+                tokio::spawn(async move {
+                    // Skip if URL already exists in task list.
+                    {
+                        let tasks_guard = tasks.lock().await;
+                        if tasks_guard
+                            .iter()
+                            .any(|t| t.source_url.as_deref() == Some(&url))
+                        {
+                            return;
+                        }
+                    }
+
+                    let name = if title.is_empty() {
+                        url.rsplit('/').next().unwrap_or("download").to_string()
+                    } else {
+                        title
+                    };
+
+                    let now = chrono::Utc::now();
+                    let task_id = uuid::Uuid::new_v4().to_string();
+                    let save_path = save_path_manager.get_save_path(&name).await.join(&name);
+
+                    // Determine protocol from URL scheme.
+                    let (protocol, source_url) = if url.starts_with("magnet:") {
+                        (DownloadProtocol::Magnet, url.clone())
+                    } else if url.starts_with("ed2k://") {
+                        (DownloadProtocol::Ed2k, url.clone())
+                    } else {
+                        (DownloadProtocol::Xunlei, url.clone())
+                    };
+
+                    let task = DownloadTask {
+                        id: task_id.clone(),
+                        name,
+                        protocol,
+                        size,
+                        downloaded: 0,
+                        state: DownloadState::Queued,
+                        error: None,
+                        speed_bps: 0.0,
+                        save_path,
+                        created_at: now,
+                        updated_at: now,
+                        tags: Vec::new(),
+                        priority: DownloadPriority::Normal,
+                        schedule: None,
+                        bandwidth_weight: 1,
+                        queue_position: None,
+                        depends_on: Vec::new(),
+                        notes: None,
+                        group: None,
+                        speed_limit_bps: None,
+                        auto_retry_count: 0,
+                        retry_after: None,
+                        source_url: Some(source_url),
+                        expected_checksum: None,
+                        checksum_algorithm: None,
+                    };
+
+                    let task_name = task.name.clone();
+                    {
+                        let mut tasks_guard = tasks.lock().await;
+                        tasks_guard.push(task);
+                    }
+
+                    // Emit event and notify scheduler.
+                    let _ = event_tx.send(TaskEvent::Added {
+                        task: TaskInfoEvent {
+                            id: task_id,
+                            name: task_name,
+                            protocol: format!("{protocol:?}"),
+                            size,
+                            downloaded: 0,
+                            progress: 0.0,
+                            speed_bps: 0.0,
+                            state: "Queued".to_string(),
+                            error: None,
+                            tags: Vec::new(),
+                            priority: "Normal".to_string(),
+                            bandwidth_weight: 1,
+                            queue_position: None,
+                            depends_on: Vec::new(),
+                            notes: None,
+                            group: None,
+                            speed_limit_bps: None,
+                            auto_retry_count: 0,
+                            retry_after: None,
+                            source_url: Some(url.clone()),
+                            expected_checksum: None,
+                            checksum_algorithm: None,
+                            checksum_status: None,
+                        },
+                    });
+                    notify.notify_one();
+
+                    tracing::info!(url = %url, "RSS: auto-queued download");
+                });
+            },
+        )
+        .await;
+
+        self.rss_feed_manager = Some(Arc::new(mgr));
+        Ok(())
     }
 
     /// Set global download speed limit in bytes/sec (0 = unlimited).

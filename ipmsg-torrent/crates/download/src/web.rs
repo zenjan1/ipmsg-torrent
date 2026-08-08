@@ -137,6 +137,12 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/hooks", post(add_hook))
         .route("/api/hooks/:id", post(update_hook))
         .route("/api/hooks/:id/remove", post(remove_hook))
+        .route("/api/feeds", get(list_feeds))
+        .route("/api/feeds", post(add_feed))
+        .route("/api/feeds/:id/remove", post(remove_feed))
+        .route("/api/feeds/:id/enable", post(enable_feed))
+        .route("/api/feeds/:id/disable", post(disable_feed))
+        .route("/api/feeds/:id/poll", post(poll_feed))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -895,6 +901,164 @@ async fn remove_hook(
     }
 }
 
+/// GET /api/feeds - List all RSS feed subscriptions
+async fn list_feeds(State(state): State<Arc<WebState>>) -> (StatusCode, Json<serde_json::Value>) {
+    let rss_mgr = match state.manager.rss_feed_manager() {
+        Some(mgr) => mgr,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "RSS feed manager not initialized"})),
+            );
+        }
+    };
+    let subs = rss_mgr.list().await;
+    (StatusCode::OK, Json(serde_json::json!(subs)))
+}
+
+/// POST /api/feeds - Add a new RSS feed subscription
+async fn add_feed(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let rss_mgr = match state.manager.rss_feed_manager() {
+        Some(mgr) => mgr,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "RSS feed manager not initialized"})),
+            );
+        }
+    };
+
+    let feed_url = match body.get("feed_url").and_then(|v| v.as_str()) {
+        Some(url) if !url.is_empty() => url,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "feed_url is required"})),
+            );
+        }
+    };
+    let label = body.get("label").and_then(|v| v.as_str());
+    let title_filter = body.get("title_filter").and_then(|v| v.as_str());
+    let extensions: Vec<String> = body
+        .get("extensions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    match rss_mgr
+        .add_subscription(feed_url, label, title_filter, extensions)
+        .await
+    {
+        Ok(id) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"success": true, "id": id})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// POST /api/feeds/:id/remove - Remove an RSS feed subscription
+async fn remove_feed(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let rss_mgr = match state.manager.rss_feed_manager() {
+        Some(mgr) => mgr,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "RSS feed manager not initialized"})),
+            );
+        }
+    };
+    match rss_mgr.remove_subscription(&id).await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// POST /api/feeds/:id/enable - Enable an RSS feed subscription
+async fn enable_feed(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let rss_mgr = match state.manager.rss_feed_manager() {
+        Some(mgr) => mgr,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "RSS feed manager not initialized"})),
+            );
+        }
+    };
+    match rss_mgr.set_enabled(&id, true).await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// POST /api/feeds/:id/disable - Disable an RSS feed subscription
+async fn disable_feed(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let rss_mgr = match state.manager.rss_feed_manager() {
+        Some(mgr) => mgr,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "RSS feed manager not initialized"})),
+            );
+        }
+    };
+    match rss_mgr.set_enabled(&id, false).await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"success": true}))),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// POST /api/feeds/:id/poll - Poll an RSS feed for new items
+async fn poll_feed(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let rss_mgr = match state.manager.rss_feed_manager() {
+        Some(mgr) => mgr,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "RSS feed manager not initialized"})),
+            );
+        }
+    };
+    match rss_mgr.poll_feed(&id).await {
+        Ok(items) => (StatusCode::OK, Json(serde_json::json!({"items": items}))),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
 /// WebSocket upgrade handler
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<WebState>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state))
@@ -1557,5 +1721,257 @@ mod tests {
         };
         let info = TaskInfo::from(task);
         assert_eq!(info.depends_on, vec!["task-0".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_list_feeds_no_rss_manager() {
+        // Without init_rss_feed_manager, rss_feed_manager is None
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/feeds")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn test_add_feed_no_rss_manager() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feeds")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "feed_url": "https://example.com/feed.xml"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn test_list_feeds_empty() {
+        let state = test_state_with_rss().await;
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/feeds")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let feeds: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(feeds.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_add_and_list_feed() {
+        let state = test_state_with_rss().await;
+        let app = create_router(state.clone());
+
+        // Add a feed
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feeds")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "feed_url": "https://example.com/feed.xml",
+                            "label": "Test Feed",
+                            "extensions": ["mp4", "mkv"]
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp["success"], true);
+        assert!(resp["id"].as_str().is_some());
+
+        // List feeds - should have 1
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/feeds")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let feeds: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(feeds.len(), 1);
+        assert_eq!(feeds[0]["feed_url"], "https://example.com/feed.xml");
+        assert_eq!(feeds[0]["label"], "Test Feed");
+    }
+
+    #[tokio::test]
+    async fn test_add_feed_missing_url() {
+        let state = test_state_with_rss().await;
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feeds")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "label": "No URL"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_remove_feed_not_found() {
+        let state = test_state_with_rss().await;
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feeds/nonexistent-id/remove")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_enable_disable_feed() {
+        let state = test_state_with_rss().await;
+        let app = create_router(state.clone());
+
+        // Add a feed first
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feeds")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "feed_url": "https://example.com/feed.xml"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let feed_id = resp["id"].as_str().unwrap().to_string();
+
+        // Disable it
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/feeds/{}/disable", feed_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify disabled
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/feeds")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let feeds: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(feeds[0]["enabled"], false);
+
+        // Re-enable
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/feeds/{}/enable", feed_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    async fn test_state_with_rss() -> Arc<WebState> {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        let mut manager = DownloadManager::new(data_dir);
+        manager.init_rss_feed_manager().await.unwrap();
+        // Leak the tempdir so it lives for the test duration
+        std::mem::forget(tmp);
+        Arc::new(WebState::new(Arc::new(manager)))
     }
 }
