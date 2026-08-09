@@ -337,6 +337,12 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             post(restore_task_handler),
         )
         .route("/api/recycle-bin/:task_id/purge", post(purge_task_handler))
+        .route("/api/auto-pause", get(get_auto_pause_handler))
+        .route("/api/auto-pause", post(set_auto_pause_handler))
+        .route("/api/auto-pause/status", get(auto_pause_status_handler))
+        .route("/api/url-allowlist", get(get_allowlist_handler))
+        .route("/api/url-allowlist", post(set_allowlist_handler))
+        .route("/api/url-allowlist/check", post(check_allowlist_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1773,6 +1779,65 @@ async fn purge_task_handler(
     } else {
         Json(serde_json::json!({"error": "Task not found in recycle bin"}))
     }
+}
+
+/// Get auto-pause configuration
+async fn get_auto_pause_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::auto_pause::AutoPauseConfig> {
+    let config = state.manager.get_auto_pause_config().await;
+    Json(config)
+}
+
+/// Set auto-pause configuration
+async fn set_auto_pause_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::auto_pause::AutoPauseConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_auto_pause_config(config).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Get auto-pause status
+async fn auto_pause_status_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::auto_pause::AutoPauseStatus> {
+    let status = state.manager.get_auto_pause_status().await;
+    Json(status)
+}
+
+/// Get URL allowlist configuration
+async fn get_allowlist_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::url_allowlist::AllowlistConfig> {
+    let config = state.manager.get_url_allowlist_config().await;
+    Json(config)
+}
+
+/// Set URL allowlist configuration
+async fn set_allowlist_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::url_allowlist::AllowlistConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_url_allowlist_config(config).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Check if a URL is allowed by the allowlist
+async fn check_allowlist_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    if url.is_empty() {
+        return Json(serde_json::json!({"error": "missing url field"}));
+    }
+    let result = state.manager.check_url_allowed(url).await;
+    Json(serde_json::to_value(result).unwrap_or_default())
 }
 
 /// Get URL deduplication configuration

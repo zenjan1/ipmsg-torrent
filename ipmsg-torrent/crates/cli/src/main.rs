@@ -455,6 +455,18 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Auto-pause scheduler: pause downloads during peak hours
+    DlAutoPause {
+        /// Subcommand: status|enable|disable|config
+        subcommand: String,
+        args: Vec<String>,
+    },
+    /// URL allowlist: restrict downloads to trusted sources
+    DlAllowlist {
+        /// Subcommand: status|enable|disable|add|del|list|check
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1327,6 +1339,46 @@ fn parse_command(input: &str) -> Command {
                     Vec::new()
                 };
                 Command::DlRecycle {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
+        "dlautopause" | "dl-autopause" | "dlap" => {
+            // /dlautopause <status|enable|disable|config> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlautopause <status|enable|disable|config> [args...]".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlAutoPause {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
+        "dlallowlist" | "dl-allowlist" | "dlal" => {
+            // /dlallowlist <status|enable|disable|add|del|list|check> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlallowlist <status|enable|disable|add|del|list|check> [args...]".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlAllowlist {
                     subcommand,
                     args: cmd_args,
                 }
@@ -7388,6 +7440,436 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlrecycle <list|restore|purge|empty|config|summary|autopause> [args...]".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlAutoPause { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let status = download_manager.get_auto_pause_status().await;
+                    let mut out = String::from("Auto-Pause Scheduler Status:\n");
+                    out.push_str(&format!("  Enabled: {}\n", status.enabled));
+                    out.push_str(&format!("  Auto-resume: {}\n", status.auto_resume));
+                    out.push_str(&format!(
+                        "  Currently in peak hours: {}\n",
+                        status.is_peak_time
+                    ));
+                    out.push_str(&format!(
+                        "  Tasks paused by auto-pause: {}\n",
+                        status.paused_task_count
+                    ));
+                    if let Some(peak) = &status.peak_hours {
+                        out.push_str(&format!("  Peak hours: {}\n", peak.format()));
+                    } else {
+                        out.push_str("  Peak hours: not configured\n");
+                    }
+                    s.add_system_message("main", out);
+                }
+                "enable" => {
+                    let mut config = download_manager.get_auto_pause_config().await;
+                    config.enabled = true;
+                    match download_manager.set_auto_pause_config(config).await {
+                        Ok(()) => {
+                            s.add_system_message("main", "Auto-pause scheduler enabled".to_string())
+                        }
+                        Err(e) => s.add_system_message("main", format!("Failed to enable: {}", e)),
+                    }
+                }
+                "disable" => {
+                    let mut config = download_manager.get_auto_pause_config().await;
+                    config.enabled = false;
+                    match download_manager.set_auto_pause_config(config).await {
+                        Ok(()) => s.add_system_message(
+                            "main",
+                            "Auto-pause scheduler disabled".to_string(),
+                        ),
+                        Err(e) => s.add_system_message("main", format!("Failed to disable: {}", e)),
+                    }
+                }
+                "config" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlautopause config <start|end|days|resume|reason> <value>"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    let mut config = download_manager.get_auto_pause_config().await;
+                    match args[0].as_str() {
+                        "start" => {
+                            // Format: HH:MM
+                            let time_parts: Vec<&str> = args[1].split(':').collect();
+                            if time_parts.len() != 2 {
+                                s.add_system_message(
+                                    "main",
+                                    "Invalid time format. Use HH:MM".to_string(),
+                                );
+                                return;
+                            }
+                            let start_hour = match time_parts[0].parse::<u8>() {
+                                Ok(h) if h <= 23 => h,
+                                _ => {
+                                    s.add_system_message("main", "Invalid hour (0-23)".to_string());
+                                    return;
+                                }
+                            };
+                            let start_minute = match time_parts[1].parse::<u8>() {
+                                Ok(m) if m <= 59 => m,
+                                _ => {
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid minute (0-59)".to_string(),
+                                    );
+                                    return;
+                                }
+                            };
+                            let peak = config.peak_hours.unwrap_or(
+                                ipmsg_download::auto_pause::PeakHours {
+                                    start_hour: 9,
+                                    start_minute: 0,
+                                    end_hour: 17,
+                                    end_minute: 0,
+                                    days: None,
+                                },
+                            );
+                            config.peak_hours = Some(ipmsg_download::auto_pause::PeakHours {
+                                start_hour,
+                                start_minute,
+                                end_hour: peak.end_hour,
+                                end_minute: peak.end_minute,
+                                days: peak.days,
+                            });
+                            match download_manager.set_auto_pause_config(config).await {
+                                Ok(()) => s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "Peak hours start set to {:02}:{:02}",
+                                        start_hour, start_minute
+                                    ),
+                                ),
+                                Err(e) => s.add_system_message("main", format!("Failed: {}", e)),
+                            }
+                        }
+                        "end" => {
+                            // Format: HH:MM
+                            let time_parts: Vec<&str> = args[1].split(':').collect();
+                            if time_parts.len() != 2 {
+                                s.add_system_message(
+                                    "main",
+                                    "Invalid time format. Use HH:MM".to_string(),
+                                );
+                                return;
+                            }
+                            let end_hour = match time_parts[0].parse::<u8>() {
+                                Ok(h) if h <= 23 => h,
+                                _ => {
+                                    s.add_system_message("main", "Invalid hour (0-23)".to_string());
+                                    return;
+                                }
+                            };
+                            let end_minute = match time_parts[1].parse::<u8>() {
+                                Ok(m) if m <= 59 => m,
+                                _ => {
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid minute (0-59)".to_string(),
+                                    );
+                                    return;
+                                }
+                            };
+                            let peak = config.peak_hours.unwrap_or(
+                                ipmsg_download::auto_pause::PeakHours {
+                                    start_hour: 9,
+                                    start_minute: 0,
+                                    end_hour: 17,
+                                    end_minute: 0,
+                                    days: None,
+                                },
+                            );
+                            config.peak_hours = Some(ipmsg_download::auto_pause::PeakHours {
+                                start_hour: peak.start_hour,
+                                start_minute: peak.start_minute,
+                                end_hour,
+                                end_minute,
+                                days: peak.days,
+                            });
+                            match download_manager.set_auto_pause_config(config).await {
+                                Ok(()) => s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "Peak hours end set to {:02}:{:02}",
+                                        end_hour, end_minute
+                                    ),
+                                ),
+                                Err(e) => s.add_system_message("main", format!("Failed: {}", e)),
+                            }
+                        }
+                        "days" => {
+                            // Format: mon,tue,wed,thu,fri,sat,sun or "all" or "none"
+                            let days_str = args[1].to_lowercase();
+                            let days = if days_str == "all" {
+                                None
+                            } else if days_str == "none" {
+                                Some(vec![])
+                            } else {
+                                let day_map = [
+                                    ("mon", chrono::Weekday::Mon),
+                                    ("tue", chrono::Weekday::Tue),
+                                    ("wed", chrono::Weekday::Wed),
+                                    ("thu", chrono::Weekday::Thu),
+                                    ("fri", chrono::Weekday::Fri),
+                                    ("sat", chrono::Weekday::Sat),
+                                    ("sun", chrono::Weekday::Sun),
+                                ];
+                                let mut days = Vec::new();
+                                for part in days_str.split(',') {
+                                    let part = part.trim();
+                                    if let Some((_, day)) =
+                                        day_map.iter().find(|(name, _)| name == &part)
+                                    {
+                                        days.push(*day);
+                                    }
+                                }
+                                Some(days)
+                            };
+                            let peak = config.peak_hours.unwrap_or(
+                                ipmsg_download::auto_pause::PeakHours {
+                                    start_hour: 9,
+                                    start_minute: 0,
+                                    end_hour: 17,
+                                    end_minute: 0,
+                                    days: None,
+                                },
+                            );
+                            config.peak_hours = Some(ipmsg_download::auto_pause::PeakHours {
+                                start_hour: peak.start_hour,
+                                start_minute: peak.start_minute,
+                                end_hour: peak.end_hour,
+                                end_minute: peak.end_minute,
+                                days,
+                            });
+                            match download_manager.set_auto_pause_config(config).await {
+                                Ok(()) => s.add_system_message(
+                                    "main",
+                                    "Peak hours days updated".to_string(),
+                                ),
+                                Err(e) => s.add_system_message("main", format!("Failed: {}", e)),
+                            }
+                        }
+                        "resume" => {
+                            let auto_resume = match args[1].to_lowercase().as_str() {
+                                "true" | "yes" | "1" => true,
+                                "false" | "no" | "0" => false,
+                                _ => {
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid value. Use true/false".to_string(),
+                                    );
+                                    return;
+                                }
+                            };
+                            config.auto_resume = auto_resume;
+                            match download_manager.set_auto_pause_config(config).await {
+                                Ok(()) => s.add_system_message(
+                                    "main",
+                                    format!("Auto-resume set to {}", auto_resume),
+                                ),
+                                Err(e) => s.add_system_message("main", format!("Failed: {}", e)),
+                            }
+                        }
+                        "reason" => {
+                            config.pause_reason = args[1..].join(" ");
+                            match download_manager.set_auto_pause_config(config).await {
+                                Ok(()) => {
+                                    s.add_system_message("main", "Pause reason updated".to_string())
+                                }
+                                Err(e) => s.add_system_message("main", format!("Failed: {}", e)),
+                            }
+                        }
+                        _ => {
+                            s.add_system_message(
+                                "main",
+                                "Usage: /dlautopause config <start|end|days|resume|reason> <value>"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlautopause <status|enable|disable|config> [args...]".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlAllowlist { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_url_allowlist_config().await;
+                    let mut out = String::from("URL Allowlist Status:\n");
+                    out.push_str(&format!("  Enabled: {}\n", config.enabled));
+                    out.push_str(&format!("  Entries: {}\n", config.entries.len()));
+                    if config.enabled && !config.entries.is_empty() {
+                        out.push_str("  Entries list:\n");
+                        for entry in &config.entries {
+                            let status = if entry.enabled { "✓" } else { "✗" };
+                            out.push_str(&format!(
+                                "    {} {} ({:?})\n",
+                                status, entry.name, entry.pattern
+                            ));
+                        }
+                    }
+                    s.add_system_message("main", out);
+                }
+                "enable" => match download_manager.set_allowlist_enabled(true).await {
+                    Ok(()) => s.add_system_message("main", "URL allowlist enabled".to_string()),
+                    Err(e) => s.add_system_message("main", format!("Failed to enable: {}", e)),
+                },
+                "disable" => match download_manager.set_allowlist_enabled(false).await {
+                    Ok(()) => s.add_system_message("main", "URL allowlist disabled".to_string()),
+                    Err(e) => s.add_system_message("main", format!("Failed to disable: {}", e)),
+                },
+                "add" => {
+                    if args.len() < 3 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlallowlist add <domain|exact|wildcard|regex> <pattern> [reason]".to_string(),
+                        );
+                    } else {
+                        let pattern_type = &args[0];
+                        let pattern_value = &args[1];
+                        let reason = if args.len() >= 4 {
+                            Some(args[3..].join(" "))
+                        } else {
+                            None
+                        };
+
+                        let pattern = match pattern_type.as_str() {
+                            "domain" => ipmsg_download::url_allowlist::AllowlistPattern::Domain(
+                                pattern_value.clone(),
+                            ),
+                            "exact" => ipmsg_download::url_allowlist::AllowlistPattern::Exact(
+                                pattern_value.clone(),
+                            ),
+                            "wildcard" => {
+                                ipmsg_download::url_allowlist::AllowlistPattern::Wildcard(
+                                    pattern_value.clone(),
+                                )
+                            }
+                            "regex" => ipmsg_download::url_allowlist::AllowlistPattern::Regex(
+                                pattern_value.clone(),
+                            ),
+                            _ => {
+                                s.add_system_message(
+                                    "main",
+                                    "Invalid pattern type. Use: domain, exact, wildcard, or regex"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                        };
+
+                        let id = uuid::Uuid::new_v4().to_string();
+                        let entry = ipmsg_download::url_allowlist::AllowlistEntry::new(
+                            id,
+                            pattern_value.clone(),
+                            pattern,
+                            reason,
+                        );
+
+                        match download_manager.add_allowlist_entry(entry).await {
+                            Ok(()) => {
+                                s.add_system_message("main", "Added to allowlist".to_string())
+                            }
+                            Err(e) => s.add_system_message("main", format!("Failed to add: {}", e)),
+                        }
+                    }
+                }
+                "del" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlallowlist del <entry_id>".to_string(),
+                        );
+                    } else {
+                        let entry_id = &args[0];
+                        match download_manager.remove_allowlist_entry(entry_id).await {
+                            Ok(()) => {
+                                s.add_system_message("main", "Removed from allowlist".to_string())
+                            }
+                            Err(e) => {
+                                s.add_system_message("main", format!("Failed to remove: {}", e))
+                            }
+                        }
+                    }
+                }
+                "list" => {
+                    let entries = download_manager.list_allowlist_entries().await;
+                    if entries.is_empty() {
+                        s.add_system_message("main", "Allowlist is empty".to_string());
+                    } else {
+                        let mut out = String::from("Allowlist entries:\n");
+                        for entry in &entries {
+                            let status = if entry.enabled { "✓" } else { "✗" };
+                            out.push_str(&format!(
+                                "  {} {} ({})\n    ID: {}\n    Pattern: {:?}\n",
+                                status,
+                                entry.name,
+                                entry.created_at.format("%Y-%m-%d %H:%M"),
+                                entry.id,
+                                entry.pattern
+                            ));
+                            if let Some(ref reason) = entry.reason {
+                                out.push_str(&format!("    Reason: {}\n", reason));
+                            }
+                        }
+                        s.add_system_message("main", out);
+                    }
+                }
+                "check" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlallowlist check <url>".to_string());
+                    } else {
+                        let url = &args[0];
+                        let result = download_manager.check_url_allowed(url).await;
+                        if result.allowed {
+                            let mut out = String::from("URL is ALLOWED\n");
+                            if let Some(id) = result.matched_entry_id {
+                                out.push_str(&format!("  Matched entry ID: {}\n", id));
+                            }
+                            if let Some(name) = result.matched_entry_name {
+                                out.push_str(&format!("  Matched entry name: {}\n", name));
+                            }
+                            if let Some(reason) = result.reason {
+                                out.push_str(&format!("  Reason: {}\n", reason));
+                            }
+                            s.add_system_message("main", out);
+                        } else {
+                            s.add_system_message(
+                                "main",
+                                "URL is BLOCKED (not in allowlist)".to_string(),
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlallowlist <status|enable|disable|add|del|list|check> [args...]"
+                            .to_string(),
                     );
                 }
             }
