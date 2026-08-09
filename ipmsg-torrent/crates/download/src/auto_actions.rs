@@ -8,7 +8,6 @@
 //! Actions can be configured globally or per-task.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 

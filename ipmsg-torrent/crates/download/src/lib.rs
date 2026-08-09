@@ -52,6 +52,7 @@ pub mod progress_milestone;
 pub mod protocol_limits;
 pub mod proxy;
 pub mod queue_health;
+pub mod queue_staleness;
 pub mod rate_limiter;
 pub mod recycle_bin;
 pub mod retry_quota;
@@ -860,6 +861,8 @@ pub struct DownloadManager {
     download_templates: Arc<Mutex<download_templates::DownloadTemplateManager>>,
     /// Auto-actions manager for triggering actions on download completion/failure
     auto_actions: Arc<Mutex<auto_actions::AutoActionsManager>>,
+    /// Queue staleness configuration for detecting long-waiting tasks
+    queue_staleness: Arc<tokio::sync::RwLock<queue_staleness::StalenessConfig>>,
 }
 
 impl DownloadManager {
@@ -984,6 +987,9 @@ impl DownloadManager {
             auto_actions: Arc::new(Mutex::new(auto_actions::AutoActionsManager::new(
                 auto_actions::AutoActionsConfig::default(),
             ))),
+            queue_staleness: Arc::new(tokio::sync::RwLock::new(
+                queue_staleness::StalenessConfig::default(),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -1240,6 +1246,9 @@ impl DownloadManager {
             auto_actions: Arc::new(Mutex::new(auto_actions::AutoActionsManager::new(
                 auto_actions::AutoActionsConfig::default(),
             ))),
+            queue_staleness: Arc::new(tokio::sync::RwLock::new(
+                queue_staleness::StalenessConfig::default(),
+            )),
         };
         // Restore error recovery config from disk
         if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
@@ -1329,6 +1338,14 @@ impl DownloadManager {
         // Restore URL deduplication configuration from disk
         if let Some(dedup_cfg) = url_dedup::load_dedup_config(&dm.data_dir) {
             *dm.url_dedup.write().await = dedup_cfg;
+        }
+        // Restore queue staleness configuration from disk
+        if let Some(staleness_cfg) = queue_staleness::load_staleness_config(&dm.data_dir).await {
+            *dm.queue_staleness.write().await = staleness_cfg;
+        }
+        // Restore queue staleness configuration from disk
+        if let Some(staleness_cfg) = queue_staleness::load_staleness_config(&dm.data_dir).await {
+            *dm.queue_staleness.write().await = staleness_cfg;
         }
         // Restore URL expander configuration from disk
         if let Some(expander_cfg) = url_expander::load_url_expander_config(&dm.data_dir) {
@@ -3603,6 +3620,44 @@ impl DownloadManager {
     pub async fn get_url_dedup(&self) -> url_dedup::DedupConfig {
         let dedup = self.url_dedup.read().await;
         dedup.clone()
+    }
+
+    /// Set queue staleness configuration.
+    /// Persists the configuration to disk for automatic restoration on restart.
+    pub async fn set_queue_staleness_config(&self, config: queue_staleness::StalenessConfig) {
+        *self.queue_staleness.write().await = config.clone();
+        if let Err(e) = queue_staleness::save_staleness_config(&config, &self.data_dir).await {
+            tracing::warn!(error = %e, "Failed to persist queue staleness config");
+        }
+    }
+
+    /// Get current queue staleness configuration.
+    pub async fn get_queue_staleness_config(&self) -> queue_staleness::StalenessConfig {
+        self.queue_staleness.read().await.clone()
+    }
+
+    /// Analyze the queue for stale tasks and optionally promote their priorities.
+    /// Returns a summary of the analysis including which tasks were promoted.
+    pub async fn check_queue_staleness(&self) -> queue_staleness::StalenessSummary {
+        let config = self.get_queue_staleness_config().await;
+        let now = chrono::Utc::now();
+        let tasks = self.tasks.lock().await;
+        let task_data: Vec<queue_staleness::TaskStalenessData> = tasks
+            .iter()
+            .map(|t| queue_staleness::TaskStalenessData {
+                id: t.id.clone(),
+                name: t.name.clone(),
+                is_queued: matches!(t.state, DownloadState::Queued),
+                created_at: t.created_at,
+                priority: match t.priority {
+                    DownloadPriority::Low => queue_staleness::StalePriority::Low,
+                    DownloadPriority::Normal => queue_staleness::StalePriority::Normal,
+                    DownloadPriority::High => queue_staleness::StalePriority::High,
+                },
+                promotion_count: 0, // TODO: track in DownloadTask if needed
+            })
+            .collect();
+        queue_staleness::analyze_staleness(&task_data, now, &config)
     }
 
     /// Handle duplicate task detection based on the configured duplicate policy.
