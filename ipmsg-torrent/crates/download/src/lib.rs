@@ -41,6 +41,7 @@ pub mod link_extractor;
 pub mod magnet;
 pub mod metadata_cache;
 pub mod mirror_health;
+pub mod network_monitor;
 pub mod notification;
 pub mod path_rules;
 pub mod path_template;
@@ -63,6 +64,7 @@ pub mod source_rotation;
 pub mod speed_alert;
 pub mod speed_burst;
 pub mod speed_history;
+pub mod speed_prediction;
 pub mod task_activity;
 pub mod task_archive;
 pub mod task_chain;
@@ -767,6 +769,8 @@ pub struct DownloadManager {
     speed_history: Arc<Mutex<speed_history::SpeedHistoryManager>>,
     /// Speed trend alert manager
     speed_alerts: Arc<speed_alert::SpeedAlertManager>,
+    /// Speed prediction manager for domain-based speed forecasting
+    speed_prediction: Arc<Mutex<speed_prediction::SpeedPredictionManager>>,
     /// Per-task download session tracking
     download_sessions: Arc<Mutex<download_session::DownloadSessionManager>>,
     /// Auto-cleanup configuration for completed/failed tasks
@@ -863,6 +867,8 @@ pub struct DownloadManager {
     auto_actions: Arc<Mutex<auto_actions::AutoActionsManager>>,
     /// Queue staleness configuration for detecting long-waiting tasks
     queue_staleness: Arc<tokio::sync::RwLock<queue_staleness::StalenessConfig>>,
+    /// Network condition monitor for tracking overall network quality
+    network_monitor: Arc<Mutex<network_monitor::NetworkMonitor>>,
 }
 
 impl DownloadManager {
@@ -871,6 +877,9 @@ impl DownloadManager {
         let dm = Self {
             tasks: Arc::new(Mutex::new(Vec::new())),
             speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
+            speed_prediction: Arc::new(Mutex::new(speed_prediction::SpeedPredictionManager::new(
+                speed_prediction::SpeedPredictionConfig::default(),
+            ))),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
@@ -990,6 +999,7 @@ impl DownloadManager {
             queue_staleness: Arc::new(tokio::sync::RwLock::new(
                 queue_staleness::StalenessConfig::default(),
             )),
+            network_monitor: Arc::new(Mutex::new(network_monitor::NetworkMonitor::new())),
         };
         dm.start_scheduler();
         dm
@@ -1130,6 +1140,9 @@ impl DownloadManager {
         let dm = Self {
             tasks: Arc::new(Mutex::new(tasks)),
             speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
+            speed_prediction: Arc::new(Mutex::new(speed_prediction::SpeedPredictionManager::new(
+                speed_prediction::SpeedPredictionConfig::default(),
+            ))),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
@@ -1249,6 +1262,7 @@ impl DownloadManager {
             queue_staleness: Arc::new(tokio::sync::RwLock::new(
                 queue_staleness::StalenessConfig::default(),
             )),
+            network_monitor: Arc::new(Mutex::new(network_monitor::NetworkMonitor::new())),
         };
         // Restore error recovery config from disk
         if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
@@ -1343,9 +1357,11 @@ impl DownloadManager {
         if let Some(staleness_cfg) = queue_staleness::load_staleness_config(&dm.data_dir).await {
             *dm.queue_staleness.write().await = staleness_cfg;
         }
-        // Restore queue staleness configuration from disk
-        if let Some(staleness_cfg) = queue_staleness::load_staleness_config(&dm.data_dir).await {
-            *dm.queue_staleness.write().await = staleness_cfg;
+        // Restore network monitor from disk
+        if let Ok(monitor) =
+            network_monitor::NetworkMonitor::load(&dm.data_dir.join("network_monitor.json")).await
+        {
+            *dm.network_monitor.lock().await = monitor;
         }
         // Restore URL expander configuration from disk
         if let Some(expander_cfg) = url_expander::load_url_expander_config(&dm.data_dir) {
@@ -3658,6 +3674,41 @@ impl DownloadManager {
             })
             .collect();
         queue_staleness::analyze_staleness(&task_data, now, &config)
+    }
+
+    /// Get current network condition summary.
+    pub async fn get_network_summary(&self) -> network_monitor::NetworkSummary {
+        self.network_monitor.lock().await.summary()
+    }
+
+    /// Record a network quality sample (called periodically by speed tracker).
+    pub async fn record_network_sample(&self, speed_bps: f64, active_tasks: usize) {
+        self.network_monitor
+            .lock()
+            .await
+            .record_sample(speed_bps, active_tasks);
+    }
+
+    /// Set network monitor configuration.
+    pub async fn set_network_monitor_config(&self, config: network_monitor::NetworkMonitorConfig) {
+        let mut monitor = self.network_monitor.lock().await;
+        monitor.set_config(config);
+        if let Err(e) = monitor
+            .save(&self.data_dir.join("network_monitor.json"))
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to persist network monitor config");
+        }
+    }
+
+    /// Get current network monitor configuration.
+    pub async fn get_network_monitor_config(&self) -> network_monitor::NetworkMonitorConfig {
+        self.network_monitor.lock().await.config().clone()
+    }
+
+    /// Clear all collected network monitor data.
+    pub async fn clear_network_monitor(&self) {
+        self.network_monitor.lock().await.clear();
     }
 
     /// Handle duplicate task detection based on the configured duplicate policy.
@@ -6096,8 +6147,10 @@ impl DownloadManager {
         let eta_estimator = self.eta_estimator.clone();
         let speed_history = self.speed_history.clone();
         let speed_alerts = self.speed_alerts.clone();
+        let speed_prediction = self.speed_prediction.clone();
         let progress_milestone = self.progress_milestone.clone();
         let progress_milestone_config = self.progress_milestone_config.clone();
+        let network_monitor = self.network_monitor.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -6181,6 +6234,27 @@ impl DownloadManager {
                         speed_history.add_sample(&task_id, avg_speed, current_downloaded);
                     }
 
+                    // Update speed prediction with domain-based speed sample
+                    {
+                        let domain = {
+                            let t = tasks.lock().await;
+                            t.iter()
+                                .find(|t| t.id == task_id)
+                                .and_then(|t| {
+                                    t.source_url.as_ref().and_then(|u| {
+                                        url::Url::parse(u)
+                                            .ok()
+                                            .and_then(|u| u.host_str().map(|h| h.to_string()))
+                                    })
+                                })
+                                .unwrap_or_default()
+                        };
+                        if !domain.is_empty() && avg_speed > 0.0 {
+                            let mut sp = speed_prediction.lock().await;
+                            sp.record_speed(&domain, avg_speed);
+                        }
+                    }
+
                     // Check speed alerts
                     {
                         let task_name = {
@@ -6211,6 +6285,16 @@ impl DownloadManager {
                         bandwidth_monitor
                             .update_current_speed(total_speed, 0.0)
                             .await;
+
+                        // Update network monitor with aggregate speed
+                        let active_count = all_tasks
+                            .iter()
+                            .filter(|t| t.state == DownloadState::Downloading)
+                            .count();
+                        network_monitor
+                            .lock()
+                            .await
+                            .record_sample(total_speed, active_count);
                     }
 
                     // Check progress milestones and send notifications
@@ -7583,6 +7667,84 @@ impl DownloadManager {
     pub async fn remove_task_speed_history(&self, task_id: &str) -> bool {
         let mut speed_history = self.speed_history.lock().await;
         speed_history.remove(task_id)
+    }
+
+    // --- Speed Prediction (Phase 102) ---
+
+    /// Set speed prediction configuration.
+    pub async fn set_speed_prediction_config(
+        &self,
+        config: speed_prediction::SpeedPredictionConfig,
+    ) {
+        let mut sp = self.speed_prediction.lock().await;
+        sp.set_config(config);
+    }
+
+    /// Get current speed prediction configuration.
+    pub async fn get_speed_prediction_config(&self) -> speed_prediction::SpeedPredictionConfig {
+        let sp = self.speed_prediction.lock().await;
+        sp.config().clone()
+    }
+
+    /// Get speed prediction for a specific task.
+    pub async fn predict_task_speed(
+        &self,
+        task_id: &str,
+        domain: &str,
+        current_speed: f64,
+        remaining_bytes: u64,
+    ) -> speed_prediction::SpeedPrediction {
+        let sp = self.speed_prediction.lock().await;
+        sp.predict(task_id, domain, current_speed, remaining_bytes)
+    }
+
+    /// Get speed prediction summary across all tracked domains.
+    pub async fn get_speed_prediction_summary(&self) -> speed_prediction::SpeedPredictionSummary {
+        let sp = self.speed_prediction.lock().await;
+        sp.get_summary()
+    }
+
+    /// Get optimal download windows for a domain.
+    pub async fn get_optimal_speed_windows(
+        &self,
+        domain: &str,
+        top_n: usize,
+    ) -> Vec<speed_prediction::OptimalWindow> {
+        let sp = self.speed_prediction.lock().await;
+        sp.get_optimal_windows(domain, top_n)
+    }
+
+    /// Get speed profile for a specific domain.
+    pub async fn get_domain_speed_profile(
+        &self,
+        domain: &str,
+    ) -> Option<speed_prediction::DomainSpeedProfile> {
+        let sp = self.speed_prediction.lock().await;
+        sp.get_profile(domain).cloned()
+    }
+
+    /// List all tracked domains.
+    pub async fn list_tracked_speed_domains(&self) -> Vec<String> {
+        let sp = self.speed_prediction.lock().await;
+        sp.tracked_domains().iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Remove a domain from speed prediction tracking.
+    pub async fn remove_speed_prediction_domain(&self, domain: &str) -> bool {
+        let mut sp = self.speed_prediction.lock().await;
+        sp.remove_domain(domain)
+    }
+
+    /// Clean up old speed prediction samples.
+    pub async fn cleanup_old_speed_predictions(&self) {
+        let mut sp = self.speed_prediction.lock().await;
+        sp.cleanup_old_samples();
+    }
+
+    /// Clear all speed prediction data.
+    pub async fn clear_all_speed_predictions(&self) {
+        let mut sp = self.speed_prediction.lock().await;
+        sp.clear_all();
     }
 
     // --- Download Session Tracking (Phase 84) ---
@@ -15292,5 +15454,89 @@ mod url_allowlist_tests {
         // Note: This will fail until we implement restore in new_with_restore()
         // For now, just verify the file was saved
         assert!(temp_dir.path().join("url_allowlist.json").exists());
+    }
+
+    // ========== Speed Prediction Integration Tests (Phase 102) ==========
+
+    #[tokio::test]
+    async fn test_speed_prediction_config_default() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_sp_config"));
+        let config = dm.get_speed_prediction_config().await;
+        assert_eq!(config.min_samples_for_prediction, 10);
+        assert_eq!(config.sample_retention_hours, 168);
+        assert!(config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_speed_prediction_set_config() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_sp_set_config"));
+        let mut config = dm.get_speed_prediction_config().await;
+        config.min_samples_for_prediction = 5;
+        config.sample_retention_hours = 48;
+        dm.set_speed_prediction_config(config.clone()).await;
+
+        let retrieved = dm.get_speed_prediction_config().await;
+        assert_eq!(retrieved.min_samples_for_prediction, 5);
+        assert_eq!(retrieved.sample_retention_hours, 48);
+    }
+
+    #[tokio::test]
+    async fn test_speed_prediction_predict_task_speed() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_sp_predict"));
+        let prediction = dm
+            .predict_task_speed("task1", "example.com", 1000.0, 10000)
+            .await;
+        assert_eq!(prediction.task_id, "task1");
+        assert_eq!(prediction.domain, "example.com");
+        assert_eq!(prediction.remaining_bytes, 10000);
+        assert_eq!(prediction.confidence, "none");
+    }
+
+    #[tokio::test]
+    async fn test_speed_prediction_summary_empty() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_sp_summary"));
+        let summary = dm.get_speed_prediction_summary().await;
+        assert_eq!(summary.tracked_domains, 0);
+        assert!(summary.domain_summaries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_speed_prediction_list_domains_empty() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_sp_domains"));
+        let domains = dm.list_tracked_speed_domains().await;
+        assert!(domains.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_speed_prediction_remove_nonexistent_domain() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_sp_remove"));
+        let removed = dm.remove_speed_prediction_domain("nonexistent.com").await;
+        assert!(!removed);
+    }
+
+    #[tokio::test]
+    async fn test_speed_prediction_get_profile_nonexistent() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_sp_profile"));
+        let profile = dm.get_domain_speed_profile("nonexistent.com").await;
+        assert!(profile.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_speed_prediction_optimal_windows_empty() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_sp_windows"));
+        let windows = dm.get_optimal_speed_windows("nonexistent.com", 5).await;
+        assert!(windows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_speed_prediction_cleanup_no_panic() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_sp_cleanup"));
+        dm.cleanup_old_speed_predictions().await;
+    }
+
+    #[tokio::test]
+    async fn test_speed_prediction_clear_no_panic() {
+        let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_sp_clear"));
+        dm.clear_all_speed_predictions().await;
     }
 }

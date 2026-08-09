@@ -121,6 +121,11 @@ enum Command {
     DlSpeedHistory {
         task_id: Option<String>,
     },
+    /// Speed prediction and optimal window analysis
+    DlSpeedPredict {
+        /// "status", "predict <task_id> <domain> <remaining_bytes>", "windows <domain>", "profile <domain>", "domains", "remove <domain>", "cleanup", "clear", "config [min_samples|max_samples|sample_ttl_secs] [value]"
+        args: Vec<String>,
+    },
     /// Configure auto-cleanup of completed/failed downloads
     DlCleanup {
         /// "status", "enable", "disable", "set <completed_retention> [failed_retention]"
@@ -721,6 +726,10 @@ fn parse_command(input: &str) -> Command {
             };
             Command::DlSpeedHistory { task_id }
         }
+        "dlspeedpredict" | "dl-speed-predict" | "dlsp" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlSpeedPredict { args }
+        }
         "dlarchive" | "dl-archive" | "dla" => {
             // /dlarchive [status|list|archive <task_id> [reason]|restore <id>|delete <id>|clear]
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
@@ -1021,7 +1030,7 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlautoshutdown <disabled|exit|shell:<command>>".to_string())
             }
         }
-        "dlpath" | "dl-path" | "dlsp" => {
+        "dlpath" | "dl-path" => {
             // /dlpath <path>
             let args: Vec<&str> = input.splitn(2, ' ').collect();
             if args.len() >= 2 {
@@ -1765,6 +1774,7 @@ fn command_help() -> String {
         "/dlstats         - Show download statistics",
         "/dlhealth        - Show download queue health report",
         "/dlspeedhist [id] - Show speed history (all tasks or specific task)",
+        "/dlspeedpredict [status|predict|windows|profile|domains|remove|cleanup|clear|config] - Speed prediction and optimal window analysis",
         "/dlcleanup [cmd]  - Auto-cleanup completed/failed (status|enable|disable|set|run)",
         "/dlarchive [cmd]  - Archive tasks (status|list|archive|restore|delete|clear)",
         "/dldedup [cmd]     - URL dedup policy (status|set <mode>|enable|disable)",
@@ -2862,6 +2872,208 @@ async fn handle_command(
                         s.add_system_message("main", msg);
                     }
                 }
+            }
+        }
+        Command::DlSpeedPredict { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if args.is_empty() || args[0] == "status" {
+                let summary = download_manager.get_speed_prediction_summary().await;
+                let mut msg = String::from("🔮 Speed Prediction Summary:\n");
+                msg.push_str(&format!("  Tracked domains: {}\n", summary.tracked_domains));
+                msg.push_str(&format!("  Enabled: {}\n", summary.config_enabled));
+                if summary.domain_summaries.is_empty() {
+                    msg.push_str("  No domain data yet");
+                } else {
+                    msg.push_str("\n  Domains:\n");
+                    for domain in &summary.domain_summaries {
+                        let best_info = domain
+                            .best_hour
+                            .map(|(h, s)| format!("{:02}:00 ({:.1} KB/s)", h, s / 1024.0))
+                            .unwrap_or_else(|| "N/A".to_string());
+                        msg.push_str(&format!(
+                            "    {} - {} samples, avg {:.1} KB/s, best: {}\n",
+                            domain.domain,
+                            domain.total_samples,
+                            domain.overall_avg_speed / 1024.0,
+                            best_info
+                        ));
+                    }
+                }
+                let mut s = state.lock().await;
+                s.add_system_message("main", msg);
+            } else if args[0] == "predict" && args.len() >= 4 {
+                let task_id = &args[1];
+                let domain = &args[2];
+                let remaining: u64 = args[3].parse().unwrap_or(0);
+                let prediction = download_manager
+                    .predict_task_speed(task_id, domain, 0.0, remaining)
+                    .await;
+                let mut msg = format!("🔮 Speed Prediction for task {}:\n", task_id);
+                msg.push_str(&format!("  Domain: {}\n", prediction.domain));
+                msg.push_str(&format!(
+                    "  Predicted avg speed: {:.1} KB/s\n",
+                    prediction.predicted_avg_speed_bps / 1024.0
+                ));
+                msg.push_str(&format!(
+                    "  Predicted current hour speed: {:.1} KB/s\n",
+                    prediction.predicted_current_hour_speed_bps / 1024.0
+                ));
+                msg.push_str(&format!(
+                    "  ETA at current speed: {}s\n",
+                    prediction.eta_current_speed_secs
+                ));
+                msg.push_str(&format!(
+                    "  ETA at historical avg: {}s\n",
+                    prediction.eta_historical_avg_secs
+                ));
+                msg.push_str(&format!("  Confidence: {}\n", prediction.confidence));
+                msg.push_str(&format!(
+                    "  Recommendation: {:?}",
+                    prediction.recommendation
+                ));
+                let mut s = state.lock().await;
+                s.add_system_message("main", msg);
+            } else if args[0] == "windows" && args.len() >= 2 {
+                let domain = &args[1];
+                let windows = download_manager.get_optimal_speed_windows(domain, 5).await;
+                let mut msg = format!("🕐 Optimal Download Windows for {}:\n", domain);
+                if windows.is_empty() {
+                    msg.push_str("  No data available");
+                } else {
+                    for window in &windows {
+                        msg.push_str(&format!(
+                            "  {:02}:00-{:02}:00 - avg {:.1} KB/s, quality: {}\n",
+                            window.start_hour,
+                            window.end_hour,
+                            window.predicted_speed_bps / 1024.0,
+                            window.quality
+                        ));
+                    }
+                }
+                let mut s = state.lock().await;
+                s.add_system_message("main", msg);
+            } else if args[0] == "profile" && args.len() >= 2 {
+                let domain = &args[1];
+                match download_manager.get_domain_speed_profile(domain).await {
+                    Some(profile) => {
+                        let mut msg = format!("📊 Speed Profile for {}:\n", profile.domain);
+                        msg.push_str(&format!("  Total samples: {}\n", profile.total_samples));
+                        msg.push_str(&format!(
+                            "  Avg speed: {:.1} KB/s\n",
+                            profile.overall_avg_speed / 1024.0
+                        ));
+                        msg.push_str("  Best hours:\n");
+                        for (hour, speed) in profile.best_hours(5) {
+                            msg.push_str(&format!(
+                                "    {:02}:00 - {:.1} KB/s\n",
+                                hour,
+                                speed / 1024.0
+                            ));
+                        }
+                        msg.push_str("  Worst hours:\n");
+                        for (hour, speed) in profile.worst_hours(5) {
+                            msg.push_str(&format!(
+                                "    {:02}:00 - {:.1} KB/s\n",
+                                hour,
+                                speed / 1024.0
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                    None => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("No speed profile for domain {}", domain),
+                        );
+                    }
+                }
+            } else if args[0] == "domains" {
+                let domains = download_manager.list_tracked_speed_domains().await;
+                let mut msg = String::from("🌐 Tracked Speed Domains:\n");
+                if domains.is_empty() {
+                    msg.push_str("  No domains tracked");
+                } else {
+                    for domain in &domains {
+                        msg.push_str(&format!("  {}\n", domain));
+                    }
+                }
+                let mut s = state.lock().await;
+                s.add_system_message("main", msg);
+            } else if args[0] == "remove" && args.len() >= 2 {
+                let domain = &args[1];
+                let removed = download_manager
+                    .remove_speed_prediction_domain(domain)
+                    .await;
+                let mut s = state.lock().await;
+                if removed {
+                    s.add_system_message("main", format!("✅ Removed domain {}", domain));
+                } else {
+                    s.add_system_message("main", format!("❌ Domain {} not found", domain));
+                }
+            } else if args[0] == "cleanup" {
+                download_manager.cleanup_old_speed_predictions().await;
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    "✅ Cleaned up old speed prediction samples".to_string(),
+                );
+            } else if args[0] == "clear" {
+                download_manager.clear_all_speed_predictions().await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", "✅ Cleared all speed prediction data".to_string());
+            } else if args[0] == "config" && args.len() >= 3 {
+                let mut config = download_manager.get_speed_prediction_config().await;
+                match args[1].as_str() {
+                    "min_samples" => {
+                        if let Ok(val) = args[2].parse() {
+                            config.min_samples_for_prediction = val;
+                            download_manager.set_speed_prediction_config(config).await;
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Set min_samples_for_prediction to {}", val),
+                            );
+                        }
+                    }
+                    "retention_hours" => {
+                        if let Ok(val) = args[2].parse() {
+                            config.sample_retention_hours = val;
+                            download_manager.set_speed_prediction_config(config).await;
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Set sample_retention_hours to {}", val),
+                            );
+                        }
+                    }
+                    "wait_ratio" => {
+                        if let Ok(val) = args[2].parse::<f64>() {
+                            config.wait_threshold_ratio = val;
+                            download_manager.set_speed_prediction_config(config).await;
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Set wait_threshold_ratio to {}", val),
+                            );
+                        }
+                    }
+                    _ => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlsp config <min_samples|max_samples|sample_ttl_secs> <value>"
+                                .to_string(),
+                        );
+                    }
+                }
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message("main", "Usage: /dlsp <status|predict|windows|profile|domains|remove|cleanup|clear|config>".to_string());
             }
         }
         Command::DlCleanup { args } => {

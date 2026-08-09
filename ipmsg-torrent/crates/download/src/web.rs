@@ -178,6 +178,36 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/speed-history/:id/clear",
             post(clear_task_speed_history),
         )
+        .route("/api/speed-prediction", get(get_speed_prediction_summary))
+        .route("/api/speed-prediction", post(set_speed_prediction_config))
+        .route(
+            "/api/speed-prediction/predict",
+            post(predict_task_speed_handler),
+        )
+        .route(
+            "/api/speed-prediction/windows/:domain",
+            get(get_optimal_speed_windows),
+        )
+        .route(
+            "/api/speed-prediction/domain/:domain",
+            get(get_domain_speed_profile),
+        )
+        .route(
+            "/api/speed-prediction/domains",
+            get(list_tracked_speed_domains),
+        )
+        .route(
+            "/api/speed-prediction/domain/:domain/remove",
+            post(remove_speed_prediction_domain),
+        )
+        .route(
+            "/api/speed-prediction/cleanup",
+            post(cleanup_old_speed_predictions),
+        )
+        .route(
+            "/api/speed-prediction/clear",
+            post(clear_all_speed_predictions),
+        )
         .route("/api/audit-log", get(get_audit_log))
         .route("/api/audit-log/clear", post(clear_audit_log))
         .route("/api/bandwidth-schedule", get(get_bandwidth_schedule))
@@ -3049,6 +3079,102 @@ async fn clear_task_speed_history(
 ) -> impl axum::response::IntoResponse {
     let removed = state.manager.clear_task_speed_history(&task_id).await;
     Json(serde_json::json!({ "cleared": removed }))
+}
+
+/// Get speed prediction summary across all tracked domains
+async fn get_speed_prediction_summary(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_speed_prediction_summary().await;
+    Json(summary)
+}
+
+/// Set speed prediction configuration
+async fn set_speed_prediction_config(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::speed_prediction::SpeedPredictionConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_speed_prediction_config(config).await;
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+/// Request body for speed prediction
+#[derive(Debug, Deserialize)]
+struct PredictSpeedRequest {
+    task_id: String,
+    domain: String,
+    current_speed: f64,
+    remaining_bytes: u64,
+}
+
+/// Predict download speed for a task
+async fn predict_task_speed_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<PredictSpeedRequest>,
+) -> impl axum::response::IntoResponse {
+    let prediction = state
+        .manager
+        .predict_task_speed(
+            &req.task_id,
+            &req.domain,
+            req.current_speed,
+            req.remaining_bytes,
+        )
+        .await;
+    Json(prediction)
+}
+
+/// Get optimal speed windows for a domain
+async fn get_optimal_speed_windows(
+    State(state): State<Arc<WebState>>,
+    Path(domain): Path<String>,
+) -> impl axum::response::IntoResponse {
+    let windows = state.manager.get_optimal_speed_windows(&domain, 5).await;
+    Json(windows)
+}
+
+/// Get speed profile for a domain
+async fn get_domain_speed_profile(
+    State(state): State<Arc<WebState>>,
+    Path(domain): Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.get_domain_speed_profile(&domain).await {
+        Some(profile) => Json(serde_json::json!({ "found": true, "profile": profile })),
+        None => Json(serde_json::json!({ "found": false, "profile": null })),
+    }
+}
+
+/// List all tracked speed domains
+async fn list_tracked_speed_domains(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let domains = state.manager.list_tracked_speed_domains().await;
+    Json(domains)
+}
+
+/// Remove a domain from speed prediction tracking
+async fn remove_speed_prediction_domain(
+    State(state): State<Arc<WebState>>,
+    Path(domain): Path<String>,
+) -> impl axum::response::IntoResponse {
+    let removed = state.manager.remove_speed_prediction_domain(&domain).await;
+    Json(serde_json::json!({ "removed": removed }))
+}
+
+/// Clean up old speed prediction samples
+async fn cleanup_old_speed_predictions(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.cleanup_old_speed_predictions().await;
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+/// Clear all speed prediction data
+async fn clear_all_speed_predictions(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_all_speed_predictions().await;
+    Json(serde_json::json!({ "status": "ok" }))
 }
 
 /// Get bandwidth monitoring dashboard
