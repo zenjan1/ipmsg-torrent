@@ -314,6 +314,29 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/favorites/config", get(get_favorites_config_handler))
         .route("/api/favorites/config", post(set_favorites_config_handler))
+        .route("/api/recycle-bin", get(list_recycled_tasks_handler))
+        .route(
+            "/api/recycle-bin/summary",
+            get(get_recycle_bin_summary_handler),
+        )
+        .route(
+            "/api/recycle-bin/config",
+            get(get_recycle_bin_config_handler),
+        )
+        .route(
+            "/api/recycle-bin/config",
+            post(set_recycle_bin_config_handler),
+        )
+        .route("/api/recycle-bin/empty", post(empty_recycle_bin_handler))
+        .route(
+            "/api/recycle-bin/auto-purge",
+            post(run_recycle_bin_auto_purge_handler),
+        )
+        .route(
+            "/api/recycle-bin/:task_id/restore",
+            post(restore_task_handler),
+        )
+        .route("/api/recycle-bin/:task_id/purge", post(purge_task_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1654,6 +1677,102 @@ async fn set_favorites_config_handler(
     let config = crate::task_favorites::FavoritesConfig { max_favorites };
     state.manager.set_favorites_config(config).await;
     Json(serde_json::json!({"status": "ok"}))
+}
+
+/// List all recycled tasks in the recycle bin
+async fn list_recycled_tasks_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let entries = state.manager.list_recycled_tasks().await;
+    Json(entries)
+}
+
+/// Get recycle bin summary statistics
+async fn get_recycle_bin_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_recycle_bin_summary().await;
+    Json(serde_json::json!({
+        "total_entries": summary.total_entries,
+        "total_size": summary.total_size,
+        "total_downloaded": summary.total_downloaded,
+        "oldest_entry": summary.oldest_entry,
+        "newest_entry": summary.newest_entry,
+        "by_protocol": summary.by_protocol,
+        "config_enabled": summary.config_enabled,
+        "auto_purge_after_secs": summary.auto_purge_after_secs,
+        "max_entries": summary.max_entries
+    }))
+}
+
+/// Get recycle bin configuration
+async fn get_recycle_bin_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_recycle_bin_config().await;
+    Json(config)
+}
+
+/// Set recycle bin configuration
+async fn set_recycle_bin_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let mut config = state.manager.get_recycle_bin_config().await;
+
+    if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
+        config.enabled = enabled;
+    }
+    if let Some(secs) = body.get("auto_purge_after_secs").and_then(|v| v.as_u64()) {
+        config.auto_purge_after_secs = secs;
+    }
+    if let Some(max) = body.get("max_entries").and_then(|v| v.as_u64()) {
+        config.max_entries = max as usize;
+    }
+
+    match state.manager.set_recycle_bin_config(config).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Empty the entire recycle bin
+async fn empty_recycle_bin_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let count = state.manager.empty_recycle_bin().await;
+    Json(serde_json::json!({"purged": count}))
+}
+
+/// Run auto-purge on the recycle bin
+async fn run_recycle_bin_auto_purge_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let purged = state.manager.run_recycle_bin_auto_purge().await;
+    Json(serde_json::json!({"purged": purged}))
+}
+
+/// Restore a task from the recycle bin
+async fn restore_task_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.restore_task(&task_id).await {
+        Some(id) => Json(serde_json::json!({"status": "ok", "task_id": id})),
+        None => Json(serde_json::json!({"error": "Task not found in recycle bin"})),
+    }
+}
+
+/// Permanently delete a task from the recycle bin
+async fn purge_task_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    if state.manager.purge_task(&task_id).await {
+        Json(serde_json::json!({"status": "ok"}))
+    } else {
+        Json(serde_json::json!({"error": "Task not found in recycle bin"}))
+    }
 }
 
 /// Get URL deduplication configuration

@@ -43,6 +43,7 @@ pub mod protocol_limits;
 pub mod proxy;
 pub mod queue_health;
 pub mod rate_limiter;
+pub mod recycle_bin;
 pub mod rss_feed;
 pub mod save_path_manager;
 pub mod segment_download;
@@ -784,6 +785,8 @@ pub struct DownloadManager {
     task_comments: Arc<Mutex<task_comments::TaskCommentsManager>>,
     /// Task favorites/pinning manager
     task_favorites: Arc<Mutex<task_favorites::FavoritesManager>>,
+    /// Recycle bin for soft-deleted tasks
+    recycle_bin: Arc<Mutex<recycle_bin::RecycleBinManager>>,
 }
 
 impl DownloadManager {
@@ -861,6 +864,7 @@ impl DownloadManager {
                 Mutex::new(download_session::DownloadSessionManager::new()),
             ),
             task_favorites: Arc::new(Mutex::new(task_favorites::FavoritesManager::new())),
+            recycle_bin: Arc::new(Mutex::new(recycle_bin::RecycleBinManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1070,7 +1074,10 @@ impl DownloadManager {
                 Mutex::new(download_session::DownloadSessionManager::new()),
             ),
             task_favorites: Arc::new(Mutex::new(task_favorites::FavoritesManager::new())),
+            recycle_bin: Arc::new(Mutex::new(recycle_bin::RecycleBinManager::new())),
         };
+        // Restore recycle bin from disk
+        dm.recycle_bin.lock().await.load_state(&dm.data_dir);
         // Restore priority aging config from disk
         if let Ok(aging_cfg) = priority_aging::load_priority_aging_config(&dm.data_dir) {
             *dm.priority_aging.write().await = aging_cfg;
@@ -5740,6 +5747,188 @@ impl DownloadManager {
     #[cfg(test)]
     pub(crate) fn emit_event_for_test(&self, event: TaskEvent) {
         self.emit_event(event);
+    }
+
+    // ─── Recycle Bin (Phase 88) ─────────────────────────────────────────
+
+    /// Move a task to the recycle bin (soft delete).
+    /// Returns true if the task was successfully moved.
+    pub async fn recycle_task(&self, task_id: &str, reason: Option<String>) -> bool {
+        // Check if recycle bin is enabled
+        {
+            let rb = self.recycle_bin.lock().await;
+            if !rb.config().enabled {
+                return false;
+            }
+        }
+
+        // Find the task
+        let task = {
+            let tasks = self.tasks.lock().await;
+            tasks.iter().find(|t| t.id == task_id).cloned()
+        };
+
+        let task = match task {
+            Some(t) => t,
+            None => return false,
+        };
+
+        // Cancel if running
+        {
+            let r = self.running.lock().await;
+            if let Some(rt) = r.get(task_id) {
+                rt.cancel_token.cancel();
+            }
+        }
+        self.running.lock().await.remove(task_id);
+        self.task_info.lock().await.remove(task_id);
+        self.eta_estimator.remove_task(task_id).await;
+
+        // Move to recycle bin
+        {
+            let mut rb = self.recycle_bin.lock().await;
+            rb.recycle(&task, reason);
+            let _ = rb.save_state(&self.data_dir).await;
+        }
+
+        // Remove from active tasks
+        {
+            let mut tasks = self.tasks.lock().await;
+            tasks.retain(|t| t.id != task_id);
+        }
+        self.persist_tasks().await;
+
+        self.emit_event(TaskEvent::Removed {
+            task_id: task_id.to_string(),
+        });
+
+        self.log_audit_event(
+            AuditEventType::TaskRemoved,
+            Some(task_id.to_string()),
+            Some(task.name.clone()),
+            Some(format!("{:?}", task.protocol)),
+            None,
+        )
+        .await;
+
+        true
+    }
+
+    /// Restore a task from the recycle bin.
+    /// Returns the restored task ID if successful.
+    pub async fn restore_task(&self, task_id: &str) -> Option<String> {
+        let task = {
+            let mut rb = self.recycle_bin.lock().await;
+            rb.restore(task_id)?
+        };
+
+        // Save recycle bin state
+        {
+            let rb = self.recycle_bin.lock().await;
+            let _ = rb.save_state(&self.data_dir).await;
+        }
+
+        let restored_id = task.id.clone();
+
+        // Add back to active tasks
+        {
+            let mut tasks = self.tasks.lock().await;
+            tasks.push(task);
+        }
+        self.persist_tasks().await;
+
+        // Emit a task info event for the restored task
+        if let Some(task) = self
+            .tasks
+            .lock()
+            .await
+            .iter()
+            .find(|t| t.id == restored_id)
+            .cloned()
+        {
+            self.emit_event(TaskEvent::Added {
+                task: TaskInfoEvent::from_task(&task),
+            });
+        }
+
+        Some(restored_id)
+    }
+
+    /// Permanently delete a task from the recycle bin.
+    pub async fn purge_task(&self, task_id: &str) -> bool {
+        let purged = {
+            let mut rb = self.recycle_bin.lock().await;
+            rb.purge_one(task_id)
+        };
+
+        if purged {
+            let rb = self.recycle_bin.lock().await;
+            let _ = rb.save_state(&self.data_dir).await;
+        }
+
+        purged
+    }
+
+    /// Empty the entire recycle bin.
+    pub async fn empty_recycle_bin(&self) -> usize {
+        let count = {
+            let mut rb = self.recycle_bin.lock().await;
+            rb.empty()
+        };
+
+        if count > 0 {
+            let rb = self.recycle_bin.lock().await;
+            let _ = rb.save_state(&self.data_dir).await;
+        }
+
+        count
+    }
+
+    /// List all tasks in the recycle bin.
+    pub async fn list_recycled_tasks(&self) -> Vec<recycle_bin::RecycledTask> {
+        let rb = self.recycle_bin.lock().await;
+        rb.list().to_vec()
+    }
+
+    /// Get recycle bin summary statistics.
+    pub async fn get_recycle_bin_summary(&self) -> recycle_bin::RecycleBinSummary {
+        let rb = self.recycle_bin.lock().await;
+        rb.summary()
+    }
+
+    /// Set recycle bin configuration.
+    pub async fn set_recycle_bin_config(
+        &self,
+        config: recycle_bin::RecycleBinConfig,
+    ) -> Result<(), recycle_bin::RecycleBinError> {
+        {
+            let mut rb = self.recycle_bin.lock().await;
+            rb.set_config(config);
+        }
+
+        let rb = self.recycle_bin.lock().await;
+        rb.save_state(&self.data_dir).await
+    }
+
+    /// Get current recycle bin configuration.
+    pub async fn get_recycle_bin_config(&self) -> recycle_bin::RecycleBinConfig {
+        let rb = self.recycle_bin.lock().await;
+        rb.config().clone()
+    }
+
+    /// Run auto-purge on the recycle bin.
+    pub async fn run_recycle_bin_auto_purge(&self) -> usize {
+        let purged = {
+            let mut rb = self.recycle_bin.lock().await;
+            rb.auto_purge()
+        };
+
+        if purged > 0 {
+            let rb = self.recycle_bin.lock().await;
+            let _ = rb.save_state(&self.data_dir).await;
+        }
+
+        purged
     }
 
     // ─── Task Archive (Phase 78) ───────────────────────────────────────

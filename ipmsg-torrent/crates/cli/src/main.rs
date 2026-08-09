@@ -449,6 +449,12 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Manage recycle bin for soft-deleted tasks
+    DlRecycle {
+        /// Subcommand: list|restore|purge|empty|config|summary|autopause
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1301,6 +1307,26 @@ fn parse_command(input: &str) -> Command {
                     Vec::new()
                 };
                 Command::DlFavorite {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
+        "dlrecycle" | "dl-recycle" | "dlrb" => {
+            // /dlrecycle <list|restore|purge|empty|config|summary> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlrecycle <list|restore|purge|empty|config|summary> [args...]".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlRecycle {
                     subcommand,
                     args: cmd_args,
                 }
@@ -7171,6 +7197,197 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlfavorite <list|add|remove|config> [args...]".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlRecycle { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "list" => {
+                    let entries = download_manager.list_recycled_tasks().await;
+                    if entries.is_empty() {
+                        s.add_system_message("main", "Recycle bin is empty".to_string());
+                    } else {
+                        let mut out = format!("Recycle bin ({} tasks):\n", entries.len());
+                        for entry in &entries {
+                            out.push_str(&format!(
+                                "  {} | {} | {} | deleted {}\n",
+                                entry.task.id,
+                                entry.task.name,
+                                entry.task.protocol,
+                                entry.deleted_at.format("%Y-%m-%d %H:%M")
+                            ));
+                        }
+                        s.add_system_message("main", out);
+                    }
+                }
+                "restore" => {
+                    if !args.is_empty() {
+                        let task_id = &args[0];
+                        match download_manager.restore_task(task_id).await {
+                            Some(id) => s.add_system_message(
+                                "main",
+                                format!("Restored task {} from recycle bin", id),
+                            ),
+                            None => s.add_system_message(
+                                "main",
+                                format!("Task {} not found in recycle bin", task_id),
+                            ),
+                        }
+                    } else {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlrecycle restore <task_id>".to_string(),
+                        );
+                    }
+                }
+                "purge" => {
+                    if !args.is_empty() {
+                        let task_id = &args[0];
+                        if download_manager.purge_task(task_id).await {
+                            s.add_system_message(
+                                "main",
+                                format!("Permanently deleted task {} from recycle bin", task_id),
+                            );
+                        } else {
+                            s.add_system_message(
+                                "main",
+                                format!("Task {} not found in recycle bin", task_id),
+                            );
+                        }
+                    } else {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlrecycle purge <task_id>".to_string(),
+                        );
+                    }
+                }
+                "empty" => {
+                    let count = download_manager.empty_recycle_bin().await;
+                    s.add_system_message(
+                        "main",
+                        format!("Emptied recycle bin ({} tasks permanently deleted)", count),
+                    );
+                }
+                "config" => {
+                    if args.len() >= 2 {
+                        match args[0].as_str() {
+                            "enabled" => {
+                                if let Ok(enabled) = args[1].parse::<bool>() {
+                                    let mut config =
+                                        download_manager.get_recycle_bin_config().await;
+                                    config.enabled = enabled;
+                                    let _ = download_manager.set_recycle_bin_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Set recycle bin enabled to {}", enabled),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        "Usage: /dlrecycle config enabled <true|false>".to_string(),
+                                    );
+                                }
+                            }
+                            "purge" => {
+                                if let Ok(secs) = args[1].parse::<u64>() {
+                                    let mut config =
+                                        download_manager.get_recycle_bin_config().await;
+                                    config.auto_purge_after_secs = secs;
+                                    let _ = download_manager.set_recycle_bin_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Set auto-purge after {} seconds", secs),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        "Usage: /dlrecycle config purge <seconds>".to_string(),
+                                    );
+                                }
+                            }
+                            "max" => {
+                                if let Ok(max) = args[1].parse::<usize>() {
+                                    let mut config =
+                                        download_manager.get_recycle_bin_config().await;
+                                    config.max_entries = max;
+                                    let _ = download_manager.set_recycle_bin_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Set max recycle bin entries to {}", max),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        "Usage: /dlrecycle config max <number>".to_string(),
+                                    );
+                                }
+                            }
+                            _ => {
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dlrecycle config <enabled|purge|max> <value>"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    } else {
+                        let config = download_manager.get_recycle_bin_config().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "Recycle bin config:\n  enabled: {}\n  auto_purge_after_secs: {}\n  max_entries: {}",
+                                config.enabled, config.auto_purge_after_secs, config.max_entries
+                            ),
+                        );
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_recycle_bin_summary().await;
+                    let mut out = String::new();
+                    out.push_str(&format!("Recycle bin summary:\n"));
+                    out.push_str(&format!("  Total entries: {}\n", summary.total_entries));
+                    out.push_str(&format!("  Total size: {} bytes\n", summary.total_size));
+                    out.push_str(&format!(
+                        "  Total downloaded: {} bytes\n",
+                        summary.total_downloaded
+                    ));
+                    if let Some(oldest) = summary.oldest_entry {
+                        out.push_str(&format!(
+                            "  Oldest entry: {}\n",
+                            oldest.format("%Y-%m-%d %H:%M")
+                        ));
+                    }
+                    if let Some(newest) = summary.newest_entry {
+                        out.push_str(&format!(
+                            "  Newest entry: {}\n",
+                            newest.format("%Y-%m-%d %H:%M")
+                        ));
+                    }
+                    if !summary.by_protocol.is_empty() {
+                        out.push_str("  By protocol:\n");
+                        for (proto, count) in &summary.by_protocol {
+                            out.push_str(&format!("    {}: {}\n", proto, count));
+                        }
+                    }
+                    s.add_system_message("main", out);
+                }
+                "autopause" => {
+                    let purged = download_manager.run_recycle_bin_auto_purge().await;
+                    s.add_system_message(
+                        "main",
+                        format!("Auto-purged {} expired entries from recycle bin", purged),
+                    );
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlrecycle <list|restore|purge|empty|config|summary|autopause> [args...]".to_string(),
                     );
                 }
             }
