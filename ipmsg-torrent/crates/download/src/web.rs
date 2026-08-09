@@ -274,6 +274,9 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/archive/config", post(set_archive_config_handler))
         .route("/api/export/csv", get(export_csv_handler))
         .route("/api/export/csv/summary", get(export_csv_summary_handler))
+        .route("/api/priority-aging", get(get_priority_aging_handler))
+        .route("/api/priority-aging", post(set_priority_aging_handler))
+        .route("/api/priority-aging/run", post(run_priority_aging_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1373,6 +1376,33 @@ async fn export_csv_summary_handler(
         [("Content-Type", "text/plain; charset=utf-8")],
         summary,
     )
+}
+
+/// GET /api/priority-aging - Get priority aging configuration
+async fn get_priority_aging_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::priority_aging::PriorityAgingConfig> {
+    let config = state.manager.get_priority_aging_config().await;
+    Json(config)
+}
+
+/// POST /api/priority-aging - Set priority aging configuration
+async fn set_priority_aging_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::priority_aging::PriorityAgingConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_priority_aging_config(config).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// POST /api/priority-aging/run - Run priority aging check
+async fn run_priority_aging_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::priority_aging::AgingDecision>> {
+    let decisions = state.manager.run_priority_aging().await;
+    Json(decisions)
 }
 
 /// Get URL deduplication configuration

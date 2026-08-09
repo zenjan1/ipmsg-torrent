@@ -36,6 +36,7 @@ pub mod path_rules;
 pub mod path_template;
 pub mod path_validator;
 pub mod post_hooks;
+pub mod priority_aging;
 pub mod progress;
 pub mod protocol_limits;
 pub mod proxy;
@@ -765,6 +766,8 @@ pub struct DownloadManager {
     task_archive: Arc<tokio::sync::RwLock<task_archive::ArchiveState>>,
     /// URL normalizer for cleaning and deduplicating download URLs
     url_normalizer: Arc<tokio::sync::RwLock<url_normalizer::UrlNormalizer>>,
+    /// Priority aging configuration for automatic priority boosting
+    priority_aging: Arc<tokio::sync::RwLock<priority_aging::PriorityAgingConfig>>,
 }
 
 impl DownloadManager {
@@ -832,6 +835,9 @@ impl DownloadManager {
             )),
             url_normalizer: Arc::new(tokio::sync::RwLock::new(
                 url_normalizer::UrlNormalizer::new(),
+            )),
+            priority_aging: Arc::new(tokio::sync::RwLock::new(
+                priority_aging::PriorityAgingConfig::default(),
             )),
         };
         dm.start_scheduler();
@@ -1033,7 +1039,14 @@ impl DownloadManager {
             url_normalizer: Arc::new(tokio::sync::RwLock::new(
                 url_normalizer::UrlNormalizer::new(),
             )),
+            priority_aging: Arc::new(tokio::sync::RwLock::new(
+                priority_aging::PriorityAgingConfig::default(),
+            )),
         };
+        // Restore priority aging config from disk
+        if let Ok(aging_cfg) = priority_aging::load_priority_aging_config(&dm.data_dir) {
+            *dm.priority_aging.write().await = aging_cfg;
+        }
         // Restore path rules from disk
         if let Ok(loaded_rules) =
             path_rules::load_path_rules(&dm.data_dir.join("path_rules.json")).await
@@ -3246,6 +3259,81 @@ impl DownloadManager {
     pub async fn get_url_normalizer_config(&self) -> url_normalizer::UrlNormalizerConfig {
         let normalizer = self.url_normalizer.read().await;
         normalizer.config().clone()
+    }
+
+    // ---- Priority Aging ----
+
+    /// Set priority aging configuration (persisted to disk).
+    pub async fn set_priority_aging_config(
+        &self,
+        config: priority_aging::PriorityAgingConfig,
+    ) -> Result<(), priority_aging::PriorityAgingError> {
+        *self.priority_aging.write().await = config.clone();
+        priority_aging::save_priority_aging_config(&config, &self.data_dir)
+    }
+
+    /// Get current priority aging configuration.
+    pub async fn get_priority_aging_config(&self) -> priority_aging::PriorityAgingConfig {
+        self.priority_aging.read().await.clone()
+    }
+
+    /// Run priority aging check. Returns the list of tasks whose priority was boosted.
+    /// Intended to be called periodically by the scheduler.
+    pub async fn run_priority_aging(&self) -> Vec<priority_aging::AgingDecision> {
+        let config = self.priority_aging.read().await.clone();
+        if !config.enabled {
+            return Vec::new();
+        }
+        let now = chrono::Utc::now();
+        let tasks_data: Vec<priority_aging::TaskAgingData> = {
+            let tasks = self.tasks.lock().await;
+            tasks
+                .iter()
+                .filter(|t| t.state == DownloadState::Queued)
+                .map(|t| priority_aging::TaskAgingData {
+                    id: t.id.clone(),
+                    priority: priority_aging::AgingPriority::from_download_priority(t.priority),
+                    queued_at: Some(t.created_at),
+                    state: t.state,
+                })
+                .collect()
+        };
+        let decisions = priority_aging::evaluate_batch_aging(&tasks_data, &config, now);
+        if decisions.is_empty() {
+            return Vec::new();
+        }
+        // Apply priority boosts
+        let mut boosted_tasks = Vec::new();
+        {
+            let mut tasks = self.tasks.lock().await;
+            for d in &decisions {
+                if let Some(task) = tasks.iter_mut().find(|t| t.id == d.task_id) {
+                    task.priority = d.new_priority.to_download_priority();
+                    boosted_tasks.push(d.task_id.clone());
+                    tracing::info!(
+                        task_id = %d.task_id,
+                        old = ?d.old_priority,
+                        new = ?d.new_priority,
+                        wait_secs = d.wait_secs,
+                        "Priority aging: task boosted"
+                    );
+                }
+            }
+        }
+        // Emit events for boosted tasks
+        {
+            let tasks = self.tasks.lock().await;
+            for task_id in boosted_tasks {
+                if let Some(task) = tasks.iter().find(|t| t.id == task_id) {
+                    self.emit_event(TaskEvent::Updated {
+                        task: TaskInfoEvent::from_task(task),
+                    });
+                }
+            }
+        }
+        // Persist task queue (priority changed)
+        let _ = self.persist_tasks().await;
+        decisions
     }
 
     /// Log an audit event

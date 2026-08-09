@@ -432,6 +432,12 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Priority aging (status|enable|disable|set|config)
+    DlPriorityAging {
+        /// Subcommand
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1233,6 +1239,26 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlpriorityaging" | "dl-priorityaging" | "dlpa" => {
+            // /dlpriorityaging <status|enable|disable|set|config> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlpriorityaging <status|enable|disable|set|config> [args...]".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlPriorityAging {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1429,6 +1455,7 @@ fn command_help() -> String {
         "/dldomainlimit <status|enable|disable|set|default> - Per-domain concurrent download limit",
         "/dlprotolimit <status|enable|disable|set|default> - Per-protocol concurrent download limit",
         "/dlpathval <status|validate|config> - Path validator for save path security",
+        "/dlpriorityaging <status|enable|disable|set|config> - Priority aging for queued tasks",
         "/dlprule [cmd]     - Path rules (status|list|add|del|enable|disable|test)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
@@ -4471,6 +4498,178 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlpathval <status|validate|config> [args...]".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlPriorityAging { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_priority_aging_config().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "⏰ Priority Aging Status\n\
+                            Enabled: {}\n\
+                            Low → Normal after: {}s\n\
+                            Normal → High after: {}s\n\
+                            Max aged priority: {:?}\n\
+                            Check interval: {}s",
+                            config.enabled,
+                            config.low_to_normal_secs,
+                            config.normal_to_high_secs,
+                            config.max_aged_priority,
+                            config.check_interval_secs
+                        ),
+                    );
+                }
+                "enable" => {
+                    let mut config = download_manager.get_priority_aging_config().await;
+                    config.enabled = true;
+                    let _ = download_manager.set_priority_aging_config(config).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "✅ Priority aging enabled".to_string());
+                }
+                "disable" => {
+                    let mut config = download_manager.get_priority_aging_config().await;
+                    config.enabled = false;
+                    let _ = download_manager.set_priority_aging_config(config).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "✅ Priority aging disabled".to_string());
+                }
+                "set" => {
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpriorityaging set <low_to_normal_secs> <normal_to_high_secs> [max_priority]".to_string(),
+                        );
+                        return;
+                    }
+                    let low_to_normal = match args[0].parse::<u64>() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "❌ Invalid low_to_normal_secs value".to_string(),
+                            );
+                            return;
+                        }
+                    };
+                    let normal_to_high = match args[1].parse::<u64>() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "❌ Invalid normal_to_high_secs value".to_string(),
+                            );
+                            return;
+                        }
+                    };
+                    let mut config = download_manager.get_priority_aging_config().await;
+                    config.low_to_normal_secs = low_to_normal;
+                    config.normal_to_high_secs = normal_to_high;
+                    if args.len() > 2 {
+                        config.max_aged_priority = match args[2].to_lowercase().as_str() {
+                            "low" => ipmsg_download::priority_aging::AgingPriority::Low,
+                            "normal" => ipmsg_download::priority_aging::AgingPriority::Normal,
+                            "high" => ipmsg_download::priority_aging::AgingPriority::High,
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "❌ Invalid max_priority. Use 'low', 'normal', or 'high'"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                        };
+                    }
+                    let _ = download_manager.set_priority_aging_config(config).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "✅ Priority aging thresholds updated\nLow → Normal: {}s\nNormal → High: {}s",
+                            low_to_normal, normal_to_high
+                        ),
+                    );
+                }
+                "config" => {
+                    let mut config = download_manager.get_priority_aging_config().await;
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpriorityaging config <interval|max_priority> <value>"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    match args[0].as_str() {
+                        "interval" => match args[1].parse::<u64>() {
+                            Ok(v) => {
+                                config.check_interval_secs = v;
+                                let _ = download_manager.set_priority_aging_config(config).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Check interval set to {}s", v),
+                                );
+                            }
+                            Err(_) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "❌ Invalid interval value".to_string(),
+                                );
+                            }
+                        },
+                        "max_priority" => {
+                            config.max_aged_priority = match args[1].to_lowercase().as_str() {
+                                "low" => ipmsg_download::priority_aging::AgingPriority::Low,
+                                "normal" => ipmsg_download::priority_aging::AgingPriority::Normal,
+                                "high" => ipmsg_download::priority_aging::AgingPriority::High,
+                                _ => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "❌ Invalid priority. Use 'low', 'normal', or 'high'"
+                                            .to_string(),
+                                    );
+                                    return;
+                                }
+                            };
+                            let _ = download_manager.set_priority_aging_config(config).await;
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Max aged priority set to {:?}", args[1]),
+                            );
+                        }
+                        _ => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "❌ Unknown config key. Use 'interval' or 'max_priority'"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlpriorityaging <status|enable|disable|set|config> [args...]"
+                            .to_string(),
                     );
                 }
             }
