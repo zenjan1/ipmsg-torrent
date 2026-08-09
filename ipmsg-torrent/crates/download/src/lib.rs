@@ -10,6 +10,7 @@ pub mod auto_categorize;
 pub mod auto_cleanup;
 pub mod auto_pause;
 pub mod auto_shutdown;
+pub mod bandwidth_allocation;
 pub mod bandwidth_monitor;
 pub mod bandwidth_schedule;
 pub mod bulk_ops;
@@ -62,6 +63,7 @@ pub mod task_archive;
 pub mod task_comments;
 pub mod task_export;
 pub mod task_favorites;
+pub mod task_proxy;
 pub mod task_queue;
 pub mod task_snooze;
 pub mod torrent;
@@ -227,6 +229,8 @@ pub struct TaskInfoEvent {
     pub is_favorite: bool,
     /// Maximum download time in seconds (auto-pause when exceeded, None = no limit)
     pub max_download_time_secs: Option<u64>,
+    /// Per-task proxy override (None = use global proxy)
+    pub proxy_override: Option<proxy::ProxyConfig>,
 }
 
 impl TaskInfoEvent {
@@ -263,6 +267,7 @@ impl TaskInfoEvent {
             sequential_mode: task.sequential_mode,
             is_favorite: false, // Set by caller via favorites check
             max_download_time_secs: task.max_download_time_secs,
+            proxy_override: task.proxy_override.clone(),
         }
     }
 }
@@ -381,6 +386,8 @@ pub struct DownloadTask {
     pub sequential_mode: bool,
     /// Maximum download time in seconds (auto-pause when exceeded, None = no limit)
     pub max_download_time_secs: Option<u64>,
+    /// Per-task proxy override (None = use global proxy)
+    pub proxy_override: Option<proxy::ProxyConfig>,
 }
 
 /// Per-task retry policy configuration
@@ -684,6 +691,8 @@ enum TaskParams {
 struct TaskInfo {
     params: TaskParams,
     max_download_time_secs: Option<u64>,
+    #[allow(dead_code)]
+    proxy_override: Option<proxy::ProxyConfig>,
 }
 
 /// Internal handle for a running task
@@ -828,6 +837,11 @@ pub struct DownloadManager {
     connection_health: Arc<Mutex<connection_health::ConnectionHealthManager>>,
     /// Source rotation manager for automatic failover to alternative sources
     source_rotation: Arc<Mutex<source_rotation::SourceRotationManager>>,
+    /// Bandwidth allocation manager for intelligent bandwidth distribution
+    bandwidth_allocation: Arc<Mutex<bandwidth_allocation::AllocationManager>>,
+    /// Per-task proxy override manager
+    #[allow(dead_code)]
+    task_proxy: Arc<Mutex<task_proxy::TaskProxyManager>>,
 }
 
 impl DownloadManager {
@@ -855,7 +869,7 @@ impl DownloadManager {
             task_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             max_auto_retries: Arc::new(AtomicU32::new(0)),
             auto_retry_base_delay_secs: Arc::new(AtomicU64::new(30)),
-            hook_manager: Arc::new(HookManager::new(data_dir)),
+            hook_manager: Arc::new(HookManager::new(data_dir.clone())),
             rss_feed_manager: None,
             eta_estimator: Arc::new(EtaEstimator::new()),
             categorize_rules: Arc::new(Mutex::new(Vec::new())),
@@ -930,6 +944,12 @@ impl DownloadManager {
                 connection_health::ConnectionHealthManager::new(),
             )),
             source_rotation: Arc::new(Mutex::new(source_rotation::SourceRotationManager::new())),
+            bandwidth_allocation: Arc::new(Mutex::new(
+                bandwidth_allocation::AllocationManager::new(),
+            )),
+            task_proxy: Arc::new(Mutex::new(task_proxy::TaskProxyManager::new(
+                data_dir.join("task_proxy.json"),
+            ))),
         };
         dm.start_scheduler();
         dm
@@ -1089,7 +1109,7 @@ impl DownloadManager {
             task_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             max_auto_retries: Arc::new(AtomicU32::new(0)),
             auto_retry_base_delay_secs: Arc::new(AtomicU64::new(30)),
-            hook_manager: Arc::new(HookManager::new(data_dir)),
+            hook_manager: Arc::new(HookManager::new(data_dir.clone())),
             rss_feed_manager: None,
             eta_estimator: Arc::new(EtaEstimator::new()),
             categorize_rules: Arc::new(Mutex::new(Vec::new())),
@@ -1164,6 +1184,12 @@ impl DownloadManager {
                 connection_health::ConnectionHealthManager::new(),
             )),
             source_rotation: Arc::new(Mutex::new(source_rotation::SourceRotationManager::new())),
+            bandwidth_allocation: Arc::new(Mutex::new(
+                bandwidth_allocation::AllocationManager::new(),
+            )),
+            task_proxy: Arc::new(Mutex::new(task_proxy::TaskProxyManager::new(
+                data_dir.join("task_proxy.json"),
+            ))),
         };
         // Restore error recovery config from disk
         if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
@@ -2526,6 +2552,7 @@ impl DownloadManager {
                         cooldown: None,
                         sequential_mode: false,
                         max_download_time_secs: None,
+                        proxy_override: None,
                         current_session_start: None,
                     };
 
@@ -2568,6 +2595,7 @@ impl DownloadManager {
                             cooldown: None,
                             sequential_mode: false,
                             max_download_time_secs: None,
+                            proxy_override: None,
                             is_favorite: false,
                         },
                     });
@@ -3258,6 +3286,63 @@ impl DownloadManager {
     /// Returns QuotaCheck::Allowed if retry is permitted, Exhausted if quota is spent.
     pub async fn check_retry_quota(&self) -> retry_quota::QuotaCheck {
         self.retry_quota.lock().await.check_quota()
+    }
+
+    /// Set bandwidth allocation configuration.
+    pub async fn set_allocation_config(
+        &self,
+        config: bandwidth_allocation::AllocationConfig,
+    ) -> Result<(), bandwidth_allocation::AllocationPersistenceError> {
+        bandwidth_allocation::save_allocation_config(&config, &self.data_dir)?;
+        let mut mgr = self.bandwidth_allocation.lock().await;
+        mgr.set_config(config);
+        Ok(())
+    }
+
+    /// Get bandwidth allocation configuration.
+    pub async fn get_allocation_config(&self) -> bandwidth_allocation::AllocationConfig {
+        self.bandwidth_allocation.lock().await.config().clone()
+    }
+
+    /// Get current bandwidth allocation plan.
+    pub async fn get_allocation_plan(&self) -> Option<bandwidth_allocation::AllocationPlan> {
+        self.bandwidth_allocation.lock().await.last_plan().cloned()
+    }
+
+    /// Calculate bandwidth allocation for all active tasks.
+    pub async fn calculate_allocation_plan(
+        &self,
+        total_bandwidth_bps: u64,
+    ) -> bandwidth_allocation::AllocationPlan {
+        let tasks = self.tasks.lock().await;
+        let task_data: Vec<bandwidth_allocation::TaskAllocationData> = tasks
+            .iter()
+            .map(|t| bandwidth_allocation::TaskAllocationData {
+                task_id: t.id.clone(),
+                priority: match t.priority {
+                    DownloadPriority::High => 3,
+                    DownloadPriority::Normal => 2,
+                    DownloadPriority::Low => 1,
+                },
+                bandwidth_weight: t.bandwidth_weight,
+                is_active: t.state == DownloadState::Downloading,
+            })
+            .collect();
+
+        let mut mgr = self.bandwidth_allocation.lock().await;
+        mgr.calculate_allocation(total_bandwidth_bps, &task_data)
+    }
+
+    /// Get allocation for a specific task.
+    pub async fn get_task_allocation(
+        &self,
+        task_id: &str,
+    ) -> Option<bandwidth_allocation::TaskAllocation> {
+        self.bandwidth_allocation
+            .lock()
+            .await
+            .get_task_allocation(task_id)
+            .cloned()
     }
 
     /// Record a retry attempt in the quota tracker.
@@ -4721,6 +4806,7 @@ impl DownloadManager {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -4803,6 +4889,7 @@ impl DownloadManager {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -4877,6 +4964,7 @@ impl DownloadManager {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -4954,6 +5042,7 @@ impl DownloadManager {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -5022,6 +5111,7 @@ impl DownloadManager {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -5044,6 +5134,7 @@ impl DownloadManager {
                         from_peer,
                     },
                     max_download_time_secs: None,
+                    proxy_override: None,
                 },
             );
         }
@@ -5327,6 +5418,7 @@ impl DownloadManager {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -5488,6 +5580,7 @@ impl DownloadManager {
                 TaskInfo {
                     params: params.clone(),
                     max_download_time_secs: None,
+                    proxy_override: None,
                 },
             );
         }
@@ -7075,6 +7168,7 @@ impl DownloadManager {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
         };
 
         self.tasks.lock().await.push(task);
@@ -7615,6 +7709,7 @@ impl DownloadManager {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
         };
 
         // Append " (copy)" to name if it doesn't already end with it
@@ -9430,6 +9525,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -9464,6 +9560,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -9498,6 +9595,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -9624,6 +9722,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -9685,6 +9784,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -9739,6 +9839,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -9773,6 +9874,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -9807,6 +9909,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -9864,6 +9967,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -9898,6 +10002,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -9945,6 +10050,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -9992,6 +10098,7 @@ mod tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
         assert!(task.tags.is_empty());
@@ -10033,6 +10140,7 @@ mod tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -10091,6 +10199,7 @@ mod tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -10141,6 +10250,7 @@ mod tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -10191,6 +10301,7 @@ mod tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -10241,6 +10352,7 @@ mod tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -10298,6 +10410,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -10332,6 +10445,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -10366,6 +10480,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             },
         ];
@@ -10415,6 +10530,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -10449,6 +10565,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -10483,6 +10600,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             },
         ];
@@ -10528,6 +10646,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -10562,6 +10681,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -10596,6 +10716,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             },
         ];
@@ -10643,6 +10764,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10677,6 +10799,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -10722,6 +10845,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10756,6 +10880,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10790,6 +10915,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -10840,6 +10966,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10874,6 +11001,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10908,6 +11036,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -11034,6 +11163,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -11088,6 +11218,7 @@ mod tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -11237,6 +11368,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -11308,6 +11440,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -11360,6 +11493,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11394,6 +11528,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11428,6 +11563,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -11506,6 +11642,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -11557,6 +11694,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -11605,6 +11743,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -11685,6 +11824,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -11742,6 +11882,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11776,6 +11917,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -11827,6 +11969,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11861,6 +12004,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -11912,6 +12056,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11946,6 +12091,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11980,6 +12126,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -12029,6 +12176,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12063,6 +12211,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12097,6 +12246,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -12147,6 +12297,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12181,6 +12332,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12215,6 +12367,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
                 current_session_start: None,
             });
         }
@@ -12826,6 +12979,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
             };
             dm.tasks.lock().await.push(task);
         }
@@ -13431,6 +13585,7 @@ mod max_concurrent_tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -13485,6 +13640,7 @@ mod max_concurrent_tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -13538,6 +13694,7 @@ mod max_concurrent_tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         };
 
@@ -13597,6 +13754,7 @@ mod max_concurrent_tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         });
         drop(tasks);
@@ -13666,6 +13824,7 @@ mod max_concurrent_tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         });
         drop(tasks);
@@ -13733,6 +13892,7 @@ mod max_concurrent_tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
             current_session_start: None,
         });
         drop(tasks);

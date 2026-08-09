@@ -201,6 +201,7 @@ impl From<PersistedTask> for DownloadTask {
             sequential_mode: t.sequential_mode,
             notes: t.notes,
             max_download_time_secs: t.max_download_time_secs,
+            proxy_override: None,
         }
     }
 }
@@ -319,6 +320,7 @@ mod tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -390,6 +392,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -424,6 +427,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 max_download_time_secs: None,
+                proxy_override: None,
             },
         ];
 
@@ -487,6 +491,7 @@ mod tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();
@@ -535,6 +540,7 @@ mod tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();
@@ -580,6 +586,7 @@ mod tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
         };
 
         save_task_queue(&[task2], data_dir).unwrap();

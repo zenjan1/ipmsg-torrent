@@ -390,6 +390,18 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/source-rotation/execute",
             post(execute_source_rotation_handler),
         )
+        .route(
+            "/api/bandwidth-allocation",
+            get(get_bandwidth_allocation_handler),
+        )
+        .route(
+            "/api/bandwidth-allocation",
+            post(set_bandwidth_allocation_handler),
+        )
+        .route(
+            "/api/bandwidth-allocation/plan",
+            get(get_bandwidth_allocation_plan_handler),
+        )
         .route("/api/speed-burst/start", post(start_speed_burst_handler))
         .route("/api/speed-burst/stop", post(stop_speed_burst_handler))
         .route("/api/ws", get(ws_handler))
@@ -2233,6 +2245,48 @@ async fn execute_source_rotation_handler(
     Json(serde_json::json!({
         "decisions": decisions,
     }))
+}
+
+/// Get bandwidth allocation configuration
+async fn get_bandwidth_allocation_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_allocation_config().await;
+    Json(serde_json::json!({
+        "enabled": config.enabled,
+        "strategy": config.strategy,
+        "min_bandwidth_bps": config.min_bandwidth_bps,
+        "max_bandwidth_bps": config.max_bandwidth_bps,
+        "recalc_interval_secs": config.recalc_interval_secs,
+    }))
+}
+
+/// Set bandwidth allocation configuration
+async fn set_bandwidth_allocation_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::bandwidth_allocation::AllocationConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_allocation_config(config).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+    }
+}
+
+/// Get current bandwidth allocation plan
+async fn get_bandwidth_allocation_plan_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.get_allocation_plan().await {
+        Some(plan) => Json(serde_json::json!({
+            "status": "ok",
+            "plan": plan,
+        })),
+        None => Json(serde_json::json!({
+            "status": "ok",
+            "plan": null,
+            "message": "No allocation plan calculated yet",
+        })),
+    }
 }
 
 /// Start a speed burst for a task
@@ -4140,6 +4194,7 @@ mod tests {
                 sequential_mode: false,
                 is_favorite: false,
                 max_download_time_secs: None,
+                proxy_override: None,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -4655,6 +4710,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             max_download_time_secs: None,
+            proxy_override: None,
         };
         let info = TaskInfo::from(task);
         assert_eq!(info.depends_on, vec!["task-0".to_string()]);

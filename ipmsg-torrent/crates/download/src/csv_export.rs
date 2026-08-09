@@ -332,6 +332,7 @@ mod tests {
             cooldown: None,
             sequential_mode: false,
             max_download_time_secs: None,
+            proxy_override: None,
         }
     }
 

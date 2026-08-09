@@ -189,6 +189,7 @@ fn test_download_task_progress() {
         cooldown: None,
         sequential_mode: false,
         max_download_time_secs: None,
+        proxy_override: None,
     };
 
     assert_eq!(task.progress(), 50.0);
@@ -231,6 +232,7 @@ fn test_download_task_progress_zero_size() {
         cooldown: None,
         sequential_mode: false,
         max_download_time_secs: None,
+        proxy_override: None,
     };
 
     assert_eq!(task.progress(), 0.0);
