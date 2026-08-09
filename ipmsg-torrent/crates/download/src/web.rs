@@ -347,6 +347,14 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/task-snooze", post(set_snooze_handler))
         .route("/api/task-snooze/config", get(get_snooze_config_handler))
         .route("/api/task-snooze/config", post(set_snooze_config_handler))
+        .route(
+            "/api/progress-milestone",
+            get(get_progress_milestone_handler),
+        )
+        .route(
+            "/api/progress-milestone",
+            post(set_progress_milestone_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1875,7 +1883,9 @@ async fn set_snooze_handler(
             let until = match chrono::DateTime::parse_from_rfc3339(until_str) {
                 Ok(dt) => dt.with_timezone(&chrono::Utc),
                 Err(_) => {
-                    return Json(serde_json::json!({"error": "invalid until format (use RFC3339)"}));
+                    return Json(
+                        serde_json::json!({"error": "invalid until format (use RFC3339)"}),
+                    );
                 }
             };
             match state.manager.snooze_task(task_id, until, reason).await {
@@ -1914,6 +1924,23 @@ async fn set_snooze_config_handler(
         Ok(_) => Json(serde_json::json!({"status": "ok"})),
         Err(e) => Json(serde_json::json!({"error": e.to_string()})),
     }
+}
+
+/// Get progress milestone configuration
+async fn get_progress_milestone_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_progress_milestone_config().await;
+    Json(config)
+}
+
+/// Set progress milestone configuration
+async fn set_progress_milestone_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::progress_milestone::ProgressMilestoneConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_progress_milestone_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
 }
 
 /// Get URL deduplication configuration

@@ -40,6 +40,7 @@ pub mod path_validator;
 pub mod post_hooks;
 pub mod priority_aging;
 pub mod progress;
+pub mod progress_milestone;
 pub mod protocol_limits;
 pub mod proxy;
 pub mod queue_health;
@@ -796,6 +797,11 @@ pub struct DownloadManager {
     url_allowlist: Arc<tokio::sync::RwLock<url_allowlist::AllowlistConfig>>,
     /// Task snooze manager for pausing downloads until a specific time
     task_snooze: Arc<Mutex<task_snooze::TaskSnoozeManager>>,
+    /// Progress milestone tracker for sending notifications at download thresholds
+    progress_milestone: Arc<Mutex<progress_milestone::ProgressMilestoneTracker>>,
+    /// Progress milestone configuration
+    progress_milestone_config:
+        Arc<tokio::sync::RwLock<progress_milestone::ProgressMilestoneConfig>>,
 }
 
 impl DownloadManager {
@@ -881,6 +887,12 @@ impl DownloadManager {
                 url_allowlist::AllowlistConfig::default(),
             )),
             task_snooze: Arc::new(Mutex::new(task_snooze::TaskSnoozeManager::new())),
+            progress_milestone: Arc::new(Mutex::new(
+                progress_milestone::ProgressMilestoneTracker::new(),
+            )),
+            progress_milestone_config: Arc::new(tokio::sync::RwLock::new(
+                progress_milestone::ProgressMilestoneConfig::default(),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -1098,7 +1110,19 @@ impl DownloadManager {
                 url_allowlist::AllowlistConfig::default(),
             )),
             task_snooze: Arc::new(Mutex::new(task_snooze::TaskSnoozeManager::new())),
+            progress_milestone: Arc::new(Mutex::new(
+                progress_milestone::ProgressMilestoneTracker::new(),
+            )),
+            progress_milestone_config: Arc::new(tokio::sync::RwLock::new(
+                progress_milestone::ProgressMilestoneConfig::default(),
+            )),
         };
+        // Restore progress milestone config from disk
+        if let Ok(Some(milestone_cfg)) =
+            progress_milestone::load_progress_milestone_config(&dm.data_dir)
+        {
+            *dm.progress_milestone_config.write().await = milestone_cfg;
+        }
         // Restore task snooze data from disk
         if let Ok(snooze_data) = task_snooze::load_task_snooze_data(&dm.data_dir).await {
             *dm.task_snooze.lock().await = task_snooze::TaskSnoozeManager::from_data(snooze_data);
@@ -2574,6 +2598,31 @@ impl DownloadManager {
     /// Get notification history manager for querying recent notifications
     pub fn notification_history(&self) -> &notification::NotificationHistory {
         self.notifier.history()
+    }
+
+    /// Set progress milestone configuration for download progress notifications.
+    /// Also persists the configuration to disk for restoration on restart.
+    pub async fn set_progress_milestone_config(
+        &self,
+        config: progress_milestone::ProgressMilestoneConfig,
+    ) {
+        *self.progress_milestone_config.write().await = config.clone();
+        if let Err(e) = progress_milestone::save_progress_milestone_config(&config, &self.data_dir)
+        {
+            tracing::warn!(error = %e, "Failed to persist progress milestone config");
+        }
+    }
+
+    /// Get current progress milestone configuration.
+    pub async fn get_progress_milestone_config(
+        &self,
+    ) -> progress_milestone::ProgressMilestoneConfig {
+        self.progress_milestone_config.read().await.clone()
+    }
+
+    /// Reset milestone tracking for a specific task (e.g., when task restarts).
+    pub async fn reset_progress_milestones(&self, task_id: &str) {
+        self.progress_milestone.lock().await.reset_task(task_id);
     }
 
     /// Set auto-shutdown configuration.
@@ -5158,6 +5207,8 @@ impl DownloadManager {
         let eta_estimator = self.eta_estimator.clone();
         let speed_history = self.speed_history.clone();
         let speed_alerts = self.speed_alerts.clone();
+        let progress_milestone = self.progress_milestone.clone();
+        let progress_milestone_config = self.progress_milestone_config.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -5271,6 +5322,55 @@ impl DownloadManager {
                         bandwidth_monitor
                             .update_current_speed(total_speed, 0.0)
                             .await;
+                    }
+
+                    // Check progress milestones and send notifications
+                    {
+                        let (task_size, task_downloaded, task_name) = {
+                            let t = tasks.lock().await;
+                            t.iter()
+                                .find(|t| t.id == task_id)
+                                .map(|t| (t.size, t.downloaded, t.name.clone()))
+                                .unwrap_or((0, 0, String::new()))
+                        };
+                        if task_size > 0 {
+                            let progress_pct =
+                                (task_downloaded as f64 / task_size as f64 * 100.0) as f32;
+                            let cfg = progress_milestone_config.read().await.clone();
+                            let triggered = {
+                                let mut tracker = progress_milestone.lock().await;
+                                tracker.check_progress(&task_id, progress_pct, &cfg)
+                            };
+                            for pct in triggered {
+                                tracing::info!(
+                                    task_id = %task_id,
+                                    task_name = %task_name,
+                                    percentage = pct,
+                                    "Progress milestone reached"
+                                );
+                                let ctx = notification::NotificationContext {
+                                    task_id: task_id.clone(),
+                                    name: task_name.clone(),
+                                    size: task_size,
+                                    downloaded: task_downloaded,
+                                    protocol: "download".to_string(),
+                                    save_path: String::new(),
+                                    error: None,
+                                    event: notification::NotificationEvent::ProgressMilestone,
+                                };
+                                let notifier_clone = notifier.clone();
+                                let pct_clone = pct;
+                                tokio::spawn(async move {
+                                    if let Err(e) = notifier_clone.dispatch(&ctx).await {
+                                        tracing::warn!(
+                                            error = %e,
+                                            percentage = pct_clone,
+                                            "Failed to send progress milestone notification"
+                                        );
+                                    }
+                                });
+                            }
+                        }
                     }
 
                     rt.last_downloaded = current_downloaded;

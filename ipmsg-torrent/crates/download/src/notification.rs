@@ -26,6 +26,8 @@ pub enum NotificationEvent {
     DownloadFailed,
     /// All downloads in queue finished
     QueueEmpty,
+    /// Download reached a progress milestone threshold
+    ProgressMilestone,
 }
 
 impl NotificationEvent {
@@ -35,6 +37,7 @@ impl NotificationEvent {
             Self::DownloadComplete => "download_complete",
             Self::DownloadFailed => "download_failed",
             Self::QueueEmpty => "queue_empty",
+            Self::ProgressMilestone => "progress_milestone",
         }
     }
 }
@@ -435,6 +438,7 @@ impl NotificationDispatcher {
             NotificationEvent::DownloadComplete => "Download Complete",
             NotificationEvent::DownloadFailed => "Download Failed",
             NotificationEvent::QueueEmpty => "All Downloads Complete",
+            NotificationEvent::ProgressMilestone => "Download Progress",
         };
 
         let body = format!(

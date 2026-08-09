@@ -473,6 +473,11 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    DlMilestone {
+        /// Subcommand: status|enable|disable|add|del
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1408,6 +1413,24 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlmilestone" | "dl-milestone" | "dlpm" => {
+            // /dlmilestone <status|enable|disable|add|del>
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlmilestone <status|enable|disable|add|del>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlMilestone {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1609,6 +1632,7 @@ fn command_help() -> String {
         "/dlfavorite <list|add|remove|config> - Task favorites/pinning",
         "/dlprule [cmd]     - Path rules (status|list|add|del|enable|disable|test)",
         "/dlsnooze [cmd]    - Task snooze (snooze <id> <duration> [reason]|unsnooze <id>|list|config)",
+        "/dlmilestone [cmd] - Progress milestones (status|enable|disable|add|del)",
         "/dlallowlist [cmd] - URL allowlist (status|enable|disable|add|del|list|check)",
         "/dlrecycle [cmd]   - Recycle bin (list|restore|purge|empty|config|summary|autopause)",
         "/block <peer>  - Block a peer",
@@ -7924,21 +7948,20 @@ async fn handle_command(
                         };
 
                         // Parse duration (e.g., "2h", "30m", "1d")
-                        let duration_secs = match ipmsg_download::auto_cleanup::parse_duration_secs(
-                            duration_str,
-                        ) {
-                            Some(secs) => secs,
-                            None => {
-                                s.add_system_message(
+                        let duration_secs =
+                            match ipmsg_download::auto_cleanup::parse_duration_secs(duration_str) {
+                                Some(secs) => secs,
+                                None => {
+                                    s.add_system_message(
                                     "main",
                                     format!(
                                         "Invalid duration format: {}. Use formats like 30m, 2h, 1d",
                                         duration_str
                                     ),
                                 );
-                                return;
-                            }
-                        };
+                                    return;
+                                }
+                            };
 
                         let until =
                             chrono::Utc::now() + chrono::Duration::seconds(duration_secs as i64);
@@ -8018,6 +8041,129 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlsnooze <snooze|unsnooze|list|config> [args...]".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlMilestone { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_progress_milestone_config().await;
+                    let out = format!(
+                        "Progress Milestone Configuration:\n  Enabled: {}\n  Milestones: {}",
+                        config.enabled,
+                        if config.milestones.is_empty() {
+                            "none".to_string()
+                        } else {
+                            config
+                                .milestones
+                                .iter()
+                                .map(|m| {
+                                    format!(
+                                        "{}%{}",
+                                        m.percentage,
+                                        if m.enabled { "" } else { " (disabled)" }
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        }
+                    );
+                    s.add_system_message("main", out);
+                }
+                "enable" => {
+                    let mut config = download_manager.get_progress_milestone_config().await;
+                    config.enabled = true;
+                    download_manager.set_progress_milestone_config(config).await;
+                    s.add_system_message(
+                        "main",
+                        "Progress milestone notifications enabled".to_string(),
+                    );
+                }
+                "disable" => {
+                    let mut config = download_manager.get_progress_milestone_config().await;
+                    config.enabled = false;
+                    download_manager.set_progress_milestone_config(config).await;
+                    s.add_system_message(
+                        "main",
+                        "Progress milestone notifications disabled".to_string(),
+                    );
+                }
+                "add" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlmilestone add <percentage>".to_string(),
+                        );
+                    } else {
+                        match args[0].parse::<u8>() {
+                            Ok(pct) => {
+                                let mut config =
+                                    download_manager.get_progress_milestone_config().await;
+                                if config.add_milestone(pct) {
+                                    download_manager.set_progress_milestone_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Added progress milestone at {}%", pct),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Milestone at {}% already exists", pct),
+                                    );
+                                }
+                            }
+                            Err(_) => {
+                                s.add_system_message(
+                                    "main",
+                                    "Invalid percentage value".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                "del" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlmilestone del <percentage>".to_string(),
+                        );
+                    } else {
+                        match args[0].parse::<u8>() {
+                            Ok(pct) => {
+                                let mut config =
+                                    download_manager.get_progress_milestone_config().await;
+                                if config.remove_milestone(pct) {
+                                    download_manager.set_progress_milestone_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Removed progress milestone at {}%", pct),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        format!("No milestone at {}%", pct),
+                                    );
+                                }
+                            }
+                            Err(_) => {
+                                s.add_system_message(
+                                    "main",
+                                    "Invalid percentage value".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlmilestone <status|enable|disable|add|del>".to_string(),
                     );
                 }
             }
