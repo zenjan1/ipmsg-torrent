@@ -478,6 +478,21 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    DlBurst {
+        /// Subcommand: status|start|stop|config
+        subcommand: String,
+        args: Vec<String>,
+    },
+    DlRetryQuota {
+        /// Subcommand: status|enable|disable|set|reset
+        subcommand: String,
+        args: Vec<String>,
+    },
+    DlTtl {
+        /// Subcommand: status|enable|disable|set|task|summary
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1431,6 +1446,57 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlburst" | "dl-burst" | "dlsb" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlburst <status|start|stop|config>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlBurst {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
+        "dlretryquota" | "dl-retryquota" | "dlrq" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlretryquota <status|enable|disable|set|reset>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlRetryQuota {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
+        "dlttl" | "dl-ttl" | "dlt" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlttl <status|enable|disable|set|task|summary>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlTtl {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1635,6 +1701,9 @@ fn command_help() -> String {
         "/dlmilestone [cmd] - Progress milestones (status|enable|disable|add|del)",
         "/dlallowlist [cmd] - URL allowlist (status|enable|disable|add|del|list|check)",
         "/dlrecycle [cmd]   - Recycle bin (list|restore|purge|empty|config|summary|autopause)",
+        "/dlburst [cmd]     - Speed burst (status|start <task_id> [duration] [multiplier]|stop <task_id>|config)",
+        "/dlretryquota [cmd] - Retry quota (status|enable|disable|set <max> [window_secs]|reset)",
+        "/dlttl [cmd]      - Task TTL management (status|enable|disable|set <duration> [interval]|task <id> <duration>|summary)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -8164,6 +8233,443 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlmilestone <status|enable|disable|add|del>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlBurst { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let status = download_manager.get_speed_burst_status().await;
+                    let config = download_manager.get_speed_burst_config().await;
+                    let mut msg = format!(
+                        "Speed Burst Status:\n  Enabled: {}\n  Active bursts: {}\n  Total started: {}\n  Total completed: {}\n  Default duration: {}s\n  Default multiplier: {:.1}x",
+                        config.enabled,
+                        status.active_bursts.len(),
+                        status.total_bursts_started,
+                        status.total_bursts_completed,
+                        config.default_duration_secs,
+                        config.default_multiplier
+                    );
+                    if !status.active_bursts.is_empty() {
+                        msg.push_str("\n\nActive Bursts:");
+                        for burst in &status.active_bursts {
+                            msg.push_str(&format!(
+                                "\n  Task {}: {:.1}x ({}s remaining)",
+                                burst.task_id,
+                                burst.multiplier,
+                                burst.remaining_secs()
+                            ));
+                        }
+                    }
+                    s.add_system_message("main", msg);
+                }
+                "start" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlburst start <task_id> [duration_secs] [multiplier]"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    let task_id = &args[0];
+                    let duration = args.get(1).and_then(|s| s.parse::<u64>().ok());
+                    let multiplier = args.get(2).and_then(|s| s.parse::<f64>().ok());
+
+                    match download_manager
+                        .start_speed_burst(task_id, duration, multiplier)
+                        .await
+                    {
+                        ipmsg_download::speed_burst::BurstStartResult::Started(burst) => {
+                            s.add_system_message(
+                                "main",
+                                format!(
+                                    "Speed burst started for task {}\n  Multiplier: {:.1}x\n  Duration: {}s\n  New limit: {} bytes/s",
+                                    burst.task_id,
+                                    burst.multiplier,
+                                    (burst.expires_at - burst.started_at).num_seconds(),
+                                    burst.burst_limit
+                                ),
+                            );
+                        }
+                        ipmsg_download::speed_burst::BurstStartResult::Disabled => {
+                            s.add_system_message(
+                                "main",
+                                "Speed burst feature is disabled".to_string(),
+                            );
+                        }
+                        ipmsg_download::speed_burst::BurstStartResult::TaskNotFound => {
+                            s.add_system_message("main", "Task not found".to_string());
+                        }
+                        ipmsg_download::speed_burst::BurstStartResult::TaskNotActive => {
+                            s.add_system_message(
+                                "main",
+                                "Task is not in a downloadable state".to_string(),
+                            );
+                        }
+                        ipmsg_download::speed_burst::BurstStartResult::MaxBurstsReached => {
+                            s.add_system_message(
+                                "main",
+                                "Maximum concurrent bursts reached".to_string(),
+                            );
+                        }
+                        ipmsg_download::speed_burst::BurstStartResult::InvalidParams(msg) => {
+                            s.add_system_message("main", format!("Invalid parameters: {}", msg));
+                        }
+                    }
+                }
+                "stop" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlburst stop <task_id>".to_string());
+                        return;
+                    }
+                    let task_id = &args[0];
+                    if download_manager.stop_speed_burst(task_id).await {
+                        s.add_system_message(
+                            "main",
+                            format!("Speed burst stopped for task {}", task_id),
+                        );
+                    } else {
+                        s.add_system_message(
+                            "main",
+                            format!("No active burst for task {}", task_id),
+                        );
+                    }
+                }
+                "config" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlburst config <enabled|duration|multiplier> <value>"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    let mut config = download_manager.get_speed_burst_config().await;
+                    match args[0].as_str() {
+                        "enabled" => {
+                            if let Ok(val) = args[1].parse::<bool>() {
+                                config.enabled = val;
+                                download_manager.set_speed_burst_config(config).await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Speed burst enabled: {}", val),
+                                );
+                            } else {
+                                s.add_system_message("main", "Invalid boolean value".to_string());
+                            }
+                        }
+                        "duration" => {
+                            if let Ok(val) = args[1].parse::<u64>() {
+                                config.default_duration_secs = val;
+                                download_manager.set_speed_burst_config(config).await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Default duration set to {}s", val),
+                                );
+                            } else {
+                                s.add_system_message("main", "Invalid duration value".to_string());
+                            }
+                        }
+                        "multiplier" => {
+                            if let Ok(val) = args[1].parse::<f64>() {
+                                config.default_multiplier = val;
+                                download_manager.set_speed_burst_config(config).await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Default multiplier set to {:.1}x", val),
+                                );
+                            } else {
+                                s.add_system_message(
+                                    "main",
+                                    "Invalid multiplier value".to_string(),
+                                );
+                            }
+                        }
+                        _ => {
+                            s.add_system_message(
+                                "main",
+                                "Usage: /dlburst config <enabled|duration|multiplier> <value>"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlburst <status|start|stop|config>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlRetryQuota { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let usage = download_manager.get_retry_quota_usage().await;
+                    let config = download_manager.get_retry_quota_config().await;
+                    let mut msg = format!(
+                        "Retry Quota Status:\n  Enabled: {}\n  Used: {}/{}\n  Remaining: {}\n  Window: {}s",
+                        usage.enabled,
+                        usage.used,
+                        if usage.limit == u32::MAX {
+                            "∞".to_string()
+                        } else {
+                            usage.limit.to_string()
+                        },
+                        if usage.remaining == u32::MAX {
+                            "∞".to_string()
+                        } else {
+                            usage.remaining.to_string()
+                        },
+                        usage.window_secs,
+                    );
+                    if config.enabled && usage.used > 0 {
+                        msg.push_str(&format!(
+                            "\n  Quota remaining: {}",
+                            if usage.remaining == u32::MAX {
+                                "unlimited".to_string()
+                            } else {
+                                usage.remaining.to_string()
+                            }
+                        ));
+                    }
+                    s.add_system_message("main", msg);
+                }
+                "enable" => {
+                    let mut config = download_manager.get_retry_quota_config().await;
+                    config.enabled = true;
+                    download_manager.set_retry_quota_config(config).await;
+                    s.add_system_message("main", "Retry quota enabled".to_string());
+                }
+                "disable" => {
+                    let mut config = download_manager.get_retry_quota_config().await;
+                    config.enabled = false;
+                    download_manager.set_retry_quota_config(config).await;
+                    s.add_system_message("main", "Retry quota disabled".to_string());
+                }
+                "set" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlretryquota set <max_retries_per_day> [window_secs]"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    let max_retries = match args[0].parse::<u32>() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            s.add_system_message("main", "Invalid max retries value".to_string());
+                            return;
+                        }
+                    };
+                    let window_secs = if args.len() >= 2 {
+                        match args[1].parse::<u64>() {
+                            Ok(v) => v,
+                            Err(_) => {
+                                s.add_system_message(
+                                    "main",
+                                    "Invalid window seconds value".to_string(),
+                                );
+                                return;
+                            }
+                        }
+                    } else {
+                        86400 // default 24 hours
+                    };
+                    let mut config = download_manager.get_retry_quota_config().await;
+                    config.max_retries_per_day = max_retries;
+                    config.window_secs = window_secs;
+                    download_manager.set_retry_quota_config(config).await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "Retry quota set: max {} retries per {}s window",
+                            max_retries, window_secs
+                        ),
+                    );
+                }
+                "reset" => {
+                    download_manager.reset_retry_quota().await;
+                    s.add_system_message("main", "Retry quota reset".to_string());
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlretryquota <status|enable|disable|set|reset>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlTtl { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_ttl_config().await;
+                    let summary = download_manager.get_ttl_summary().await;
+                    let mut msg = format!(
+                        "TTL Status:\n  Enabled: {}\n  Default Max Lifetime: {}\n  Check Interval: {}s\n  Tasks Tracked: {}\n  Tasks Expired: {}\n  Tasks Active: {}",
+                        config.enabled,
+                        ipmsg_download::ttl::format_ttl_duration(config.default_max_lifetime_secs),
+                        config.check_interval_secs,
+                        summary.total_tasks,
+                        summary.tasks_expired,
+                        summary.tasks_active,
+                    );
+                    if !summary.task_details.is_empty() {
+                        msg.push_str("\n\nTask Details:");
+                        for detail in &summary.task_details {
+                            msg.push_str(&format!(
+                                "\n  {} ({}): {} / {} remaining",
+                                detail.task_name,
+                                detail.task_id,
+                                ipmsg_download::ttl::format_ttl_duration(detail.effective_max_secs),
+                                if detail.remaining_secs.is_infinite() {
+                                    "∞".to_string()
+                                } else {
+                                    format!("{:.0}s", detail.remaining_secs)
+                                }
+                            ));
+                            if detail.is_override {
+                                msg.push_str(" [override]");
+                            }
+                            if detail.expired {
+                                msg.push_str(" [EXPIRED]");
+                            }
+                        }
+                    }
+                    s.add_system_message("main", msg);
+                }
+                "enable" => {
+                    let mut config = download_manager.get_ttl_config().await;
+                    config.enabled = true;
+                    download_manager.set_ttl_config(config).await;
+                    s.add_system_message("main", "TTL enforcement enabled".to_string());
+                }
+                "disable" => {
+                    let mut config = download_manager.get_ttl_config().await;
+                    config.enabled = false;
+                    download_manager.set_ttl_config(config).await;
+                    s.add_system_message("main", "TTL enforcement disabled".to_string());
+                }
+                "set" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlttl set <duration|none> [check_interval_secs]".to_string(),
+                        );
+                        return;
+                    }
+                    let duration = match ipmsg_download::ttl::parse_ttl_duration(&args[0]) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            s.add_system_message("main", format!("Invalid duration: {}", e));
+                            return;
+                        }
+                    };
+                    let check_interval = if args.len() >= 2 {
+                        match args[1].parse::<u64>() {
+                            Ok(v) => v,
+                            Err(_) => {
+                                s.add_system_message("main", "Invalid check interval".to_string());
+                                return;
+                            }
+                        }
+                    } else {
+                        60
+                    };
+                    let mut config = download_manager.get_ttl_config().await;
+                    config.default_max_lifetime_secs = duration;
+                    config.check_interval_secs = check_interval;
+                    download_manager.set_ttl_config(config).await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "TTL config set: default max lifetime {}, check interval {}s",
+                            ipmsg_download::ttl::format_ttl_duration(duration),
+                            check_interval
+                        ),
+                    );
+                }
+                "task" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlttl task <task_id> <duration|none>".to_string(),
+                        );
+                        return;
+                    }
+                    let task_id = &args[0];
+                    let duration = match ipmsg_download::ttl::parse_ttl_duration(&args[1]) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            s.add_system_message("main", format!("Invalid duration: {}", e));
+                            return;
+                        }
+                    };
+                    download_manager.set_task_ttl(task_id, duration).await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "Task {} TTL set to {}",
+                            task_id,
+                            ipmsg_download::ttl::format_ttl_duration(duration)
+                        ),
+                    );
+                }
+                "summary" => {
+                    let summary = download_manager.get_ttl_summary().await;
+                    let mut msg = format!(
+                        "TTL Summary:\n  Enabled: {}\n  Default: {}\n  Check Interval: {}s\n  Total Tasks: {}\n  With Override: {}\n  Expired: {}\n  Active: {}",
+                        summary.enabled,
+                        ipmsg_download::ttl::format_ttl_duration(summary.default_max_lifetime_secs),
+                        summary.check_interval_secs,
+                        summary.total_tasks,
+                        summary.tasks_with_override,
+                        summary.tasks_expired,
+                        summary.tasks_active,
+                    );
+                    if !summary.task_details.is_empty() {
+                        msg.push_str("\n\nTasks:");
+                        for detail in &summary.task_details {
+                            let status = if detail.expired {
+                                "EXPIRED"
+                            } else if detail.remaining_secs.is_infinite() {
+                                "no limit"
+                            } else {
+                                &format!("{:.0}s remaining", detail.remaining_secs)
+                            };
+                            msg.push_str(&format!(
+                                "\n  {} [{}]: {} - {}",
+                                detail.task_name,
+                                detail.task_id,
+                                ipmsg_download::ttl::format_ttl_duration(detail.effective_max_secs),
+                                status
+                            ));
+                        }
+                    }
+                    s.add_system_message("main", msg);
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlttl <status|enable|disable|set|task|summary>".to_string(),
                     );
                 }
             }

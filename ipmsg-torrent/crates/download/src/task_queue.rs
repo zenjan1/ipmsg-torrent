@@ -55,6 +55,9 @@ pub struct PersistedTask {
     pub sequential_mode: bool,
     #[serde(default)]
     pub notes: Option<String>,
+    /// Maximum download time in seconds (auto-pause when exceeded, None = no limit)
+    #[serde(default)]
+    pub max_download_time_secs: Option<u64>,
 }
 
 fn default_bandwidth_weight() -> u8 {
@@ -158,6 +161,7 @@ impl From<DownloadTask> for PersistedTask {
             retry_policy: t.retry_policy,
             sequential_mode: t.sequential_mode,
             notes: t.notes,
+            max_download_time_secs: t.max_download_time_secs,
         }
     }
 }
@@ -196,6 +200,7 @@ impl From<PersistedTask> for DownloadTask {
             cooldown: None,
             sequential_mode: t.sequential_mode,
             notes: t.notes,
+            max_download_time_secs: t.max_download_time_secs,
         }
     }
 }
@@ -313,6 +318,7 @@ mod tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -383,6 +389,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -416,6 +423,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
             },
         ];
 
@@ -478,6 +486,7 @@ mod tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();
@@ -525,6 +534,7 @@ mod tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();
@@ -569,6 +579,7 @@ mod tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
         };
 
         save_task_queue(&[task2], data_dir).unwrap();

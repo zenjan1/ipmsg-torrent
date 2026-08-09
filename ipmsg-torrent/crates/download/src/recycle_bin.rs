@@ -124,6 +124,7 @@ impl RecycledTaskData {
             retry_policy: None,
             cooldown: None,
             sequential_mode: self.sequential_mode,
+            max_download_time_secs: None,
         }
     }
 }
@@ -435,6 +436,7 @@ mod tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
         }
     }
 

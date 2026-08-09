@@ -27,6 +27,7 @@ pub mod download_presets;
 pub mod download_report;
 pub mod download_session;
 pub mod download_stats;
+pub mod download_time_limit;
 pub mod ed2k;
 pub mod eta_estimator;
 pub mod link_extractor;
@@ -46,10 +47,12 @@ pub mod proxy;
 pub mod queue_health;
 pub mod rate_limiter;
 pub mod recycle_bin;
+pub mod retry_quota;
 pub mod rss_feed;
 pub mod save_path_manager;
 pub mod segment_download;
 pub mod speed_alert;
+pub mod speed_burst;
 pub mod speed_history;
 pub mod task_activity;
 pub mod task_archive;
@@ -219,6 +222,8 @@ pub struct TaskInfoEvent {
     pub sequential_mode: bool,
     /// Whether this task is in favorites (for WebSocket push)
     pub is_favorite: bool,
+    /// Maximum download time in seconds (auto-pause when exceeded, None = no limit)
+    pub max_download_time_secs: Option<u64>,
 }
 
 impl TaskInfoEvent {
@@ -254,6 +259,7 @@ impl TaskInfoEvent {
             cooldown: task.cooldown.clone(),
             sequential_mode: task.sequential_mode,
             is_favorite: false, // Set by caller via favorites check
+            max_download_time_secs: task.max_download_time_secs,
         }
     }
 }
@@ -370,6 +376,8 @@ pub struct DownloadTask {
     pub cooldown: Option<download_cooldown::CooldownState>,
     /// Sequential download mode for torrents (download pieces in order for streaming)
     pub sequential_mode: bool,
+    /// Maximum download time in seconds (auto-pause when exceeded, None = no limit)
+    pub max_download_time_secs: Option<u64>,
 }
 
 /// Per-task retry policy configuration
@@ -672,6 +680,7 @@ enum TaskParams {
 #[derive(Debug, Clone)]
 struct TaskInfo {
     params: TaskParams,
+    max_download_time_secs: Option<u64>,
 }
 
 /// Internal handle for a running task
@@ -799,9 +808,17 @@ pub struct DownloadManager {
     task_snooze: Arc<Mutex<task_snooze::TaskSnoozeManager>>,
     /// Progress milestone tracker for sending notifications at download thresholds
     progress_milestone: Arc<Mutex<progress_milestone::ProgressMilestoneTracker>>,
+    /// Download time limit manager for auto-pausing tasks that exceed time limits
+    download_time_limit: Arc<Mutex<download_time_limit::DownloadTimeLimitManager>>,
     /// Progress milestone configuration
     progress_milestone_config:
         Arc<tokio::sync::RwLock<progress_milestone::ProgressMilestoneConfig>>,
+    /// Speed burst manager for temporary speed boosts
+    speed_burst: Arc<Mutex<speed_burst::SpeedBurstManager>>,
+    /// Daily retry quota manager for limiting total retry attempts
+    retry_quota: Arc<Mutex<retry_quota::RetryQuotaManager>>,
+    /// TTL manager for auto-pausing tasks that exceed their lifetime
+    ttl: Arc<Mutex<ttl::TtlManager>>,
 }
 
 impl DownloadManager {
@@ -893,6 +910,12 @@ impl DownloadManager {
             progress_milestone_config: Arc::new(tokio::sync::RwLock::new(
                 progress_milestone::ProgressMilestoneConfig::default(),
             )),
+            speed_burst: Arc::new(Mutex::new(speed_burst::SpeedBurstManager::new())),
+            retry_quota: Arc::new(Mutex::new(retry_quota::RetryQuotaManager::new())),
+            download_time_limit: Arc::new(Mutex::new(
+                download_time_limit::DownloadTimeLimitManager::new(),
+            )),
+            ttl: Arc::new(Mutex::new(ttl::TtlManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1116,6 +1139,12 @@ impl DownloadManager {
             progress_milestone_config: Arc::new(tokio::sync::RwLock::new(
                 progress_milestone::ProgressMilestoneConfig::default(),
             )),
+            speed_burst: Arc::new(Mutex::new(speed_burst::SpeedBurstManager::new())),
+            retry_quota: Arc::new(Mutex::new(retry_quota::RetryQuotaManager::new())),
+            download_time_limit: Arc::new(Mutex::new(
+                download_time_limit::DownloadTimeLimitManager::new(),
+            )),
+            ttl: Arc::new(Mutex::new(ttl::TtlManager::new())),
         };
         // Restore progress milestone config from disk
         if let Ok(Some(milestone_cfg)) =
@@ -1242,6 +1271,13 @@ impl DownloadManager {
         if let Ok(Some(loaded_ap)) = auto_pause::load_auto_pause_config(&dm.data_dir).await {
             *dm.auto_pause.write().await = loaded_ap;
         }
+        // Restore retry quota config from disk
+        let retry_quota_path = dm.data_dir.join("retry_quota.json");
+        if retry_quota::RetryQuotaManager::state_file_exists(&retry_quota_path) {
+            if let Ok(loaded) = retry_quota::RetryQuotaManager::load(&retry_quota_path) {
+                *dm.retry_quota.lock().await = loaded;
+            }
+        }
         dm.start_scheduler();
         dm.start_bandwidth_scheduler();
         dm.start_auto_pause_scheduler();
@@ -1269,6 +1305,7 @@ impl DownloadManager {
         let auto_retry_base_delay_secs = self.auto_retry_base_delay_secs.clone();
         let domain_limit = self.domain_limit.clone();
         let protocol_limits = self.protocol_limits.clone();
+        let retry_quota = self.retry_quota.clone();
 
         // Spawn task snooze expiry checker (runs every 30 seconds)
         let snooze_tasks = self.tasks.clone();
@@ -1603,6 +1640,7 @@ impl DownloadManager {
                             let max_auto_retries_clone = max_auto_retries.clone();
                             let auto_retry_base_delay_secs_clone =
                                 auto_retry_base_delay_secs.clone();
+                            let retry_quota_clone = retry_quota.clone();
                             // Resolve per-task limiter: use task-specific if set, else global per-task.
                             let task_rate_limiter: RateLimiter = {
                                 let limiters = task_rate_limiters_clone.lock().await;
@@ -1855,24 +1893,51 @@ impl DownloadManager {
                                                 if max_retries > 0
                                                     && task.auto_retry_count < max_retries
                                                 {
-                                                    // Schedule retry with calculated delay
-                                                    let retry_after = chrono::Utc::now()
-                                                        + chrono::Duration::seconds(
-                                                            delay_secs as i64,
+                                                    // Check retry quota before scheduling
+                                                    let quota_allowed = {
+                                                        let mut rq = retry_quota_clone.lock().await;
+                                                        rq.record_retry()
+                                                    };
+
+                                                    if quota_allowed {
+                                                        // Schedule retry with calculated delay
+                                                        let retry_after = chrono::Utc::now()
+                                                            + chrono::Duration::seconds(
+                                                                delay_secs as i64,
+                                                            );
+                                                        task.retry_after = Some(retry_after);
+                                                        task.auto_retry_count += 1;
+                                                        task.state = DownloadState::Queued;
+                                                        task.error = Some(format!(
+                                                            "{} (retry {}/{})",
+                                                            err_str,
+                                                            task.auto_retry_count,
+                                                            max_retries
+                                                        ));
+                                                        tracing::info!(
+                                                            task_id = %task_id_clone,
+                                                            retry_count = task.auto_retry_count,
+                                                            delay_secs = delay_secs,
+                                                            "Scheduling auto-retry"
                                                         );
-                                                    task.retry_after = Some(retry_after);
-                                                    task.auto_retry_count += 1;
-                                                    task.state = DownloadState::Queued;
-                                                    task.error = Some(format!(
-                                                        "{} (retry {}/{})",
-                                                        err_str, task.auto_retry_count, max_retries
-                                                    ));
-                                                    tracing::info!(
-                                                        task_id = %task_id_clone,
-                                                        retry_count = task.auto_retry_count,
-                                                        delay_secs = delay_secs,
-                                                        "Scheduling auto-retry"
-                                                    );
+                                                    } else {
+                                                        task.finalize_active_time();
+                                                        task.state = DownloadState::Error;
+                                                        task.error = Some(format!(
+                                                            "{} (retry quota exhausted)",
+                                                            err_str
+                                                        ));
+                                                        tracing::warn!(
+                                                            task_id = %task_id_clone,
+                                                            "Auto-retry blocked: daily retry quota exhausted"
+                                                        );
+                                                        Self::record_task_history(
+                                                            task,
+                                                            &data_dir_clone,
+                                                            Some(&notifier_clone),
+                                                            Some(&hook_manager_clone),
+                                                        );
+                                                    }
                                                 } else {
                                                     task.finalize_active_time();
                                                     task.state = DownloadState::Error;
@@ -2425,6 +2490,7 @@ impl DownloadManager {
                         retry_policy: None,
                         cooldown: None,
                         sequential_mode: false,
+                        max_download_time_secs: None,
                         current_session_start: None,
                     };
 
@@ -2466,6 +2532,7 @@ impl DownloadManager {
                             retry_policy: None,
                             cooldown: None,
                             sequential_mode: false,
+                            max_download_time_secs: None,
                             is_favorite: false,
                         },
                     });
@@ -2550,6 +2617,122 @@ impl DownloadManager {
         &self.rate_limiter
     }
 
+    // ── Speed Burst Mode ──────────────────────────────────────────────────
+
+    /// Start a speed burst for a task, temporarily boosting its download speed.
+    ///
+    /// Returns the burst result indicating success or failure reason.
+    /// The burst will automatically expire after the configured duration.
+    pub async fn start_speed_burst(
+        &self,
+        task_id: &str,
+        duration_secs: Option<u64>,
+        multiplier: Option<f64>,
+    ) -> speed_burst::BurstStartResult {
+        // Get current speed limit for the task
+        let current_limit = {
+            let tasks = self.tasks.lock().await;
+            match tasks.iter().find(|t| t.id == task_id) {
+                Some(task) => task.speed_limit_bps,
+                None => return speed_burst::BurstStartResult::TaskNotFound,
+            }
+        };
+
+        // Check task state - must be downloading or queued
+        {
+            let tasks = self.tasks.lock().await;
+            if let Some(task) = tasks.iter().find(|t| t.id == task_id) {
+                match task.state {
+                    DownloadState::Downloading | DownloadState::Queued => {}
+                    _ => return speed_burst::BurstStartResult::TaskNotActive,
+                }
+            }
+        }
+
+        let mut burst_mgr = self.speed_burst.lock().await;
+        let result = burst_mgr.start_burst(task_id, current_limit, duration_secs, multiplier);
+
+        // If burst started, update the rate limiter
+        if let speed_burst::BurstStartResult::Started(ref burst) = result {
+            let mut limiters = self.task_rate_limiters.lock().await;
+            if burst.burst_limit > 0 {
+                limiters.insert(task_id.to_string(), RateLimiter::new(burst.burst_limit));
+            } else {
+                // Unlimited burst - remove any per-task limiter
+                limiters.remove(task_id);
+            }
+        }
+
+        result
+    }
+
+    /// Stop an active speed burst for a task, reverting to the original limit.
+    pub async fn stop_speed_burst(&self, task_id: &str) -> bool {
+        let mut burst_mgr = self.speed_burst.lock().await;
+        if let Some(burst) = burst_mgr.stop_burst(task_id) {
+            // Revert to original limit
+            let mut limiters = self.task_rate_limiters.lock().await;
+            match burst.original_limit {
+                Some(limit) => {
+                    limiters.insert(task_id.to_string(), RateLimiter::new(limit));
+                }
+                None => {
+                    limiters.remove(task_id);
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the current speed burst status for all tasks.
+    pub async fn get_speed_burst_status(&self) -> speed_burst::BurstStatus {
+        let burst_mgr = self.speed_burst.lock().await;
+        burst_mgr.status()
+    }
+
+    /// Check if a task has an active speed burst.
+    pub async fn has_active_speed_burst(&self, task_id: &str) -> bool {
+        let burst_mgr = self.speed_burst.lock().await;
+        burst_mgr.has_active_burst(task_id)
+    }
+
+    /// Set speed burst configuration.
+    pub async fn set_speed_burst_config(&self, config: speed_burst::SpeedBurstConfig) {
+        let mut burst_mgr = self.speed_burst.lock().await;
+        burst_mgr.set_config(config);
+    }
+
+    /// Get speed burst configuration.
+    pub async fn get_speed_burst_config(&self) -> speed_burst::SpeedBurstConfig {
+        let burst_mgr = self.speed_burst.lock().await;
+        burst_mgr.config().clone()
+    }
+
+    /// Process expired speed bursts and revert limits.
+    /// Called periodically by the scheduler.
+    pub async fn process_expired_speed_bursts(&self) {
+        let mut burst_mgr = self.speed_burst.lock().await;
+        let reverted = burst_mgr.process_expired();
+
+        if reverted.is_empty() {
+            return;
+        }
+
+        let mut limiters = self.task_rate_limiters.lock().await;
+        for (task_id, original_limit) in reverted {
+            match original_limit {
+                Some(limit) => {
+                    limiters.insert(task_id, RateLimiter::new(limit));
+                }
+                None => {
+                    limiters.remove(&task_id);
+                }
+            }
+        }
+    }
+
     /// Set download timeout in seconds (0 = disabled).
     /// When a download makes no progress for this duration, it will be retried.
     pub fn set_timeout_secs(&self, secs: u64) {
@@ -2623,6 +2806,155 @@ impl DownloadManager {
     /// Reset milestone tracking for a specific task (e.g., when task restarts).
     pub async fn reset_progress_milestones(&self, task_id: &str) {
         self.progress_milestone.lock().await.reset_task(task_id);
+    }
+
+    /// Set retry quota configuration.
+    /// Limits total auto-retry attempts per day across all tasks.
+    /// Persists to disk for restoration on restart.
+    pub async fn set_retry_quota_config(&self, config: retry_quota::RetryQuotaConfig) {
+        let mut mgr = self.retry_quota.lock().await;
+        mgr.set_config(config);
+        let path = self.data_dir.join("retry_quota.json");
+        if let Err(e) = mgr.save(&path) {
+            tracing::warn!(error = %e, "Failed to persist retry quota config");
+        }
+    }
+
+    /// Get current retry quota configuration.
+    pub async fn get_retry_quota_config(&self) -> retry_quota::RetryQuotaConfig {
+        self.retry_quota.lock().await.config().clone()
+    }
+
+    /// Get current retry quota usage statistics.
+    pub async fn get_retry_quota_usage(&self) -> retry_quota::RetryQuotaUsage {
+        self.retry_quota.lock().await.usage()
+    }
+
+    /// Set download time limit configuration.
+    /// Controls automatic pausing of tasks that exceed time limits.
+    pub async fn set_download_time_limit_config(
+        &self,
+        config: download_time_limit::DownloadTimeLimitConfig,
+    ) {
+        let mut mgr = self.download_time_limit.lock().await;
+        *mgr = download_time_limit::DownloadTimeLimitManager::from_config(config);
+        let path = self.data_dir.join("download_time_limit.json");
+        if let Err(e) = mgr.save(&path) {
+            tracing::warn!(error = %e, "Failed to persist download time limit config");
+        }
+    }
+
+    /// Get current download time limit configuration.
+    pub async fn get_download_time_limit_config(
+        &self,
+    ) -> download_time_limit::DownloadTimeLimitConfig {
+        self.download_time_limit.lock().await.config().clone()
+    }
+
+    /// Set per-task download time limit override.
+    pub async fn set_task_download_time_limit(
+        &self,
+        task_id: &str,
+        limit_secs: Option<u64>,
+    ) -> Result<(), String> {
+        let mut tasks = self.task_info.lock().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.max_download_time_secs = limit_secs;
+            Ok(())
+        } else {
+            Err(format!("Task not found: {}", task_id))
+        }
+    }
+
+    /// Get per-task download time limit.
+    pub async fn get_task_download_time_limit(&self, task_id: &str) -> Option<u64> {
+        let tasks = self.task_info.lock().await;
+        tasks.get(task_id).and_then(|t| t.max_download_time_secs)
+    }
+
+    /// Set TTL configuration.
+    pub async fn set_ttl_config(&self, config: ttl::TtlConfig) {
+        let mut mgr = self.ttl.lock().await;
+        mgr.set_config(config);
+        let path = self.data_dir.join("ttl_config.json");
+        if let Ok(content) = mgr.serialize_config() {
+            let temp_path = path.with_extension("tmp");
+            if tokio::fs::write(&temp_path, &content).await.is_ok() {
+                let _ = tokio::fs::rename(&temp_path, &path).await;
+            }
+        }
+    }
+
+    /// Get current TTL configuration.
+    pub async fn get_ttl_config(&self) -> ttl::TtlConfig {
+        self.ttl.lock().await.config().clone()
+    }
+
+    /// Set per-task TTL override.
+    pub async fn set_task_ttl(&self, task_id: &str, max_lifetime_secs: Option<u64>) {
+        self.ttl
+            .lock()
+            .await
+            .set_task_ttl(task_id, max_lifetime_secs);
+        let mgr = self.ttl.lock().await;
+        let path = self.data_dir.join("ttl_states.json");
+        if let Ok(content) = mgr.serialize_states() {
+            let temp_path = path.with_extension("tmp");
+            if tokio::fs::write(&temp_path, &content).await.is_ok() {
+                let _ = tokio::fs::rename(&temp_path, &path).await;
+            }
+        }
+    }
+
+    /// Get TTL summary for all tasks.
+    pub async fn get_ttl_summary(&self) -> ttl::TtlSummary {
+        let mgr = self.ttl.lock().await;
+        let tasks = self.tasks.lock().await;
+        mgr.summary(|id| {
+            tasks
+                .iter()
+                .find(|t| t.id == id)
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| id.to_string())
+        })
+    }
+
+    /// Check and auto-pause tasks whose TTL has expired.
+    pub async fn check_and_enforce_ttl(&self) {
+        let expired_ids = {
+            let mgr = self.ttl.lock().await;
+            mgr.check_all_expired()
+        };
+
+        for task_id in expired_ids {
+            let mut tasks = self.tasks.lock().await;
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                if task.state == crate::DownloadState::Downloading {
+                    task.state = crate::DownloadState::Paused;
+                    task.error = Some("TTL expired".to_string());
+                    task.finalize_active_time();
+                    self.ttl.lock().await.mark_expired(&task_id);
+                    tracing::info!(task_id = %task_id, "Auto-paused due to TTL expiry");
+                }
+            }
+        }
+    }
+
+    /// Reset the retry quota (clear all recorded retry timestamps).
+    pub async fn reset_retry_quota(&self) {
+        self.retry_quota.lock().await.reset();
+    }
+
+    /// Check if a retry attempt is allowed under the daily quota.
+    /// Returns QuotaCheck::Allowed if retry is permitted, Exhausted if quota is spent.
+    pub async fn check_retry_quota(&self) -> retry_quota::QuotaCheck {
+        self.retry_quota.lock().await.check_quota()
+    }
+
+    /// Record a retry attempt in the quota tracker.
+    /// Returns true if recorded, false if quota was exhausted.
+    pub async fn record_retry_quota(&self) -> bool {
+        self.retry_quota.lock().await.record_retry()
     }
 
     /// Set auto-shutdown configuration.
@@ -4079,6 +4411,7 @@ impl DownloadManager {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -4160,6 +4493,7 @@ impl DownloadManager {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -4233,6 +4567,7 @@ impl DownloadManager {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -4309,6 +4644,7 @@ impl DownloadManager {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -4376,6 +4712,7 @@ impl DownloadManager {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -4397,6 +4734,7 @@ impl DownloadManager {
                         file_size,
                         from_peer,
                     },
+                    max_download_time_secs: None,
                 },
             );
         }
@@ -4679,6 +5017,7 @@ impl DownloadManager {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -4839,6 +5178,7 @@ impl DownloadManager {
                 task_id.clone(),
                 TaskInfo {
                     params: params.clone(),
+                    max_download_time_secs: None,
                 },
             );
         }
@@ -6425,6 +6765,7 @@ impl DownloadManager {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
         };
 
         self.tasks.lock().await.push(task);
@@ -6964,6 +7305,7 @@ impl DownloadManager {
             retry_policy: source_task.retry_policy,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
         };
 
         // Append " (copy)" to name if it doesn't already end with it
@@ -8778,6 +9120,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -8811,6 +9154,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -8844,6 +9188,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -8969,6 +9314,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -9029,6 +9375,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -9082,6 +9429,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -9115,6 +9463,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -9148,6 +9497,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -9204,6 +9554,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -9237,6 +9588,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -9283,6 +9635,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -9329,6 +9682,7 @@ mod tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
         assert!(task.tags.is_empty());
@@ -9369,6 +9723,7 @@ mod tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -9426,6 +9781,7 @@ mod tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -9475,6 +9831,7 @@ mod tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -9524,6 +9881,7 @@ mod tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -9573,6 +9931,7 @@ mod tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -9629,6 +9988,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -9662,6 +10022,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -9695,6 +10056,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             },
         ];
@@ -9743,6 +10105,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -9776,6 +10139,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -9809,6 +10173,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             },
         ];
@@ -9853,6 +10218,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -9886,6 +10252,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -9919,6 +10286,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             },
         ];
@@ -9965,6 +10333,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -9998,6 +10367,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -10042,6 +10412,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10075,6 +10446,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10108,6 +10480,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -10157,6 +10530,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10190,6 +10564,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10223,6 +10598,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -10348,6 +10724,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -10401,6 +10778,7 @@ mod tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -10549,6 +10927,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -10619,6 +10998,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -10670,6 +11050,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10703,6 +11084,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10736,6 +11118,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -10813,6 +11196,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -10863,6 +11247,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -10910,6 +11295,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -10989,6 +11375,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -11045,6 +11432,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11078,6 +11466,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -11128,6 +11517,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11161,6 +11551,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -11211,6 +11602,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11244,6 +11636,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11277,6 +11670,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -11325,6 +11719,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11358,6 +11753,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11391,6 +11787,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -11440,6 +11837,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11473,6 +11871,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11506,6 +11905,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
                 current_session_start: None,
             });
         }
@@ -12116,6 +12516,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                max_download_time_secs: None,
             };
             dm.tasks.lock().await.push(task);
         }
@@ -12720,6 +13121,7 @@ mod max_concurrent_tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -12773,6 +13175,7 @@ mod max_concurrent_tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -12825,6 +13228,7 @@ mod max_concurrent_tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         };
 
@@ -12883,6 +13287,7 @@ mod max_concurrent_tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         });
         drop(tasks);
@@ -12951,6 +13356,7 @@ mod max_concurrent_tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         });
         drop(tasks);
@@ -13017,6 +13423,7 @@ mod max_concurrent_tests {
             retry_policy: None,
             cooldown: None,
             sequential_mode: false,
+            max_download_time_secs: None,
             current_session_start: None,
         });
         drop(tasks);

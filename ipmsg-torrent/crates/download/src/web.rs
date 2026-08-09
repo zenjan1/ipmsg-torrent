@@ -355,6 +355,17 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/progress-milestone",
             post(set_progress_milestone_handler),
         )
+        .route("/api/speed-burst", get(get_speed_burst_handler))
+        .route("/api/speed-burst", post(set_speed_burst_config_handler))
+        .route("/api/retry-quota", get(get_retry_quota_handler))
+        .route("/api/retry-quota", post(set_retry_quota_handler))
+        .route("/api/retry-quota/reset", post(reset_retry_quota_handler))
+        .route("/api/ttl", get(get_ttl_handler))
+        .route("/api/ttl", post(set_ttl_handler))
+        .route("/api/ttl/summary", get(get_ttl_summary_handler))
+        .route("/api/ttl/check", post(check_ttl_handler))
+        .route("/api/speed-burst/start", post(start_speed_burst_handler))
+        .route("/api/speed-burst/stop", post(stop_speed_burst_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1941,6 +1952,160 @@ async fn set_progress_milestone_handler(
 ) -> impl axum::response::IntoResponse {
     state.manager.set_progress_milestone_config(config).await;
     Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get speed burst status and configuration
+async fn get_speed_burst_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let status = state.manager.get_speed_burst_status().await;
+    let config = state.manager.get_speed_burst_config().await;
+    Json(serde_json::json!({
+        "config": config,
+        "status": {
+            "active_bursts": status.active_bursts,
+            "total_bursts_started": status.total_bursts_started,
+            "total_bursts_completed": status.total_bursts_completed
+        }
+    }))
+}
+
+/// Set speed burst configuration
+async fn set_speed_burst_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::speed_burst::SpeedBurstConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_speed_burst_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get retry quota usage
+async fn get_retry_quota_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let usage = state.manager.get_retry_quota_usage().await;
+    let config = state.manager.get_retry_quota_config().await;
+    Json(serde_json::json!({
+        "config": config,
+        "usage": {
+            "enabled": usage.enabled,
+            "used": usage.used,
+            "limit": usage.limit,
+            "remaining": usage.remaining,
+            "window_secs": usage.window_secs
+        }
+    }))
+}
+
+/// Set retry quota configuration
+async fn set_retry_quota_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::retry_quota::RetryQuotaConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_retry_quota_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Reset retry quota
+async fn reset_retry_quota_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.reset_retry_quota().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get TTL configuration
+async fn get_ttl_handler(State(state): State<Arc<WebState>>) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_ttl_config().await;
+    Json(serde_json::json!({
+        "config": config,
+        "enabled": config.enabled,
+        "default_max_lifetime_secs": config.default_max_lifetime_secs,
+        "check_interval_secs": config.check_interval_secs
+    }))
+}
+
+/// Set TTL configuration
+async fn set_ttl_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::ttl::TtlConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_ttl_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get TTL summary
+async fn get_ttl_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_ttl_summary().await;
+    Json(serde_json::json!({
+        "summary": summary
+    }))
+}
+
+/// Check and enforce TTL
+async fn check_ttl_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.check_and_enforce_ttl().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Start a speed burst for a task
+async fn start_speed_burst_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<StartBurstRequest>,
+) -> impl axum::response::IntoResponse {
+    let result = state
+        .manager
+        .start_speed_burst(&req.task_id, req.duration_secs, req.multiplier)
+        .await;
+    match result {
+        crate::speed_burst::BurstStartResult::Started(burst) => {
+            Json(serde_json::json!({"status": "started", "burst": burst}))
+        }
+        crate::speed_burst::BurstStartResult::Disabled => {
+            Json(serde_json::json!({"status": "error", "error": "Speed burst feature is disabled"}))
+        }
+        crate::speed_burst::BurstStartResult::TaskNotFound => {
+            Json(serde_json::json!({"status": "error", "error": "Task not found"}))
+        }
+        crate::speed_burst::BurstStartResult::TaskNotActive => Json(
+            serde_json::json!({"status": "error", "error": "Task is not in a downloadable state"}),
+        ),
+        crate::speed_burst::BurstStartResult::MaxBurstsReached => Json(
+            serde_json::json!({"status": "error", "error": "Maximum concurrent bursts reached"}),
+        ),
+        crate::speed_burst::BurstStartResult::InvalidParams(msg) => {
+            Json(serde_json::json!({"status": "error", "error": msg}))
+        }
+    }
+}
+
+/// Stop a speed burst for a task
+async fn stop_speed_burst_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<StopBurstRequest>,
+) -> impl axum::response::IntoResponse {
+    let stopped = state.manager.stop_speed_burst(&req.task_id).await;
+    if stopped {
+        Json(serde_json::json!({"status": "stopped"}))
+    } else {
+        Json(serde_json::json!({"status": "error", "error": "No active burst for this task"}))
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct StartBurstRequest {
+    task_id: String,
+    duration_secs: Option<u64>,
+    multiplier: Option<f64>,
+}
+
+#[derive(serde::Deserialize)]
+struct StopBurstRequest {
+    task_id: String,
 }
 
 /// Get URL deduplication configuration
@@ -3791,6 +3956,7 @@ mod tests {
                 cooldown: None,
                 sequential_mode: false,
                 is_favorite: false,
+                max_download_time_secs: None,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -4305,6 +4471,7 @@ mod tests {
             sequential_mode: false,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            max_download_time_secs: None,
         };
         let info = TaskInfo::from(task);
         assert_eq!(info.depends_on, vec!["task-0".to_string()]);
