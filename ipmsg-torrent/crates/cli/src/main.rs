@@ -498,6 +498,12 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Manage task chains for sequential execution
+    DlChain {
+        /// Subcommand: list|create|delete|add|remove|enable|disable|summary
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1521,6 +1527,25 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlchain" | "dl-chain" | "dlch" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlchain <list|create|delete|add|remove|enable|disable|summary>".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlChain {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1729,6 +1754,7 @@ fn command_help() -> String {
         "/dlretryquota [cmd] - Retry quota (status|enable|disable|set <max> [window_secs]|reset)",
         "/dlttl [cmd]      - Task TTL management (status|enable|disable|set <duration> [interval]|task <id> <duration>|summary)",
         "/dlerrrec [cmd]   - Error recovery (status|enable|disable|set <category> <strategy>|reset|test <error>)",
+        "/dlchain [cmd]    - Task chains (list|create|delete|add|remove|enable|disable|summary)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -8857,6 +8883,180 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlerrrec <status|enable|disable|set|reset|test>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlChain { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "list" => {
+                    let chains = download_manager.list_task_chains().await;
+                    if chains.is_empty() {
+                        s.add_system_message("main", "No task chains configured".to_string());
+                    } else {
+                        let mut msg = "Task Chains:\n".to_string();
+                        for chain in chains {
+                            msg.push_str(&format!(
+                                "  {} ({}) - {} tasks, enabled: {}\n",
+                                chain.name,
+                                chain.chain_id,
+                                chain.task_ids.len(),
+                                chain.enabled
+                            ));
+                        }
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "create" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlchain create <chain_id> <name>".to_string(),
+                        );
+                        return;
+                    }
+                    let chain_id = args[0].clone();
+                    let name = args[1..].join(" ");
+                    match download_manager
+                        .create_task_chain(chain_id.clone(), name)
+                        .await
+                    {
+                        Ok(()) => {
+                            s.add_system_message("main", format!("Created chain '{}'", chain_id));
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Failed to create chain: {}", e));
+                        }
+                    }
+                }
+                "delete" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlchain delete <chain_id>".to_string(),
+                        );
+                        return;
+                    }
+                    let chain_id = &args[0];
+                    match download_manager.delete_task_chain(chain_id).await {
+                        Ok(()) => {
+                            s.add_system_message("main", format!("Deleted chain '{}'", chain_id));
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Failed to delete chain: {}", e));
+                        }
+                    }
+                }
+                "add" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlchain add <chain_id> <task_id>".to_string(),
+                        );
+                        return;
+                    }
+                    let chain_id = &args[0];
+                    let task_id = &args[1];
+                    match download_manager
+                        .add_task_to_chain(chain_id, task_id.clone())
+                        .await
+                    {
+                        Ok(()) => {
+                            s.add_system_message(
+                                "main",
+                                format!("Added task '{}' to chain '{}'", task_id, chain_id),
+                            );
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Failed to add task: {}", e));
+                        }
+                    }
+                }
+                "remove" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlchain remove <chain_id> <task_id>".to_string(),
+                        );
+                        return;
+                    }
+                    let chain_id = &args[0];
+                    let task_id = &args[1];
+                    match download_manager
+                        .remove_task_from_chain(chain_id, task_id)
+                        .await
+                    {
+                        Ok(()) => {
+                            s.add_system_message(
+                                "main",
+                                format!("Removed task '{}' from chain '{}'", task_id, chain_id),
+                            );
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Failed to remove task: {}", e));
+                        }
+                    }
+                }
+                "enable" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlchain enable <chain_id>".to_string(),
+                        );
+                        return;
+                    }
+                    let chain_id = &args[0];
+                    match download_manager
+                        .set_task_chain_enabled(chain_id, true)
+                        .await
+                    {
+                        Ok(()) => {
+                            s.add_system_message("main", format!("Enabled chain '{}'", chain_id));
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Failed to enable chain: {}", e));
+                        }
+                    }
+                }
+                "disable" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlchain disable <chain_id>".to_string(),
+                        );
+                        return;
+                    }
+                    let chain_id = &args[0];
+                    match download_manager
+                        .set_task_chain_enabled(chain_id, false)
+                        .await
+                    {
+                        Ok(()) => {
+                            s.add_system_message("main", format!("Disabled chain '{}'", chain_id));
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Failed to disable chain: {}", e));
+                        }
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_task_chain_summary().await;
+                    let msg = format!(
+                        "Task Chain Summary:\n  Total chains: {}\n  Enabled chains: {}\n  Total tasks: {}",
+                        summary.total_chains, summary.enabled_chains, summary.total_tasks
+                    );
+                    s.add_system_message("main", msg);
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlchain <list|create|delete|add|remove|enable|disable|summary>"
+                            .to_string(),
                     );
                 }
             }

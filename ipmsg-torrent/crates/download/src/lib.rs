@@ -60,6 +60,7 @@ pub mod speed_burst;
 pub mod speed_history;
 pub mod task_activity;
 pub mod task_archive;
+pub mod task_chain;
 pub mod task_comments;
 pub mod task_export;
 pub mod task_favorites;
@@ -842,6 +843,8 @@ pub struct DownloadManager {
     /// Per-task proxy override manager
     #[allow(dead_code)]
     task_proxy: Arc<Mutex<task_proxy::TaskProxyManager>>,
+    /// Task chain manager for sequential task execution
+    task_chain: Arc<Mutex<task_chain::TaskChainManager>>,
 }
 
 impl DownloadManager {
@@ -949,6 +952,9 @@ impl DownloadManager {
             )),
             task_proxy: Arc::new(Mutex::new(task_proxy::TaskProxyManager::new(
                 data_dir.join("task_proxy.json"),
+            ))),
+            task_chain: Arc::new(Mutex::new(task_chain::TaskChainManager::new(
+                data_dir.join("task_chain.json"),
             ))),
         };
         dm.start_scheduler();
@@ -1190,6 +1196,9 @@ impl DownloadManager {
             task_proxy: Arc::new(Mutex::new(task_proxy::TaskProxyManager::new(
                 data_dir.join("task_proxy.json"),
             ))),
+            task_chain: Arc::new(Mutex::new(task_chain::TaskChainManager::new(
+                data_dir.join("task_chain.json"),
+            ))),
         };
         // Restore error recovery config from disk
         if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
@@ -1328,6 +1337,10 @@ impl DownloadManager {
         }
         // Restore task archive from disk
         dm.restore_archive().await;
+        // Restore task chain state from disk
+        dm.restore_task_chain().await;
+        // Restore task chain state from disk
+        dm.restore_task_chain().await;
         // Restore auto-pause config from disk
         if let Ok(Some(loaded_ap)) = auto_pause::load_auto_pause_config(&dm.data_dir).await {
             *dm.auto_pause.write().await = loaded_ap;
@@ -5571,6 +5584,7 @@ impl DownloadManager {
         let notifier = self.notifier.clone();
         let hook_manager = self.hook_manager.clone();
         let proxy_config = self.proxy_config.clone();
+        let task_chain = self.task_chain.clone();
 
         // Store task info for resume
         {
@@ -5842,6 +5856,28 @@ impl DownloadManager {
                             Some(&notifier),
                             Some(&hook_manager),
                         );
+
+                        // Trigger task chain: start next task in chain if any
+                        let chain_task = task_chain.lock().await;
+                        if let Some(next_task_id) = chain_task
+                            .get_next_task_after_completion(&task_id_clone)
+                            .map(|(_, tid)| tid)
+                        {
+                            drop(chain_task);
+                            // Set the next task to Queued so the scheduler picks it up
+                            let mut tasks_lock = tasks.lock().await;
+                            if let Some(next_task) =
+                                tasks_lock.iter_mut().find(|t| t.id == next_task_id)
+                            {
+                                if next_task.state == DownloadState::Paused
+                                    || next_task.state == DownloadState::Queued
+                                {
+                                    next_task.state = DownloadState::Queued;
+                                }
+                            }
+                            drop(tasks_lock);
+                            task_complete_notify.notify_one();
+                        }
                     }
                     Err(e) => {
                         let err_str = e.to_string();
@@ -7210,6 +7246,123 @@ impl DownloadManager {
             }
             Err(_) => {}
         }
+    }
+
+    // ===== Task Chain Methods =====
+
+    /// Create a new task chain.
+    pub async fn create_task_chain(
+        &self,
+        chain_id: String,
+        name: String,
+    ) -> Result<(), task_chain::TaskChainError> {
+        let mut manager = self.task_chain.lock().await;
+        manager.create_chain(chain_id, name)?;
+        manager.save().await?;
+        Ok(())
+    }
+
+    /// Delete a task chain.
+    pub async fn delete_task_chain(
+        &self,
+        chain_id: &str,
+    ) -> Result<(), task_chain::TaskChainError> {
+        let mut manager = self.task_chain.lock().await;
+        manager.delete_chain(chain_id)?;
+        manager.save().await?;
+        Ok(())
+    }
+
+    /// Add a task to a chain.
+    pub async fn add_task_to_chain(
+        &self,
+        chain_id: &str,
+        task_id: String,
+    ) -> Result<(), task_chain::TaskChainError> {
+        let mut manager = self.task_chain.lock().await;
+        manager.add_task_to_chain(chain_id, task_id)?;
+        manager.save().await?;
+        Ok(())
+    }
+
+    /// Remove a task from a chain.
+    pub async fn remove_task_from_chain(
+        &self,
+        chain_id: &str,
+        task_id: &str,
+    ) -> Result<(), task_chain::TaskChainError> {
+        let mut manager = self.task_chain.lock().await;
+        manager.remove_task_from_chain(chain_id, task_id)?;
+        manager.save().await?;
+        Ok(())
+    }
+
+    /// List all task chains.
+    pub async fn list_task_chains(&self) -> Vec<task_chain::TaskChain> {
+        let manager = self.task_chain.lock().await;
+        manager.list_chains().into_iter().cloned().collect()
+    }
+
+    /// Get a task chain by ID.
+    pub async fn get_task_chain(&self, chain_id: &str) -> Option<task_chain::TaskChain> {
+        let manager = self.task_chain.lock().await;
+        manager.get_chain(chain_id).cloned()
+    }
+
+    /// Get task chain summary.
+    pub async fn get_task_chain_summary(&self) -> task_chain::TaskChainSummary {
+        let manager = self.task_chain.lock().await;
+        manager.get_summary()
+    }
+
+    /// Enable or disable a task chain.
+    pub async fn set_task_chain_enabled(
+        &self,
+        chain_id: &str,
+        enabled: bool,
+    ) -> Result<(), task_chain::TaskChainError> {
+        let mut manager = self.task_chain.lock().await;
+        manager.set_chain_enabled(chain_id, enabled)?;
+        manager.save().await?;
+        Ok(())
+    }
+
+    /// Set auto-remove completed tasks for a chain.
+    pub async fn set_chain_auto_remove(
+        &self,
+        chain_id: &str,
+        auto_remove: bool,
+    ) -> Result<(), task_chain::TaskChainError> {
+        let mut manager = self.task_chain.lock().await;
+        manager.set_auto_remove_completed(chain_id, auto_remove)?;
+        manager.save().await?;
+        Ok(())
+    }
+
+    /// Get the next task to start after a task completes.
+    pub async fn get_next_task_in_chain(&self, completed_task_id: &str) -> Option<String> {
+        let manager = self.task_chain.lock().await;
+        manager
+            .get_next_task_after_completion(completed_task_id)
+            .map(|(_, task_id)| task_id)
+    }
+
+    /// Mark a task as completed in the chain and return the next task to start.
+    pub async fn mark_chain_task_completed(&self, task_id: &str) -> Option<String> {
+        let mut manager = self.task_chain.lock().await;
+        match manager.mark_task_completed(task_id) {
+            Ok(Some((_, next_task_id))) => {
+                let _ = manager.save().await;
+                Some(next_task_id)
+            }
+            _ => None,
+        }
+    }
+
+    /// Restore task chain state from disk on startup.
+    async fn restore_task_chain(&self) {
+        let mut manager = self.task_chain.lock().await;
+        let _ = manager.load().await;
     }
 
     /// Get aggregated download statistics.

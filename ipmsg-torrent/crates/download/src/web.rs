@@ -11,7 +11,7 @@ use axum::{
     },
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -278,6 +278,29 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/archive/config", post(set_archive_config_handler))
         .route("/api/export/csv", get(export_csv_handler))
         .route("/api/export/csv/summary", get(export_csv_summary_handler))
+        .route("/api/task-chains", get(list_task_chains_handler))
+        .route("/api/task-chains", post(create_task_chain_handler))
+        .route(
+            "/api/task-chains/summary",
+            get(get_task_chain_summary_handler),
+        )
+        .route("/api/task-chains/:chain_id", get(get_task_chain_handler))
+        .route(
+            "/api/task-chains/:chain_id",
+            delete(delete_task_chain_handler),
+        )
+        .route(
+            "/api/task-chains/:chain_id/enable",
+            post(enable_task_chain_handler),
+        )
+        .route(
+            "/api/task-chains/:chain_id/tasks",
+            post(add_task_to_chain_handler),
+        )
+        .route(
+            "/api/task-chains/:chain_id/tasks/:task_id",
+            delete(remove_task_from_chain_handler),
+        )
         .route("/api/priority-aging", get(get_priority_aging_handler))
         .route("/api/priority-aging", post(set_priority_aging_handler))
         .route("/api/priority-aging/run", post(run_priority_aging_handler))
@@ -1541,6 +1564,123 @@ async fn export_csv_summary_handler(
         [("Content-Type", "text/plain; charset=utf-8")],
         summary,
     )
+}
+
+// ===== Task Chain Handlers =====
+
+/// GET /api/task-chains - List all task chains
+async fn list_task_chains_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::task_chain::TaskChain>> {
+    let chains = state.manager.list_task_chains().await;
+    Json(chains)
+}
+
+/// POST /api/task-chains - Create a new task chain
+async fn create_task_chain_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let chain_id = req.get("chain_id").and_then(|v| v.as_str()).unwrap_or("");
+    let name = req.get("name").and_then(|v| v.as_str()).unwrap_or("");
+
+    if chain_id.is_empty() || name.is_empty() {
+        return Json(serde_json::json!({"error": "chain_id and name are required"}));
+    }
+
+    match state
+        .manager
+        .create_task_chain(chain_id.to_string(), name.to_string())
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({"status": "ok", "chain_id": chain_id})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/task-chains/summary - Get task chain summary
+async fn get_task_chain_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::task_chain::TaskChainSummary> {
+    let summary = state.manager.get_task_chain_summary().await;
+    Json(summary)
+}
+
+/// GET /api/task-chains/:chain_id - Get a specific task chain
+async fn get_task_chain_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(chain_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.get_task_chain(&chain_id).await {
+        Some(chain) => Json(serde_json::json!({"chain": chain})),
+        None => Json(serde_json::json!({"error": "Chain not found"})),
+    }
+}
+
+/// DELETE /api/task-chains/:chain_id - Delete a task chain
+async fn delete_task_chain_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(chain_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.delete_task_chain(&chain_id).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// POST /api/task-chains/:chain_id/enable - Enable or disable a task chain
+async fn enable_task_chain_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(chain_id): axum::extract::Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let enabled = req.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    match state
+        .manager
+        .set_task_chain_enabled(&chain_id, enabled)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({"status": "ok", "enabled": enabled})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// POST /api/task-chains/:chain_id/tasks - Add a task to a chain
+async fn add_task_to_chain_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(chain_id): axum::extract::Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let task_id = req.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+
+    if task_id.is_empty() {
+        return Json(serde_json::json!({"error": "task_id is required"}));
+    }
+
+    match state
+        .manager
+        .add_task_to_chain(&chain_id, task_id.to_string())
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({"status": "ok", "task_id": task_id})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// DELETE /api/task-chains/:chain_id/tasks/:task_id - Remove a task from a chain
+async fn remove_task_from_chain_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path((chain_id, task_id)): axum::extract::Path<(String, String)>,
+) -> impl axum::response::IntoResponse {
+    match state
+        .manager
+        .remove_task_from_chain(&chain_id, &task_id)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
 }
 
 /// GET /api/priority-aging - Get priority aging configuration
