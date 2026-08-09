@@ -424,6 +424,7 @@ impl Default for TtlManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
 
     #[test]
     fn test_parse_ttl_seconds() {

@@ -444,6 +444,11 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    DlFavorite {
+        /// Subcommand: list|add|remove|config
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1283,6 +1288,24 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlfavorite" | "dl-favorite" | "dlfav" => {
+            // /dlfavorite <list|add|remove|config> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlfavorite <list|add|remove|config> [args...]".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlFavorite {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1481,6 +1504,7 @@ fn command_help() -> String {
         "/dlpathval <status|validate|config> - Path validator for save path security",
         "/dlpriorityaging <status|enable|disable|set|config> - Priority aging for queued tasks",
         "/dlcomment <add|list|remove|search|config> - Task comments",
+        "/dlfavorite <list|add|remove|config> - Task favorites/pinning",
         "/dlprule [cmd]     - Path rules (status|list|add|del|enable|disable|test)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
@@ -7054,6 +7078,99 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlcomment <add|list|remove> [args...]".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlFavorite { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "list" => {
+                    let ids = download_manager.get_favorite_ids().await;
+                    if ids.is_empty() {
+                        s.add_system_message("main", "No favorite tasks".to_string());
+                    } else {
+                        let mut out = format!("Favorite tasks ({}):\n", ids.len());
+                        for id in &ids {
+                            out.push_str(&format!("  {}\n", id));
+                        }
+                        s.add_system_message("main", out);
+                    }
+                }
+                "add" => {
+                    if !args.is_empty() {
+                        let task_id = &args[0];
+                        let note = if args.len() > 1 {
+                            Some(args[1..].join(" "))
+                        } else {
+                            None
+                        };
+                        match download_manager.add_favorite(task_id, note).await {
+                            Ok(()) => s.add_system_message(
+                                "main",
+                                format!("Added task {} to favorites", task_id),
+                            ),
+                            Err(e) => s.add_system_message("main", format!("Error: {}", e)),
+                        }
+                    } else {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlfavorite add <task_id> [note]".to_string(),
+                        );
+                    }
+                }
+                "remove" => {
+                    if !args.is_empty() {
+                        let task_id = &args[0];
+                        let removed = download_manager.remove_favorite(task_id).await;
+                        if removed {
+                            s.add_system_message(
+                                "main",
+                                format!("Removed task {} from favorites", task_id),
+                            );
+                        } else {
+                            s.add_system_message(
+                                "main",
+                                format!("Task {} is not in favorites", task_id),
+                            );
+                        }
+                    } else {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlfavorite remove <task_id>".to_string(),
+                        );
+                    }
+                }
+                "config" => {
+                    if !args.is_empty() {
+                        if let Ok(max) = args[0].parse::<usize>() {
+                            let config = ipmsg_download::task_favorites::FavoritesConfig {
+                                max_favorites: max,
+                            };
+                            download_manager.set_favorites_config(config).await;
+                            s.add_system_message("main", format!("Set max favorites to {}", max));
+                        } else {
+                            s.add_system_message(
+                                "main",
+                                "Usage: /dlfavorite config <max_favorites>".to_string(),
+                            );
+                        }
+                    } else {
+                        let config = download_manager.get_favorites_config().await;
+                        s.add_system_message(
+                            "main",
+                            format!("Max favorites: {}", config.max_favorites),
+                        );
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlfavorite <list|add|remove|config> [args...]".to_string(),
                     );
                 }
             }

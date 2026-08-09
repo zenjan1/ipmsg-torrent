@@ -52,9 +52,11 @@ pub mod task_activity;
 pub mod task_archive;
 pub mod task_comments;
 pub mod task_export;
+pub mod task_favorites;
 pub mod task_queue;
 pub mod torrent;
 pub mod ttl;
+pub mod url_blacklist;
 pub mod url_bookmarks;
 pub mod url_dedup;
 pub mod url_expander;
@@ -210,6 +212,8 @@ pub struct TaskInfoEvent {
     pub cooldown: Option<download_cooldown::CooldownState>,
     /// Sequential download mode for torrents (download pieces in order for streaming)
     pub sequential_mode: bool,
+    /// Whether this task is in favorites (for WebSocket push)
+    pub is_favorite: bool,
 }
 
 impl TaskInfoEvent {
@@ -244,6 +248,7 @@ impl TaskInfoEvent {
             retry_policy: task.retry_policy,
             cooldown: task.cooldown.clone(),
             sequential_mode: task.sequential_mode,
+            is_favorite: false, // Set by caller via favorites check
         }
     }
 }
@@ -777,6 +782,8 @@ pub struct DownloadManager {
     priority_aging: Arc<tokio::sync::RwLock<priority_aging::PriorityAgingConfig>>,
     /// Per-task user comments manager
     task_comments: Arc<Mutex<task_comments::TaskCommentsManager>>,
+    /// Task favorites/pinning manager
+    task_favorites: Arc<Mutex<task_favorites::FavoritesManager>>,
 }
 
 impl DownloadManager {
@@ -853,6 +860,7 @@ impl DownloadManager {
             download_sessions: Arc::new(
                 Mutex::new(download_session::DownloadSessionManager::new()),
             ),
+            task_favorites: Arc::new(Mutex::new(task_favorites::FavoritesManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1061,6 +1069,7 @@ impl DownloadManager {
             download_sessions: Arc::new(
                 Mutex::new(download_session::DownloadSessionManager::new()),
             ),
+            task_favorites: Arc::new(Mutex::new(task_favorites::FavoritesManager::new())),
         };
         // Restore priority aging config from disk
         if let Ok(aging_cfg) = priority_aging::load_priority_aging_config(&dm.data_dir) {
@@ -2293,6 +2302,7 @@ impl DownloadManager {
                             retry_policy: None,
                             cooldown: None,
                             sequential_mode: false,
+                            is_favorite: false,
                         },
                     });
                     notify.notify_one();
@@ -6640,6 +6650,73 @@ impl DownloadManager {
         }
     }
 
+    /// Add a task to favorites.
+    /// Returns Ok(()) if successful, Err if task is already favorited or limit reached.
+    pub async fn add_favorite(&self, task_id: &str, note: Option<String>) -> Result<(), String> {
+        let mut favorites = self.task_favorites.lock().await;
+        favorites.add_favorite(task_id.to_string(), note)?;
+        drop(favorites);
+        self.persist_task_favorites().await;
+        Ok(())
+    }
+
+    /// Remove a task from favorites.
+    /// Returns true if the task was removed, false if it wasn't in favorites.
+    pub async fn remove_favorite(&self, task_id: &str) -> bool {
+        let mut favorites = self.task_favorites.lock().await;
+        let removed = favorites.remove_favorite(task_id);
+        drop(favorites);
+        if removed {
+            self.persist_task_favorites().await;
+        }
+        removed
+    }
+
+    /// Check if a task is in favorites.
+    pub async fn is_favorite(&self, task_id: &str) -> bool {
+        let favorites = self.task_favorites.lock().await;
+        favorites.is_favorite(task_id)
+    }
+
+    /// Get all favorite task IDs.
+    pub async fn get_favorite_ids(&self) -> Vec<String> {
+        let favorites = self.task_favorites.lock().await;
+        favorites.get_favorite_ids().into_iter().collect()
+    }
+
+    /// Get favorites count.
+    pub async fn get_favorites_count(&self) -> usize {
+        let favorites = self.task_favorites.lock().await;
+        favorites.count()
+    }
+
+    /// Set favorites configuration.
+    pub async fn set_favorites_config(&self, config: task_favorites::FavoritesConfig) {
+        let mut favorites = self.task_favorites.lock().await;
+        favorites.set_config(config);
+    }
+
+    /// Get favorites configuration.
+    pub async fn get_favorites_config(&self) -> task_favorites::FavoritesConfig {
+        let favorites = self.task_favorites.lock().await;
+        favorites.get_config().clone()
+    }
+
+    /// Persist task favorites to disk.
+    async fn persist_task_favorites(&self) {
+        let favorites = self.task_favorites.lock().await;
+        let path = self.data_dir.join("task_favorites.json");
+        if let Err(e) = favorites.save_to_file(&path) {
+            tracing::warn!(error = %e, "Failed to persist task favorites");
+        }
+    }
+
+    /// Internal helper to get favorite task IDs (used by scheduler).
+    async fn get_favorite_ids_internal(&self) -> std::collections::HashSet<String> {
+        let favorites = self.task_favorites.lock().await;
+        favorites.get_favorite_ids()
+    }
+
     /// Set mirror/fallback URLs for a download task.
     /// These URLs are tried in order if the primary source fails.
     /// Only applicable to HTTP/Xunlei downloads.
@@ -7576,6 +7653,9 @@ impl DownloadManager {
             return None;
         }
 
+        // Get favorite task IDs for priority scheduling
+        let favorite_ids = self.get_favorite_ids_internal().await;
+
         // Find the highest-priority queued task with all dependencies satisfied
         let tasks = self.tasks.lock().await;
         let completed_ids: std::collections::HashSet<&str> = tasks
@@ -7593,15 +7673,22 @@ impl DownloadManager {
                         .all(|dep| completed_ids.contains(dep.as_str()))
             })
             .max_by(|a, b| {
-                a.priority.cmp(&b.priority).then_with(|| {
-                    // Lower queue_position comes first
-                    match (a.queue_position, b.queue_position) {
-                        (Some(pa), Some(pb)) => pb.cmp(&pa),
-                        (Some(_), None) => std::cmp::Ordering::Greater,
-                        (None, Some(_)) => std::cmp::Ordering::Less,
-                        (None, None) => a.created_at.cmp(&b.created_at),
-                    }
-                })
+                // Favorites always come first
+                let a_fav = favorite_ids.contains(&a.id);
+                let b_fav = favorite_ids.contains(&b.id);
+                match (a_fav, b_fav) {
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    _ => a.priority.cmp(&b.priority).then_with(|| {
+                        // Lower queue_position comes first
+                        match (a.queue_position, b.queue_position) {
+                            (Some(pa), Some(pb)) => pb.cmp(&pa),
+                            (Some(_), None) => std::cmp::Ordering::Greater,
+                            (None, Some(_)) => std::cmp::Ordering::Less,
+                            (None, None) => a.created_at.cmp(&b.created_at),
+                        }
+                    }),
+                }
             })
             .map(|t| t.id.clone());
         drop(tasks);

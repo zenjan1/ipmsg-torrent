@@ -306,6 +306,14 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/task-comments/:task_id/:comment_id",
             axum::routing::delete(remove_task_comment_handler),
         )
+        .route("/api/favorites", get(get_favorites_handler))
+        .route("/api/favorites", post(add_favorite_handler))
+        .route(
+            "/api/favorites/:task_id/remove",
+            post(remove_favorite_handler),
+        )
+        .route("/api/favorites/config", get(get_favorites_config_handler))
+        .route("/api/favorites/config", post(set_favorites_config_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1580,6 +1588,72 @@ async fn remove_task_comment_handler(
         Ok(removed) => Json(serde_json::json!({"status": "ok", "removed": removed})),
         Err(e) => Json(serde_json::json!({"error": e.to_string()})),
     }
+}
+
+/// Get task favorites list
+async fn get_favorites_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let ids = state.manager.get_favorite_ids().await;
+    let count = state.manager.get_favorites_count().await;
+    Json(serde_json::json!({
+        "favorite_ids": ids,
+        "count": count
+    }))
+}
+
+/// Add task to favorites
+async fn add_favorite_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let task_id = body.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+    let note = body
+        .get("note")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if task_id.is_empty() {
+        return Json(serde_json::json!({"error": "task_id is required"}));
+    }
+
+    match state.manager.add_favorite(task_id, note).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok", "task_id": task_id})),
+        Err(e) => Json(serde_json::json!({"error": e})),
+    }
+}
+
+/// Remove task from favorites
+async fn remove_favorite_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let removed = state.manager.remove_favorite(&task_id).await;
+    Json(serde_json::json!({"status": "ok", "removed": removed}))
+}
+
+/// Get favorites configuration
+async fn get_favorites_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_favorites_config().await;
+    Json(serde_json::json!({
+        "max_favorites": config.max_favorites
+    }))
+}
+
+/// Set favorites configuration
+async fn set_favorites_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let max_favorites = body
+        .get("max_favorites")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    let config = crate::task_favorites::FavoritesConfig { max_favorites };
+    state.manager.set_favorites_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
 }
 
 /// Get URL deduplication configuration
@@ -3429,6 +3503,7 @@ mod tests {
                 retry_policy: None,
                 cooldown: None,
                 sequential_mode: false,
+                is_favorite: false,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
