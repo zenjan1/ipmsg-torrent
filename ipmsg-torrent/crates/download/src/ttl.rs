@@ -13,7 +13,7 @@
 //!
 //! TTL can be disabled entirely, or set to specific durations per task.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;

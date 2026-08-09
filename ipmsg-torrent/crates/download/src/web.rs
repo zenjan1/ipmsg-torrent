@@ -281,6 +281,31 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/priority-aging", get(get_priority_aging_handler))
         .route("/api/priority-aging", post(set_priority_aging_handler))
         .route("/api/priority-aging/run", post(run_priority_aging_handler))
+        .route("/api/task-comments", get(get_all_task_comments_handler))
+        .route(
+            "/api/task-comments/search",
+            post(search_task_comments_handler),
+        )
+        .route(
+            "/api/task-comments/:task_id",
+            get(get_task_comments_handler),
+        )
+        .route(
+            "/api/task-comments/:task_id",
+            post(add_task_comment_handler),
+        )
+        .route(
+            "/api/task-comments/:task_id/config",
+            get(get_task_comments_config_handler),
+        )
+        .route(
+            "/api/task-comments/:task_id/config",
+            post(set_task_comments_config_handler),
+        )
+        .route(
+            "/api/task-comments/:task_id/:comment_id",
+            axum::routing::delete(remove_task_comment_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1445,6 +1470,116 @@ async fn run_priority_aging_handler(
 ) -> Json<Vec<crate::priority_aging::AgingDecision>> {
     let decisions = state.manager.run_priority_aging().await;
     Json(decisions)
+}
+
+/// GET /api/task-comments - List all tasks with comments and counts
+async fn get_all_task_comments_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let task_ids = state.manager.list_tasks_with_comments().await;
+    let counts = state.manager.get_task_comment_counts().await;
+    let config = state.manager.get_task_comments_config().await;
+    let total: usize = counts.values().sum();
+
+    Json(serde_json::json!({
+        "tasks": task_ids,
+        "counts": counts,
+        "total_comments": total,
+        "config": config,
+    }))
+}
+
+/// POST /api/task-comments/search - Search comments across all tasks
+async fn search_task_comments_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+
+    if query.is_empty() {
+        return Json(serde_json::json!({"error": "query is required"}));
+    }
+
+    let result = state.manager.search_task_comments(query).await;
+    Json(serde_json::json!({
+        "query": result.query,
+        "total_matches": result.total_matches,
+        "matches": result.matches,
+    }))
+}
+
+/// GET /api/task-comments/:task_id - Get comments for a specific task
+async fn get_task_comments_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_task_comment_summary(&task_id).await;
+    Json(summary)
+}
+
+/// POST /api/task-comments/:task_id - Add a comment to a task
+async fn add_task_comment_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+
+    if text.trim().is_empty() {
+        return Json(serde_json::json!({"error": "text is required and cannot be empty"}));
+    }
+
+    let author = body
+        .get("author")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let tags: Vec<String> = body
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    match state
+        .manager
+        .add_task_comment(&task_id, text, author.as_deref(), tags)
+        .await
+    {
+        Ok(comment) => Json(serde_json::json!({"status": "ok", "comment": comment})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/task-comments/:task_id/config - Get task comments configuration
+async fn get_task_comments_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::task_comments::TaskCommentsConfig> {
+    let config = state.manager.get_task_comments_config().await;
+    Json(config)
+}
+
+/// POST /api/task-comments/:task_id/config - Set task comments configuration
+async fn set_task_comments_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::task_comments::TaskCommentsConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_task_comments_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// DELETE /api/task-comments/:task_id/:comment_id - Remove a comment
+async fn remove_task_comment_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path((_task_id, comment_id)): axum::extract::Path<(String, String)>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.remove_task_comment(&comment_id).await {
+        Ok(removed) => Json(serde_json::json!({"status": "ok", "removed": removed})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
 }
 
 /// Get URL deduplication configuration

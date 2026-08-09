@@ -57,6 +57,8 @@ pub enum ActivityEventType {
     ProgressMilestone,
     /// User note added/changed
     NoteChanged,
+    /// User comment added to task
+    CommentAdded,
     /// Tags modified
     TagsChanged,
     /// Generic info message
@@ -87,6 +89,7 @@ impl std::fmt::Display for ActivityEventType {
             ActivityEventType::ConflictResolved => write!(f, "conflict_resolved"),
             ActivityEventType::ProgressMilestone => write!(f, "progress"),
             ActivityEventType::NoteChanged => write!(f, "note_changed"),
+            ActivityEventType::CommentAdded => write!(f, "comment_added"),
             ActivityEventType::TagsChanged => write!(f, "tags_changed"),
             ActivityEventType::Info => write!(f, "info"),
             ActivityEventType::Warning => write!(f, "warning"),
@@ -117,6 +120,7 @@ impl ActivityEventType {
             ActivityEventType::ConflictResolved => "⚖️",
             ActivityEventType::ProgressMilestone => "📊",
             ActivityEventType::NoteChanged => "📝",
+            ActivityEventType::CommentAdded => "💬",
             ActivityEventType::TagsChanged => "🏷️",
             ActivityEventType::Info => "ℹ️",
             ActivityEventType::Warning => "⚠️",

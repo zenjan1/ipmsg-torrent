@@ -438,6 +438,12 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Task comments (add|list|remove|search|config)
+    DlComment {
+        /// Subcommand
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1259,6 +1265,24 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlcomment" | "dl-comment" | "dlcmt" => {
+            // /dlcomment <add|list|remove|search|config> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlcomment <add|list|remove|search|config> [args...]".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlComment {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1456,6 +1480,7 @@ fn command_help() -> String {
         "/dlprotolimit <status|enable|disable|set|default> - Per-protocol concurrent download limit",
         "/dlpathval <status|validate|config> - Path validator for save path security",
         "/dlpriorityaging <status|enable|disable|set|config> - Priority aging for queued tasks",
+        "/dlcomment <add|list|remove|search|config> - Task comments",
         "/dlprule [cmd]     - Path rules (status|list|add|del|enable|disable|test)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
@@ -6961,6 +6986,77 @@ async fn handle_command(
         },
         Command::IpMsgPeers => {
             let _ = cmd_tx.send(SendCommand::ListIpMsgPeers);
+        }
+        Command::DlComment { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "add" => {
+                    if args.len() >= 2 {
+                        let task_id = &args[0];
+                        let comment = args[1..].join(" ");
+                        match download_manager
+                            .add_task_comment(task_id, &comment, None, vec![])
+                            .await
+                        {
+                            Ok(_) => s.add_system_message(
+                                "main",
+                                format!("Added comment to task {}", task_id),
+                            ),
+                            Err(e) => s.add_system_message("main", format!("Error: {}", e)),
+                        }
+                    } else {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlcomment add <task_id> <comment>".to_string(),
+                        );
+                    }
+                }
+                "list" => {
+                    if !args.is_empty() {
+                        let task_id = &args[0];
+                        let comments = download_manager.get_task_comments(task_id).await;
+                        if comments.is_empty() {
+                            s.add_system_message(
+                                "main",
+                                format!("No comments for task {}", task_id),
+                            );
+                        } else {
+                            let mut out = format!("Comments for task {}:\n", task_id);
+                            for c in &comments {
+                                out.push_str(&format!("  [{}] {}\n", c.created_at, c.text));
+                            }
+                            s.add_system_message("main", out);
+                        }
+                    } else {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlcomment list <task_id>".to_string(),
+                        );
+                    }
+                }
+                "remove" => {
+                    if args.len() >= 2 {
+                        let comment_id = &args[1];
+                        let _ = download_manager.remove_task_comment(comment_id).await;
+                        s.add_system_message("main", format!("Removed comment {}", comment_id));
+                    } else {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlcomment remove <task_id> <comment_id>".to_string(),
+                        );
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlcomment <add|list|remove> [args...]".to_string(),
+                    );
+                }
+            }
         }
     }
 }

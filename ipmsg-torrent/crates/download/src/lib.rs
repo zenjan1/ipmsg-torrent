@@ -24,6 +24,7 @@ pub mod download_cooldown;
 pub mod download_history;
 pub mod download_presets;
 pub mod download_report;
+pub mod download_session;
 pub mod download_stats;
 pub mod ed2k;
 pub mod eta_estimator;
@@ -45,9 +46,11 @@ pub mod rate_limiter;
 pub mod rss_feed;
 pub mod save_path_manager;
 pub mod segment_download;
+pub mod speed_alert;
 pub mod speed_history;
 pub mod task_activity;
 pub mod task_archive;
+pub mod task_comments;
 pub mod task_export;
 pub mod task_queue;
 pub mod torrent;
@@ -724,6 +727,10 @@ pub struct DownloadManager {
     categorize_rules: Arc<Mutex<Vec<auto_categorize::CategorizeRule>>>,
     /// Per-task speed history tracking
     speed_history: Arc<Mutex<speed_history::SpeedHistoryManager>>,
+    /// Speed trend alert manager
+    speed_alerts: Arc<speed_alert::SpeedAlertManager>,
+    /// Per-task download session tracking
+    download_sessions: Arc<Mutex<download_session::DownloadSessionManager>>,
     /// Auto-cleanup configuration for completed/failed tasks
     auto_cleanup: Arc<tokio::sync::RwLock<auto_cleanup::AutoCleanupConfig>>,
     /// URL deduplication configuration
@@ -768,6 +775,8 @@ pub struct DownloadManager {
     url_normalizer: Arc<tokio::sync::RwLock<url_normalizer::UrlNormalizer>>,
     /// Priority aging configuration for automatic priority boosting
     priority_aging: Arc<tokio::sync::RwLock<priority_aging::PriorityAgingConfig>>,
+    /// Per-task user comments manager
+    task_comments: Arc<Mutex<task_comments::TaskCommentsManager>>,
 }
 
 impl DownloadManager {
@@ -775,6 +784,7 @@ impl DownloadManager {
         let save_path = data_dir.join("downloads");
         let dm = Self {
             tasks: Arc::new(Mutex::new(Vec::new())),
+            speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
@@ -839,6 +849,10 @@ impl DownloadManager {
             priority_aging: Arc::new(tokio::sync::RwLock::new(
                 priority_aging::PriorityAgingConfig::default(),
             )),
+            task_comments: Arc::new(Mutex::new(task_comments::TaskCommentsManager::new())),
+            download_sessions: Arc::new(
+                Mutex::new(download_session::DownloadSessionManager::new()),
+            ),
         };
         dm.start_scheduler();
         dm
@@ -978,6 +992,7 @@ impl DownloadManager {
         let save_path = data_dir.join("downloads");
         let dm = Self {
             tasks: Arc::new(Mutex::new(tasks)),
+            speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
@@ -1042,6 +1057,10 @@ impl DownloadManager {
             priority_aging: Arc::new(tokio::sync::RwLock::new(
                 priority_aging::PriorityAgingConfig::default(),
             )),
+            task_comments: Arc::new(Mutex::new(task_comments::TaskCommentsManager::new())),
+            download_sessions: Arc::new(
+                Mutex::new(download_session::DownloadSessionManager::new()),
+            ),
         };
         // Restore priority aging config from disk
         if let Ok(aging_cfg) = priority_aging::load_priority_aging_config(&dm.data_dir) {
@@ -1064,6 +1083,12 @@ impl DownloadManager {
         // Restore per-task activity logs from disk
         if let Some(loaded_activity) = task_activity::load_activity_logs(&dm.data_dir) {
             *dm.activity_log.lock().await = loaded_activity;
+        }
+        // Restore task comments from disk
+        if let Ok(loaded_comments) =
+            task_comments::TaskCommentsManager::load(&dm.data_dir.join("task_comments.json")).await
+        {
+            *dm.task_comments.lock().await = loaded_comments;
         }
         // Restore post-download hooks from disk
         if let Err(e) = dm.hook_manager.load() {
@@ -4638,15 +4663,23 @@ impl DownloadManager {
             );
         }
 
-        // Mark as downloading
+        // Mark as downloading and start a download session
+        let protocol_str;
+        let bytes_at_start;
         {
             let mut t = tasks.lock().await;
             if let Some(task) = t.iter_mut().find(|t| t.id == task_id) {
                 task.state = DownloadState::Downloading;
                 task.current_session_start = Some(chrono::Utc::now());
                 task.updated_at = chrono::Utc::now();
+                protocol_str = format!("{:?}", task.protocol);
+                bytes_at_start = task.downloaded;
+            } else {
+                return;
             }
         }
+        self.start_download_session(&task_id, bytes_at_start, &protocol_str)
+            .await;
 
         let proxy_config_for_spawn = proxy_config.read().await.clone();
         let my_generation = generation; // capture for completion handler
@@ -4974,6 +5007,7 @@ impl DownloadManager {
         let auto_retry_base_delay_secs = self.auto_retry_base_delay_secs.clone();
         let eta_estimator = self.eta_estimator.clone();
         let speed_history = self.speed_history.clone();
+        let speed_alerts = self.speed_alerts.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -5055,6 +5089,25 @@ impl DownloadManager {
                     {
                         let mut speed_history = speed_history.lock().await;
                         speed_history.add_sample(&task_id, avg_speed, current_downloaded);
+                    }
+
+                    // Check speed alerts
+                    {
+                        let task_name = {
+                            let tasks = tasks.lock().await;
+                            tasks
+                                .iter()
+                                .find(|t| t.id == task_id)
+                                .map(|t| t.name.clone())
+                                .unwrap_or_default()
+                        };
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let _alerts = speed_alerts
+                            .record_speed(&task_id, &task_name, avg_speed, now_secs)
+                            .await;
                     }
 
                     // Update bandwidth monitor with aggregate speed
@@ -5997,6 +6050,55 @@ impl DownloadManager {
         speed_history.remove(task_id)
     }
 
+    // --- Download Session Tracking (Phase 84) ---
+
+    /// Start a new download session for a task.
+    /// Call this when a task transitions to Downloading state.
+    pub async fn start_download_session(&self, task_id: &str, bytes_at_start: u64, protocol: &str) {
+        let mut sessions = self.download_sessions.lock().await;
+        sessions.start_session(task_id, bytes_at_start, protocol);
+    }
+
+    /// Close the active download session for a task.
+    /// Call this when a task transitions to Paused/Complete/Error state.
+    pub async fn close_download_session(
+        &self,
+        task_id: &str,
+        bytes_at_end: u64,
+        outcome: download_session::SessionOutcome,
+        error: Option<String>,
+    ) {
+        let mut sessions = self.download_sessions.lock().await;
+        let _ = sessions.close_session(task_id, bytes_at_end, outcome, error);
+    }
+
+    /// Update peak speed for the active session.
+    pub async fn update_session_peak_speed(&self, task_id: &str, speed_bps: u64) {
+        let mut sessions = self.download_sessions.lock().await;
+        sessions.update_peak_speed(task_id, speed_bps);
+    }
+
+    /// Get session summary for a task.
+    pub async fn get_task_session_summary(
+        &self,
+        task_id: &str,
+    ) -> Option<download_session::TaskSessionSummary> {
+        let sessions = self.download_sessions.lock().await;
+        sessions.get_task_summary(task_id)
+    }
+
+    /// Get session summaries for all tasks.
+    pub async fn get_all_session_summaries(&self) -> Vec<download_session::TaskSessionSummary> {
+        let sessions = self.download_sessions.lock().await;
+        sessions.get_all_summaries()
+    }
+
+    /// Remove all sessions for a task.
+    pub async fn remove_task_sessions(&self, task_id: &str) -> bool {
+        let mut sessions = self.download_sessions.lock().await;
+        sessions.remove_task_sessions(task_id)
+    }
+
     /// Pause all running downloads.
     pub async fn pause_all(&self) -> usize {
         let tasks = self.tasks.lock().await;
@@ -6413,6 +6515,128 @@ impl DownloadManager {
             true
         } else {
             false
+        }
+    }
+
+    /// Add a user comment to a download task.
+    /// Returns the created comment on success.
+    pub async fn add_task_comment(
+        &self,
+        task_id: &str,
+        text: &str,
+        author: Option<&str>,
+        tags: Vec<String>,
+    ) -> Result<task_comments::TaskComment, task_comments::TaskCommentError> {
+        // Verify task exists
+        {
+            let tasks = self.tasks.lock().await;
+            if !tasks.iter().any(|t| t.id == task_id) {
+                return Err(task_comments::TaskCommentError::TaskNotFound(
+                    task_id.to_string(),
+                ));
+            }
+        }
+
+        let mut comments = self.task_comments.lock().await;
+        let comment = comments.add_comment(task_id, text, author, tags)?;
+
+        // Log to task activity
+        let task_name = {
+            let tasks = self.tasks.lock().await;
+            tasks
+                .iter()
+                .find(|t| t.id == task_id)
+                .map(|t| t.name.clone())
+                .unwrap_or_default()
+        };
+        let preview = comment.text.chars().take(50).collect::<String>();
+        self.log_task_activity(
+            task_id,
+            &task_name,
+            task_activity::ActivityEventType::CommentAdded,
+            format!("Comment added: {preview}"),
+        )
+        .await;
+
+        drop(comments);
+        self.persist_task_comments().await;
+        Ok(comment)
+    }
+
+    /// Remove a comment by ID.
+    pub async fn remove_task_comment(
+        &self,
+        comment_id: &str,
+    ) -> Result<task_comments::TaskComment, task_comments::TaskCommentError> {
+        let mut comments = self.task_comments.lock().await;
+        let removed = comments.remove_comment(comment_id)?;
+        drop(comments);
+        self.persist_task_comments().await;
+        Ok(removed)
+    }
+
+    /// Get all comments for a task (chronological order).
+    pub async fn get_task_comments(&self, task_id: &str) -> Vec<task_comments::TaskComment> {
+        let comments = self.task_comments.lock().await;
+        comments
+            .get_comments(task_id)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Get comment summary for a task.
+    pub async fn get_task_comment_summary(
+        &self,
+        task_id: &str,
+    ) -> task_comments::TaskCommentSummary {
+        let comments = self.task_comments.lock().await;
+        comments.get_comment_summary(task_id)
+    }
+
+    /// List all task IDs that have comments.
+    pub async fn list_tasks_with_comments(&self) -> Vec<String> {
+        let comments = self.task_comments.lock().await;
+        comments.list_tasks_with_comments()
+    }
+
+    /// Get comment counts per task.
+    pub async fn get_task_comment_counts(&self) -> HashMap<String, usize> {
+        let comments = self.task_comments.lock().await;
+        comments.get_comment_counts()
+    }
+
+    /// Search comments across all tasks.
+    pub async fn search_task_comments(&self, query: &str) -> task_comments::CommentSearchResult {
+        let comments = self.task_comments.lock().await;
+        comments.search_comments(query)
+    }
+
+    /// Search comments by tag.
+    pub async fn search_task_comments_by_tag(&self, tag: &str) -> Vec<task_comments::TaskComment> {
+        let comments = self.task_comments.lock().await;
+        comments.search_by_tag(tag)
+    }
+
+    /// Get/set task comments configuration.
+    pub async fn set_task_comments_config(&self, config: task_comments::TaskCommentsConfig) {
+        let mut comments = self.task_comments.lock().await;
+        comments.set_config(config);
+        drop(comments);
+        self.persist_task_comments().await;
+    }
+
+    pub async fn get_task_comments_config(&self) -> task_comments::TaskCommentsConfig {
+        let comments = self.task_comments.lock().await;
+        comments.config().clone()
+    }
+
+    /// Persist task comments to disk.
+    async fn persist_task_comments(&self) {
+        let comments = self.task_comments.lock().await;
+        let path = self.data_dir.join("task_comments.json");
+        if let Err(e) = comments.save(&path).await {
+            tracing::warn!(error = %e, "Failed to persist task comments");
         }
     }
 
