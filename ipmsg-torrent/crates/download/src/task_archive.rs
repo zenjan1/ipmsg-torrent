@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tokio::fs;
 
-use crate::{DownloadProtocol, DownloadState};
+use crate::DownloadState;
 
 /// Error type for task archive operations
 #[derive(Debug, thiserror::Error)]

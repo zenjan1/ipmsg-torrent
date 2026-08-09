@@ -50,6 +50,7 @@ pub mod task_queue;
 pub mod torrent;
 pub mod url_dedup;
 pub mod url_expander;
+pub mod url_normalizer;
 pub mod url_pattern;
 pub mod url_rewrite;
 pub mod watch_folder;
@@ -752,6 +753,8 @@ pub struct DownloadManager {
     path_rules: Arc<Mutex<path_rules::PathRuleManager>>,
     /// Task archive for preserving completed/failed tasks
     task_archive: Arc<tokio::sync::RwLock<task_archive::ArchiveState>>,
+    /// URL normalizer for cleaning and deduplicating download URLs
+    url_normalizer: Arc<tokio::sync::RwLock<url_normalizer::UrlNormalizer>>,
 }
 
 impl DownloadManager {
@@ -815,6 +818,9 @@ impl DownloadManager {
             path_rules: Arc::new(Mutex::new(path_rules::PathRuleManager::new())),
             task_archive: Arc::new(tokio::sync::RwLock::new(
                 task_archive::ArchiveState::default(),
+            )),
+            url_normalizer: Arc::new(tokio::sync::RwLock::new(
+                url_normalizer::UrlNormalizer::new(),
             )),
         };
         dm.start_scheduler();
@@ -1011,6 +1017,9 @@ impl DownloadManager {
             path_rules: Arc::new(Mutex::new(path_rules::PathRuleManager::new())),
             task_archive: Arc::new(tokio::sync::RwLock::new(
                 task_archive::ArchiveState::default(),
+            )),
+            url_normalizer: Arc::new(tokio::sync::RwLock::new(
+                url_normalizer::UrlNormalizer::new(),
             )),
         };
         // Restore path rules from disk
@@ -3047,6 +3056,41 @@ impl DownloadManager {
     pub async fn get_path_validator_config(&self) -> path_validator::PathValidatorConfig {
         let validator = self.path_validator.lock().await;
         validator.config().clone()
+    }
+
+    // ========== Phase 79: URL Normalization ==========
+
+    /// Normalize a URL using the configured URL normalizer.
+    ///
+    /// This cleans and standardizes URLs for better deduplication and reliability.
+    /// Returns the normalization result with the normalized URL and change log.
+    pub async fn normalize_url(&self, url: &str) -> url_normalizer::NormalizationResult {
+        let normalizer = self.url_normalizer.read().await;
+        normalizer.normalize(url)
+    }
+
+    /// Check if two URLs are equivalent after normalization.
+    pub async fn are_urls_equivalent(&self, url1: &str, url2: &str) -> bool {
+        let normalizer = self.url_normalizer.read().await;
+        normalizer.are_equivalent(url1, url2)
+    }
+
+    /// Set the URL normalizer configuration.
+    pub async fn set_url_normalizer_config(&self, config: url_normalizer::UrlNormalizerConfig) {
+        let mut normalizer = self.url_normalizer.write().await;
+        normalizer.set_config(config.clone());
+        drop(normalizer);
+
+        // Persist to disk
+        if let Err(e) = url_normalizer::save_url_normalizer_config(&config, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist URL normalizer config");
+        }
+    }
+
+    /// Get the current URL normalizer configuration.
+    pub async fn get_url_normalizer_config(&self) -> url_normalizer::UrlNormalizerConfig {
+        let normalizer = self.url_normalizer.read().await;
+        normalizer.config().clone()
     }
 
     /// Log an audit event
@@ -11721,6 +11765,53 @@ mod max_concurrent_tests {
         // Verify two tasks exist
         let tasks = dm.list_tasks().await;
         assert_eq!(tasks.len(), 2);
+    }
+
+    // ========== Phase 79: URL Normalization Tests ==========
+
+    #[tokio::test]
+    async fn test_url_normalizer_set_get() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        let config = dm.get_url_normalizer_config().await;
+        assert!(config.enabled);
+        assert!(config.remove_www);
+    }
+
+    #[tokio::test]
+    async fn test_url_normalizer_normalize() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        let result = dm
+            .normalize_url("  https://www.EXAMPLE.com/file.zip?utm_source=google  ")
+            .await;
+        assert!(result.was_modified);
+        assert!(!result.normalized_url.contains("www."));
+        assert!(!result.normalized_url.contains("utm_source"));
+    }
+
+    #[tokio::test]
+    async fn test_url_normalizer_equivalent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        assert!(
+            dm.are_urls_equivalent(
+                "https://www.example.com/file.zip?utm_source=google",
+                "https://example.com/file.zip"
+            )
+            .await
+        );
+
+        assert!(
+            !dm.are_urls_equivalent(
+                "https://example.com/file1.zip",
+                "https://example.com/file2.zip"
+            )
+            .await
+        );
     }
 
     #[tokio::test]
