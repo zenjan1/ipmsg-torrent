@@ -544,6 +544,20 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/snapshots/:id",
             axum::routing::delete(delete_snapshot_handler),
         )
+        .route("/api/network-monitor", get(get_network_monitor_handler))
+        .route("/api/network-monitor", post(set_network_monitor_handler))
+        .route(
+            "/api/network-monitor/clear",
+            post(clear_network_monitor_handler),
+        )
+        .route(
+            "/api/download-time-limit",
+            get(get_download_time_limit_handler),
+        )
+        .route(
+            "/api/download-time-limit",
+            post(set_download_time_limit_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -4266,6 +4280,48 @@ async fn delete_snapshot_handler(
         Ok(()) => Json(serde_json::json!({"status": "deleted"})),
         Err(e) => Json(serde_json::json!({"error": e.to_string()})),
     }
+}
+
+// ─── Phase 103: Network Monitor & Download Time Limit REST API ───
+
+/// GET /api/network-monitor - Get network monitor status and summary
+async fn get_network_monitor_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let summary = state.manager.get_network_summary().await;
+    let config = state.manager.get_network_monitor_config().await;
+    Json(serde_json::json!({
+        "config": config,
+        "summary": summary
+    }))
+}
+
+/// POST /api/network-monitor - Update network monitor configuration
+async fn set_network_monitor_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::network_monitor::NetworkMonitorConfig>,
+) -> impl IntoResponse {
+    state.manager.set_network_monitor_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/network-monitor/clear - Clear network monitor data
+async fn clear_network_monitor_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    state.manager.clear_network_monitor().await;
+    Json(serde_json::json!({"status": "cleared"}))
+}
+
+/// GET /api/download-time-limit - Get download time limit configuration
+async fn get_download_time_limit_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let config = state.manager.get_download_time_limit_config().await;
+    Json(config)
+}
+
+/// POST /api/download-time-limit - Update download time limit configuration
+async fn set_download_time_limit_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::download_time_limit::DownloadTimeLimitConfig>,
+) -> impl IntoResponse {
+    state.manager.set_download_time_limit_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
 }
 
 /// WebSocket upgrade handler

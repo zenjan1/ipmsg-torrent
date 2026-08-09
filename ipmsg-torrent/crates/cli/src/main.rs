@@ -526,6 +526,24 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Download queue snapshots (list|create|show|restore|delete)
+    DlSnapshot {
+        /// Subcommand: list|create|show|restore|delete
+        subcommand: String,
+        args: Vec<String>,
+    },
+    /// Network condition monitor (status|config|clear)
+    DlNetMon {
+        /// Subcommand: status|config|clear
+        subcommand: String,
+        args: Vec<String>,
+    },
+    /// Download time limits (status|config|set|clear)
+    DlTimeLimit {
+        /// Subcommand: status|config|set|clear
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1627,6 +1645,57 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlsnap" | "dl-snap" | "dlsnapshot" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlsnap <list|create|show|restore|delete>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlSnapshot {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
+        "dlnetmon" | "dl-netmon" | "dlnm" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlnetmon <status|config|clear>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlNetMon {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
+        "dltimelimit" | "dl-timelimit" | "dltl" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dltimelimit <status|config|set|clear>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlTimeLimit {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1840,6 +1909,9 @@ fn command_help() -> String {
         "/dlprofiler [cmd] - Task performance profiler (status|summary|profile|refresh|clear|config)",
         "/dladaptive [cmd] - Adaptive concurrency (status|config|evaluate|clear)",
         "/dltemplate [cmd] - Download templates (list|add|del|show|match|enable|disable|categories)",
+        "/dlsnap [cmd]    - Queue snapshots (list|create [name] [desc]|show <id>|restore <id>|delete <id>)",
+        "/dlnetmon [cmd]  - Network monitor (status|config <max_samples|sample_interval>|clear)",
+        "/dltimelimit [cmd] - Download time limits (status|config <enabled|default> <value>|set <task_id> <secs>|clear <task_id>)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -7697,6 +7769,385 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlSnapshot { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "list" => {
+                    let snapshots = download_manager.list_queue_snapshots().await;
+                    if snapshots.is_empty() {
+                        s.add_system_message("main", "No snapshots found".to_string());
+                    } else {
+                        let mut output = String::new();
+                        output.push_str("📸 Download Queue Snapshots:\n");
+                        for snap in snapshots {
+                            output.push_str(&format!(
+                                "  {} [{}] {} tasks, {} ({})\n",
+                                snap.name,
+                                snap.id,
+                                snap.task_count,
+                                ipmsg_download::download_snapshot::format_size(snap.total_size),
+                                snap.created_at.format("%Y-%m-%d %H:%M:%S")
+                            ));
+                        }
+                        s.add_system_message("main", output.trim_end().to_string());
+                    }
+                }
+                "create" => {
+                    let name = args
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "manual".to_string());
+                    let description = if args.len() > 1 {
+                        Some(args[1..].join(" "))
+                    } else {
+                        None
+                    };
+                    match download_manager
+                        .create_queue_snapshot(name.clone(), description)
+                        .await
+                    {
+                        Ok(entry) => {
+                            s.add_system_message(
+                                "main",
+                                format!(
+                                    "Snapshot created: {} [{}]\n  Tasks: {}\n  Size: {}",
+                                    entry.name,
+                                    entry.id,
+                                    entry.task_count,
+                                    ipmsg_download::download_snapshot::format_size(
+                                        entry.total_size
+                                    )
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            s.add_system_message(
+                                "main",
+                                format!("Failed to create snapshot: {}", e),
+                            );
+                        }
+                    }
+                }
+                "show" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlsnap show <id>".to_string());
+                        return;
+                    }
+                    match download_manager.get_queue_snapshot(&args[0]).await {
+                        Ok(data) => {
+                            let mut output = String::new();
+                            output.push_str(&format!("📸 Snapshot: {} [{}]\n", data.name, data.id));
+                            output.push_str(&format!(
+                                "  Created: {}\n",
+                                data.created_at.format("%Y-%m-%d %H:%M:%S")
+                            ));
+                            output.push_str(&format!("  Tasks: {}\n", data.tasks.len()));
+                            output.push_str(&format!(
+                                "  Global speed limit: {} bytes/s\n",
+                                data.global_speed_limit
+                            ));
+                            output
+                                .push_str(&format!("  Max concurrent: {}\n", data.max_concurrent));
+                            if let Some(desc) = &data.description {
+                                output.push_str(&format!("  Description: {}\n", desc));
+                            }
+                            output.push_str("\nTasks:\n");
+                            for task in &data.tasks {
+                                output.push_str(&format!(
+                                    "  {} - {} ({:?})\n",
+                                    task.name,
+                                    ipmsg_download::download_snapshot::format_size(task.size),
+                                    task.state
+                                ));
+                            }
+                            s.add_system_message("main", output.trim_end().to_string());
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Snapshot not found: {}", e));
+                        }
+                    }
+                }
+                "restore" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlsnap restore <id>".to_string());
+                        return;
+                    }
+                    match download_manager.restore_queue_snapshot(&args[0]).await {
+                        Ok(tasks) => {
+                            s.add_system_message(
+                                "main",
+                                format!("Snapshot restored: {} tasks loaded", tasks.len()),
+                            );
+                        }
+                        Err(e) => {
+                            s.add_system_message(
+                                "main",
+                                format!("Failed to restore snapshot: {}", e),
+                            );
+                        }
+                    }
+                }
+                "delete" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlsnap delete <id>".to_string());
+                        return;
+                    }
+                    match download_manager.delete_queue_snapshot(&args[0]).await {
+                        Ok(_) => {
+                            s.add_system_message("main", "Snapshot deleted".to_string());
+                        }
+                        Err(e) => {
+                            s.add_system_message(
+                                "main",
+                                format!("Failed to delete snapshot: {}", e),
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlsnap <list|create|show|restore|delete>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlNetMon { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let summary = download_manager.get_network_summary().await;
+                    let config = download_manager.get_network_monitor_config().await;
+                    let mut output = String::new();
+                    output.push_str("🌐 Network Monitor Status:\n");
+                    output.push_str(&format!("  Enabled: {}\n", config.enabled));
+                    output.push_str(&format!("  Max samples: {}\n", config.max_samples));
+                    output.push_str(&format!(
+                        "  Sample interval: {}s\n",
+                        config.sample_interval_secs
+                    ));
+                    output.push_str(&format!(
+                        "  Current condition: {:?}\n",
+                        summary.current_condition
+                    ));
+                    output.push_str(&format!("  Total samples: {}\n", summary.total_samples));
+                    output.push_str(&format!(
+                        "  Average speed: {:.1} bytes/s\n",
+                        summary.avg_speed_bps
+                    ));
+                    output.push_str(&format!(
+                        "  Peak speed: {:.1} bytes/s\n",
+                        summary.peak_speed_bps
+                    ));
+                    if !summary.best_hours.is_empty() {
+                        output.push_str(&format!("  Best hours: {:?}\n", summary.best_hours));
+                    }
+                    if !summary.worst_hours.is_empty() {
+                        output.push_str(&format!("  Worst hours: {:?}\n", summary.worst_hours));
+                    }
+                    s.add_system_message("main", output.trim_end().to_string());
+                }
+                "config" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlnetmon config <max_samples|sample_interval> <value>"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    let mut config = download_manager.get_network_monitor_config().await;
+                    match args[0].as_str() {
+                        "max_samples" => {
+                            if let Ok(val) = args[1].parse::<usize>() {
+                                config.max_samples = val;
+                                download_manager.set_network_monitor_config(config).await;
+                                s.add_system_message("main", format!("Max samples set to {}", val));
+                            } else {
+                                s.add_system_message("main", "Invalid value".to_string());
+                            }
+                        }
+                        "sample_interval" => {
+                            if let Ok(val) = args[1].parse::<u64>() {
+                                config.sample_interval_secs = val;
+                                download_manager.set_network_monitor_config(config).await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Sample interval set to {}s", val),
+                                );
+                            } else {
+                                s.add_system_message("main", "Invalid value".to_string());
+                            }
+                        }
+                        _ => {
+                            s.add_system_message(
+                                "main",
+                                "Usage: /dlnetmon config <max_samples|sample_interval> <value>"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_network_monitor().await;
+                    s.add_system_message("main", "Network monitor data cleared".to_string());
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlnetmon <status|config|clear>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlTimeLimit { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_download_time_limit_config().await;
+                    let mut output = String::new();
+                    output.push_str("⏱️  Download Time Limit Status:\n");
+                    output.push_str(&format!("  Enabled: {}\n", config.enabled));
+                    if let Some(default_limit) = config.default_limit_secs {
+                        output.push_str(&format!("  Default limit: {}s\n", default_limit));
+                    } else {
+                        output.push_str("  Default limit: none\n");
+                    }
+                    if !config.task_limits.is_empty() {
+                        output.push_str("\nPer-task limits:\n");
+                        for (task_id, limit) in &config.task_limits {
+                            output.push_str(&format!("  {}: {}s\n", task_id, limit));
+                        }
+                    }
+                    s.add_system_message("main", output.trim_end().to_string());
+                }
+                "config" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dltimelimit config <enabled|default> <value>".to_string(),
+                        );
+                        return;
+                    }
+                    let mut config = download_manager.get_download_time_limit_config().await;
+                    match args[0].as_str() {
+                        "enabled" => {
+                            if let Ok(val) = args[1].parse::<bool>() {
+                                config.enabled = val;
+                                download_manager
+                                    .set_download_time_limit_config(config)
+                                    .await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Time limit enabled: {}", val),
+                                );
+                            } else {
+                                s.add_system_message("main", "Invalid boolean value".to_string());
+                            }
+                        }
+                        "default" => {
+                            if args[1].eq_ignore_ascii_case("none") {
+                                config.default_limit_secs = None;
+                                download_manager
+                                    .set_download_time_limit_config(config)
+                                    .await;
+                                s.add_system_message("main", "Default limit removed".to_string());
+                            } else if let Ok(val) = args[1].parse::<u64>() {
+                                config.default_limit_secs = Some(val);
+                                download_manager
+                                    .set_download_time_limit_config(config)
+                                    .await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Default limit set to {}s", val),
+                                );
+                            } else {
+                                s.add_system_message(
+                                    "main",
+                                    "Invalid value (use seconds or 'none')".to_string(),
+                                );
+                            }
+                        }
+                        _ => {
+                            s.add_system_message(
+                                "main",
+                                "Usage: /dltimelimit config <enabled|default> <value>".to_string(),
+                            );
+                        }
+                    }
+                }
+                "set" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dltimelimit set <task_id> <seconds>".to_string(),
+                        );
+                        return;
+                    }
+                    let task_id = &args[0];
+                    if let Ok(limit) = args[1].parse::<u64>() {
+                        match download_manager
+                            .set_task_download_time_limit(task_id, Some(limit))
+                            .await
+                        {
+                            Ok(_) => {
+                                s.add_system_message(
+                                    "main",
+                                    format!("Time limit for task {} set to {}s", task_id, limit),
+                                );
+                            }
+                            Err(e) => {
+                                s.add_system_message("main", format!("Failed: {}", e));
+                            }
+                        }
+                    } else {
+                        s.add_system_message("main", "Invalid time value".to_string());
+                    }
+                }
+                "clear" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dltimelimit clear <task_id>".to_string(),
+                        );
+                        return;
+                    }
+                    let task_id = &args[0];
+                    match download_manager
+                        .set_task_download_time_limit(task_id, None)
+                        .await
+                    {
+                        Ok(_) => {
+                            s.add_system_message(
+                                "main",
+                                format!("Time limit cleared for task {}", task_id),
+                            );
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Failed: {}", e));
+                        }
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dltimelimit <status|config|set|clear>".to_string(),
+                    );
+                }
+            }
+        }
         Command::Block { peer } => {
             let _ = cmd_tx.send(SendCommand::BlockPeer {
                 peer_id: peer.clone(),
@@ -10886,5 +11337,132 @@ mod save_path_tests {
     fn test_help_contains_url_expander() {
         let help = command_help();
         assert!(help.contains("/dlurlx"));
+    }
+
+    #[test]
+    fn test_parse_dlsnap_list() {
+        match parse_command("/dlsnap list") {
+            Command::DlSnapshot { subcommand, args } => {
+                assert_eq!(subcommand, "list");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlSnapshot, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsnap_create() {
+        match parse_command("/dlsnap create my-backup some description") {
+            Command::DlSnapshot { subcommand, args } => {
+                assert_eq!(subcommand, "create");
+                assert_eq!(args, vec!["my-backup", "some", "description"]);
+            }
+            other => panic!("Expected DlSnapshot, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsnap_restore() {
+        match parse_command("/dlsnapshot restore snap-123") {
+            Command::DlSnapshot { subcommand, args } => {
+                assert_eq!(subcommand, "restore");
+                assert_eq!(args, vec!["snap-123"]);
+            }
+            other => panic!("Expected DlSnapshot, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsnap_no_args() {
+        match parse_command("/dlsnap") {
+            Command::Unknown(msg) => {
+                assert!(msg.contains("/dlsnap"));
+            }
+            other => panic!("Expected Unknown, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlnetmon_status() {
+        match parse_command("/dlnetmon status") {
+            Command::DlNetMon { subcommand, args } => {
+                assert_eq!(subcommand, "status");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlNetMon, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlnetmon_config() {
+        match parse_command("/dlnm config max_samples 1000") {
+            Command::DlNetMon { subcommand, args } => {
+                assert_eq!(subcommand, "config");
+                assert_eq!(args, vec!["max_samples", "1000"]);
+            }
+            other => panic!("Expected DlNetMon, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlnetmon_clear() {
+        match parse_command("/dl-netmon clear") {
+            Command::DlNetMon { subcommand, args } => {
+                assert_eq!(subcommand, "clear");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlNetMon, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dltimelimit_status() {
+        match parse_command("/dltimelimit status") {
+            Command::DlTimeLimit { subcommand, args } => {
+                assert_eq!(subcommand, "status");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlTimeLimit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dltimelimit_set() {
+        match parse_command("/dltl set task-123 3600") {
+            Command::DlTimeLimit { subcommand, args } => {
+                assert_eq!(subcommand, "set");
+                assert_eq!(args, vec!["task-123", "3600"]);
+            }
+            other => panic!("Expected DlTimeLimit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dltimelimit_config() {
+        match parse_command("/dl-timelimit config enabled true") {
+            Command::DlTimeLimit { subcommand, args } => {
+                assert_eq!(subcommand, "config");
+                assert_eq!(args, vec!["enabled", "true"]);
+            }
+            other => panic!("Expected DlTimeLimit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_snapshot() {
+        let help = command_help();
+        assert!(help.contains("/dlsnap"));
+    }
+
+    #[test]
+    fn test_help_contains_netmon() {
+        let help = command_help();
+        assert!(help.contains("/dlnetmon"));
+    }
+
+    #[test]
+    fn test_help_contains_timelimit() {
+        let help = command_help();
+        assert!(help.contains("/dltimelimit"));
     }
 }
