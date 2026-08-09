@@ -53,6 +53,7 @@ pub mod retry_quota;
 pub mod rss_feed;
 pub mod save_path_manager;
 pub mod segment_download;
+pub mod source_rotation;
 pub mod speed_alert;
 pub mod speed_burst;
 pub mod speed_history;
@@ -825,6 +826,8 @@ pub struct DownloadManager {
     error_recovery: Arc<Mutex<error_recovery::ErrorRecoveryManager>>,
     /// Connection health monitor for tracking per-connection quality
     connection_health: Arc<Mutex<connection_health::ConnectionHealthManager>>,
+    /// Source rotation manager for automatic failover to alternative sources
+    source_rotation: Arc<Mutex<source_rotation::SourceRotationManager>>,
 }
 
 impl DownloadManager {
@@ -926,6 +929,7 @@ impl DownloadManager {
             connection_health: Arc::new(Mutex::new(
                 connection_health::ConnectionHealthManager::new(),
             )),
+            source_rotation: Arc::new(Mutex::new(source_rotation::SourceRotationManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1159,6 +1163,7 @@ impl DownloadManager {
             connection_health: Arc::new(Mutex::new(
                 connection_health::ConnectionHealthManager::new(),
             )),
+            source_rotation: Arc::new(Mutex::new(source_rotation::SourceRotationManager::new())),
         };
         // Restore error recovery config from disk
         if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
@@ -1170,6 +1175,11 @@ impl DownloadManager {
         {
             *dm.connection_health.lock().await =
                 connection_health::ConnectionHealthManager::with_config(health_cfg);
+        }
+        // Restore source rotation config from disk
+        if let Ok(Some(rotation_cfg)) = source_rotation::load_source_rotation_config(&dm.data_dir) {
+            *dm.source_rotation.lock().await =
+                source_rotation::SourceRotationManager::with_config(rotation_cfg);
         }
         // Restore progress milestone config from disk
         if let Ok(Some(milestone_cfg)) =
@@ -3126,6 +3136,122 @@ impl DownloadManager {
             .lock()
             .await
             .get_unhealthy_connections()
+    }
+
+    // ========== Phase 95: Download Source Rotation ==========
+
+    /// Set source rotation configuration.
+    pub async fn set_source_rotation_config(
+        &self,
+        config: source_rotation::SourceRotationConfig,
+    ) -> Result<(), source_rotation::SourceRotationPersistenceError> {
+        source_rotation::save_source_rotation_config(&config, &self.data_dir)?;
+        let mut mgr = self.source_rotation.lock().await;
+        mgr.set_config(config);
+        Ok(())
+    }
+
+    /// Get current source rotation configuration.
+    pub async fn get_source_rotation_config(&self) -> source_rotation::SourceRotationConfig {
+        self.source_rotation.lock().await.config().clone()
+    }
+
+    /// Add a download source for a task.
+    pub async fn add_download_source(&self, source: source_rotation::DownloadSource) -> bool {
+        self.source_rotation.lock().await.add_source(source)
+    }
+
+    /// Remove a download source.
+    pub async fn remove_download_source(
+        &self,
+        source_id: &str,
+    ) -> Option<source_rotation::DownloadSource> {
+        self.source_rotation.lock().await.remove_source(source_id)
+    }
+
+    /// Record a successful download from a source.
+    pub async fn record_source_success(&self, source_id: &str, bytes: u64) {
+        self.source_rotation
+            .lock()
+            .await
+            .record_source_success(source_id, bytes);
+    }
+
+    /// Record a failed download from a source.
+    pub async fn record_source_failure(&self, source_id: &str) {
+        self.source_rotation
+            .lock()
+            .await
+            .record_source_failure(source_id);
+    }
+
+    /// Get the best available source for a task.
+    pub async fn get_best_source(&self, task_id: &str) -> Option<source_rotation::DownloadSource> {
+        self.source_rotation
+            .lock()
+            .await
+            .get_best_source(task_id)
+            .cloned()
+    }
+
+    /// Get all sources for a task.
+    pub async fn get_task_sources(&self, task_id: &str) -> Vec<source_rotation::DownloadSource> {
+        self.source_rotation
+            .lock()
+            .await
+            .get_task_sources(task_id)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Get source rotation summary for a task.
+    pub async fn get_source_rotation_summary(
+        &self,
+        task_id: &str,
+    ) -> source_rotation::SourceRotationSummary {
+        self.source_rotation.lock().await.get_task_summary(task_id)
+    }
+
+    /// Get overall source rotation summary for all tasks.
+    pub async fn get_overall_source_rotation_summary(
+        &self,
+    ) -> std::collections::HashMap<String, source_rotation::SourceRotationSummary> {
+        self.source_rotation.lock().await.get_overall_summary()
+    }
+
+    /// Execute source rotation for a task.
+    pub async fn execute_source_rotation(
+        &self,
+        task_id: &str,
+    ) -> source_rotation::RotationDecision {
+        let mut mgr = self.source_rotation.lock().await;
+        let decision = mgr.decide_rotation(task_id);
+        mgr.apply_rotation(&decision);
+        decision
+    }
+
+    /// Execute source rotation for all tasks.
+    pub async fn execute_source_rotation_all(
+        &self,
+    ) -> std::collections::HashMap<String, source_rotation::RotationDecision> {
+        let mut mgr = self.source_rotation.lock().await;
+        let task_ids: Vec<String> = mgr.get_overall_summary().keys().cloned().collect();
+        let mut decisions = std::collections::HashMap::new();
+        for task_id in task_ids {
+            let decision = mgr.decide_rotation(&task_id);
+            mgr.apply_rotation(&decision);
+            decisions.insert(task_id, decision);
+        }
+        decisions
+    }
+
+    /// Remove all sources for a task.
+    pub async fn remove_task_sources(&self, task_id: &str) -> usize {
+        self.source_rotation
+            .lock()
+            .await
+            .remove_task_sources(task_id)
     }
 
     /// Check if a retry attempt is allowed under the daily quota.

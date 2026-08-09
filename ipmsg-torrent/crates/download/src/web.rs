@@ -380,6 +380,16 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/connection-health/unhealthy",
             get(get_unhealthy_connections_handler),
         )
+        .route("/api/source-rotation", get(get_source_rotation_handler))
+        .route("/api/source-rotation", post(set_source_rotation_handler))
+        .route(
+            "/api/source-rotation/summary",
+            get(get_source_rotation_summary_handler),
+        )
+        .route(
+            "/api/source-rotation/execute",
+            post(execute_source_rotation_handler),
+        )
         .route("/api/speed-burst/start", post(start_speed_burst_handler))
         .route("/api/speed-burst/stop", post(stop_speed_burst_handler))
         .route("/api/ws", get(ws_handler))
@@ -2172,6 +2182,56 @@ async fn get_unhealthy_connections_handler(
     Json(serde_json::json!({
         "unhealthy_connections": unhealthy,
         "count": unhealthy.len(),
+    }))
+}
+
+/// Get source rotation configuration
+async fn get_source_rotation_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_source_rotation_config().await;
+    Json(serde_json::json!({
+        "enabled": config.enabled,
+        "unhealthy_threshold": config.unhealthy_threshold,
+        "healthy_threshold": config.healthy_threshold,
+        "max_sources_per_task": config.max_sources_per_task,
+        "failure_cooldown_secs": config.failure_cooldown_secs,
+        "backoff_multiplier": config.backoff_multiplier,
+        "max_cooldown_secs": config.max_cooldown_secs,
+        "min_active_sources": config.min_active_sources,
+        "auto_promote_backups": config.auto_promote_backups,
+        "max_parallel_sources": config.max_parallel_sources,
+    }))
+}
+
+/// Set source rotation configuration
+async fn set_source_rotation_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::source_rotation::SourceRotationConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_source_rotation_config(config).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+    }
+}
+
+/// Get source rotation summary for all tasks
+async fn get_source_rotation_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summaries = state.manager.get_overall_source_rotation_summary().await;
+    Json(serde_json::json!({
+        "summaries": summaries,
+    }))
+}
+
+/// Execute source rotation for all tasks
+async fn execute_source_rotation_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let decisions = state.manager.execute_source_rotation_all().await;
+    Json(serde_json::json!({
+        "decisions": decisions,
     }))
 }
 
