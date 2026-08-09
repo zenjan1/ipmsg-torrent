@@ -163,6 +163,9 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/domain-limit", post(set_domain_limit))
         .route("/api/protocol-limit", get(get_protocol_limit))
         .route("/api/protocol-limit", post(set_protocol_limit))
+        .route("/api/path-validator", get(get_path_validator_config))
+        .route("/api/path-validator", post(set_path_validator_config))
+        .route("/api/path-validator/validate", post(validate_save_path))
         .route("/api/speed-history", get(get_all_speed_history))
         .route("/api/speed-history/:id", get(get_task_speed_history))
         .route(
@@ -229,6 +232,17 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             post(disable_watch_folder_handler),
         )
         .route("/api/watch-folders/scan", post(scan_watch_folders_handler))
+        .route(
+            "/api/path-rules",
+            get(list_path_rules_handler).post(add_path_rule_handler),
+        )
+        .route("/api/path-rules/:id/remove", post(remove_path_rule_handler))
+        .route("/api/path-rules/:id/enable", post(enable_path_rule_handler))
+        .route(
+            "/api/path-rules/:id/disable",
+            post(disable_path_rule_handler),
+        )
+        .route("/api/path-rules/match", post(match_path_rule_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -900,6 +914,148 @@ async fn scan_watch_folders_handler(State(state): State<Arc<WebState>>) -> Json<
     }))
 }
 
+// ─── Phase 77: Path Rules REST API ───
+
+async fn list_path_rules_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::path_rules::PathRule>> {
+    Json(state.manager.list_path_rules().await)
+}
+
+#[derive(serde::Deserialize)]
+struct AddPathRuleRequest {
+    name: String,
+    pattern_type: String, // "contains", "wildcard", "exact"
+    pattern: String,
+    save_path: String,
+    #[serde(default)]
+    match_url: bool,
+    #[serde(default)]
+    match_filename: bool,
+    #[serde(default)]
+    priority: u32,
+}
+
+async fn add_path_rule_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AddPathRuleRequest>,
+) -> Json<serde_json::Value> {
+    let pattern = match req.pattern_type.to_lowercase().as_str() {
+        "contains" => crate::path_rules::PathRulePattern::Contains(req.pattern),
+        "wildcard" => crate::path_rules::PathRulePattern::Wildcard(req.pattern),
+        "exact" => crate::path_rules::PathRulePattern::Exact(req.pattern),
+        _ => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Invalid pattern_type. Use: contains, wildcard, exact"
+            }));
+        }
+    };
+
+    let id = format!("prule_{}", chrono::Utc::now().timestamp_millis());
+    let rule = crate::path_rules::PathRule {
+        id: id.clone(),
+        name: req.name,
+        pattern,
+        match_url: req.match_url,
+        match_filename: req.match_filename,
+        save_path: std::path::PathBuf::from(req.save_path),
+        enabled: true,
+        priority: req.priority,
+    };
+
+    match state.manager.add_path_rule(rule).await {
+        Ok(()) => Json(serde_json::json!({
+            "success": true,
+            "id": id,
+            "message": "Path rule added"
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
+async fn remove_path_rule_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    match state.manager.remove_path_rule(&id).await {
+        Ok(_) => Json(serde_json::json!({
+            "success": true,
+            "message": format!("Path rule {} removed", id)
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
+async fn enable_path_rule_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    match state.manager.set_path_rule_enabled(&id, true).await {
+        Ok(()) => Json(serde_json::json!({
+            "success": true,
+            "message": format!("Path rule {} enabled", id)
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
+async fn disable_path_rule_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    match state.manager.set_path_rule_enabled(&id, false).await {
+        Ok(()) => Json(serde_json::json!({
+            "success": true,
+            "message": format!("Path rule {} disabled", id)
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MatchPathRuleRequest {
+    url: String,
+    filename: String,
+}
+
+async fn match_path_rule_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MatchPathRuleRequest>,
+) -> Json<serde_json::Value> {
+    match state
+        .manager
+        .find_matching_path_rule(&req.url, &req.filename)
+        .await
+    {
+        Some(rule) => Json(serde_json::json!({
+            "matched": true,
+            "rule": {
+                "id": rule.id,
+                "name": rule.name,
+                "save_path": rule.save_path.display().to_string(),
+                "priority": rule.priority,
+            }
+        })),
+        None => Json(serde_json::json!({
+            "matched": false,
+            "message": "No matching path rule found"
+        })),
+    }
+}
+
 async fn preview_path_template(
     State(_state): State<Arc<WebState>>,
     Json(req): Json<PathTemplatePreviewRequest>,
@@ -1213,6 +1369,63 @@ async fn set_protocol_limit(
         axum::http::StatusCode::OK,
         Json(serde_json::json!({"status": "ok"})),
     )
+}
+
+/// Get path validator configuration
+async fn get_path_validator_config(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let config = state.manager.get_path_validator_config().await;
+    Json(
+        serde_json::to_value(&config)
+            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})),
+    )
+}
+
+/// Set path validator configuration
+async fn set_path_validator_config(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let mut config = state.manager.get_path_validator_config().await;
+
+    if let Some(auto_create) = body.get("auto_create_dirs").and_then(|v| v.as_bool()) {
+        config.auto_create_dirs = auto_create;
+    }
+    if let Some(max_len) = body.get("max_path_length").and_then(|v| v.as_u64()) {
+        config.max_path_length = max_len as usize;
+    }
+    if let Some(check_reserved) = body.get("check_reserved_names").and_then(|v| v.as_bool()) {
+        config.check_reserved_names = check_reserved;
+    }
+    if let Some(allow_abs) = body.get("allow_absolute_paths").and_then(|v| v.as_bool()) {
+        config.allow_absolute_paths = allow_abs;
+    }
+    if let Some(base_dir) = body.get("base_dir").and_then(|v| v.as_str()) {
+        config.base_dir = std::path::PathBuf::from(base_dir);
+    }
+
+    state.manager.set_path_validator_config(config).await;
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({"status": "ok"})),
+    )
+}
+
+/// Validate a save path
+async fn validate_save_path(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if path.is_empty() {
+        return Json(serde_json::json!({"error": "path is required"}));
+    }
+    let result = state.manager.validate_save_path(path).await;
+    Json(serde_json::json!({
+        "is_valid": result.is_valid,
+        "canonical_path": result.canonical_path.map(|p| p.to_string_lossy().to_string()),
+        "warnings": result.warnings,
+        "error": result.error,
+    }))
 }
 
 /// Get speed history for a specific task

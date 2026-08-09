@@ -162,6 +162,12 @@ enum Command {
         action: String,
         url: Option<String>,
     },
+    /// Manage path rules for automatic save path assignment
+    DlPathRule {
+        /// "status", "enable", "disable", "add", "del", "list"
+        action: String,
+        args: Vec<String>,
+    },
     /// Add tags to a download task
     DlTag {
         task_id: String,
@@ -402,6 +408,11 @@ enum Command {
     /// Per-protocol concurrent download limit (status/enable/disable/set)
     DlProtoLimit {
         /// Subcommand: "status", "enable", "disable", "set <protocol> <limit>", "default <limit>"
+        subcommand: String,
+        args: Vec<String>,
+    },
+    DlPathVal {
+        /// Subcommand: "status", "validate <path>", "config [auto_create|base_dir|max_len]"
         subcommand: String,
         args: Vec<String>,
     },
@@ -651,6 +662,14 @@ fn parse_command(input: &str) -> Command {
                 .unwrap_or_else(|| "status".to_string());
             let url = parts.get(2).map(|s| s.to_string());
             Command::DlUrlExpand { action, url }
+        }
+        "dlprule" | "dl-prule" | "dlpr" => {
+            let action = parts
+                .get(1)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "status".to_string());
+            let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+            Command::DlPathRule { action, args }
         }
         "dltag" | "dl-tag" => {
             if parts.len() >= 3 {
@@ -1032,7 +1051,7 @@ fn parse_command(input: &str) -> Command {
             };
             Command::DlBwSchedule { subcommand, args }
         }
-        "dlpreset" | "dl-preset" | "dlpr" => {
+        "dlpreset" | "dl-preset" | "dlps" => {
             let subcommand = if parts.len() >= 2 {
                 parts[1].to_string()
             } else {
@@ -1142,6 +1161,24 @@ fn parse_command(input: &str) -> Command {
                     Vec::new()
                 };
                 Command::DlProtoLimit {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
+        "dlpathval" | "dl-pathval" | "dlpv" => {
+            // /dlpathval <status|validate|config> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlpathval <status|validate|config> [args...]".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlPathVal {
                     subcommand,
                     args: cmd_args,
                 }
@@ -1340,6 +1377,8 @@ fn command_help() -> String {
         "/dlconflict <get|set|check> - Conflict detection (get strategy / set skip|rename|overwrite / check path)",
         "/dldomainlimit <status|enable|disable|set|default> - Per-domain concurrent download limit",
         "/dlprotolimit <status|enable|disable|set|default> - Per-protocol concurrent download limit",
+        "/dlpathval <status|validate|config> - Path validator for save path security",
+        "/dlprule [cmd]     - Path rules (status|list|add|del|enable|disable|test)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -2914,6 +2953,223 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlPathRule { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match action.as_str() {
+                "status" | "list" => {
+                    let rules = download_manager.list_path_rules().await;
+                    if rules.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "📂 No path rules configured. Use /dlprule add to create one."
+                                .to_string(),
+                        );
+                    } else {
+                        let mut output = format!("📂 Path Rules ({} total):\n", rules.len());
+                        for rule in &rules {
+                            let pattern_str = match &rule.pattern {
+                                ipmsg_download::path_rules::PathRulePattern::Contains(s) => {
+                                    format!("contains:{s}")
+                                }
+                                ipmsg_download::path_rules::PathRulePattern::Wildcard(s) => {
+                                    format!("wildcard:{s}")
+                                }
+                                ipmsg_download::path_rules::PathRulePattern::Exact(s) => {
+                                    format!("exact:{s}")
+                                }
+                            };
+                            let enabled_icon = if rule.enabled { "✅" } else { "❌" };
+                            output.push_str(&format!(
+                                "  {} [{}] {} → {} (priority: {}, url: {}, filename: {})\n",
+                                enabled_icon,
+                                rule.id,
+                                pattern_str,
+                                rule.save_path.display(),
+                                rule.priority,
+                                if rule.match_url { "✓" } else { "✗" },
+                                if rule.match_filename { "✓" } else { "✗" },
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", output);
+                    }
+                }
+                "add" => {
+                    // /dlprule add <name> <pattern_type> <pattern> <save_path> [priority]
+                    if args.len() < 4 {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlprule add <name> <contains|wildcard|exact> <pattern> <save_path> [priority]\nExample: /dlprule add \"Linux ISOs\" contains linux /downloads/linux".to_string());
+                    } else {
+                        let name = args[0].clone();
+                        let pattern_type = args[1].to_lowercase();
+                        let pattern_str = args[2].clone();
+                        let save_path = std::path::PathBuf::from(&args[3]);
+                        let priority = args.get(4).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+
+                        let pattern = match pattern_type.as_str() {
+                            "contains" => {
+                                ipmsg_download::path_rules::PathRulePattern::Contains(pattern_str)
+                            }
+                            "wildcard" => {
+                                ipmsg_download::path_rules::PathRulePattern::Wildcard(pattern_str)
+                            }
+                            "exact" => {
+                                ipmsg_download::path_rules::PathRulePattern::Exact(pattern_str)
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Unknown pattern type: {pattern_type}. Use: contains, wildcard, exact"));
+                                return;
+                            }
+                        };
+
+                        let id = format!("prule_{}", chrono::Utc::now().timestamp_millis());
+                        let rule = ipmsg_download::path_rules::PathRule {
+                            id: id.clone(),
+                            name,
+                            pattern,
+                            match_url: true,
+                            match_filename: true,
+                            save_path,
+                            enabled: true,
+                            priority,
+                        };
+
+                        match download_manager.add_path_rule(rule).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Path rule added (id: {id})"),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Failed to add rule: {e}"));
+                            }
+                        }
+                    }
+                }
+                "del" | "remove" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlprule del <rule_id>".to_string());
+                    } else {
+                        let rule_id = &args[0];
+                        match download_manager.remove_path_rule(rule_id).await {
+                            Ok(_) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("🗑️ Path rule {rule_id} removed"),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to remove rule: {e}"),
+                                );
+                            }
+                        }
+                    }
+                }
+                "enable" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlprule enable <rule_id>".to_string(),
+                        );
+                    } else {
+                        match download_manager.set_path_rule_enabled(&args[0], true).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Path rule {} enabled", args[0]),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Failed: {e}"));
+                            }
+                        }
+                    }
+                }
+                "disable" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlprule disable <rule_id>".to_string(),
+                        );
+                    } else {
+                        match download_manager
+                            .set_path_rule_enabled(&args[0], false)
+                            .await
+                        {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Path rule {} disabled", args[0]),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Failed: {e}"));
+                            }
+                        }
+                    }
+                }
+                "test" => {
+                    // /dlprule test <url> <filename>
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlprule test <url> <filename>".to_string(),
+                        );
+                    } else {
+                        let url = &args[0];
+                        let filename = &args[1];
+                        match download_manager
+                            .find_matching_path_rule(url, filename)
+                            .await
+                        {
+                            Some(rule) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "🎯 Matched rule: [{}] {}\n  Save path: {}",
+                                        rule.id,
+                                        rule.name,
+                                        rule.save_path.display()
+                                    ),
+                                );
+                            }
+                            None => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "❌ No matching path rule found".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Usage: /dlprule [status|list|add|del|enable|disable|test]\n  /dlprule add <name> <contains|wildcard|exact> <pattern> <save_path> [priority]\n  /dlprule del <rule_id>\n  /dlprule enable <rule_id>\n  /dlprule disable <rule_id>\n  /dlprule test <url> <filename>".to_string());
+                }
+            }
+        }
         Command::DlAudit { args } => {
             let s = state.lock().await;
             let download_manager = s.download_manager.clone();
@@ -3726,6 +3982,144 @@ async fn handle_command(
                         "main",
                         "Usage: /dlprotolimit <status|enable|disable|default|set|remove> [args...]"
                             .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlPathVal { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_path_validator_config().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "🔒 Path Validator Status\n\
+                            Base directory: {:?}\n\
+                            Auto-create directories: {}\n\
+                            Max path length: {}\n\
+                            Check reserved names: {}\n\
+                            Allow absolute paths: {}",
+                            config.base_dir,
+                            config.auto_create_dirs,
+                            config.max_path_length,
+                            config.check_reserved_names,
+                            config.allow_absolute_paths
+                        ),
+                    );
+                }
+                "validate" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpathval validate <path>".to_string(),
+                        );
+                        return;
+                    }
+                    let path = &args[0];
+                    let result = download_manager.validate_save_path(path).await;
+                    let mut s = state.lock().await;
+                    if result.is_valid {
+                        let canonical = result
+                            .canonical_path
+                            .map(|p| format!("{:?}", p))
+                            .unwrap_or_else(|| "N/A".to_string());
+                        let mut msg = format!("✅ Path is valid\nCanonical: {}", canonical);
+                        if !result.warnings.is_empty() {
+                            msg.push_str("\nWarnings:");
+                            for w in &result.warnings {
+                                msg.push_str(&format!("\n  ⚠️ {}", w));
+                            }
+                        }
+                        s.add_system_message("main", msg);
+                    } else {
+                        let error = result.error.unwrap_or_else(|| "Unknown error".to_string());
+                        s.add_system_message(
+                            "main",
+                            format!("❌ Path validation failed: {}", error),
+                        );
+                    }
+                }
+                "config" => {
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpathval config <auto_create|base_dir|max_len> <value>"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    let key = &args[0];
+                    let value = &args[1];
+                    let mut config = download_manager.get_path_validator_config().await;
+
+                    match key.as_str() {
+                        "auto_create" => match value.parse::<bool>() {
+                            Ok(v) => {
+                                config.auto_create_dirs = v;
+                                download_manager.set_path_validator_config(config).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Auto-create directories: {}", v),
+                                );
+                            }
+                            Err(_) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "❌ Invalid boolean value. Use 'true' or 'false'".to_string(),
+                                );
+                            }
+                        },
+                        "base_dir" => {
+                            config.base_dir = std::path::PathBuf::from(value);
+                            download_manager.set_path_validator_config(config).await;
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Base directory set to: {}", value),
+                            );
+                        }
+                        "max_len" => match value.parse::<usize>() {
+                            Ok(v) => {
+                                config.max_path_length = v;
+                                download_manager.set_path_validator_config(config).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Max path length set to: {}", v),
+                                );
+                            }
+                            Err(_) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "❌ Invalid number for max_len".to_string(),
+                                );
+                            }
+                        },
+                        _ => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "❌ Unknown config key. Use: auto_create, base_dir, max_len"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlpathval <status|validate|config> [args...]".to_string(),
                     );
                 }
             }

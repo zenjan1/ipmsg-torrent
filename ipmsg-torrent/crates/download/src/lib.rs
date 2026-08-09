@@ -30,7 +30,9 @@ pub mod magnet;
 pub mod metadata_cache;
 pub mod mirror_health;
 pub mod notification;
+pub mod path_rules;
 pub mod path_template;
+pub mod path_validator;
 pub mod post_hooks;
 pub mod progress;
 pub mod protocol_limits;
@@ -743,6 +745,10 @@ pub struct DownloadManager {
     watch_folder: Arc<Mutex<watch_folder::WatchFolderManager>>,
     /// Per-protocol concurrent download limits
     protocol_limits: Arc<tokio::sync::RwLock<protocol_limits::ProtocolLimitsConfig>>,
+    /// Path validator for save path security checks
+    path_validator: Arc<Mutex<path_validator::PathValidator>>,
+    /// Path rules for automatic save path assignment
+    path_rules: Arc<Mutex<path_rules::PathRuleManager>>,
 }
 
 impl DownloadManager {
@@ -802,6 +808,8 @@ impl DownloadManager {
             protocol_limits: Arc::new(tokio::sync::RwLock::new(
                 protocol_limits::ProtocolLimitsConfig::new(),
             )),
+            path_validator: Arc::new(Mutex::new(path_validator::PathValidator::new())),
+            path_rules: Arc::new(Mutex::new(path_rules::PathRuleManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -993,7 +1001,15 @@ impl DownloadManager {
             protocol_limits: Arc::new(tokio::sync::RwLock::new(
                 protocol_limits::ProtocolLimitsConfig::new(),
             )),
+            path_validator: Arc::new(Mutex::new(path_validator::PathValidator::new())),
+            path_rules: Arc::new(Mutex::new(path_rules::PathRuleManager::new())),
         };
+        // Restore path rules from disk
+        if let Ok(loaded_rules) =
+            path_rules::load_path_rules(&dm.data_dir.join("path_rules.json")).await
+        {
+            *dm.path_rules.lock().await = loaded_rules;
+        }
         // Restore data cap config from disk
         if let Some(loaded_cap) = data_cap::load_data_cap(&dm.data_dir) {
             *dm.data_cap.lock().await = loaded_cap;
@@ -2996,6 +3012,30 @@ impl DownloadManager {
             .count() as u32;
 
         config.can_start(protocol, current_running)
+    }
+
+    /// Validate a save path for security and correctness.
+    ///
+    /// Checks for path traversal attacks, invalid characters, and optionally
+    /// auto-creates missing directories.
+    pub async fn validate_save_path(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> path_validator::ValidationResult {
+        let validator = self.path_validator.lock().await;
+        validator.validate(path).await
+    }
+
+    /// Set the path validator configuration.
+    pub async fn set_path_validator_config(&self, config: path_validator::PathValidatorConfig) {
+        let mut validator = self.path_validator.lock().await;
+        *validator = path_validator::PathValidator::with_config(config);
+    }
+
+    /// Get the current path validator configuration.
+    pub async fn get_path_validator_config(&self) -> path_validator::PathValidatorConfig {
+        let validator = self.path_validator.lock().await;
+        validator.config().clone()
     }
 
     /// Log an audit event
@@ -6044,6 +6084,96 @@ impl DownloadManager {
     ) -> Option<auto_categorize::CategorizeAction> {
         let rules = self.categorize_rules.lock().await;
         auto_categorize::apply_rules(&rules, url, filename).cloned()
+    }
+
+    // ─── Phase 77: Path Rules ───
+
+    /// Add a path rule for automatic save path assignment.
+    pub async fn add_path_rule(
+        &self,
+        rule: path_rules::PathRule,
+    ) -> Result<(), path_rules::PathRulesError> {
+        let mut manager = self.path_rules.lock().await;
+        manager.add_rule(rule);
+        let config_path = self.data_dir.join("path_rules.json");
+        path_rules::save_path_rules(&manager, &config_path).await
+    }
+
+    /// List all path rules.
+    pub async fn list_path_rules(&self) -> Vec<path_rules::PathRule> {
+        self.path_rules.lock().await.list_rules().to_vec()
+    }
+
+    /// Remove a path rule by ID.
+    pub async fn remove_path_rule(
+        &self,
+        rule_id: &str,
+    ) -> Result<path_rules::PathRule, path_rules::PathRulesError> {
+        let mut manager = self.path_rules.lock().await;
+        let removed = manager.remove_rule(rule_id)?;
+        let config_path = self.data_dir.join("path_rules.json");
+        path_rules::save_path_rules(&manager, &config_path).await?;
+        Ok(removed)
+    }
+
+    /// Get a path rule by ID.
+    pub async fn get_path_rule(&self, rule_id: &str) -> Option<path_rules::PathRule> {
+        self.path_rules.lock().await.get_rule(rule_id).cloned()
+    }
+
+    /// Enable or disable a path rule.
+    pub async fn set_path_rule_enabled(
+        &self,
+        rule_id: &str,
+        enabled: bool,
+    ) -> Result<(), path_rules::PathRulesError> {
+        let mut manager = self.path_rules.lock().await;
+        manager.set_rule_enabled(rule_id, enabled)?;
+        let config_path = self.data_dir.join("path_rules.json");
+        path_rules::save_path_rules(&manager, &config_path).await
+    }
+
+    /// Update a path rule's save path.
+    pub async fn update_path_rule_save_path(
+        &self,
+        rule_id: &str,
+        save_path: std::path::PathBuf,
+    ) -> Result<(), path_rules::PathRulesError> {
+        let mut manager = self.path_rules.lock().await;
+        manager.update_rule_save_path(rule_id, save_path)?;
+        let config_path = self.data_dir.join("path_rules.json");
+        path_rules::save_path_rules(&manager, &config_path).await
+    }
+
+    /// Update a path rule's priority.
+    pub async fn update_path_rule_priority(
+        &self,
+        rule_id: &str,
+        priority: u32,
+    ) -> Result<(), path_rules::PathRulesError> {
+        let mut manager = self.path_rules.lock().await;
+        manager.update_rule_priority(rule_id, priority)?;
+        let config_path = self.data_dir.join("path_rules.json");
+        path_rules::save_path_rules(&manager, &config_path).await
+    }
+
+    /// Find the matching path rule for a URL and filename.
+    pub async fn find_matching_path_rule(
+        &self,
+        url: &str,
+        filename: &str,
+    ) -> Option<path_rules::PathRule> {
+        let manager = self.path_rules.lock().await;
+        manager.find_matching_rule(url, filename).cloned()
+    }
+
+    /// Apply path rules to determine save path for a download.
+    /// Returns the save path if a matching rule is found, None otherwise.
+    pub async fn apply_path_rules(&self, url: &str, filename: &str) -> Option<std::path::PathBuf> {
+        let manager = self.path_rules.lock().await;
+        manager
+            .find_matching_rule(url, filename)
+            .map(|rule| rule.save_path.clone())
     }
 
     fn would_create_cycle(
