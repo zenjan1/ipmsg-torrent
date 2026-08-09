@@ -123,6 +123,12 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/batch/resume-all", post(resume_all))
         .route("/api/batch/remove-completed", post(remove_completed))
         .route("/api/batch/remove-failed", post(remove_failed))
+        .route("/api/bulk/tags", post(bulk_tags))
+        .route("/api/bulk/group", post(bulk_group))
+        .route("/api/bulk/priority", post(bulk_priority))
+        .route("/api/bulk/speed-limit", post(bulk_speed_limit))
+        .route("/api/bulk/weight", post(bulk_weight))
+        .route("/api/bulk/match", post(bulk_match))
         .route("/api/batch-import", post(batch_import))
         .route("/api/bandwidth", get(get_bandwidth))
         .route("/api/bandwidth/history", get(get_bandwidth_history))
@@ -1751,6 +1757,95 @@ async fn remove_failed(State(state): State<Arc<WebState>>) -> Json<TaskResponse>
         task_id: None,
         message: format!("Removed {} failed tasks", count),
     })
+}
+
+// ─── Phase 80: Bulk Operations ───
+
+/// Request for bulk tag operations
+#[derive(Debug, Deserialize)]
+pub struct BulkTagsRequest {
+    pub filter: crate::bulk_ops::BulkFilter,
+    pub action: crate::bulk_ops::BulkTagAction,
+}
+
+/// Request for bulk group operations
+#[derive(Debug, Deserialize)]
+pub struct BulkGroupRequest {
+    pub filter: crate::bulk_ops::BulkFilter,
+    pub action: crate::bulk_ops::BulkGroupAction,
+}
+
+/// Request for bulk priority operations
+#[derive(Debug, Deserialize)]
+pub struct BulkPriorityRequest {
+    pub filter: crate::bulk_ops::BulkFilter,
+    pub action: crate::bulk_ops::BulkPriorityAction,
+}
+
+/// Request for bulk speed limit operations
+#[derive(Debug, Deserialize)]
+pub struct BulkSpeedLimitRequest {
+    pub filter: crate::bulk_ops::BulkFilter,
+    pub action: crate::bulk_ops::BulkSpeedLimitAction,
+}
+
+/// Request for bulk weight operations
+#[derive(Debug, Deserialize)]
+pub struct BulkWeightRequest {
+    pub filter: crate::bulk_ops::BulkFilter,
+    pub action: crate::bulk_ops::BulkWeightAction,
+}
+
+async fn bulk_tags(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<BulkTagsRequest>,
+) -> Json<crate::bulk_ops::BulkResult> {
+    Json(state.manager.bulk_tag(&req.filter, &req.action).await)
+}
+
+async fn bulk_group(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<BulkGroupRequest>,
+) -> Json<crate::bulk_ops::BulkResult> {
+    Json(state.manager.bulk_group(&req.filter, &req.action).await)
+}
+
+async fn bulk_priority(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<BulkPriorityRequest>,
+) -> Json<crate::bulk_ops::BulkResult> {
+    Json(state.manager.bulk_priority(&req.filter, &req.action).await)
+}
+
+async fn bulk_speed_limit(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<BulkSpeedLimitRequest>,
+) -> Json<crate::bulk_ops::BulkResult> {
+    Json(
+        state
+            .manager
+            .bulk_speed_limit(&req.filter, &req.action)
+            .await,
+    )
+}
+
+async fn bulk_weight(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<BulkWeightRequest>,
+) -> Json<crate::bulk_ops::BulkResult> {
+    Json(
+        state
+            .manager
+            .bulk_bandwidth_weight(&req.filter, &req.action)
+            .await,
+    )
+}
+
+async fn bulk_match(
+    State(state): State<Arc<WebState>>,
+    Json(filter): Json<crate::bulk_ops::BulkFilter>,
+) -> Json<Vec<String>> {
+    Json(state.manager.get_bulk_filter_matches(&filter).await)
 }
 
 /// Request to set proxy configuration

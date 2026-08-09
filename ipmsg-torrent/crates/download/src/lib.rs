@@ -11,6 +11,7 @@ pub mod auto_cleanup;
 pub mod auto_shutdown;
 pub mod bandwidth_monitor;
 pub mod bandwidth_schedule;
+pub mod bulk_ops;
 pub mod checksum;
 pub mod conflict_detection;
 pub mod connection_pool;
@@ -83,6 +84,10 @@ pub use bandwidth_schedule::{
     BandwidthScheduleError, BandwidthScheduleManager, BandwidthScheduleRule,
     load_bandwidth_schedule, parse_days, parse_speed_limit, parse_time, parse_time_window,
     save_bandwidth_schedule,
+};
+pub use bulk_ops::{
+    BulkFilter, BulkGroupAction, BulkPriorityAction, BulkResult, BulkSpeedLimitAction,
+    BulkTagAction, BulkWeightAction,
 };
 pub use eta_estimator::{EtaConfidence, EtaEstimate, EtaEstimator};
 pub use mirror_health::{MirrorHealth, MirrorHealthConfig, MirrorSummary};
@@ -6149,6 +6154,379 @@ impl DownloadManager {
             true
         } else {
             false
+        }
+    }
+
+    // ─── Phase 80: Bulk Task Operations ───
+
+    /// Get task IDs matching a bulk filter.
+    pub async fn get_bulk_filter_matches(&self, filter: &bulk_ops::BulkFilter) -> Vec<String> {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .iter()
+            .filter(|t| {
+                // Filter by task IDs
+                if !filter.task_ids.is_empty() && !filter.task_ids.contains(&t.id) {
+                    return false;
+                }
+                // Filter by state
+                if let Some(ref state_str) = filter.state {
+                    let state_match = match state_str.to_lowercase().as_str() {
+                        "downloading" | "running" | "active" => {
+                            t.state == DownloadState::Downloading
+                        }
+                        "paused" => t.state == DownloadState::Paused,
+                        "queued" | "waiting" => t.state == DownloadState::Queued,
+                        "complete" | "completed" | "done" => t.state == DownloadState::Complete,
+                        "error" | "failed" => t.state == DownloadState::Error,
+                        _ => false,
+                    };
+                    if !state_match {
+                        return false;
+                    }
+                }
+                // Filter by protocol
+                if let Some(ref proto_str) = filter.protocol {
+                    let proto_match = match proto_str.to_lowercase().as_str() {
+                        "http" | "https" | "ftp" | "xunlei" => {
+                            t.protocol == DownloadProtocol::Xunlei
+                        }
+                        "torrent" | "bittorrent" | "bt" => t.protocol == DownloadProtocol::Torrent,
+                        "ed2k" | "edonkey" | "emule" => t.protocol == DownloadProtocol::Ed2k,
+                        "p2p" => t.protocol == DownloadProtocol::P2P,
+                        "magnet" => t.protocol == DownloadProtocol::Magnet,
+                        _ => false,
+                    };
+                    if !proto_match {
+                        return false;
+                    }
+                }
+                // Filter by tag
+                if let Some(ref tag) = filter.tag {
+                    let tag_lower = tag.to_lowercase();
+                    if !t.tags.contains(&tag_lower) {
+                        return false;
+                    }
+                }
+                // Filter by group
+                if let Some(ref group) = filter.group {
+                    if t.group.as_deref() != Some(group.as_str()) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|t| t.id.clone())
+            .collect()
+    }
+
+    /// Bulk tag operation: add/remove/replace/clear tags on multiple tasks.
+    pub async fn bulk_tag(
+        &self,
+        filter: &bulk_ops::BulkFilter,
+        action: &bulk_ops::BulkTagAction,
+    ) -> bulk_ops::BulkResult {
+        let matched_ids = self.get_bulk_filter_matches(filter).await;
+        let matched = matched_ids.len();
+        let mut modified_ids = Vec::new();
+
+        if matched == 0 {
+            return bulk_ops::BulkResult {
+                matched: 0,
+                modified: 0,
+                modified_ids,
+                description: "No tasks matched the filter".to_string(),
+            };
+        }
+
+        let mut tasks = self.tasks.lock().await;
+        for id in &matched_ids {
+            if let Some(task) = tasks.iter_mut().find(|t| &t.id == id) {
+                match action {
+                    bulk_ops::BulkTagAction::Add { tags } => {
+                        for tag in tags {
+                            let tag = tag.trim().to_lowercase();
+                            if !tag.is_empty() && !task.tags.contains(&tag) {
+                                task.tags.push(tag);
+                            }
+                        }
+                        task.tags.sort();
+                        task.tags.dedup();
+                    }
+                    bulk_ops::BulkTagAction::Remove { tags } => {
+                        let tags_to_remove: Vec<String> =
+                            tags.iter().map(|t| t.trim().to_lowercase()).collect();
+                        task.tags.retain(|t| !tags_to_remove.contains(t));
+                    }
+                    bulk_ops::BulkTagAction::Replace { tags } => {
+                        task.tags = tags
+                            .iter()
+                            .map(|t| t.trim().to_lowercase())
+                            .filter(|t| !t.is_empty())
+                            .collect();
+                        task.tags.sort();
+                        task.tags.dedup();
+                    }
+                    bulk_ops::BulkTagAction::Clear => {
+                        task.tags.clear();
+                    }
+                }
+                task.updated_at = chrono::Utc::now();
+                self.emit_event(TaskEvent::Updated {
+                    task: TaskInfoEvent::from_task(task),
+                });
+                modified_ids.push(id.clone());
+            }
+        }
+        drop(tasks);
+        self.persist_tasks().await;
+
+        let modified_count = modified_ids.len();
+        let description = match action {
+            bulk_ops::BulkTagAction::Add { tags } => {
+                format!("Added {} tags to {} tasks", tags.len(), modified_count)
+            }
+            bulk_ops::BulkTagAction::Remove { tags } => {
+                format!("Removed {} tags from {} tasks", tags.len(), modified_count)
+            }
+            bulk_ops::BulkTagAction::Replace { tags } => {
+                format!(
+                    "Replaced tags with {} tags on {} tasks",
+                    tags.len(),
+                    modified_count
+                )
+            }
+            bulk_ops::BulkTagAction::Clear => {
+                format!("Cleared tags from {} tasks", modified_count)
+            }
+        };
+
+        bulk_ops::BulkResult {
+            matched,
+            modified: modified_count,
+            modified_ids,
+            description,
+        }
+    }
+
+    /// Bulk group operation: set/clear group on multiple tasks.
+    pub async fn bulk_group(
+        &self,
+        filter: &bulk_ops::BulkFilter,
+        action: &bulk_ops::BulkGroupAction,
+    ) -> bulk_ops::BulkResult {
+        let matched_ids = self.get_bulk_filter_matches(filter).await;
+        let matched = matched_ids.len();
+        let mut modified_ids = Vec::new();
+
+        if matched == 0 {
+            return bulk_ops::BulkResult {
+                matched: 0,
+                modified: 0,
+                modified_ids,
+                description: "No tasks matched the filter".to_string(),
+            };
+        }
+
+        let group_value = match action {
+            bulk_ops::BulkGroupAction::Set { group } => {
+                let trimmed = group.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            }
+            bulk_ops::BulkGroupAction::Clear => None,
+        };
+
+        let mut tasks = self.tasks.lock().await;
+        for id in &matched_ids {
+            if let Some(task) = tasks.iter_mut().find(|t| &t.id == id) {
+                task.group = group_value.clone();
+                task.updated_at = chrono::Utc::now();
+                self.emit_event(TaskEvent::Updated {
+                    task: TaskInfoEvent::from_task(task),
+                });
+                modified_ids.push(id.clone());
+            }
+        }
+        drop(tasks);
+        self.persist_tasks().await;
+
+        let modified_count = modified_ids.len();
+        let description = match action {
+            bulk_ops::BulkGroupAction::Set { group } => {
+                format!("Set group '{}' on {} tasks", group, modified_count)
+            }
+            bulk_ops::BulkGroupAction::Clear => {
+                format!("Cleared group from {} tasks", modified_count)
+            }
+        };
+
+        bulk_ops::BulkResult {
+            matched,
+            modified: modified_count,
+            modified_ids,
+            description,
+        }
+    }
+
+    /// Bulk priority operation: set priority on multiple tasks.
+    pub async fn bulk_priority(
+        &self,
+        filter: &bulk_ops::BulkFilter,
+        action: &bulk_ops::BulkPriorityAction,
+    ) -> bulk_ops::BulkResult {
+        let matched_ids = self.get_bulk_filter_matches(filter).await;
+        let matched = matched_ids.len();
+        let mut modified_ids = Vec::new();
+
+        if matched == 0 {
+            return bulk_ops::BulkResult {
+                matched: 0,
+                modified: 0,
+                modified_ids,
+                description: "No tasks matched the filter".to_string(),
+            };
+        }
+
+        let priority = match bulk_ops::parse_priority(&action.priority) {
+            Some(p) => p,
+            None => {
+                return bulk_ops::BulkResult {
+                    matched,
+                    modified: 0,
+                    modified_ids,
+                    description: format!("Invalid priority: {}", action.priority),
+                };
+            }
+        };
+
+        let priority_enum = match priority.as_str() {
+            "Low" => DownloadPriority::Low,
+            "Normal" => DownloadPriority::Normal,
+            "High" => DownloadPriority::High,
+            _ => DownloadPriority::Normal,
+        };
+
+        let mut tasks = self.tasks.lock().await;
+        for id in &matched_ids {
+            if let Some(task) = tasks.iter_mut().find(|t| &t.id == id) {
+                task.priority = priority_enum;
+                task.updated_at = chrono::Utc::now();
+                self.emit_event(TaskEvent::Updated {
+                    task: TaskInfoEvent::from_task(task),
+                });
+                modified_ids.push(id.clone());
+            }
+        }
+        drop(tasks);
+        self.persist_tasks().await;
+
+        let modified_count = modified_ids.len();
+        bulk_ops::BulkResult {
+            matched,
+            modified: modified_count,
+            modified_ids,
+            description: format!("Set priority to {} on {} tasks", priority, modified_count),
+        }
+    }
+
+    /// Bulk speed limit operation: set speed limit on multiple tasks.
+    pub async fn bulk_speed_limit(
+        &self,
+        filter: &bulk_ops::BulkFilter,
+        action: &bulk_ops::BulkSpeedLimitAction,
+    ) -> bulk_ops::BulkResult {
+        let matched_ids = self.get_bulk_filter_matches(filter).await;
+        let matched = matched_ids.len();
+        let mut modified_ids = Vec::new();
+
+        if matched == 0 {
+            return bulk_ops::BulkResult {
+                matched: 0,
+                modified: 0,
+                modified_ids,
+                description: "No tasks matched the filter".to_string(),
+            };
+        }
+
+        let mut tasks = self.tasks.lock().await;
+        for id in &matched_ids {
+            if let Some(task) = tasks.iter_mut().find(|t| &t.id == id) {
+                task.speed_limit_bps = action.bytes_per_sec;
+                task.updated_at = chrono::Utc::now();
+                self.emit_event(TaskEvent::Updated {
+                    task: TaskInfoEvent::from_task(task),
+                });
+                modified_ids.push(id.clone());
+            }
+        }
+        drop(tasks);
+        self.persist_tasks().await;
+
+        let modified_count = modified_ids.len();
+        let description = match action.bytes_per_sec {
+            Some(limit) => format!(
+                "Set speed limit to {} bytes/s on {} tasks",
+                limit, modified_count
+            ),
+            None => format!("Removed speed limit from {} tasks", modified_count),
+        };
+
+        bulk_ops::BulkResult {
+            matched,
+            modified: modified_count,
+            modified_ids,
+            description,
+        }
+    }
+
+    /// Bulk bandwidth weight operation: set weight on multiple tasks.
+    pub async fn bulk_bandwidth_weight(
+        &self,
+        filter: &bulk_ops::BulkFilter,
+        action: &bulk_ops::BulkWeightAction,
+    ) -> bulk_ops::BulkResult {
+        let matched_ids = self.get_bulk_filter_matches(filter).await;
+        let matched = matched_ids.len();
+        let mut modified_ids = Vec::new();
+
+        if matched == 0 {
+            return bulk_ops::BulkResult {
+                matched: 0,
+                modified: 0,
+                modified_ids,
+                description: "No tasks matched the filter".to_string(),
+            };
+        }
+
+        let weight = action.weight.clamp(1, 10);
+
+        let mut tasks = self.tasks.lock().await;
+        for id in &matched_ids {
+            if let Some(task) = tasks.iter_mut().find(|t| &t.id == id) {
+                task.bandwidth_weight = weight;
+                task.updated_at = chrono::Utc::now();
+                self.emit_event(TaskEvent::Updated {
+                    task: TaskInfoEvent::from_task(task),
+                });
+                modified_ids.push(id.clone());
+            }
+        }
+        drop(tasks);
+        self.persist_tasks().await;
+
+        let modified_count = modified_ids.len();
+        bulk_ops::BulkResult {
+            matched,
+            modified: modified_count,
+            modified_ids,
+            description: format!(
+                "Set bandwidth weight to {} on {} tasks",
+                weight, modified_count
+            ),
         }
     }
 
