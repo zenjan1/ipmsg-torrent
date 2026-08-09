@@ -1429,7 +1429,7 @@ fn command_help() -> String {
         "/dlsegment <url>   - Download URL using multi-segment parallel connections",
         "/dlextract <path>  - Extract download URLs from arbitrary text file",
         "/dllinks <url>     - Scrape web page and extract download links",
-        "/dlwf [cmd]        - Watch folders (list|add <path> [name]|remove <id>|scan|enable|disable)",
+        "/dlwf [cmd]        - Watch folders (list|add <path> [name]|remove <id>|scan|enable|disable|autoscan)",
         "/dlautoshutdown <disabled|exit|shell:<cmd>> - Auto-shutdown when all downloads complete",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/dlpath <path>       - Set download save path (absolute path)",
@@ -5624,9 +5624,88 @@ async fn handle_command(
                         }
                     }
                 }
+                "autoscan" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_watch_folder_auto_scan().await;
+                        let mut s = state.lock().await;
+                        let status = if config.enabled {
+                            "✅ Enabled"
+                        } else {
+                            "❌ Disabled"
+                        };
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "🔄 Auto-scan: {}\n   Interval: {}s\n   Last scan: {}",
+                                status,
+                                config.interval_secs,
+                                config
+                                    .last_auto_scan
+                                    .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                                    .unwrap_or_else(|| "Never".to_string())
+                            ),
+                        );
+                    } else if args[0] == "enable" || args[0] == "on" {
+                        let interval = args
+                            .get(1)
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(300);
+                        download_manager
+                            .set_watch_folder_auto_scan(true, interval)
+                            .await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Auto-scan enabled (interval: {}s)", interval),
+                        );
+                    } else if args[0] == "disable" || args[0] == "off" {
+                        let config = download_manager.get_watch_folder_auto_scan().await;
+                        download_manager
+                            .set_watch_folder_auto_scan(false, config.interval_secs)
+                            .await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Auto-scan disabled".to_string());
+                    } else if args[0] == "interval" || args[0] == "set" {
+                        if args.len() < 2 {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "Usage: /dlwf autoscan interval <seconds>".to_string(),
+                            );
+                        } else {
+                            match args[1].parse::<u64>() {
+                                Ok(interval) => {
+                                    let config =
+                                        download_manager.get_watch_folder_auto_scan().await;
+                                    download_manager
+                                        .set_watch_folder_auto_scan(config.enabled, interval)
+                                        .await;
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("✅ Auto-scan interval set to {}s", interval),
+                                    );
+                                }
+                                Err(_) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "❌ Invalid interval. Use a number in seconds.".to_string(),
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlwf autoscan [enable|disable|interval <seconds>]".to_string(),
+                        );
+                    }
+                }
                 _ => {
                     let mut s = state.lock().await;
-                    s.add_system_message("main", "Usage: /dlwf [list|add <path> [name]|remove <id>|scan|enable <id>|disable <id>]".to_string());
+                    s.add_system_message("main", "Usage: /dlwf [list|add <path> [name]|remove <id>|scan|enable <id>|disable <id>|autoscan]".to_string());
                 }
             }
         }

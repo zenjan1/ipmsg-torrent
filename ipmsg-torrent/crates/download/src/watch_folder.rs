@@ -82,6 +82,30 @@ pub struct WatchFolderScanResult {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WatchFolderState {
     pub folders: Vec<WatchFolderEntry>,
+    #[serde(default)]
+    pub auto_scan_config: Option<WatchFolderAutoScanConfig>,
+}
+
+/// Configuration for automatic watch folder scanning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchFolderAutoScanConfig {
+    /// Whether auto-scanning is enabled.
+    pub enabled: bool,
+    /// Scan interval in seconds (default: 300 = 5 minutes).
+    pub interval_secs: u64,
+    /// Last auto-scan timestamp.
+    #[serde(default)]
+    pub last_auto_scan: Option<DateTime<Utc>>,
+}
+
+impl Default for WatchFolderAutoScanConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 300,
+            last_auto_scan: None,
+        }
+    }
 }
 
 /// Default file extensions to watch.
@@ -301,6 +325,9 @@ pub struct WatchFolderManager {
     /// Set of already-processed file paths (to avoid re-processing).
     #[serde(default)]
     pub processed_files: HashSet<String>,
+    /// Auto-scan configuration.
+    #[serde(default)]
+    pub auto_scan_config: WatchFolderAutoScanConfig,
 }
 
 impl Default for WatchFolderManager {
@@ -314,6 +341,7 @@ impl WatchFolderManager {
         Self {
             folders: Vec::new(),
             processed_files: HashSet::new(),
+            auto_scan_config: WatchFolderAutoScanConfig::default(),
         }
     }
 
@@ -520,6 +548,7 @@ impl WatchFolderManager {
     pub fn save(&self, path: &Path) -> Result<(), WatchFolderError> {
         let state = WatchFolderState {
             folders: self.folders.clone(),
+            auto_scan_config: Some(self.auto_scan_config.clone()),
         };
         save_watch_folders(path, &state)
     }
@@ -530,7 +559,37 @@ impl WatchFolderManager {
         Ok(Self {
             folders: state.folders,
             processed_files: HashSet::new(),
+            auto_scan_config: state.auto_scan_config.unwrap_or_default(),
         })
+    }
+
+    /// Set auto-scan configuration.
+    pub fn set_auto_scan_config(&mut self, config: WatchFolderAutoScanConfig) {
+        self.auto_scan_config = config;
+    }
+
+    /// Get auto-scan configuration.
+    pub fn get_auto_scan_config(&self) -> &WatchFolderAutoScanConfig {
+        &self.auto_scan_config
+    }
+
+    /// Check if auto-scan is due (interval has elapsed).
+    pub fn is_auto_scan_due(&self) -> bool {
+        if !self.auto_scan_config.enabled {
+            return false;
+        }
+        match self.auto_scan_config.last_auto_scan {
+            None => true,
+            Some(last) => {
+                let elapsed = Utc::now().signed_duration_since(last).num_seconds() as u64;
+                elapsed >= self.auto_scan_config.interval_secs
+            }
+        }
+    }
+
+    /// Update last auto-scan timestamp to now.
+    pub fn mark_auto_scan_complete(&mut self) {
+        self.auto_scan_config.last_auto_scan = Some(Utc::now());
     }
 
     /// Get summary of all watch folders.
@@ -591,6 +650,83 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_auto_scan_config_default() {
+        let config = WatchFolderAutoScanConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.interval_secs, 300);
+        assert!(config.last_auto_scan.is_none());
+    }
+
+    #[test]
+    fn test_auto_scan_due_when_disabled() {
+        let mgr = WatchFolderManager::new();
+        assert!(!mgr.is_auto_scan_due());
+    }
+
+    #[test]
+    fn test_auto_scan_due_when_enabled_no_last_scan() {
+        let mut mgr = WatchFolderManager::new();
+        mgr.set_auto_scan_config(WatchFolderAutoScanConfig {
+            enabled: true,
+            interval_secs: 300,
+            last_auto_scan: None,
+        });
+        assert!(mgr.is_auto_scan_due());
+    }
+
+    #[test]
+    fn test_auto_scan_due_when_interval_elapsed() {
+        let mut mgr = WatchFolderManager::new();
+        let past = Utc::now() - chrono::Duration::seconds(400);
+        mgr.set_auto_scan_config(WatchFolderAutoScanConfig {
+            enabled: true,
+            interval_secs: 300,
+            last_auto_scan: Some(past),
+        });
+        assert!(mgr.is_auto_scan_due());
+    }
+
+    #[test]
+    fn test_auto_scan_not_due_when_recent() {
+        let mut mgr = WatchFolderManager::new();
+        let recent = Utc::now() - chrono::Duration::seconds(100);
+        mgr.set_auto_scan_config(WatchFolderAutoScanConfig {
+            enabled: true,
+            interval_secs: 300,
+            last_auto_scan: Some(recent),
+        });
+        assert!(!mgr.is_auto_scan_due());
+    }
+
+    #[test]
+    fn test_mark_auto_scan_complete() {
+        let mut mgr = WatchFolderManager::new();
+        assert!(mgr.auto_scan_config.last_auto_scan.is_none());
+        mgr.mark_auto_scan_complete();
+        assert!(mgr.auto_scan_config.last_auto_scan.is_some());
+    }
+
+    #[test]
+    fn test_auto_scan_config_persistence() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("watch_folders.json");
+
+        let mut mgr = WatchFolderManager::new();
+        mgr.set_auto_scan_config(WatchFolderAutoScanConfig {
+            enabled: true,
+            interval_secs: 600,
+            last_auto_scan: Some(Utc::now()),
+        });
+
+        mgr.save(&config_path).unwrap();
+
+        let loaded = WatchFolderManager::load(&config_path).unwrap();
+        assert!(loaded.auto_scan_config.enabled);
+        assert_eq!(loaded.auto_scan_config.interval_secs, 600);
+        assert!(loaded.auto_scan_config.last_auto_scan.is_some());
+    }
 
     #[test]
     fn test_extract_urls_from_text_basic() {

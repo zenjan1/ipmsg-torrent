@@ -1173,6 +1173,56 @@ impl DownloadManager {
         let domain_limit = self.domain_limit.clone();
         let protocol_limits = self.protocol_limits.clone();
 
+        // Spawn watch folder auto-scanner (runs every 60 seconds)
+        let watch_folder = self.watch_folder.clone();
+        let watch_folder_data_dir = self.data_dir.clone();
+        let watch_folder_tasks = self.tasks.clone();
+        let watch_folder_event_tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let mut mgr = watch_folder.lock().await;
+                if !mgr.is_auto_scan_due() {
+                    continue;
+                }
+                tracing::debug!("Auto-scanning watch folders");
+                let urls = mgr.scan_and_collect_urls().await;
+                mgr.mark_auto_scan_complete();
+                let config_path = watch_folder_data_dir.join("watch_folders.json");
+                if let Err(e) = mgr.save(&config_path) {
+                    tracing::warn!(error = %e, "Failed to persist watch folder config");
+                }
+                drop(mgr);
+
+                let mut imported = 0usize;
+                for wfu in urls {
+                    let tasks_lock = watch_folder_tasks.lock().await;
+                    if tasks_lock
+                        .iter()
+                        .any(|t| t.source_url.as_deref() == Some(&wfu.url))
+                    {
+                        continue;
+                    }
+                    drop(tasks_lock);
+
+                    let mut tags = wfu.tags.clone();
+                    tags.push("watch-folder".to_string());
+                    let url = wfu.url.clone();
+                    tracing::info!(url = %url, tags = ?tags, "Watch folder auto-imported URL");
+                    imported += 1;
+                }
+                if imported > 0 {
+                    tracing::info!(count = imported, "Watch folder auto-scan completed");
+                    let _ = watch_folder_event_tx.send(TaskEvent::Status {
+                        total_tasks: 0,
+                        running_tasks: 0,
+                        total_speed_bps: 0.0,
+                    });
+                }
+            }
+        });
+
         // Spawn schedule checker (runs every 60 seconds)
         let schedule_check_tasks = self.tasks.clone();
         let schedule_check_notify = self.task_complete_notify.clone();
@@ -1737,6 +1787,56 @@ impl DownloadManager {
                 }
             }
         });
+    }
+
+    /// Tick watch folder auto-scanner (called from main scheduler loop)
+    pub async fn tick_watch_folder_auto_scan(&self) -> usize {
+        let mut mgr = self.watch_folder.lock().await;
+        if !mgr.is_auto_scan_due() {
+            return 0;
+        }
+        tracing::debug!("Auto-scanning watch folders");
+        let urls = mgr.scan_and_collect_urls().await;
+        mgr.mark_auto_scan_complete();
+        let config_path = self.data_dir.join("watch_folders.json");
+        if let Err(e) = mgr.save(&config_path) {
+            tracing::warn!(error = %e, "Failed to persist watch folder config");
+        }
+        drop(mgr);
+
+        let mut imported = 0;
+        for wfu in urls {
+            let tasks = self.tasks.lock().await;
+            if tasks
+                .iter()
+                .any(|t| t.source_url.as_deref() == Some(&wfu.url))
+            {
+                continue;
+            }
+            drop(tasks);
+
+            let mut tags = wfu.tags.clone();
+            tags.push("watch-folder".to_string());
+            let url = wfu.url.clone();
+            let result = if url.starts_with("magnet:?") {
+                self.add_magnet(&url).await
+            } else if url.starts_with("ed2k://") {
+                continue;
+            } else {
+                self.add_url(&url).await
+            };
+
+            if let Ok(task_id) = result {
+                if !tags.is_empty() {
+                    self.add_tags(&task_id, tags).await;
+                }
+                if let Some(group) = &wfu.group {
+                    self.set_task_group(&task_id, Some(group.clone())).await;
+                }
+                imported += 1;
+            }
+        }
+        imported
     }
 
     /// Add a bandwidth schedule rule
@@ -2704,6 +2804,29 @@ impl DownloadManager {
                 tracing::warn!(error = %e, "Failed to load watch folder config");
             }
         }
+    }
+
+    /// Set watch folder auto-scan configuration.
+    pub async fn set_watch_folder_auto_scan(&self, enabled: bool, interval_secs: u64) -> bool {
+        let mut mgr = self.watch_folder.lock().await;
+        let config = watch_folder::WatchFolderAutoScanConfig {
+            enabled,
+            interval_secs,
+            last_auto_scan: mgr.auto_scan_config.last_auto_scan,
+        };
+        mgr.set_auto_scan_config(config);
+        let config_path = self.data_dir.join("watch_folders.json");
+        if let Err(e) = mgr.save(&config_path) {
+            tracing::warn!(error = %e, "Failed to persist watch folder config");
+            return false;
+        }
+        true
+    }
+
+    /// Get watch folder auto-scan configuration.
+    pub async fn get_watch_folder_auto_scan(&self) -> watch_folder::WatchFolderAutoScanConfig {
+        let mgr = self.watch_folder.lock().await;
+        mgr.auto_scan_config.clone()
     }
 
     /// Expand a shortened URL and validate it is reachable.

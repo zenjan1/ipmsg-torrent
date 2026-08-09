@@ -249,6 +249,10 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/watch-folders/scan", post(scan_watch_folders_handler))
         .route(
+            "/api/watch-folders/auto-scan",
+            get(auto_scan_config_handler).post(set_auto_scan_config_handler),
+        )
+        .route(
             "/api/path-rules",
             get(list_path_rules_handler).post(add_path_rule_handler),
         )
@@ -945,6 +949,44 @@ async fn scan_watch_folders_handler(State(state): State<Arc<WebState>>) -> Json<
         "success": true,
         "imported": imported,
         "message": format!("{} URL(s) imported", imported)
+    }))
+}
+
+/// GET /api/watch-folders/auto-scan - Get auto-scan configuration
+async fn auto_scan_config_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let config = state.manager.get_watch_folder_auto_scan().await;
+    Json(serde_json::json!({
+        "enabled": config.enabled,
+        "interval_secs": config.interval_secs,
+        "last_auto_scan": config.last_auto_scan
+    }))
+}
+
+/// POST /api/watch-folders/auto-scan - Set auto-scan configuration
+#[derive(serde::Deserialize)]
+struct SetAutoScanConfigRequest {
+    enabled: Option<bool>,
+    interval_secs: Option<u64>,
+}
+
+async fn set_auto_scan_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SetAutoScanConfigRequest>,
+) -> Json<serde_json::Value> {
+    let current = state.manager.get_watch_folder_auto_scan().await;
+    let enabled = req.enabled.unwrap_or(current.enabled);
+    let interval_secs = req.interval_secs.unwrap_or(current.interval_secs);
+
+    let success = state
+        .manager
+        .set_watch_folder_auto_scan(enabled, interval_secs)
+        .await;
+
+    Json(serde_json::json!({
+        "success": success,
+        "enabled": enabled,
+        "interval_secs": interval_secs,
+        "message": if success { "Auto-scan configuration updated" } else { "Failed to update configuration" }
     }))
 }
 

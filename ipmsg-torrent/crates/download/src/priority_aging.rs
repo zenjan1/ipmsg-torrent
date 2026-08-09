@@ -29,7 +29,9 @@ pub enum PriorityAgingError {
 
 /// Priority levels used for aging configuration.
 /// Mirrors DownloadPriority but is self-contained for the aging module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AgingPriority {
     Low = 0,
