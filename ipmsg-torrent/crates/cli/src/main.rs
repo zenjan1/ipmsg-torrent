@@ -516,6 +516,11 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    DlTemplate {
+        /// Subcommand: list|add|del|show|match|enable|disable|categories
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1594,6 +1599,25 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dltemplate" | "dl-template" | "dltmpl" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dltemplate <list|add|del|show|match|enable|disable|categories>".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlTemplate {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1805,6 +1829,7 @@ fn command_help() -> String {
         "/dlchain [cmd]    - Task chains (list|create|delete|add|remove|enable|disable|summary)",
         "/dlprofiler [cmd] - Task performance profiler (status|summary|profile|refresh|clear|config)",
         "/dladaptive [cmd] - Adaptive concurrency (status|config|evaluate|clear)",
+        "/dltemplate [cmd] - Download templates (list|add|del|show|match|enable|disable|categories)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -7260,6 +7285,204 @@ async fn handle_command(
                 }
                 let mut s = state.lock().await;
                 s.add_system_message("main", lines.trim_end().to_string());
+            }
+        }
+        Command::DlTemplate { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "list" => {
+                    let templates = download_manager.list_download_templates().await;
+                    if templates.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "No download templates configured".to_string(),
+                        );
+                    } else {
+                        let mut output = String::new();
+                        output.push_str("📋 Download Templates:\n");
+                        for t in templates {
+                            output.push_str(&format!(
+                                "  {} {} [{}]{} - {} patterns, {} uses\n",
+                                if t.enabled { "✅" } else { "❌" },
+                                t.name,
+                                t.id,
+                                if t.auto_apply { " (auto)" } else { "" },
+                                t.url_patterns.len(),
+                                t.use_count
+                            ));
+                        }
+                        s.add_system_message("main", output.trim_end().to_string());
+                    }
+                }
+                "show" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dltemplate show <id>".to_string());
+                    } else {
+                        let id = &args[0];
+                        if let Some(t) = download_manager.get_download_template(id).await {
+                            let mut output = String::new();
+                            output.push_str(&format!("📋 Template: {} ({})\n", t.name, t.id));
+                            if let Some(desc) = &t.description {
+                                output.push_str(&format!("  Description: {}\n", desc));
+                            }
+                            output.push_str(&format!("  Enabled: {}\n", t.enabled));
+                            output.push_str(&format!("  Auto-apply: {}\n", t.auto_apply));
+                            if !t.url_patterns.is_empty() {
+                                output.push_str("  URL Patterns:\n");
+                                for p in &t.url_patterns {
+                                    output.push_str(&format!("    - {}\n", p));
+                                }
+                            }
+                            if !t.tags.is_empty() {
+                                output.push_str(&format!("  Tags: {}\n", t.tags.join(", ")));
+                            }
+                            if let Some(g) = &t.group {
+                                output.push_str(&format!("  Group: {}\n", g));
+                            }
+                            output.push_str(&format!("  Priority: {}\n", t.priority));
+                            if let Some(limit) = t.speed_limit_bps {
+                                output.push_str(&format!("  Speed limit: {} B/s\n", limit));
+                            }
+                            output
+                                .push_str(&format!("  Bandwidth weight: {}\n", t.bandwidth_weight));
+                            if let Some(path) = &t.save_path {
+                                output.push_str(&format!("  Save path: {}\n", path.display()));
+                            }
+                            if let Some(retries) = t.max_retries {
+                                output.push_str(&format!("  Max retries: {}\n", retries));
+                            }
+                            if let Some(checksum) = &t.checksum {
+                                output.push_str(&format!("  Checksum: {}\n", checksum));
+                            }
+                            if let Some(proxy) = &t.proxy_url {
+                                output.push_str(&format!("  Proxy: {}\n", proxy));
+                            }
+                            if let Some(time) = t.max_download_time_secs {
+                                output.push_str(&format!("  Max download time: {}s\n", time));
+                            }
+                            if let Some(cat) = &t.category {
+                                output.push_str(&format!("  Category: {}\n", cat));
+                            }
+                            output.push_str(&format!("  Use count: {}\n", t.use_count));
+                            s.add_system_message("main", output.trim_end().to_string());
+                        } else {
+                            s.add_system_message("main", format!("Template '{}' not found", id));
+                        }
+                    }
+                }
+                "add" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dltemplate add <id> <name> [url_pattern] [category]"
+                                .to_string(),
+                        );
+                    } else {
+                        let id = &args[0];
+                        let name = &args[1];
+                        let mut template =
+                            ipmsg_download::download_templates::DownloadTemplate::new(id, name);
+                        if args.len() > 2 {
+                            template.url_patterns.push(args[2].clone());
+                        }
+                        if args.len() > 3 {
+                            template.category = Some(args[3].clone());
+                        }
+                        download_manager.add_download_template(template).await;
+                        s.add_system_message("main", format!("✅ Template '{}' added", id));
+                    }
+                }
+                "del" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dltemplate del <id>".to_string());
+                    } else {
+                        let id = &args[0];
+                        if download_manager
+                            .remove_download_template(id)
+                            .await
+                            .is_some()
+                        {
+                            s.add_system_message("main", format!("✅ Template '{}' removed", id));
+                        } else {
+                            s.add_system_message("main", format!("Template '{}' not found", id));
+                        }
+                    }
+                }
+                "match" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dltemplate match <url>".to_string());
+                    } else {
+                        let url = &args[0];
+                        let templates = download_manager.find_matching_templates(url).await;
+                        if templates.is_empty() {
+                            s.add_system_message("main", format!("No templates match '{}'", url));
+                        } else {
+                            let mut output = String::new();
+                            output.push_str(&format!("🔍 Templates matching '{}':\n", url));
+                            for t in templates {
+                                output.push_str(&format!(
+                                    "  {} {} ({} patterns)\n",
+                                    t.name,
+                                    t.id,
+                                    t.url_patterns.len()
+                                ));
+                            }
+                            s.add_system_message("main", output.trim_end().to_string());
+                        }
+                    }
+                }
+                "enable" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dltemplate enable <id>".to_string());
+                    } else {
+                        let id = &args[0];
+                        if download_manager.set_template_enabled(id, true).await {
+                            s.add_system_message("main", format!("✅ Template '{}' enabled", id));
+                        } else {
+                            s.add_system_message("main", format!("Template '{}' not found", id));
+                        }
+                    }
+                }
+                "disable" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dltemplate disable <id>".to_string());
+                    } else {
+                        let id = &args[0];
+                        if download_manager.set_template_enabled(id, false).await {
+                            s.add_system_message("main", format!("✅ Template '{}' disabled", id));
+                        } else {
+                            s.add_system_message("main", format!("Template '{}' not found", id));
+                        }
+                    }
+                }
+                "categories" => {
+                    let categories = download_manager.list_template_categories().await;
+                    if categories.is_empty() {
+                        s.add_system_message("main", "No template categories defined".to_string());
+                    } else {
+                        let mut output = String::new();
+                        output.push_str("📁 Template Categories:\n");
+                        for cat in categories {
+                            let count = download_manager
+                                .list_templates_by_category(&cat)
+                                .await
+                                .len();
+                            output.push_str(&format!("  {} ({} templates)\n", cat, count));
+                        }
+                        s.add_system_message("main", output.trim_end().to_string());
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dltemplate <list|add|del|show|match|enable|disable|categories>"
+                            .to_string(),
+                    );
+                }
             }
         }
         Command::Block { peer } => {

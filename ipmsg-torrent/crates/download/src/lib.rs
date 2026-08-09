@@ -31,6 +31,7 @@ pub mod download_report;
 pub mod download_session;
 pub mod download_snapshot;
 pub mod download_stats;
+pub mod download_templates;
 pub mod download_time_limit;
 pub mod ed2k;
 pub mod error_recovery;
@@ -854,6 +855,8 @@ pub struct DownloadManager {
     task_profiler: Arc<Mutex<task_profiler::TaskProfiler>>,
     /// Adaptive download concurrency manager
     adaptive_concurrency: Arc<Mutex<adaptive_concurrency::AdaptiveConcurrencyManager>>,
+    /// Download templates for reusable task configurations
+    download_templates: Arc<Mutex<download_templates::DownloadTemplateManager>>,
 }
 
 impl DownloadManager {
@@ -971,6 +974,9 @@ impl DownloadManager {
             task_profiler: Arc::new(Mutex::new(task_profiler::TaskProfiler::default())),
             adaptive_concurrency: Arc::new(Mutex::new(
                 adaptive_concurrency::AdaptiveConcurrencyManager::new(),
+            )),
+            download_templates: Arc::new(Mutex::new(
+                download_templates::DownloadTemplateManager::new(),
             )),
         };
         dm.start_scheduler();
@@ -1222,6 +1228,9 @@ impl DownloadManager {
             adaptive_concurrency: Arc::new(Mutex::new(
                 adaptive_concurrency::AdaptiveConcurrencyManager::new(),
             )),
+            download_templates: Arc::new(Mutex::new(
+                download_templates::DownloadTemplateManager::new(),
+            )),
         };
         // Restore error recovery config from disk
         if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
@@ -1373,6 +1382,13 @@ impl DownloadManager {
         if retry_quota::RetryQuotaManager::state_file_exists(&retry_quota_path) {
             if let Ok(loaded) = retry_quota::RetryQuotaManager::load(&retry_quota_path) {
                 *dm.retry_quota.lock().await = loaded;
+            }
+        }
+        // Restore download templates from disk
+        if let Ok(templates) = download_templates::load_templates(&dm.data_dir) {
+            let mut mgr = dm.download_templates.lock().await;
+            for t in templates {
+                mgr.add_template(t);
             }
         }
         dm.start_scheduler();
@@ -9593,6 +9609,137 @@ impl DownloadManager {
     pub async fn clear_adaptive_concurrency(&self) {
         let mut mgr = self.adaptive_concurrency.lock().await;
         mgr.clear();
+    }
+
+    // ─── Download Templates (Phase 100) ────────────────────────────────
+
+    /// Add or update a download template
+    pub async fn add_download_template(&self, template: download_templates::DownloadTemplate) {
+        let mut mgr = self.download_templates.lock().await;
+        mgr.add_template(template);
+        if let Err(e) = self.persist_download_templates().await {
+            tracing::warn!(error = %e, "Failed to persist download templates");
+        }
+    }
+
+    /// Remove a download template by ID
+    pub async fn remove_download_template(
+        &self,
+        id: &str,
+    ) -> Option<download_templates::DownloadTemplate> {
+        let mut mgr = self.download_templates.lock().await;
+        let removed = mgr.remove_template(id);
+        if removed.is_some()
+            && let Err(e) = self.persist_download_templates().await
+        {
+            tracing::warn!(error = %e, "Failed to persist download templates");
+        }
+        removed
+    }
+
+    /// Get a download template by ID
+    pub async fn get_download_template(
+        &self,
+        id: &str,
+    ) -> Option<download_templates::DownloadTemplate> {
+        let mgr = self.download_templates.lock().await;
+        mgr.get_template(id).cloned()
+    }
+
+    /// List all download templates
+    pub async fn list_download_templates(&self) -> Vec<download_templates::DownloadTemplate> {
+        let mgr = self.download_templates.lock().await;
+        mgr.list_templates().to_vec()
+    }
+
+    /// List template summaries
+    pub async fn list_download_template_summaries(
+        &self,
+    ) -> Vec<download_templates::TemplateSummary> {
+        let mgr = self.download_templates.lock().await;
+        mgr.get_summaries()
+    }
+
+    /// Find templates matching a URL
+    pub async fn find_matching_templates(
+        &self,
+        url: &str,
+    ) -> Vec<download_templates::DownloadTemplate> {
+        let mgr = self.download_templates.lock().await;
+        mgr.find_matching_templates(url)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Find the best matching template for a URL
+    pub async fn find_best_template(
+        &self,
+        url: &str,
+    ) -> Option<download_templates::DownloadTemplate> {
+        let mgr = self.download_templates.lock().await;
+        mgr.find_best_template(url).cloned()
+    }
+
+    /// Enable or disable a template
+    pub async fn set_template_enabled(&self, id: &str, enabled: bool) -> bool {
+        let mut mgr = self.download_templates.lock().await;
+        let result = mgr.set_enabled(id, enabled);
+        if result
+            && let Err(e) = self.persist_download_templates().await
+        {
+            tracing::warn!(error = %e, "Failed to persist download templates");
+        }
+        result
+    }
+
+    /// Enable or disable auto-apply for a template
+    pub async fn set_template_auto_apply(&self, id: &str, auto_apply: bool) -> bool {
+        let mut mgr = self.download_templates.lock().await;
+        let result = mgr.set_auto_apply(id, auto_apply);
+        if result
+            && let Err(e) = self.persist_download_templates().await
+        {
+            tracing::warn!(error = %e, "Failed to persist download templates");
+        }
+        result
+    }
+
+    /// List templates by category
+    pub async fn list_templates_by_category(
+        &self,
+        category: &str,
+    ) -> Vec<download_templates::DownloadTemplate> {
+        let mgr = self.download_templates.lock().await;
+        mgr.list_by_category(category)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// List all template categories
+    pub async fn list_template_categories(&self) -> Vec<String> {
+        let mgr = self.download_templates.lock().await;
+        mgr.list_categories()
+    }
+
+    /// Get template manager statistics
+    pub async fn get_template_stats(&self) -> download_templates::TemplateStats {
+        let mgr = self.download_templates.lock().await;
+        download_templates::TemplateStats {
+            total: mgr.count(),
+            enabled: mgr.enabled_count(),
+            categories: mgr.list_categories().len(),
+        }
+    }
+
+    /// Persist download templates to disk
+    async fn persist_download_templates(
+        &self,
+    ) -> Result<(), download_templates::TemplatePersistenceError> {
+        let mgr = self.download_templates.lock().await;
+        let templates = mgr.list_templates();
+        download_templates::save_templates(templates, &self.data_dir)
     }
 }
 

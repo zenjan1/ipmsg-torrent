@@ -343,6 +343,46 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/adaptive-concurrency/clear",
             post(clear_adaptive_concurrency_handler),
         )
+        .route(
+            "/api/download-templates",
+            get(get_download_templates_handler),
+        )
+        .route(
+            "/api/download-templates",
+            post(add_download_template_handler),
+        )
+        .route(
+            "/api/download-templates/summary",
+            get(get_download_templates_summary_handler),
+        )
+        .route(
+            "/api/download-templates/match",
+            post(match_download_template_handler),
+        )
+        .route(
+            "/api/download-templates/:id",
+            get(get_download_template_handler),
+        )
+        .route(
+            "/api/download-templates/:id",
+            post(delete_download_template_handler),
+        )
+        .route(
+            "/api/download-templates/:id/enable",
+            post(enable_download_template_handler),
+        )
+        .route(
+            "/api/download-templates/:id/disable",
+            post(disable_download_template_handler),
+        )
+        .route(
+            "/api/download-templates/:id/auto-apply",
+            post(set_template_auto_apply_handler),
+        )
+        .route(
+            "/api/download-templates/categories",
+            get(get_template_categories_handler),
+        )
         .route("/api/task-comments", get(get_all_task_comments_handler))
         .route(
             "/api/task-comments/search",
@@ -1862,6 +1902,121 @@ async fn clear_adaptive_concurrency_handler(
 ) -> Json<serde_json::Value> {
     state.manager.clear_adaptive_concurrency().await;
     Json(serde_json::json!({"status": "ok"}))
+}
+
+// ─── Download Templates (Phase 100) ────────────────────────────────
+
+/// GET /api/download-templates - List all download templates
+async fn get_download_templates_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::download_templates::DownloadTemplate>> {
+    let templates = state.manager.list_download_templates().await;
+    Json(templates)
+}
+
+/// POST /api/download-templates - Add or update a download template
+async fn add_download_template_handler(
+    State(state): State<Arc<WebState>>,
+    Json(template): Json<crate::download_templates::DownloadTemplate>,
+) -> Json<serde_json::Value> {
+    state.manager.add_download_template(template).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/download-templates/summary - Get template summaries
+async fn get_download_templates_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summaries = state.manager.list_download_template_summaries().await;
+    let stats = state.manager.get_template_stats().await;
+    Json(serde_json::json!({
+        "summaries": summaries,
+        "stats": stats
+    }))
+}
+
+/// POST /api/download-templates/match - Find templates matching a URL
+async fn match_download_template_handler(
+    State(state): State<Arc<WebState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    if let Some(url) = payload.get("url").and_then(|v| v.as_str()) {
+        let templates = state.manager.find_matching_templates(url).await;
+        Json(serde_json::json!({"matching_templates": templates}))
+    } else {
+        Json(serde_json::json!({"error": "Missing 'url' field"}))
+    }
+}
+
+/// GET /api/download-templates/:id - Get a specific template
+async fn get_download_template_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    if let Some(template) = state.manager.get_download_template(&id).await {
+        Json(serde_json::json!({"template": template}))
+    } else {
+        Json(serde_json::json!({"error": "Template not found"}))
+    }
+}
+
+/// POST /api/download-templates/:id - Delete a template
+async fn delete_download_template_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    if state.manager.remove_download_template(&id).await.is_some() {
+        Json(serde_json::json!({"status": "deleted"}))
+    } else {
+        Json(serde_json::json!({"error": "Template not found"}))
+    }
+}
+
+/// POST /api/download-templates/:id/enable - Enable a template
+async fn enable_download_template_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    if state.manager.set_template_enabled(&id, true).await {
+        Json(serde_json::json!({"status": "enabled"}))
+    } else {
+        Json(serde_json::json!({"error": "Template not found"}))
+    }
+}
+
+/// POST /api/download-templates/:id/disable - Disable a template
+async fn disable_download_template_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    if state.manager.set_template_enabled(&id, false).await {
+        Json(serde_json::json!({"status": "disabled"}))
+    } else {
+        Json(serde_json::json!({"error": "Template not found"}))
+    }
+}
+
+/// POST /api/download-templates/:id/auto-apply - Set auto-apply for a template
+async fn set_template_auto_apply_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    if let Some(auto_apply) = payload.get("auto_apply").and_then(|v| v.as_bool()) {
+        if state.manager.set_template_auto_apply(&id, auto_apply).await {
+            Json(serde_json::json!({"status": "ok", "auto_apply": auto_apply}))
+        } else {
+            Json(serde_json::json!({"error": "Template not found"}))
+        }
+    } else {
+        Json(serde_json::json!({"error": "Missing 'auto_apply' field"}))
+    }
+}
+
+/// GET /api/download-templates/categories - List all template categories
+async fn get_template_categories_handler(State(state): State<Arc<WebState>>) -> Json<Vec<String>> {
+    let categories = state.manager.list_template_categories().await;
+    Json(categories)
 }
 
 /// GET /api/task-comments - List all tasks with comments and counts
