@@ -558,6 +558,40 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/download-time-limit",
             post(set_download_time_limit_handler),
         )
+        .route("/api/auto-actions", get(get_auto_actions_handler))
+        .route("/api/auto-actions", post(set_auto_actions_handler))
+        .route(
+            "/api/auto-actions/summary",
+            get(get_auto_actions_summary_handler),
+        )
+        .route(
+            "/api/auto-actions/rules",
+            get(list_auto_action_rules_handler),
+        )
+        .route(
+            "/api/auto-actions/rules",
+            post(add_auto_action_rule_handler),
+        )
+        .route(
+            "/api/auto-actions/rules/:id",
+            axum::routing::delete(remove_auto_action_rule_handler),
+        )
+        .route(
+            "/api/auto-actions/rules/:id/enable",
+            post(set_auto_action_rule_enabled_handler),
+        )
+        .route(
+            "/api/auto-actions/task/:task_id",
+            post(set_task_auto_action_handler),
+        )
+        .route(
+            "/api/auto-actions/task/:task_id",
+            axum::routing::delete(remove_task_auto_action_handler),
+        )
+        .route(
+            "/api/auto-actions/history/clear",
+            post(clear_auto_actions_history_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -4795,6 +4829,118 @@ async fn get_torrent_files(
         }
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+/// GET /api/auto-actions - Get auto-actions configuration
+async fn get_auto_actions_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let config = state.manager.get_auto_actions_config().await;
+    Json(config)
+}
+
+/// POST /api/auto-actions - Update auto-actions configuration
+async fn set_auto_actions_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::auto_actions::AutoActionsConfig>,
+) -> impl IntoResponse {
+    state.manager.set_auto_actions_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/auto-actions/summary - Get auto-actions summary
+async fn get_auto_actions_summary_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let summary = state.manager.get_auto_actions_summary().await;
+    Json(summary)
+}
+
+/// GET /api/auto-actions/rules - List all auto-action rules
+async fn list_auto_action_rules_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let rules = state.manager.list_auto_action_rules().await;
+    Json(rules)
+}
+
+/// POST /api/auto-actions/rules - Add a new auto-action rule
+async fn add_auto_action_rule_handler(
+    State(state): State<Arc<WebState>>,
+    Json(rule): Json<crate::auto_actions::AutoActionRule>,
+) -> impl IntoResponse {
+    let id = state.manager.add_auto_action_rule(rule).await;
+    Json(serde_json::json!({"status": "ok", "rule_id": id}))
+}
+
+/// DELETE /api/auto-actions/rules/:id - Remove an auto-action rule
+async fn remove_auto_action_rule_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.manager.remove_auto_action_rule(&id).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "message": e.to_string()})),
+    }
+}
+
+/// POST /api/auto-actions/rules/:id/enable - Enable or disable an auto-action rule
+async fn set_auto_action_rule_enabled_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let enabled = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    match state
+        .manager
+        .set_auto_action_rule_enabled(&id, enabled)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "message": e.to_string()})),
+    }
+}
+
+/// POST /api/auto-actions/task/:task_id - Set per-task auto-action override
+async fn set_task_auto_action_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let actions: Vec<crate::auto_actions::AutoAction> = match body.get("actions") {
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(a) => a,
+            Err(e) => {
+                return Json(serde_json::json!({"status": "error", "message": e.to_string()}));
+            }
+        },
+        None => return Json(serde_json::json!({"status": "error", "message": "missing actions"})),
+    };
+    let trigger: crate::auto_actions::AutoActionTrigger = body
+        .get("trigger")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    state
+        .manager
+        .set_task_auto_action(&task_id, actions, trigger)
+        .await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// DELETE /api/auto-actions/task/:task_id - Remove per-task auto-action override
+async fn remove_task_auto_action_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> impl IntoResponse {
+    match state.manager.remove_task_auto_action(&task_id).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "message": e.to_string()})),
+    }
+}
+
+/// POST /api/auto-actions/history/clear - Clear auto-actions execution history
+async fn clear_auto_actions_history_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl IntoResponse {
+    state.manager.clear_auto_actions_history().await;
+    Json(serde_json::json!({"status": "cleared"}))
 }
 
 #[cfg(test)]

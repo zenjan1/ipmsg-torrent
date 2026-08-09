@@ -107,6 +107,9 @@ use notification::{NotificationContext, NotificationDispatcher};
 use post_hooks::HookManager;
 use rss_feed::FeedSubscriptionManager;
 
+pub use auto_actions::{
+    AutoAction, AutoActionRule, AutoActionTrigger, AutoActionsConfig, AutoActionsSummary,
+};
 pub use bandwidth_monitor::{
     BandwidthDashboard, BandwidthMonitor as BandwidthMonitorType, BandwidthSample, BandwidthStats,
     BandwidthTrendSummary, MovingAvgPoint, TaskBandwidth, TrendDirection, TrendStats, WindowTrend,
@@ -2895,6 +2898,212 @@ impl DownloadManager {
                     limiters.remove(&task_id);
                 }
             }
+        }
+    }
+
+    // ===== Auto-Actions =====
+
+    /// Set auto-actions configuration.
+    pub async fn set_auto_actions_config(&self, config: auto_actions::AutoActionsConfig) {
+        let mut mgr = self.auto_actions.lock().await;
+        mgr.set_config(config);
+        // Persist to disk
+        let config_path = self.data_dir.join("auto_actions_config.json");
+        let _ = auto_actions::save_auto_actions_config(mgr.config(), &config_path);
+    }
+
+    /// Get current auto-actions configuration.
+    pub async fn get_auto_actions_config(&self) -> auto_actions::AutoActionsConfig {
+        let mgr = self.auto_actions.lock().await;
+        mgr.config().clone()
+    }
+
+    /// Get auto-actions summary.
+    pub async fn get_auto_actions_summary(&self) -> auto_actions::AutoActionsSummary {
+        let mgr = self.auto_actions.lock().await;
+        mgr.summary()
+    }
+
+    /// Add a new auto-action rule.
+    pub async fn add_auto_action_rule(&self, rule: auto_actions::AutoActionRule) -> String {
+        let mut mgr = self.auto_actions.lock().await;
+        let id = mgr.add_rule(rule);
+        // Persist
+        let config_path = self.data_dir.join("auto_actions_config.json");
+        let _ = auto_actions::save_auto_actions_config(mgr.config(), &config_path);
+        id
+    }
+
+    /// Remove a auto-action rule by ID.
+    pub async fn remove_auto_action_rule(
+        &self,
+        rule_id: &str,
+    ) -> Result<(), auto_actions::AutoActionsError> {
+        let mut mgr = self.auto_actions.lock().await;
+        mgr.remove_rule(rule_id)?;
+        // Persist
+        let config_path = self.data_dir.join("auto_actions_config.json");
+        let _ = auto_actions::save_auto_actions_config(mgr.config(), &config_path);
+        Ok(())
+    }
+
+    /// List all auto-action rules.
+    pub async fn list_auto_action_rules(&self) -> Vec<auto_actions::AutoActionRule> {
+        let mgr = self.auto_actions.lock().await;
+        mgr.list_rules().to_vec()
+    }
+
+    /// Enable or disable a specific auto-action rule.
+    pub async fn set_auto_action_rule_enabled(
+        &self,
+        rule_id: &str,
+        enabled: bool,
+    ) -> Result<(), auto_actions::AutoActionsError> {
+        let mut mgr = self.auto_actions.lock().await;
+        mgr.set_rule_enabled(rule_id, enabled)?;
+        // Persist
+        let config_path = self.data_dir.join("auto_actions_config.json");
+        let _ = auto_actions::save_auto_actions_config(mgr.config(), &config_path);
+        Ok(())
+    }
+
+    /// Set per-task auto-action override.
+    pub async fn set_task_auto_action(
+        &self,
+        task_id: &str,
+        actions: Vec<auto_actions::AutoAction>,
+        trigger: auto_actions::AutoActionTrigger,
+    ) {
+        let mut mgr = self.auto_actions.lock().await;
+        mgr.set_task_override(task_id, actions, trigger);
+        // Persist
+        let config_path = self.data_dir.join("auto_actions_config.json");
+        let _ = auto_actions::save_auto_actions_config(mgr.config(), &config_path);
+    }
+
+    /// Remove per-task auto-action override.
+    pub async fn remove_task_auto_action(
+        &self,
+        task_id: &str,
+    ) -> Result<(), auto_actions::AutoActionsError> {
+        let mut mgr = self.auto_actions.lock().await;
+        mgr.remove_task_override(task_id)?;
+        // Persist
+        let config_path = self.data_dir.join("auto_actions_config.json");
+        let _ = auto_actions::save_auto_actions_config(mgr.config(), &config_path);
+        Ok(())
+    }
+
+    /// Clear auto-actions execution history.
+    pub async fn clear_auto_actions_history(&self) {
+        let mut mgr = self.auto_actions.lock().await;
+        mgr.clear_history();
+    }
+
+    /// Execute auto-actions for a completed/failed task.
+    pub async fn execute_auto_actions(
+        &self,
+        task_id: &str,
+        tags: &[String],
+        group: Option<&str>,
+        is_complete: bool,
+        file_path: &std::path::Path,
+    ) -> Vec<auto_actions::AutoActionResult> {
+        let actions = {
+            let mgr = self.auto_actions.lock().await;
+            mgr.get_actions_for_task(task_id, tags, group, is_complete)
+        };
+
+        let mut results = Vec::new();
+        for (rule_id, action_list) in actions {
+            for action in action_list {
+                let result = self
+                    .execute_single_auto_action(&rule_id, &action, file_path)
+                    .await;
+                // Record result
+                {
+                    let mut mgr = self.auto_actions.lock().await;
+                    mgr.record_result(result.clone());
+                }
+                results.push(result);
+            }
+        }
+        results
+    }
+
+    /// Execute a single auto-action.
+    async fn execute_single_auto_action(
+        &self,
+        rule_id: &str,
+        action: &auto_actions::AutoAction,
+        file_path: &std::path::Path,
+    ) -> auto_actions::AutoActionResult {
+        let action_type = match action {
+            auto_actions::AutoAction::OpenFile => "open_file".to_string(),
+            auto_actions::AutoAction::MoveTo { .. } => "move_to".to_string(),
+            auto_actions::AutoAction::RunCommand { .. } => "run_command".to_string(),
+        };
+
+        let (success, error) = match action {
+            auto_actions::AutoAction::OpenFile => {
+                // Try to open file with system default application
+                #[cfg(target_os = "linux")]
+                {
+                    match std::process::Command::new("xdg-open")
+                        .arg(file_path)
+                        .spawn()
+                    {
+                        Ok(_) => (true, None),
+                        Err(e) => (false, Some(format!("Failed to open file: {}", e))),
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    match std::process::Command::new("open").arg(file_path).spawn() {
+                        Ok(_) => (true, None),
+                        Err(e) => (false, Some(format!("Failed to open file: {}", e))),
+                    }
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                {
+                    (
+                        false,
+                        Some("Open file not supported on this platform".to_string()),
+                    )
+                }
+            }
+            auto_actions::AutoAction::MoveTo { target_dir } => {
+                match auto_actions::execute_move_to(file_path, target_dir) {
+                    Ok(_) => (true, None),
+                    Err(e) => (false, Some(e)),
+                }
+            }
+            auto_actions::AutoAction::RunCommand { command } => {
+                let cmd = auto_actions::build_command(command, file_path);
+                match std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .output()
+                {
+                    Ok(output) => {
+                        if output.status.success() {
+                            (true, None)
+                        } else {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            (false, Some(format!("Command failed: {}", stderr)))
+                        }
+                    }
+                    Err(e) => (false, Some(format!("Failed to run command: {}", e))),
+                }
+            }
+        };
+
+        auto_actions::AutoActionResult {
+            rule_id: rule_id.to_string(),
+            action_type,
+            success,
+            error,
+            timestamp: chrono::Utc::now(),
         }
     }
 

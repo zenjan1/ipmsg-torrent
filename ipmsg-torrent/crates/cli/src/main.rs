@@ -466,6 +466,12 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Auto-actions: trigger actions on download completion
+    DlAutoAction {
+        /// Subcommand: status|enable|disable|add|del|list|rule-enable|task|task-remove|summary|clear
+        subcommand: String,
+        args: Vec<String>,
+    },
     /// URL allowlist: restrict downloads to trusted sources
     DlAllowlist {
         /// Subcommand: status|enable|disable|add|del|list|check
@@ -1445,6 +1451,26 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlautoaction" | "dl-autoaction" | "dlact" => {
+            // /dlautoaction <status|enable|disable|add|del|list|rule-enable|task|task-remove|summary|clear> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlautoaction <status|enable|disable|add|del|list|rule-enable|task|task-remove|summary|clear> [args...]".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlAutoAction {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlallowlist" | "dl-allowlist" | "dlal" => {
             // /dlallowlist <status|enable|disable|add|del|list|check> [args...]
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
@@ -1912,6 +1938,7 @@ fn command_help() -> String {
         "/dlsnap [cmd]    - Queue snapshots (list|create [name] [desc]|show <id>|restore <id>|delete <id>)",
         "/dlnetmon [cmd]  - Network monitor (status|config <max_samples|sample_interval>|clear)",
         "/dltimelimit [cmd] - Download time limits (status|config <enabled|default> <value>|set <task_id> <secs>|clear <task_id>)",
+        "/dlautoaction [cmd] - Auto-actions on completion (status|enable|disable|add|del|list|rule-enable|task|task-remove|summary|clear)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -8551,6 +8578,294 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlAutoAction { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_auto_actions_config().await;
+                    let summary = download_manager.get_auto_actions_summary().await;
+                    let mut out = String::from("Auto-Actions Status:\n");
+                    out.push_str(&format!("  Enabled: {}\n", config.enabled));
+                    out.push_str(&format!("  Total rules: {}\n", summary.total_rules));
+                    out.push_str(&format!("  Enabled rules: {}\n", summary.enabled_rules));
+                    out.push_str(&format!("  Task overrides: {}\n", summary.task_overrides));
+                    out.push_str(&format!("  Total executed: {}\n", summary.total_executed));
+                    out.push_str(&format!("  Total successes: {}\n", summary.total_successes));
+                    out.push_str(&format!("  Total failures: {}\n", summary.total_failures));
+                    s.add_system_message("main", out);
+                }
+                "enable" => {
+                    let mut config = download_manager.get_auto_actions_config().await;
+                    config.enabled = true;
+                    download_manager.set_auto_actions_config(config).await;
+                    s.add_system_message("main", "Auto-actions enabled".to_string());
+                }
+                "disable" => {
+                    let mut config = download_manager.get_auto_actions_config().await;
+                    config.enabled = false;
+                    download_manager.set_auto_actions_config(config).await;
+                    s.add_system_message("main", "Auto-actions disabled".to_string());
+                }
+                "list" => {
+                    let rules = download_manager.list_auto_action_rules().await;
+                    if rules.is_empty() {
+                        s.add_system_message("main", "No auto-action rules configured".to_string());
+                    } else {
+                        let mut out = format!("Auto-action rules ({}):\n", rules.len());
+                        for rule in &rules {
+                            let status = if rule.enabled { "✓" } else { "✗" };
+                            out.push_str(&format!(
+                                "  {} {} [{}] | trigger: {:?} | priority: {} | tags: {:?}\n",
+                                status,
+                                rule.id,
+                                rule.name,
+                                rule.trigger,
+                                rule.priority,
+                                rule.tag_filter
+                            ));
+                        }
+                        s.add_system_message("main", out);
+                    }
+                }
+                "add" => {
+                    if args.len() < 3 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlautoaction add <name> <trigger> <action_type> [action_arg]"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    let name = args[0].clone();
+                    let trigger = match args[1].as_str() {
+                        "complete" => ipmsg_download::AutoActionTrigger::OnComplete,
+                        "fail" => ipmsg_download::AutoActionTrigger::OnFail,
+                        "both" => ipmsg_download::AutoActionTrigger::OnCompleteOrFail,
+                        _ => {
+                            s.add_system_message(
+                                "main",
+                                "Invalid trigger. Use: complete, fail, or both".to_string(),
+                            );
+                            return;
+                        }
+                    };
+                    let action = match args[2].as_str() {
+                        "open" => ipmsg_download::AutoAction::OpenFile,
+                        "move" => {
+                            if args.len() < 4 {
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dlautoaction add <name> <trigger> move <target_dir>"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                            ipmsg_download::AutoAction::MoveTo {
+                                target_dir: std::path::PathBuf::from(&args[3]),
+                            }
+                        }
+                        "run" => {
+                            if args.len() < 4 {
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dlautoaction add <name> <trigger> run <command>"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                            ipmsg_download::AutoAction::RunCommand {
+                                command: args[3..].join(" "),
+                            }
+                        }
+                        _ => {
+                            s.add_system_message(
+                                "main",
+                                "Invalid action. Use: open, move, or run".to_string(),
+                            );
+                            return;
+                        }
+                    };
+                    let rule = ipmsg_download::AutoActionRule {
+                        id: String::new(),
+                        name,
+                        trigger,
+                        actions: vec![action],
+                        tag_filter: vec![],
+                        group_filter: None,
+                        enabled: true,
+                        priority: 1,
+                    };
+                    let id = download_manager.add_auto_action_rule(rule).await;
+                    s.add_system_message("main", format!("Added auto-action rule: {}", id));
+                }
+                "del" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlautoaction del <rule_id>".to_string(),
+                        );
+                    } else {
+                        match download_manager.remove_auto_action_rule(&args[0]).await {
+                            Ok(()) => {
+                                s.add_system_message("main", format!("Deleted rule: {}", args[0]))
+                            }
+                            Err(e) => {
+                                s.add_system_message("main", format!("Failed to delete: {}", e))
+                            }
+                        }
+                    }
+                }
+                "rule-enable" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlautoaction rule-enable <rule_id> <true|false>".to_string(),
+                        );
+                    } else {
+                        let enabled = match args[1].parse::<bool>() {
+                            Ok(b) => b,
+                            Err(_) => {
+                                s.add_system_message("main", "Invalid boolean value".to_string());
+                                return;
+                            }
+                        };
+                        match download_manager
+                            .set_auto_action_rule_enabled(&args[0], enabled)
+                            .await
+                        {
+                            Ok(()) => s.add_system_message(
+                                "main",
+                                format!("Rule {} enabled: {}", args[0], enabled),
+                            ),
+                            Err(e) => s.add_system_message("main", format!("Failed: {}", e)),
+                        }
+                    }
+                }
+                "task" => {
+                    if args.len() < 3 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlautoaction task <task_id> <trigger> <action_type> [action_arg]".to_string(),
+                        );
+                    } else {
+                        let task_id = args[0].clone();
+                        let trigger = match args[1].as_str() {
+                            "complete" => ipmsg_download::AutoActionTrigger::OnComplete,
+                            "fail" => ipmsg_download::AutoActionTrigger::OnFail,
+                            "both" => ipmsg_download::AutoActionTrigger::OnCompleteOrFail,
+                            _ => {
+                                s.add_system_message(
+                                    "main",
+                                    "Invalid trigger. Use: complete, fail, or both".to_string(),
+                                );
+                                return;
+                            }
+                        };
+                        let action = match args[2].as_str() {
+                            "open" => ipmsg_download::AutoAction::OpenFile,
+                            "move" => {
+                                if args.len() < 4 {
+                                    s.add_system_message(
+                                        "main",
+                                        "Usage: /dlautoaction task <task_id> <trigger> move <target_dir>".to_string(),
+                                    );
+                                    return;
+                                }
+                                ipmsg_download::AutoAction::MoveTo {
+                                    target_dir: std::path::PathBuf::from(&args[3]),
+                                }
+                            }
+                            "run" => {
+                                if args.len() < 4 {
+                                    s.add_system_message(
+                                        "main",
+                                        "Usage: /dlautoaction task <task_id> <trigger> run <command>".to_string(),
+                                    );
+                                    return;
+                                }
+                                ipmsg_download::AutoAction::RunCommand {
+                                    command: args[3..].join(" "),
+                                }
+                            }
+                            _ => {
+                                s.add_system_message(
+                                    "main",
+                                    "Invalid action. Use: open, move, or run".to_string(),
+                                );
+                                return;
+                            }
+                        };
+                        download_manager
+                            .set_task_auto_action(&task_id, vec![action], trigger)
+                            .await;
+                        s.add_system_message(
+                            "main",
+                            format!("Set task auto-action for {}", task_id),
+                        );
+                    }
+                }
+                "task-remove" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlautoaction task-remove <task_id>".to_string(),
+                        );
+                    } else {
+                        match download_manager.remove_task_auto_action(&args[0]).await {
+                            Ok(()) => s.add_system_message(
+                                "main",
+                                format!("Removed task auto-action for {}", args[0]),
+                            ),
+                            Err(e) => s.add_system_message("main", format!("Failed: {}", e)),
+                        }
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_auto_actions_summary().await;
+                    let mut out = String::from("Auto-Actions Summary:\n");
+                    out.push_str(&format!("  Total rules: {}\n", summary.total_rules));
+                    out.push_str(&format!("  Enabled rules: {}\n", summary.enabled_rules));
+                    out.push_str(&format!("  Task overrides: {}\n", summary.task_overrides));
+                    out.push_str(&format!("  Total executed: {}\n", summary.total_executed));
+                    out.push_str(&format!("  Total successes: {}\n", summary.total_successes));
+                    out.push_str(&format!("  Total failures: {}\n", summary.total_failures));
+                    if !summary.recent_results.is_empty() {
+                        out.push_str(&format!(
+                            "\n  Recent results ({}):\n",
+                            summary.recent_results.len()
+                        ));
+                        for result in summary.recent_results.iter().take(10) {
+                            let status = if result.success { "✓" } else { "✗" };
+                            out.push_str(&format!(
+                                "    {} {} | {} | {}\n",
+                                status,
+                                result.rule_id,
+                                result.action_type,
+                                result.timestamp.format("%Y-%m-%d %H:%M")
+                            ));
+                            if let Some(err) = &result.error {
+                                out.push_str(&format!("      Error: {}\n", err));
+                            }
+                        }
+                    }
+                    s.add_system_message("main", out);
+                }
+                "clear" => {
+                    download_manager.clear_auto_actions_history().await;
+                    s.add_system_message("main", "Cleared auto-actions history".to_string());
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlautoaction <status|enable|disable|add|del|list|rule-enable|task|task-remove|summary|clear> [args...]".to_string(),
+                    );
+                }
+            }
+        }
         Command::DlAutoPause { subcommand, args } => {
             let download_manager = {
                 let s = state.lock().await;
@@ -11464,5 +11779,58 @@ mod save_path_tests {
     fn test_help_contains_timelimit() {
         let help = command_help();
         assert!(help.contains("/dltimelimit"));
+    }
+
+    #[test]
+    fn test_parse_dlautoaction_status() {
+        let cmd = parse_command("/dlautoaction status");
+        match cmd {
+            Command::DlAutoAction { subcommand, args } => {
+                assert_eq!(subcommand, "status");
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected DlAutoAction"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlautoaction_add() {
+        let cmd = parse_command("/dlautoaction add myrule complete open");
+        match cmd {
+            Command::DlAutoAction { subcommand, args } => {
+                assert_eq!(subcommand, "add");
+                assert_eq!(args, vec!["myrule complete open"]);
+            }
+            _ => panic!("Expected DlAutoAction"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlautoaction_alias() {
+        let cmd = parse_command("/dlact list");
+        match cmd {
+            Command::DlAutoAction { subcommand, args } => {
+                assert_eq!(subcommand, "list");
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected DlAutoAction"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlautoaction_no_args() {
+        let cmd = parse_command("/dlautoaction");
+        match cmd {
+            Command::Unknown(msg) => {
+                assert!(msg.contains("/dlautoaction"));
+            }
+            _ => panic!("Expected Unknown command"),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_autoaction() {
+        let help = command_help();
+        assert!(help.contains("/dlautoaction"));
     }
 }
