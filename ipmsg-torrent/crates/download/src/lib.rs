@@ -243,6 +243,8 @@ pub struct TaskInfoEvent {
     pub max_download_time_secs: Option<u64>,
     /// Per-task proxy override (None = use global proxy)
     pub proxy_override: Option<proxy::ProxyConfig>,
+    /// Number of times this task has been auto-promoted by queue staleness detection
+    pub staleness_promotion_count: u32,
 }
 
 impl TaskInfoEvent {
@@ -280,6 +282,7 @@ impl TaskInfoEvent {
             is_favorite: false, // Set by caller via favorites check
             max_download_time_secs: task.max_download_time_secs,
             proxy_override: task.proxy_override.clone(),
+            staleness_promotion_count: task.staleness_promotion_count,
         }
     }
 }
@@ -400,6 +403,8 @@ pub struct DownloadTask {
     pub max_download_time_secs: Option<u64>,
     /// Per-task proxy override (None = use global proxy)
     pub proxy_override: Option<proxy::ProxyConfig>,
+    /// Number of times this task has been auto-promoted by queue staleness detection
+    pub staleness_promotion_count: u32,
 }
 
 /// Per-task retry policy configuration
@@ -2658,6 +2663,7 @@ impl DownloadManager {
                         sequential_mode: false,
                         max_download_time_secs: None,
                         proxy_override: None,
+                        staleness_promotion_count: 0,
                         current_session_start: None,
                     };
 
@@ -2701,6 +2707,7 @@ impl DownloadManager {
                             sequential_mode: false,
                             max_download_time_secs: None,
                             proxy_override: None,
+                            staleness_promotion_count: 0,
                             is_favorite: false,
                         },
                     });
@@ -3863,10 +3870,12 @@ impl DownloadManager {
 
     /// Analyze the queue for stale tasks and optionally promote their priorities.
     /// Returns a summary of the analysis including which tasks were promoted.
+    /// When auto_promote is enabled, actually applies priority promotions to tasks
+    /// and persists the updated promotion counts.
     pub async fn check_queue_staleness(&self) -> queue_staleness::StalenessSummary {
         let config = self.get_queue_staleness_config().await;
         let now = chrono::Utc::now();
-        let tasks = self.tasks.lock().await;
+        let mut tasks = self.tasks.lock().await;
         let task_data: Vec<queue_staleness::TaskStalenessData> = tasks
             .iter()
             .map(|t| queue_staleness::TaskStalenessData {
@@ -3879,10 +3888,41 @@ impl DownloadManager {
                     DownloadPriority::Normal => queue_staleness::StalePriority::Normal,
                     DownloadPriority::High => queue_staleness::StalePriority::High,
                 },
-                promotion_count: 0, // TODO: track in DownloadTask if needed
+                promotion_count: t.staleness_promotion_count,
             })
             .collect();
-        queue_staleness::analyze_staleness(&task_data, now, &config)
+        let summary = queue_staleness::analyze_staleness(&task_data, now, &config);
+
+        // Apply promotions to actual tasks when auto_promote is enabled
+        if config.auto_promote {
+            for stale_task in &summary.tasks {
+                if stale_task.promoted {
+                    if let Some(task) = tasks.iter_mut().find(|t| t.id == stale_task.id) {
+                        // Apply priority promotion
+                        if let Some(new_priority_str) = &stale_task.new_priority {
+                            let new_priority = match new_priority_str.as_str() {
+                                "low" => DownloadPriority::Low,
+                                "normal" => DownloadPriority::Normal,
+                                "high" => DownloadPriority::High,
+                                _ => DownloadPriority::High,
+                            };
+                            task.priority = new_priority;
+                        }
+                        // Update promotion count
+                        task.staleness_promotion_count = stale_task.promotion_count;
+                        task.updated_at = chrono::Utc::now();
+                    }
+                }
+            }
+            // Persist updated tasks
+            let tasks_ref: Vec<_> = tasks.iter().cloned().collect();
+            drop(tasks);
+            if let Err(e) = task_queue::save_task_queue(&tasks_ref, &self.data_dir) {
+                tracing::warn!(error = %e, "Failed to persist task queue after staleness promotion");
+            }
+        }
+
+        summary
     }
 
     /// Get current network condition summary.
@@ -5191,6 +5231,7 @@ impl DownloadManager {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -5274,6 +5315,7 @@ impl DownloadManager {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -5349,6 +5391,7 @@ impl DownloadManager {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -5427,6 +5470,7 @@ impl DownloadManager {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -5496,6 +5540,7 @@ impl DownloadManager {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -5803,6 +5848,7 @@ impl DownloadManager {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -7609,6 +7655,7 @@ impl DownloadManager {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
         };
 
         self.tasks.lock().await.push(task);
@@ -8345,6 +8392,7 @@ impl DownloadManager {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
         };
 
         // Append " (copy)" to name if it doesn't already end with it
@@ -10485,6 +10533,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10520,6 +10569,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10555,6 +10605,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -10682,6 +10733,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -10744,6 +10796,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -10799,6 +10852,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10834,6 +10888,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10869,6 +10924,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -10927,6 +10983,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10962,6 +11019,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -11010,6 +11068,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -11058,6 +11117,7 @@ mod tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
         assert!(task.tags.is_empty());
@@ -11100,6 +11160,7 @@ mod tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -11159,6 +11220,7 @@ mod tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -11210,6 +11272,7 @@ mod tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -11261,6 +11324,7 @@ mod tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -11312,6 +11376,7 @@ mod tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -11370,6 +11435,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             },
             DownloadTask {
@@ -11405,6 +11471,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             },
             DownloadTask {
@@ -11440,6 +11507,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             },
         ];
@@ -11490,6 +11558,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             },
             DownloadTask {
@@ -11525,6 +11594,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             },
             DownloadTask {
@@ -11560,6 +11630,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             },
         ];
@@ -11606,6 +11677,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             },
             DownloadTask {
@@ -11641,6 +11713,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             },
             DownloadTask {
@@ -11676,6 +11749,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             },
         ];
@@ -11724,6 +11798,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11759,6 +11834,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -11805,6 +11881,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11840,6 +11917,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11875,6 +11953,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -11926,6 +12005,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11961,6 +12041,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11996,6 +12077,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -12123,6 +12205,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -12178,6 +12261,7 @@ mod tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -12328,6 +12412,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -12400,6 +12485,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -12453,6 +12539,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12488,6 +12575,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12523,6 +12611,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -12602,6 +12691,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -12654,6 +12744,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -12703,6 +12794,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -12784,6 +12876,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -12842,6 +12935,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12877,6 +12971,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -12929,6 +13024,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12964,6 +13060,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -13016,6 +13113,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13051,6 +13149,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13086,6 +13185,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -13136,6 +13236,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13171,6 +13272,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13206,6 +13308,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -13257,6 +13360,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13292,6 +13396,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13327,6 +13432,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
                 current_session_start: None,
             });
         }
@@ -13939,6 +14045,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
             };
             dm.tasks.lock().await.push(task);
         }
@@ -14545,6 +14652,7 @@ mod max_concurrent_tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -14600,6 +14708,7 @@ mod max_concurrent_tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -14654,6 +14763,7 @@ mod max_concurrent_tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         };
 
@@ -14714,6 +14824,7 @@ mod max_concurrent_tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         });
         drop(tasks);
@@ -14784,6 +14895,7 @@ mod max_concurrent_tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         });
         drop(tasks);
@@ -14852,6 +14964,7 @@ mod max_concurrent_tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
             current_session_start: None,
         });
         drop(tasks);

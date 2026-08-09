@@ -190,6 +190,7 @@ fn test_download_task_progress() {
         sequential_mode: false,
         max_download_time_secs: None,
         proxy_override: None,
+        staleness_promotion_count: 0,
     };
 
     assert_eq!(task.progress(), 50.0);
@@ -233,6 +234,7 @@ fn test_download_task_progress_zero_size() {
         sequential_mode: false,
         max_download_time_secs: None,
         proxy_override: None,
+        staleness_promotion_count: 0,
     };
 
     assert_eq!(task.progress(), 0.0);

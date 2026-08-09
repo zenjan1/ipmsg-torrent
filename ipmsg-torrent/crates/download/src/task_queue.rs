@@ -58,6 +58,9 @@ pub struct PersistedTask {
     /// Maximum download time in seconds (auto-pause when exceeded, None = no limit)
     #[serde(default)]
     pub max_download_time_secs: Option<u64>,
+    /// Number of times this task has been auto-promoted by queue staleness detection
+    #[serde(default)]
+    pub staleness_promotion_count: u32,
 }
 
 fn default_bandwidth_weight() -> u8 {
@@ -162,6 +165,7 @@ impl From<DownloadTask> for PersistedTask {
             sequential_mode: t.sequential_mode,
             notes: t.notes,
             max_download_time_secs: t.max_download_time_secs,
+            staleness_promotion_count: t.staleness_promotion_count,
         }
     }
 }
@@ -202,6 +206,7 @@ impl From<PersistedTask> for DownloadTask {
             notes: t.notes,
             max_download_time_secs: t.max_download_time_secs,
             proxy_override: None,
+            staleness_promotion_count: t.staleness_promotion_count,
         }
     }
 }
@@ -321,6 +326,7 @@ mod tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -393,6 +399,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -428,6 +435,7 @@ mod tests {
                 sequential_mode: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
             },
         ];
 
@@ -492,6 +500,7 @@ mod tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
         };
 
         save_task_queue(&[task], data_dir).unwrap();
@@ -541,6 +550,7 @@ mod tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
         };
 
         save_task_queue(&[task], data_dir).unwrap();
@@ -587,6 +597,7 @@ mod tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
         };
 
         save_task_queue(&[task2], data_dir).unwrap();

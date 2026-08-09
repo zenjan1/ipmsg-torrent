@@ -5059,6 +5059,7 @@ mod tests {
                 is_favorite: false,
                 max_download_time_secs: None,
                 proxy_override: None,
+                staleness_promotion_count: 0,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -5575,6 +5576,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
         };
         let info = TaskInfo::from(task);
         assert_eq!(info.depends_on, vec!["task-0".to_string()]);

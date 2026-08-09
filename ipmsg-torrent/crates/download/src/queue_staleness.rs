@@ -604,4 +604,59 @@ mod tests {
         let result = load_staleness_config(dir.path()).await;
         assert!(result.is_none());
     }
+
+    #[test]
+    fn test_promotion_count_tracking() {
+        // Test that promotion_count is properly incremented
+        let mut task = make_task("1", 7200, StalePriority::Low, 0);
+        let mut config = StalenessConfig::default();
+        config.auto_promote = true;
+
+        // First promotion
+        let result = evaluate_task(&task, Utc::now(), &config).unwrap();
+        assert!(result.promoted);
+        assert_eq!(result.promotion_count, 1);
+
+        // Update task with new promotion count
+        task.promotion_count = result.promotion_count;
+        task.created_at = Utc::now() - Duration::seconds(10800); // 3 hours ago
+
+        // Second promotion
+        let result = evaluate_task(&task, Utc::now(), &config).unwrap();
+        assert!(result.promoted);
+        assert_eq!(result.promotion_count, 2);
+
+        // Update task again
+        task.promotion_count = result.promotion_count;
+        task.created_at = Utc::now() - Duration::seconds(14400); // 4 hours ago
+
+        // Third promotion
+        let result = evaluate_task(&task, Utc::now(), &config).unwrap();
+        assert!(result.promoted);
+        assert_eq!(result.promotion_count, 3);
+    }
+
+    #[test]
+    fn test_promotion_count_respects_max_promotions() {
+        let task = make_task("1", 7200, StalePriority::Low, 3);
+        let mut config = StalenessConfig::default();
+        config.auto_promote = true;
+        config.max_promotions = 3;
+
+        let result = evaluate_task(&task, Utc::now(), &config).unwrap();
+        assert!(!result.promoted); // Should not promote because max reached
+        assert_eq!(result.promotion_count, 3);
+    }
+
+    #[test]
+    fn test_promotion_count_unlimited() {
+        let task = make_task("1", 7200, StalePriority::Low, 10);
+        let mut config = StalenessConfig::default();
+        config.auto_promote = true;
+        config.max_promotions = 0; // Unlimited
+
+        let result = evaluate_task(&task, Utc::now(), &config).unwrap();
+        assert!(result.promoted);
+        assert_eq!(result.promotion_count, 11); // Should increment to 11
+    }
 }

@@ -126,6 +126,7 @@ impl RecycledTaskData {
             sequential_mode: self.sequential_mode,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
         }
     }
 }
@@ -439,6 +440,7 @@ mod tests {
             sequential_mode: false,
             max_download_time_secs: None,
             proxy_override: None,
+            staleness_promotion_count: 0,
         }
     }
 
