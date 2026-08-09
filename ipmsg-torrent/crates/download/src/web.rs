@@ -367,6 +367,19 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/error-recovery", get(get_error_recovery_handler))
         .route("/api/error-recovery", post(set_error_recovery_handler))
         .route("/api/error-recovery/classify", post(classify_error_handler))
+        .route("/api/connection-health", get(get_connection_health_handler))
+        .route(
+            "/api/connection-health",
+            post(set_connection_health_handler),
+        )
+        .route(
+            "/api/connection-health/summary",
+            get(get_connection_health_summary_handler),
+        )
+        .route(
+            "/api/connection-health/unhealthy",
+            get(get_unhealthy_connections_handler),
+        )
         .route("/api/speed-burst/start", post(start_speed_burst_handler))
         .route("/api/speed-burst/stop", post(stop_speed_burst_handler))
         .route("/api/ws", get(ws_handler))
@@ -2098,6 +2111,67 @@ async fn classify_error_handler(
         "strategy": decision.strategy,
         "explanation": decision.explanation,
         "overridden": decision.overridden,
+    }))
+}
+
+/// Get connection health configuration
+async fn get_connection_health_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_connection_health_config().await;
+    Json(serde_json::json!({
+        "enabled": config.enabled,
+        "stall_threshold_bps": config.stall_threshold_bps,
+        "degraded_stall_threshold": config.degraded_stall_threshold,
+        "unhealthy_stall_threshold": config.unhealthy_stall_threshold,
+        "degraded_error_threshold": config.degraded_error_threshold,
+        "unhealthy_error_threshold": config.unhealthy_error_threshold,
+        "degraded_timeout_threshold": config.degraded_timeout_threshold,
+        "unhealthy_timeout_threshold": config.unhealthy_timeout_threshold,
+        "max_idle_secs": config.max_idle_secs,
+        "max_connections_per_task": config.max_connections_per_task,
+        "max_total_connections": config.max_total_connections,
+    }))
+}
+
+/// Set connection health configuration
+async fn set_connection_health_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::connection_health::ConnectionHealthConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_connection_health_config(config).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+    }
+}
+
+/// Get connection health summary
+async fn get_connection_health_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_connection_health_summary().await;
+    Json(serde_json::json!({
+        "total_connections": summary.total_connections,
+        "healthy_count": summary.healthy_count,
+        "degraded_count": summary.degraded_count,
+        "unhealthy_count": summary.unhealthy_count,
+        "unknown_count": summary.unknown_count,
+        "stale_count": summary.stale_count,
+        "total_bytes_transferred": summary.total_bytes_transferred,
+        "total_errors": summary.total_errors,
+        "total_timeouts": summary.total_timeouts,
+        "connections_needing_action": summary.connections_needing_action.len(),
+    }))
+}
+
+/// Get unhealthy connections
+async fn get_unhealthy_connections_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let unhealthy = state.manager.get_unhealthy_connections().await;
+    Json(serde_json::json!({
+        "unhealthy_connections": unhealthy,
+        "count": unhealthy.len(),
     }))
 }
 

@@ -15,6 +15,7 @@ pub mod bandwidth_schedule;
 pub mod bulk_ops;
 pub mod checksum;
 pub mod conflict_detection;
+pub mod connection_health;
 pub mod connection_pool;
 pub mod csv_export;
 pub mod data_cap;
@@ -822,6 +823,8 @@ pub struct DownloadManager {
     ttl: Arc<Mutex<ttl::TtlManager>>,
     /// Error recovery manager for classifying errors and determining recovery strategies
     error_recovery: Arc<Mutex<error_recovery::ErrorRecoveryManager>>,
+    /// Connection health monitor for tracking per-connection quality
+    connection_health: Arc<Mutex<connection_health::ConnectionHealthManager>>,
 }
 
 impl DownloadManager {
@@ -920,6 +923,9 @@ impl DownloadManager {
             )),
             ttl: Arc::new(Mutex::new(ttl::TtlManager::new())),
             error_recovery: Arc::new(Mutex::new(error_recovery::ErrorRecoveryManager::new())),
+            connection_health: Arc::new(Mutex::new(
+                connection_health::ConnectionHealthManager::new(),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -1150,11 +1156,20 @@ impl DownloadManager {
             )),
             ttl: Arc::new(Mutex::new(ttl::TtlManager::new())),
             error_recovery: Arc::new(Mutex::new(error_recovery::ErrorRecoveryManager::new())),
+            connection_health: Arc::new(Mutex::new(
+                connection_health::ConnectionHealthManager::new(),
+            )),
         };
         // Restore error recovery config from disk
         if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
             *dm.error_recovery.lock().await =
                 error_recovery::ErrorRecoveryManager::from_config(recovery_cfg);
+        }
+        // Restore connection health config from disk
+        if let Ok(Some(health_cfg)) = connection_health::load_connection_health_config(&dm.data_dir)
+        {
+            *dm.connection_health.lock().await =
+                connection_health::ConnectionHealthManager::with_config(health_cfg);
         }
         // Restore progress milestone config from disk
         if let Ok(Some(milestone_cfg)) =
@@ -3003,6 +3018,114 @@ impl DownloadManager {
         if let Err(e) = error_recovery::save_error_recovery_config(mgr.config(), &self.data_dir) {
             tracing::warn!(error = %e, "Failed to persist error recovery config");
         }
+    }
+
+    // ========== Phase 94: Connection Health Monitor ==========
+
+    /// Set connection health monitoring configuration.
+    pub async fn set_connection_health_config(
+        &self,
+        config: connection_health::ConnectionHealthConfig,
+    ) -> Result<(), connection_health::ConnectionHealthPersistenceError> {
+        connection_health::save_connection_health_config(&config, &self.data_dir)?;
+        let mut mgr = self.connection_health.lock().await;
+        mgr.set_config(config);
+        Ok(())
+    }
+
+    /// Get current connection health monitoring configuration.
+    pub async fn get_connection_health_config(&self) -> connection_health::ConnectionHealthConfig {
+        self.connection_health.lock().await.config().clone()
+    }
+
+    /// Register a new connection for health monitoring.
+    pub async fn register_connection_health(
+        &self,
+        connection_id: String,
+        task_id: String,
+        protocol: String,
+        remote_addr: String,
+    ) -> bool {
+        self.connection_health.lock().await.register_connection(
+            connection_id,
+            task_id,
+            protocol,
+            remote_addr,
+        )
+    }
+
+    /// Unregister a connection from health monitoring.
+    pub async fn unregister_connection_health(&self, connection_id: &str) {
+        self.connection_health
+            .lock()
+            .await
+            .unregister_connection(connection_id);
+    }
+
+    /// Record speed for a connection.
+    pub async fn record_connection_speed(&self, connection_id: &str, speed_bps: u64) {
+        self.connection_health
+            .lock()
+            .await
+            .record_speed(connection_id, speed_bps);
+    }
+
+    /// Record bytes transferred for a connection.
+    pub async fn record_connection_transfer(&self, connection_id: &str, bytes: u64) {
+        self.connection_health
+            .lock()
+            .await
+            .record_transfer(connection_id, bytes);
+    }
+
+    /// Record an error for a connection.
+    pub async fn record_connection_error(&self, connection_id: &str) {
+        self.connection_health
+            .lock()
+            .await
+            .record_error(connection_id);
+    }
+
+    /// Record a timeout for a connection.
+    pub async fn record_connection_timeout(&self, connection_id: &str) {
+        self.connection_health
+            .lock()
+            .await
+            .record_timeout(connection_id);
+    }
+
+    /// Get connection health summary.
+    pub async fn get_connection_health_summary(
+        &self,
+    ) -> connection_health::ConnectionHealthSummary {
+        self.connection_health.lock().await.get_summary()
+    }
+
+    /// Assess health of a specific connection.
+    pub async fn assess_connection_health(
+        &self,
+        connection_id: &str,
+    ) -> Option<connection_health::ConnectionHealthAssessment> {
+        self.connection_health
+            .lock()
+            .await
+            .assess_connection(connection_id)
+    }
+
+    /// Remove all connections for a task.
+    pub async fn remove_task_connections_health(&self, task_id: &str) -> usize {
+        self.connection_health
+            .lock()
+            .await
+            .remove_task_connections(task_id)
+    }
+
+    /// Get unhealthy connections for potential replacement.
+    pub async fn get_unhealthy_connections(&self) -> Vec<String> {
+        self.connection_health
+            .lock()
+            .await
+            .get_unhealthy_connections()
     }
 
     /// Check if a retry attempt is allowed under the daily quota.
