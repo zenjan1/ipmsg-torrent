@@ -15,6 +15,7 @@ pub mod bulk_ops;
 pub mod checksum;
 pub mod conflict_detection;
 pub mod connection_pool;
+pub mod csv_export;
 pub mod data_cap;
 pub mod dht;
 pub mod disk_monitor;
@@ -49,6 +50,8 @@ pub mod task_archive;
 pub mod task_export;
 pub mod task_queue;
 pub mod torrent;
+pub mod ttl;
+pub mod url_bookmarks;
 pub mod url_dedup;
 pub mod url_expander;
 pub mod url_normalizer;
@@ -730,6 +733,8 @@ pub struct DownloadManager {
     bandwidth_schedule: Arc<Mutex<BandwidthScheduleManager>>,
     /// Download presets for reusable task configurations
     download_presets: Arc<Mutex<Vec<download_presets::DownloadPreset>>>,
+    /// URL bookmarks for named collections of downloadable URLs
+    url_bookmarks: Arc<Mutex<Vec<url_bookmarks::UrlBookmark>>>,
     /// Cooldown configuration for failed task retry backoff
     cooldown_config: Arc<tokio::sync::RwLock<download_cooldown::CooldownConfig>>,
     /// Conflict detection strategy for file path conflicts
@@ -798,6 +803,7 @@ impl DownloadManager {
             audit_log: Arc::new(Mutex::new(AuditLog::new())),
             bandwidth_schedule: Arc::new(Mutex::new(BandwidthScheduleManager::new())),
             download_presets: Arc::new(Mutex::new(Vec::new())),
+            url_bookmarks: Arc::new(Mutex::new(Vec::new())),
             cooldown_config: Arc::new(tokio::sync::RwLock::new(
                 download_cooldown::CooldownConfig::default(),
             )),
@@ -997,6 +1003,7 @@ impl DownloadManager {
             audit_log: Arc::new(Mutex::new(AuditLog::new())),
             bandwidth_schedule: Arc::new(Mutex::new(BandwidthScheduleManager::new())),
             download_presets: Arc::new(Mutex::new(Vec::new())),
+            url_bookmarks: Arc::new(Mutex::new(Vec::new())),
             cooldown_config: Arc::new(tokio::sync::RwLock::new(
                 download_cooldown::CooldownConfig::default(),
             )),
@@ -1102,6 +1109,10 @@ impl DownloadManager {
         // Restore download presets from disk
         if let Ok(presets) = download_presets::load_presets(&dm.data_dir) {
             *dm.download_presets.lock().await = presets;
+        }
+        // Restore URL bookmarks from disk
+        if let Ok(bookmarks) = url_bookmarks::load_bookmarks(&dm.data_dir) {
+            *dm.url_bookmarks.lock().await = bookmarks;
         }
         // Restore URL rewrite rules from disk
         if let Some(rewrite_mgr) = url_rewrite::load_url_rewrite_manager(&dm.data_dir) {
@@ -1840,6 +1851,145 @@ impl DownloadManager {
         } else {
             false
         }
+    }
+
+    // ========== URL Bookmarks ==========
+
+    /// Add a URL bookmark collection. Persists to disk.
+    pub async fn add_url_bookmark(
+        &self,
+        name: &str,
+        entries: Vec<url_bookmarks::BookmarkEntry>,
+    ) -> Result<url_bookmarks::UrlBookmark, url_bookmarks::BookmarkError> {
+        let mut bookmarks = self.url_bookmarks.lock().await;
+        let bookmark = url_bookmarks::add_bookmark(&mut bookmarks, name, entries)?;
+        if let Err(e) = url_bookmarks::save_bookmarks(&bookmarks, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist URL bookmarks");
+        }
+        Ok(bookmark)
+    }
+
+    /// List all URL bookmarks
+    pub async fn list_url_bookmarks(&self) -> Vec<url_bookmarks::UrlBookmark> {
+        self.url_bookmarks.lock().await.clone()
+    }
+
+    /// Get a URL bookmark by name
+    pub async fn get_url_bookmark(&self, name: &str) -> Option<url_bookmarks::UrlBookmark> {
+        url_bookmarks::get_bookmark(&self.url_bookmarks.lock().await, name).cloned()
+    }
+
+    /// Remove a URL bookmark by name
+    pub async fn remove_url_bookmark(
+        &self,
+        name: &str,
+    ) -> Result<(), url_bookmarks::BookmarkError> {
+        let mut bookmarks = self.url_bookmarks.lock().await;
+        url_bookmarks::remove_bookmark(&mut bookmarks, name)?;
+        if let Err(e) = url_bookmarks::save_bookmarks(&bookmarks, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist URL bookmarks");
+        }
+        Ok(())
+    }
+
+    /// Add URLs to an existing bookmark
+    pub async fn add_urls_to_bookmark(
+        &self,
+        name: &str,
+        urls: Vec<url_bookmarks::BookmarkEntry>,
+    ) -> Result<(), url_bookmarks::BookmarkError> {
+        let mut bookmarks = self.url_bookmarks.lock().await;
+        if let Some(bookmark) = url_bookmarks::get_bookmark_mut(&mut bookmarks, name) {
+            url_bookmarks::add_urls_to_book(bookmark, urls)?;
+            if let Err(e) = url_bookmarks::save_bookmarks(&bookmarks, &self.data_dir) {
+                tracing::warn!(error = %e, "Failed to persist URL bookmarks");
+            }
+            Ok(())
+        } else {
+            Err(url_bookmarks::BookmarkError::NotFound(name.to_string()))
+        }
+    }
+
+    /// Remove a URL from a bookmark
+    pub async fn remove_url_from_bookmark(
+        &self,
+        name: &str,
+        url: &str,
+    ) -> Result<(), url_bookmarks::BookmarkError> {
+        let mut bookmarks = self.url_bookmarks.lock().await;
+        if let Some(bookmark) = url_bookmarks::get_bookmark_mut(&mut bookmarks, name) {
+            url_bookmarks::remove_url_from_bookmark(bookmark, url)?;
+            if let Err(e) = url_bookmarks::save_bookmarks(&bookmarks, &self.data_dir) {
+                tracing::warn!(error = %e, "Failed to persist URL bookmarks");
+            }
+            Ok(())
+        } else {
+            Err(url_bookmarks::BookmarkError::NotFound(name.to_string()))
+        }
+    }
+
+    /// Import all URLs from a bookmark as download tasks
+    pub async fn import_bookmark(
+        &self,
+        name: &str,
+    ) -> Result<url_bookmarks::BookmarkImportResult, String> {
+        let mut bookmarks = self.url_bookmarks.lock().await;
+        let bookmark = url_bookmarks::get_bookmark_mut(&mut bookmarks, name)
+            .ok_or_else(|| format!("Bookmark '{}' not found", name))?;
+
+        if bookmark.entries.is_empty() {
+            return Err(format!("Bookmark '{}' has no URLs", name));
+        }
+
+        let urls: Vec<String> = bookmark.entries.iter().map(|e| e.url.clone()).collect();
+
+        // Mark as used
+        url_bookmarks::mark_bookmark_used(bookmark);
+
+        // Persist the updated bookmark
+        if let Err(e) = url_bookmarks::save_bookmarks(&bookmarks, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist URL bookmarks");
+        }
+
+        // Import each URL as a download task
+        let mut imported = 0;
+        let mut skipped = 0;
+
+        for url in &urls {
+            // Check for duplicates
+            let existing = self.tasks.lock().await;
+            let is_duplicate = existing
+                .iter()
+                .any(|t| t.source_url.as_deref() == Some(url.as_str()));
+            drop(existing);
+
+            if is_duplicate {
+                skipped += 1;
+                continue;
+            }
+
+            // Add the download using add_xunlei with HTTP source
+            let sources = vec![xunlei::XunleiSource::Http {
+                url: url.clone(),
+                cookies: None,
+                referer: None,
+            }];
+            let filename = url.rsplit('/').next().unwrap_or("download").to_string();
+            match self.add_xunlei(filename, 0, sources).await {
+                Ok(_) => imported += 1,
+                Err(e) => {
+                    tracing::warn!(error = %e, url = %url, "Failed to import URL from bookmark");
+                    skipped += 1;
+                }
+            }
+        }
+
+        Ok(url_bookmarks::BookmarkImportResult {
+            bookmark_name: name.to_string(),
+            urls_imported: imported,
+            urls_skipped: skipped,
+            urls,
+        })
     }
 
     /// Set maximum concurrent downloads (0 = unlimited).
@@ -7044,6 +7194,35 @@ impl DownloadManager {
                 tracing::warn!(error = %e, "Failed to persist task queue");
             }
         });
+    }
+
+    // ========== Phase 81: CSV Export ==========
+
+    /// Export tasks to a CSV file for spreadsheet analysis.
+    ///
+    /// Returns the export result with file path and task count.
+    pub async fn export_tasks_to_csv(
+        &self,
+        output_path: &std::path::Path,
+        config: Option<csv_export::CsvExportConfig>,
+    ) -> Result<csv_export::CsvExportResult, String> {
+        let tasks = self.tasks.lock().await;
+        csv_export::export_tasks_to_csv(&tasks, output_path, config).map_err(|e| e.to_string())
+    }
+
+    /// Export tasks to a CSV string (useful for API responses).
+    pub async fn export_tasks_to_csv_string(
+        &self,
+        config: Option<csv_export::CsvExportConfig>,
+    ) -> Result<String, String> {
+        let tasks = self.tasks.lock().await;
+        csv_export::export_tasks_to_csv_string(&tasks, config).map_err(|e| e.to_string())
+    }
+
+    /// Generate a CSV summary report with aggregated statistics.
+    pub async fn get_csv_summary(&self) -> String {
+        let tasks = self.tasks.lock().await;
+        csv_export::generate_csv_summary(&tasks)
     }
 }
 

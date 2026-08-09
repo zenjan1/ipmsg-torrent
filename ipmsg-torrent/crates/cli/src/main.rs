@@ -332,6 +332,11 @@ enum Command {
         /// Task ID to clone
         task_id: String,
     },
+    /// Export tasks to CSV format for spreadsheet analysis
+    DlExportCsv {
+        /// Output file path
+        path: String,
+    },
     /// Set or clear mirror/fallback URLs for a download task
     DlMirror {
         /// Task ID to set mirrors for
@@ -383,6 +388,12 @@ enum Command {
     /// Manage download presets
     DlPreset {
         /// Subcommand: "list", "add", "del", "apply", "show"
+        subcommand: String,
+        args: Vec<String>,
+    },
+    /// URL bookmarks (list|add|del|show|import|addurl|delurl)
+    DlBookmark {
+        /// Subcommand
         subcommand: String,
         args: Vec<String>,
     },
@@ -1024,6 +1035,17 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlclone <task_id>".to_string())
             }
         }
+        "dlexportcsv" | "dl-exportcsv" | "dlec" => {
+            // /dlexportcsv <output_path>
+            let args: Vec<&str> = input.splitn(2, ' ').collect();
+            if args.len() >= 2 {
+                Command::DlExportCsv {
+                    path: args[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlexportcsv <output_path>".to_string())
+            }
+        }
         "dlarule" | "dl-auto-rule" | "dlar" => {
             // /dlarule <add|list|del> [args...]
             let args: Vec<&str> = input.splitn(2, ' ').collect();
@@ -1077,6 +1099,23 @@ fn parse_command(input: &str) -> Command {
                 vec![]
             };
             Command::DlPreset { subcommand, args }
+        }
+        "dlbookmark" | "dl-bookmark" | "dlbm" => {
+            let subcommand = if parts.len() >= 2 {
+                parts[1].to_string()
+            } else {
+                "list".to_string()
+            };
+            let args: Vec<String> = if parts.len() >= 3 {
+                parts[2..]
+                    .join(" ")
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect()
+            } else {
+                vec![]
+            };
+            Command::DlBookmark { subcommand, args }
         }
         "dlarules" | "dl-auto-rules" | "dlars" => Command::DlAutoRule {
             subcommand: "list".to_string(),
@@ -1383,6 +1422,7 @@ fn command_help() -> String {
         "/dlaudit [cmd]     - Audit log (status|recent [n]|task <id>|clear)",
         "/dlbwsched [cmd]   - Bandwidth schedule (status|list|add|del)",
         "/dlpreset [cmd]    - Download presets (list|show|add|del|apply)",
+        "/dlbookmark [cmd]  - URL bookmarks (list|show|add|del|import|addurl|delurl)",
         "/dlretry <task_id> [none|fixed|exp|linear <secs>] - Per-task retry policy",
         "/dlfiles <task_id> [list|all|0,2,4|except:1,3] - View/select torrent files",
         "/dlconflict <get|set|check> - Conflict detection (get strategy / set skip|rename|overwrite / check path)",
@@ -3606,6 +3646,205 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlBookmark { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "list" | "" => {
+                    let bookmarks = download_manager.list_url_bookmarks().await;
+                    let mut output = "🔖 URL Bookmarks:\n".to_string();
+                    if bookmarks.is_empty() {
+                        output.push_str("  (no bookmarks configured)\n");
+                    } else {
+                        for bm in bookmarks.iter() {
+                            let status = if bm.enabled { "✅" } else { "❌" };
+                            output.push_str(&format!(
+                                "  {} {} ({} URLs, imported {} times)\n",
+                                status,
+                                bm.name,
+                                bm.entries.len(),
+                                bm.import_count
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", output);
+                }
+                "show" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlbookmark show <name>".to_string());
+                        return;
+                    }
+                    let name = &args[0];
+                    if let Some(bm) = download_manager.get_url_bookmark(name).await {
+                        let mut output = format!("🔖 Bookmark: {}\n", bm.name);
+                        output.push_str(&format!("  URLs: {}\n", bm.entries.len()));
+                        output.push_str(&format!("  Imported: {} times\n", bm.import_count));
+                        if let Some(ref desc) = bm.description {
+                            output.push_str(&format!("  Description: {}\n", desc));
+                        }
+                        output.push_str("  URLs:\n");
+                        for (i, entry) in bm.entries.iter().enumerate() {
+                            output.push_str(&format!("    {}. {}\n", i + 1, entry.display_label()));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", output);
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("Bookmark '{}' not found", name));
+                    }
+                }
+                "add" => {
+                    // /dlbookmark add <name> <url1> [url2] [url3] ...
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlbookmark add <name> <url1> [url2] ...".to_string(),
+                        );
+                        return;
+                    }
+                    let name = &args[0];
+                    let entries: Vec<ipmsg_download::url_bookmarks::BookmarkEntry> = args[1..]
+                        .iter()
+                        .map(ipmsg_download::url_bookmarks::BookmarkEntry::new)
+                        .collect();
+                    match download_manager.add_url_bookmark(name, entries).await {
+                        Ok(bm) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!(
+                                    "✅ Added bookmark '{}' with {} URLs",
+                                    bm.name,
+                                    bm.entries.len()
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("❌ Failed to add bookmark: {}", e),
+                            );
+                        }
+                    }
+                }
+                "del" | "remove" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlbookmark del <name>".to_string());
+                        return;
+                    }
+                    let name = &args[0];
+                    match download_manager.remove_url_bookmark(name).await {
+                        Ok(()) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("🗑️ Removed bookmark '{}'", name));
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("❌ Failed to remove bookmark: {}", e),
+                            );
+                        }
+                    }
+                }
+                "import" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlbookmark import <name>".to_string(),
+                        );
+                        return;
+                    }
+                    let name = &args[0];
+                    match download_manager.import_bookmark(name).await {
+                        Ok(result) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!(
+                                    "✅ Imported {} URLs from bookmark '{}' ({} skipped)",
+                                    result.urls_imported, result.bookmark_name, result.urls_skipped
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("❌ Failed to import bookmark: {}", e),
+                            );
+                        }
+                    }
+                }
+                "addurl" => {
+                    // /dlbookmark addurl <name> <url1> [url2] ...
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlbookmark addurl <name> <url1> [url2] ...".to_string(),
+                        );
+                        return;
+                    }
+                    let name = &args[0];
+                    let entries: Vec<ipmsg_download::url_bookmarks::BookmarkEntry> = args[1..]
+                        .iter()
+                        .map(ipmsg_download::url_bookmarks::BookmarkEntry::new)
+                        .collect();
+                    match download_manager.add_urls_to_bookmark(name, entries).await {
+                        Ok(()) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Added URLs to bookmark '{}'", name),
+                            );
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("❌ Failed to add URLs: {}", e));
+                        }
+                    }
+                }
+                "delurl" => {
+                    // /dlbookmark delurl <name> <url>
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlbookmark delurl <name> <url>".to_string(),
+                        );
+                        return;
+                    }
+                    let name = &args[0];
+                    let url = &args[1];
+                    match download_manager.remove_url_from_bookmark(name, url).await {
+                        Ok(()) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Removed URL from bookmark '{}'", name),
+                            );
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("❌ Failed to remove URL: {}", e));
+                        }
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Usage: /dlbookmark [list|show <name>|add <name> <urls...>|del <name>|import <name>|addurl <name> <urls...>|delurl <name> <url>]".to_string());
+                }
+            }
+        }
         Command::DlRetryPolicy {
             task_id,
             policy_args,
@@ -5573,6 +5812,32 @@ async fn handle_command(
                 Err(e) => {
                     let mut s = state.lock().await;
                     s.add_system_message("main", format!("❌ Failed to clone task: {}", e));
+                }
+            }
+        }
+        Command::DlExportCsv { path } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match download_manager
+                .export_tasks_to_csv(std::path::Path::new(&path), None)
+                .await
+            {
+                Ok(result) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "✅ Exported {} tasks to CSV: {}",
+                            result.task_count,
+                            result.path.display()
+                        ),
+                    );
+                }
+                Err(e) => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("❌ Failed to export CSV: {}", e));
                 }
             }
         }

@@ -193,6 +193,16 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/download-presets/:id/apply/:task_id",
             post(apply_download_preset),
         )
+        .route("/api/url-bookmarks", get(list_url_bookmarks))
+        .route("/api/url-bookmarks", post(add_url_bookmark))
+        .route("/api/url-bookmarks/:name", get(get_url_bookmark))
+        .route("/api/url-bookmarks/:name", post(remove_url_bookmark))
+        .route("/api/url-bookmarks/:name/import", post(import_url_bookmark))
+        .route("/api/url-bookmarks/:name/urls", post(add_urls_to_bookmark))
+        .route(
+            "/api/url-bookmarks/:name/urls/remove",
+            post(remove_url_from_bookmark),
+        )
         .route("/api/retry-policy", get(get_retry_policy))
         .route("/api/retry-policy", post(set_retry_policy))
         .route("/api/torrent-files/:task_id", get(get_torrent_files))
@@ -262,6 +272,8 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/archive/clear", post(clear_archive_handler))
         .route("/api/archive/config", post(set_archive_config_handler))
+        .route("/api/export/csv", get(export_csv_handler))
+        .route("/api/export/csv/summary", get(export_csv_summary_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1330,6 +1342,37 @@ async fn set_archive_config_handler(
 ) -> impl axum::response::IntoResponse {
     state.manager.set_archive_config(config).await;
     Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Export tasks to CSV format
+async fn export_csv_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.export_tasks_to_csv_string(None).await {
+        Ok(csv) => (
+            StatusCode::OK,
+            [("Content-Type", "text/csv; charset=utf-8")],
+            csv,
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+/// Get CSV export summary statistics
+async fn export_csv_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_csv_summary().await;
+    (
+        StatusCode::OK,
+        [("Content-Type", "text/plain; charset=utf-8")],
+        summary,
+    )
 }
 
 /// Get URL deduplication configuration
@@ -2759,6 +2802,165 @@ async fn apply_download_preset(
         },
         task_id: Some(task_id),
     })
+}
+
+// ========== URL Bookmarks REST API ==========
+
+/// Request to add URLs to a bookmark
+#[derive(Debug, Deserialize)]
+struct AddUrlsRequest {
+    urls: Vec<String>,
+}
+
+/// Request to remove a URL from a bookmark
+#[derive(Debug, Deserialize)]
+struct RemoveUrlRequest {
+    url: String,
+}
+
+/// GET /api/url-bookmarks - List all bookmarks
+async fn list_url_bookmarks(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let bookmarks = state.manager.list_url_bookmarks().await;
+    let summaries: Vec<crate::url_bookmarks::BookmarkSummary> = bookmarks
+        .iter()
+        .map(crate::url_bookmarks::BookmarkSummary::from)
+        .collect();
+    Json(serde_json::json!({
+        "bookmarks": summaries,
+        "count": summaries.len()
+    }))
+}
+
+/// POST /api/url-bookmarks - Add a bookmark
+async fn add_url_bookmark(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let name = req
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let urls: Vec<String> = req
+        .get("urls")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let entries: Vec<crate::url_bookmarks::BookmarkEntry> = urls
+        .iter()
+        .map(crate::url_bookmarks::BookmarkEntry::new)
+        .collect();
+
+    match state.manager.add_url_bookmark(name, entries).await {
+        Ok(bm) => Ok(Json(serde_json::json!({
+            "success": true,
+            "bookmark": {
+                "id": bm.id,
+                "name": bm.name,
+                "url_count": bm.entries.len(),
+            }
+        }))),
+        Err(_) => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+/// GET /api/url-bookmarks/:name - Get a bookmark
+async fn get_url_bookmark(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.manager.get_url_bookmark(&name).await {
+        Some(bm) => Ok(Json(serde_json::json!({
+            "id": bm.id,
+            "name": bm.name,
+            "entries": bm.entries,
+            "description": bm.description,
+            "created_at": bm.created_at,
+            "last_used_at": bm.last_used_at,
+            "import_count": bm.import_count,
+            "enabled": bm.enabled,
+        }))),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// POST /api/url-bookmarks/:name - Remove a bookmark
+async fn remove_url_bookmark(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<TaskResponse>, StatusCode> {
+    match state.manager.remove_url_bookmark(&name).await {
+        Ok(()) => Ok(Json(TaskResponse {
+            success: true,
+            message: format!("Removed bookmark '{}'", name),
+            task_id: None,
+        })),
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// POST /api/url-bookmarks/:name/import - Import all URLs as tasks
+async fn import_url_bookmark(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.manager.import_bookmark(&name).await {
+        Ok(result) => Ok(Json(serde_json::json!({
+            "success": true,
+            "bookmark_name": result.bookmark_name,
+            "urls_imported": result.urls_imported,
+            "urls_skipped": result.urls_skipped,
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "success": false,
+            "error": e,
+        }))),
+    }
+}
+
+/// POST /api/url-bookmarks/:name/urls - Add URLs to a bookmark
+async fn add_urls_to_bookmark(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Json(req): Json<AddUrlsRequest>,
+) -> Result<Json<TaskResponse>, StatusCode> {
+    let entries: Vec<crate::url_bookmarks::BookmarkEntry> = req
+        .urls
+        .iter()
+        .map(crate::url_bookmarks::BookmarkEntry::new)
+        .collect();
+    match state.manager.add_urls_to_bookmark(&name, entries).await {
+        Ok(()) => Ok(Json(TaskResponse {
+            success: true,
+            message: format!("Added URLs to bookmark '{}'", name),
+            task_id: None,
+        })),
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// POST /api/url-bookmarks/:name/urls/remove - Remove a URL from a bookmark
+async fn remove_url_from_bookmark(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Json(req): Json<RemoveUrlRequest>,
+) -> Result<Json<TaskResponse>, StatusCode> {
+    match state
+        .manager
+        .remove_url_from_bookmark(&name, &req.url)
+        .await
+    {
+        Ok(()) => Ok(Json(TaskResponse {
+            success: true,
+            message: format!("Removed URL from bookmark '{}'", name),
+            task_id: None,
+        })),
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 /// Serve the index HTML page
