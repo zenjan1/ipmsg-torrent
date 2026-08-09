@@ -343,6 +343,10 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/url-allowlist", get(get_allowlist_handler))
         .route("/api/url-allowlist", post(set_allowlist_handler))
         .route("/api/url-allowlist/check", post(check_allowlist_handler))
+        .route("/api/task-snooze", get(get_snooze_handler))
+        .route("/api/task-snooze", post(set_snooze_handler))
+        .route("/api/task-snooze/config", get(get_snooze_config_handler))
+        .route("/api/task-snooze/config", post(set_snooze_config_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1838,6 +1842,78 @@ async fn check_allowlist_handler(
     }
     let result = state.manager.check_url_allowed(url).await;
     Json(serde_json::to_value(result).unwrap_or_default())
+}
+
+/// Get task snooze status (list of snoozed tasks)
+async fn get_snooze_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let snoozed = state.manager.list_snoozed_tasks().await;
+    Json(serde_json::json!({
+        "snoozed_tasks": snoozed,
+        "count": snoozed.len()
+    }))
+}
+
+/// Snooze or unsnooze a task
+async fn set_snooze_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    match action {
+        "snooze" => {
+            let task_id = body.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+            let until_str = body.get("until").and_then(|v| v.as_str()).unwrap_or("");
+            let reason = body
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if task_id.is_empty() || until_str.is_empty() {
+                return Json(serde_json::json!({"error": "missing task_id or until field"}));
+            }
+            let until = match chrono::DateTime::parse_from_rfc3339(until_str) {
+                Ok(dt) => dt.with_timezone(&chrono::Utc),
+                Err(_) => {
+                    return Json(serde_json::json!({"error": "invalid until format (use RFC3339)"}));
+                }
+            };
+            match state.manager.snooze_task(task_id, until, reason).await {
+                Ok(state) => Json(serde_json::json!({"status": "ok", "snooze": state})),
+                Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+            }
+        }
+        "unsnooze" => {
+            let task_id = body.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+            if task_id.is_empty() {
+                return Json(serde_json::json!({"error": "missing task_id field"}));
+            }
+            match state.manager.unsnooze_task(task_id).await {
+                Ok(_) => Json(serde_json::json!({"status": "ok"})),
+                Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+            }
+        }
+        _ => Json(serde_json::json!({"error": "action must be 'snooze' or 'unsnooze'"})),
+    }
+}
+
+/// Get task snooze configuration
+async fn get_snooze_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_task_snooze_config().await;
+    Json(config)
+}
+
+/// Set task snooze configuration
+async fn set_snooze_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::task_snooze::TaskSnoozeConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_task_snooze_config(config).await {
+        Ok(_) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
 }
 
 /// Get URL deduplication configuration

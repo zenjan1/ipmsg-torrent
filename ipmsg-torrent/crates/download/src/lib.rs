@@ -56,6 +56,7 @@ pub mod task_comments;
 pub mod task_export;
 pub mod task_favorites;
 pub mod task_queue;
+pub mod task_snooze;
 pub mod torrent;
 pub mod ttl;
 pub mod url_allowlist;
@@ -793,6 +794,8 @@ pub struct DownloadManager {
     auto_pause: Arc<tokio::sync::RwLock<auto_pause::AutoPauseConfig>>,
     /// URL allowlist for restricting downloads to trusted sources
     url_allowlist: Arc<tokio::sync::RwLock<url_allowlist::AllowlistConfig>>,
+    /// Task snooze manager for pausing downloads until a specific time
+    task_snooze: Arc<Mutex<task_snooze::TaskSnoozeManager>>,
 }
 
 impl DownloadManager {
@@ -877,6 +880,7 @@ impl DownloadManager {
             url_allowlist: Arc::new(tokio::sync::RwLock::new(
                 url_allowlist::AllowlistConfig::default(),
             )),
+            task_snooze: Arc::new(Mutex::new(task_snooze::TaskSnoozeManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1093,7 +1097,12 @@ impl DownloadManager {
             url_allowlist: Arc::new(tokio::sync::RwLock::new(
                 url_allowlist::AllowlistConfig::default(),
             )),
+            task_snooze: Arc::new(Mutex::new(task_snooze::TaskSnoozeManager::new())),
         };
+        // Restore task snooze data from disk
+        if let Ok(snooze_data) = task_snooze::load_task_snooze_data(&dm.data_dir).await {
+            *dm.task_snooze.lock().await = task_snooze::TaskSnoozeManager::from_data(snooze_data);
+        }
         // Restore recycle bin from disk
         dm.recycle_bin.lock().await.load_state(&dm.data_dir);
         // Restore priority aging config from disk
@@ -1236,6 +1245,45 @@ impl DownloadManager {
         let auto_retry_base_delay_secs = self.auto_retry_base_delay_secs.clone();
         let domain_limit = self.domain_limit.clone();
         let protocol_limits = self.protocol_limits.clone();
+
+        // Spawn task snooze expiry checker (runs every 30 seconds)
+        let snooze_tasks = self.tasks.clone();
+        let snooze_task_snooze = self.task_snooze.clone();
+        let snooze_event_tx = self.event_tx.clone();
+        let snooze_notify = self.task_complete_notify.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                let mut mgr = snooze_task_snooze.lock().await;
+                let expired = mgr.collect_expired();
+                if expired.is_empty() {
+                    continue;
+                }
+                let expired_ids: Vec<String> = expired.iter().map(|s| s.task_id.clone()).collect();
+                tracing::info!(count = expired_ids.len(), "Processing expired task snoozes");
+
+                let mut tasks = snooze_tasks.lock().await;
+                for task in tasks.iter_mut() {
+                    if expired_ids.contains(&task.id) && task.state == DownloadState::Paused {
+                        task.state = DownloadState::Queued;
+                        task.updated_at = chrono::Utc::now();
+                        task.error = None;
+                    }
+                }
+                drop(tasks);
+
+                mgr.clear_expired();
+                drop(mgr);
+
+                let _ = snooze_event_tx.send(TaskEvent::Status {
+                    total_tasks: 0,
+                    running_tasks: 0,
+                    total_speed_bps: 0.0,
+                });
+                snooze_notify.notify_one();
+            }
+        });
 
         // Spawn watch folder auto-scanner (runs every 60 seconds)
         let watch_folder = self.watch_folder.clone();
@@ -8189,6 +8237,143 @@ impl DownloadManager {
     pub async fn check_url_allowed(&self, url: &str) -> url_allowlist::AllowlistCheckResult {
         let config = self.url_allowlist.read().await.clone();
         url_allowlist::check_url_allowlist(url, &config)
+    }
+
+    // ─── Task Snooze (Phase 90) ───────────────────────────────────────
+
+    /// Set task snooze configuration.
+    pub async fn set_task_snooze_config(
+        &self,
+        config: task_snooze::TaskSnoozeConfig,
+    ) -> Result<(), task_snooze::TaskSnoozeError> {
+        let mut mgr = self.task_snooze.lock().await;
+        mgr.set_config(config);
+        let data = mgr.to_data();
+        task_snooze::save_task_snooze_data(&data, &self.data_dir).await
+    }
+
+    /// Get current task snooze configuration.
+    pub async fn get_task_snooze_config(&self) -> task_snooze::TaskSnoozeConfig {
+        self.task_snooze.lock().await.config().clone()
+    }
+
+    /// Snooze a task until the specified time.
+    /// The task will be paused and automatically resume when the snooze expires.
+    pub async fn snooze_task(
+        &self,
+        task_id: &str,
+        until: chrono::DateTime<chrono::Utc>,
+        reason: Option<String>,
+    ) -> Result<task_snooze::SnoozeState, task_snooze::TaskSnoozeError> {
+        let mut mgr = self.task_snooze.lock().await;
+        let state = mgr.snooze_task(task_id.to_string(), until, reason)?;
+
+        // Pause the task if it's currently running or queued
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            if task.state == DownloadState::Downloading || task.state == DownloadState::Queued {
+                task.state = DownloadState::Paused;
+                task.updated_at = chrono::Utc::now();
+                task.error = Some(format!(
+                    "Snoozed until {}",
+                    until.format("%Y-%m-%d %H:%M UTC")
+                ));
+            }
+        }
+        drop(tasks);
+
+        // Persist
+        let data = mgr.to_data();
+        task_snooze::save_task_snooze_data(&data, &self.data_dir).await?;
+        Ok(state)
+    }
+
+    /// Unsnooze a task immediately (wake it up).
+    pub async fn unsnooze_task(
+        &self,
+        task_id: &str,
+    ) -> Result<task_snooze::SnoozeState, task_snooze::TaskSnoozeError> {
+        let mut mgr = self.task_snooze.lock().await;
+        let state = mgr.unsnooze_task(task_id)?;
+
+        // Move task back to Queued
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+            if task.state == DownloadState::Paused {
+                task.state = DownloadState::Queued;
+                task.updated_at = chrono::Utc::now();
+                task.error = None;
+            }
+        }
+        drop(tasks);
+
+        // Persist
+        let data = mgr.to_data();
+        task_snooze::save_task_snooze_data(&data, &self.data_dir).await?;
+        Ok(state)
+    }
+
+    /// Check if a task is currently snoozed.
+    pub async fn is_task_snoozed(&self, task_id: &str) -> bool {
+        self.task_snooze.lock().await.is_snoozed(task_id)
+    }
+
+    /// Get snooze state for a task.
+    pub async fn get_task_snooze_state(&self, task_id: &str) -> Option<task_snooze::SnoozeState> {
+        self.task_snooze
+            .lock()
+            .await
+            .get_snooze_state(task_id)
+            .cloned()
+    }
+
+    /// List all currently snoozed tasks.
+    pub async fn list_snoozed_tasks(&self) -> Vec<task_snooze::SnoozeState> {
+        self.task_snooze
+            .lock()
+            .await
+            .list_snoozed()
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Process expired snoozes: resume tasks whose snooze time has passed.
+    /// Returns the list of task IDs that were resumed.
+    pub async fn process_expired_snoozes(&self) -> Vec<String> {
+        let mut mgr = self.task_snooze.lock().await;
+        let expired = mgr.collect_expired();
+        if expired.is_empty() {
+            return vec![];
+        }
+
+        let expired_ids: Vec<String> = expired.iter().map(|s| s.task_id.clone()).collect();
+
+        // Move expired tasks back to Queued
+        let mut tasks = self.tasks.lock().await;
+        for task in tasks.iter_mut() {
+            if expired_ids.contains(&task.id) && task.state == DownloadState::Paused {
+                task.state = DownloadState::Queued;
+                task.updated_at = chrono::Utc::now();
+                task.error = None;
+            }
+        }
+        drop(tasks);
+
+        // Clear expired entries and persist
+        mgr.clear_expired();
+        let data = mgr.to_data();
+        let _ = task_snooze::save_task_snooze_data(&data, &self.data_dir).await;
+
+        expired_ids
+    }
+
+    /// Remove snooze tracking for a task (e.g., when task is deleted).
+    pub async fn remove_task_snooze(&self, task_id: &str) {
+        let mut mgr = self.task_snooze.lock().await;
+        mgr.remove_task(task_id);
+        let data = mgr.to_data();
+        let _ = task_snooze::save_task_snooze_data(&data, &self.data_dir).await;
     }
 }
 

@@ -467,6 +467,12 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Task snooze: pause downloads until a specific time
+    DlSnooze {
+        /// Subcommand: snooze|unsnooze|list|config
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1384,6 +1390,24 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlsnooze" | "dl-snooze" | "dlsnz" => {
+            // /dlsnooze <snooze|unsnooze|list|config> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlsnooze <snooze|unsnooze|list|config> [args...]".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlSnooze {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1584,6 +1608,9 @@ fn command_help() -> String {
         "/dlcomment <add|list|remove|search|config> - Task comments",
         "/dlfavorite <list|add|remove|config> - Task favorites/pinning",
         "/dlprule [cmd]     - Path rules (status|list|add|del|enable|disable|test)",
+        "/dlsnooze [cmd]    - Task snooze (snooze <id> <duration> [reason]|unsnooze <id>|list|config)",
+        "/dlallowlist [cmd] - URL allowlist (status|enable|disable|add|del|list|check)",
+        "/dlrecycle [cmd]   - Recycle bin (list|restore|purge|empty|config|summary|autopause)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -7870,6 +7897,127 @@ async fn handle_command(
                         "main",
                         "Usage: /dlallowlist <status|enable|disable|add|del|list|check> [args...]"
                             .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlSnooze { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "snooze" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlsnooze snooze <task_id> <duration> [reason]".to_string(),
+                        );
+                    } else {
+                        let task_id = &args[0];
+                        let duration_str = &args[1];
+                        let reason = if args.len() > 2 {
+                            Some(args[2..].join(" "))
+                        } else {
+                            None
+                        };
+
+                        // Parse duration (e.g., "2h", "30m", "1d")
+                        let duration_secs = match ipmsg_download::auto_cleanup::parse_duration_secs(
+                            duration_str,
+                        ) {
+                            Some(secs) => secs,
+                            None => {
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "Invalid duration format: {}. Use formats like 30m, 2h, 1d",
+                                        duration_str
+                                    ),
+                                );
+                                return;
+                            }
+                        };
+
+                        let until =
+                            chrono::Utc::now() + chrono::Duration::seconds(duration_secs as i64);
+                        match download_manager.snooze_task(task_id, until, reason).await {
+                            Ok(_) => {
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "Task {} snoozed until {}",
+                                        task_id,
+                                        until.format("%Y-%m-%d %H:%M:%S UTC")
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                s.add_system_message(
+                                    "main",
+                                    format!("Failed to snooze task: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "unsnooze" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlsnooze unsnooze <task_id>".to_string(),
+                        );
+                    } else {
+                        let task_id = &args[0];
+                        match download_manager.unsnooze_task(task_id).await {
+                            Ok(_) => {
+                                s.add_system_message("main", format!("Task {} unsnoozed", task_id));
+                            }
+                            Err(e) => {
+                                s.add_system_message(
+                                    "main",
+                                    format!("Failed to unsnooze task: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "list" => {
+                    let snoozed = download_manager.list_snoozed_tasks().await;
+                    if snoozed.is_empty() {
+                        s.add_system_message("main", "No snoozed tasks".to_string());
+                    } else {
+                        let mut out = format!("Snoozed tasks ({}):\n", snoozed.len());
+                        for state in snoozed {
+                            out.push_str(&format!(
+                                "  {} - until {} ({})\n",
+                                state.task_id,
+                                state.snoozed_until.format("%Y-%m-%d %H:%M:%S UTC"),
+                                state.reason.as_deref().unwrap_or("no reason")
+                            ));
+                        }
+                        s.add_system_message("main", out);
+                    }
+                }
+                "config" => {
+                    let config = download_manager.get_task_snooze_config().await;
+                    let out = format!(
+                        "Task Snooze Configuration:\n  Enabled: {}\n  Max snoozed tasks: {}\n  Max duration: {} seconds",
+                        config.enabled,
+                        if config.max_snoozed == 0 {
+                            "unlimited".to_string()
+                        } else {
+                            config.max_snoozed.to_string()
+                        },
+                        config.max_duration_secs
+                    );
+                    s.add_system_message("main", out);
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlsnooze <snooze|unsnooze|list|config> [args...]".to_string(),
                     );
                 }
             }
