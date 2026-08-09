@@ -304,6 +304,25 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/priority-aging", get(get_priority_aging_handler))
         .route("/api/priority-aging", post(set_priority_aging_handler))
         .route("/api/priority-aging/run", post(run_priority_aging_handler))
+        .route("/api/task-profiler", get(get_task_profiler_handler))
+        .route("/api/task-profiler", post(set_task_profiler_handler))
+        .route(
+            "/api/task-profiler/summary",
+            get(get_performance_summary_handler),
+        )
+        .route(
+            "/api/task-profiler/refresh",
+            post(refresh_task_profiles_handler),
+        )
+        .route("/api/task-profiler/:task_id", get(get_task_profile_handler))
+        .route(
+            "/api/task-profiler/:task_id",
+            delete(delete_task_profile_handler),
+        )
+        .route(
+            "/api/task-profiler/clear",
+            post(clear_task_profiles_handler),
+        )
         .route("/api/task-comments", get(get_all_task_comments_handler))
         .route(
             "/api/task-comments/search",
@@ -427,6 +446,14 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/speed-burst/start", post(start_speed_burst_handler))
         .route("/api/speed-burst/stop", post(stop_speed_burst_handler))
+        .route("/api/snapshots", get(list_snapshots_handler))
+        .route("/api/snapshots", post(create_snapshot_handler))
+        .route("/api/snapshots/:id", get(get_snapshot_handler))
+        .route("/api/snapshots/:id/restore", post(restore_snapshot_handler))
+        .route(
+            "/api/snapshots/:id",
+            axum::routing::delete(delete_snapshot_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1708,6 +1735,67 @@ async fn run_priority_aging_handler(
 ) -> Json<Vec<crate::priority_aging::AgingDecision>> {
     let decisions = state.manager.run_priority_aging().await;
     Json(decisions)
+}
+
+/// GET /api/task-profiler - Get task profiler configuration
+async fn get_task_profiler_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::task_profiler::TaskProfilerConfig> {
+    let config = state.manager.get_task_profiler_config().await;
+    Json(config)
+}
+
+/// POST /api/task-profiler - Set task profiler configuration
+async fn set_task_profiler_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::task_profiler::TaskProfilerConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_task_profiler_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/task-profiler/summary - Get performance summary
+async fn get_performance_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::task_profiler::PerformanceSummary> {
+    let summary = state.manager.get_performance_summary(5).await;
+    Json(summary)
+}
+
+/// POST /api/task-profiler/refresh - Refresh all task profiles
+async fn refresh_task_profiles_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.refresh_task_profiles().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/task-profiler/:task_id - Get profile for a specific task
+async fn get_task_profile_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.get_task_profile(&task_id).await {
+        Some(profile) => Json(serde_json::json!({"profile": profile})),
+        None => Json(serde_json::json!({"error": "Profile not found"})),
+    }
+}
+
+/// DELETE /api/task-profiler/:task_id - Remove a task profile
+async fn delete_task_profile_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let removed = state.manager.remove_task_profile(&task_id).await;
+    Json(serde_json::json!({"removed": removed}))
+}
+
+/// POST /api/task-profiler/clear - Clear all task profiles
+async fn clear_task_profiles_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_task_profiles().await;
+    Json(serde_json::json!({"status": "ok"}))
 }
 
 /// GET /api/task-comments - List all tasks with comments and counts
@@ -3743,6 +3831,93 @@ async fn remove_auto_rule(
         Json(serde_json::json!({"success": true, "message": "Rule removed"}))
     } else {
         Json(serde_json::json!({"error": "Rule not found"}))
+    }
+}
+
+// ─── Phase 98: Download Queue Snapshot Handlers ───
+
+#[derive(serde::Deserialize)]
+struct CreateSnapshotRequest {
+    name: String,
+    description: Option<String>,
+}
+
+/// List all available snapshots
+async fn list_snapshots_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::download_snapshot::SnapshotSummary>> {
+    let summaries = state.manager.list_queue_snapshots().await;
+    Json(summaries)
+}
+
+/// Create a new snapshot
+async fn create_snapshot_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<CreateSnapshotRequest>,
+) -> impl axum::response::IntoResponse {
+    match state
+        .manager
+        .create_queue_snapshot(req.name, req.description)
+        .await
+    {
+        Ok(entry) => (
+            axum::http::StatusCode::CREATED,
+            Json(serde_json::json!({
+                "status": "created",
+                "id": entry.id,
+                "name": entry.name,
+                "task_count": entry.task_count,
+                "total_size": entry.total_size,
+            })),
+        ),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// Get a specific snapshot's data
+async fn get_snapshot_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.get_queue_snapshot(&id).await {
+        Ok(data) => Json(serde_json::json!({
+            "id": data.id,
+            "name": data.name,
+            "description": data.description,
+            "created_at": data.created_at.to_rfc3339(),
+            "global_speed_limit": data.global_speed_limit,
+            "max_concurrent": data.max_concurrent,
+            "task_count": data.tasks.len(),
+        })),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Restore a snapshot
+async fn restore_snapshot_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.restore_queue_snapshot(&id).await {
+        Ok(tasks) => Json(serde_json::json!({
+            "status": "restored",
+            "task_count": tasks.len(),
+        })),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Delete a snapshot
+async fn delete_snapshot_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.delete_queue_snapshot(&id).await {
+        Ok(()) => Json(serde_json::json!({"status": "deleted"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
     }
 }
 

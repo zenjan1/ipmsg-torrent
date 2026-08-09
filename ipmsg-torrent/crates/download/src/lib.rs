@@ -28,6 +28,7 @@ pub mod download_history;
 pub mod download_presets;
 pub mod download_report;
 pub mod download_session;
+pub mod download_snapshot;
 pub mod download_stats;
 pub mod download_time_limit;
 pub mod ed2k;
@@ -64,6 +65,7 @@ pub mod task_chain;
 pub mod task_comments;
 pub mod task_export;
 pub mod task_favorites;
+pub mod task_profiler;
 pub mod task_proxy;
 pub mod task_queue;
 pub mod task_snooze;
@@ -845,6 +847,10 @@ pub struct DownloadManager {
     task_proxy: Arc<Mutex<task_proxy::TaskProxyManager>>,
     /// Task chain manager for sequential task execution
     task_chain: Arc<Mutex<task_chain::TaskChainManager>>,
+    /// Download queue snapshot manager
+    snapshot_manager: Arc<Mutex<download_snapshot::SnapshotManager>>,
+    /// Task performance profiler
+    task_profiler: Arc<Mutex<task_profiler::TaskProfiler>>,
 }
 
 impl DownloadManager {
@@ -956,6 +962,10 @@ impl DownloadManager {
             task_chain: Arc::new(Mutex::new(task_chain::TaskChainManager::new(
                 data_dir.join("task_chain.json"),
             ))),
+            snapshot_manager: Arc::new(Mutex::new(download_snapshot::SnapshotManager::new(
+                data_dir.join("snapshots"),
+            ))),
+            task_profiler: Arc::new(Mutex::new(task_profiler::TaskProfiler::default())),
         };
         dm.start_scheduler();
         dm
@@ -1199,6 +1209,10 @@ impl DownloadManager {
             task_chain: Arc::new(Mutex::new(task_chain::TaskChainManager::new(
                 data_dir.join("task_chain.json"),
             ))),
+            snapshot_manager: Arc::new(Mutex::new(download_snapshot::SnapshotManager::new(
+                data_dir.join("snapshots"),
+            ))),
+            task_profiler: Arc::new(Mutex::new(task_profiler::TaskProfiler::default())),
         };
         // Restore error recovery config from disk
         if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
@@ -9373,6 +9387,133 @@ impl DownloadManager {
         mgr.remove_task(task_id);
         let data = mgr.to_data();
         let _ = task_snooze::save_task_snooze_data(&data, &self.data_dir).await;
+    }
+
+    // ─── Phase 98: Download Queue Snapshot & Restore ───
+
+    /// Create a snapshot of the current download queue.
+    pub async fn create_queue_snapshot(
+        &self,
+        name: String,
+        description: Option<String>,
+    ) -> Result<download_snapshot::SnapshotEntry, download_snapshot::SnapshotError> {
+        let tasks = self.tasks.lock().await.clone();
+        let speed_limit = self.rate_limiter.global_limit().await;
+        let max_concurrent = self.max_concurrent.load(Ordering::Relaxed);
+
+        let mut mgr = self.snapshot_manager.lock().await;
+        mgr.create_snapshot(&tasks, name, description, speed_limit, max_concurrent)
+    }
+
+    /// List all available snapshots.
+    pub async fn list_queue_snapshots(&self) -> Vec<download_snapshot::SnapshotSummary> {
+        let mgr = self.snapshot_manager.lock().await;
+        mgr.list_snapshots()
+    }
+
+    /// Get snapshot data.
+    pub async fn get_queue_snapshot(
+        &self,
+        id: &str,
+    ) -> Result<download_snapshot::SnapshotData, download_snapshot::SnapshotError> {
+        let mgr = self.snapshot_manager.lock().await;
+        mgr.get_snapshot(id)
+    }
+
+    /// Restore a snapshot, replacing the current task queue.
+    pub async fn restore_queue_snapshot(
+        &self,
+        id: &str,
+    ) -> Result<Vec<DownloadTask>, download_snapshot::SnapshotError> {
+        let mgr = self.snapshot_manager.lock().await;
+        let restored = mgr.restore_snapshot(id, &self.data_dir)?;
+        // Reload tasks into memory
+        let mut tasks = self.tasks.lock().await;
+        *tasks = restored.clone();
+        drop(tasks);
+        // Persist
+        let _ = task_queue::save_task_queue(&restored, &self.data_dir);
+        Ok(restored)
+    }
+
+    /// Delete a snapshot.
+    pub async fn delete_queue_snapshot(
+        &self,
+        id: &str,
+    ) -> Result<(), download_snapshot::SnapshotError> {
+        let mut mgr = self.snapshot_manager.lock().await;
+        mgr.delete_snapshot(id)
+    }
+
+    // ===== Task Performance Profiler =====
+
+    /// Set task profiler configuration.
+    pub async fn set_task_profiler_config(&self, config: task_profiler::TaskProfilerConfig) {
+        let mut profiler = self.task_profiler.lock().await;
+        profiler.set_config(config);
+    }
+
+    /// Get task profiler configuration.
+    pub async fn get_task_profiler_config(&self) -> task_profiler::TaskProfilerConfig {
+        let profiler = self.task_profiler.lock().await;
+        profiler.get_config().clone()
+    }
+
+    /// Get the performance profile for a specific task.
+    pub async fn get_task_profile(&self, task_id: &str) -> Option<task_profiler::TaskProfile> {
+        let profiler = self.task_profiler.lock().await;
+        profiler.get_profile(task_id).cloned()
+    }
+
+    /// Get all task performance profiles.
+    pub async fn get_all_task_profiles(&self) -> Vec<task_profiler::TaskProfile> {
+        let profiler = self.task_profiler.lock().await;
+        profiler.get_all_profiles().into_iter().cloned().collect()
+    }
+
+    /// Get the performance summary across all tasks.
+    pub async fn get_performance_summary(&self, top_n: usize) -> task_profiler::PerformanceSummary {
+        let profiler = self.task_profiler.lock().await;
+        profiler.get_performance_summary(top_n)
+    }
+
+    /// Remove a task from the profiler.
+    pub async fn remove_task_profile(&self, task_id: &str) -> bool {
+        let mut profiler = self.task_profiler.lock().await;
+        profiler.remove_profile(task_id)
+    }
+
+    /// Clear all task profiles.
+    pub async fn clear_task_profiles(&self) {
+        let mut profiler = self.task_profiler.lock().await;
+        profiler.clear_all();
+    }
+
+    /// Refresh all task profiles from current task state.
+    pub async fn refresh_task_profiles(&self) {
+        let tasks = self.tasks.lock().await;
+        let mut profiler = self.task_profiler.lock().await;
+        let now = chrono::Utc::now();
+
+        for task in tasks.iter() {
+            let input = task_profiler::TaskProfileInput {
+                task_id: task.id.clone(),
+                task_name: task.name.clone(),
+                protocol: format!("{:?}", task.protocol).to_lowercase(),
+                total_bytes: task.size,
+                downloaded_bytes: task.downloaded,
+                is_complete: task.state == DownloadState::Complete,
+                created_at: task.created_at,
+                active_time_seconds: task.active_time_seconds,
+                current_speed_bps: task.speed_bps,
+                retry_count: task.auto_retry_count,
+                error_count: if task.error.is_some() { 1 } else { 0 },
+                stall_count: 0,
+                total_stall_secs: 0.0,
+            };
+            let _ = now; // suppress unused warning
+            profiler.update_profile(input);
+        }
     }
 }
 

@@ -504,6 +504,12 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Task performance profiler (status|summary|profile|refresh|clear|config)
+    DlProfiler {
+        /// Subcommand: status|summary|profile|refresh|clear|config
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1546,6 +1552,25 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlprofiler" | "dl-profiler" | "dlprof" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlprofiler <status|summary|profile|refresh|clear|config>".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlProfiler {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1755,6 +1780,7 @@ fn command_help() -> String {
         "/dlttl [cmd]      - Task TTL management (status|enable|disable|set <duration> [interval]|task <id> <duration>|summary)",
         "/dlerrrec [cmd]   - Error recovery (status|enable|disable|set <category> <strategy>|reset|test <error>)",
         "/dlchain [cmd]    - Task chains (list|create|delete|add|remove|enable|disable|summary)",
+        "/dlprofiler [cmd] - Task performance profiler (status|summary|profile|refresh|clear|config)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -9056,6 +9082,153 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlchain <list|create|delete|add|remove|enable|disable|summary>"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlProfiler { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_task_profiler_config().await;
+                    let msg = format!(
+                        "Task Profiler:\n  Enabled: {}\n  Max samples/task: {}\n  Stall threshold: {:.0} B/s\n  Auto-refresh: {}",
+                        config.enabled,
+                        config.max_samples_per_task,
+                        config.stall_threshold_bps,
+                        config.auto_refresh
+                    );
+                    s.add_system_message("main", msg);
+                }
+                "summary" => {
+                    let summary = download_manager.get_performance_summary(5).await;
+                    let msg = ipmsg_download::task_profiler::TaskProfiler::format_summary(&summary);
+                    s.add_system_message("main", msg);
+                }
+                "profile" => {
+                    if args.is_empty() {
+                        let profiles = download_manager.get_all_task_profiles().await;
+                        if profiles.is_empty() {
+                            s.add_system_message(
+                                "main",
+                                "No task profiles found. Run /dlprofiler refresh first."
+                                    .to_string(),
+                            );
+                        } else {
+                            let mut msg = format!("Task Profiles ({} total):\n", profiles.len());
+                            for p in profiles.iter().take(10) {
+                                msg.push_str(&format!(
+                                    "  {} {} - {:.0}/100 ({}) bottleneck: {}\n",
+                                    p.rating.emoji(),
+                                    p.task_name,
+                                    p.efficiency_score,
+                                    p.rating.label(),
+                                    p.bottleneck
+                                ));
+                            }
+                            s.add_system_message("main", msg);
+                        }
+                    } else {
+                        match download_manager.get_task_profile(&args[0]).await {
+                            Some(p) => {
+                                let mut msg = format!(
+                                    "Profile for '{}':\n  Rating: {} {:.0}/100 ({})\n  Progress: {:.1}%\n  Avg speed: {:.0} B/s\n  Peak speed: {:.0} B/s\n  Bottleneck: {}\n  Stalls: {}\n  Retries: {}\n  Errors: {}\n",
+                                    p.task_name,
+                                    p.rating.emoji(),
+                                    p.efficiency_score,
+                                    p.rating.label(),
+                                    p.progress_pct,
+                                    p.avg_speed_bps,
+                                    p.peak_speed_bps,
+                                    p.bottleneck,
+                                    p.stall_count,
+                                    p.retry_count,
+                                    p.error_count
+                                );
+                                if !p.recommendations.is_empty() {
+                                    msg.push_str("  Recommendations:\n");
+                                    for r in &p.recommendations {
+                                        msg.push_str(&format!("    • {}\n", r));
+                                    }
+                                }
+                                s.add_system_message("main", msg);
+                            }
+                            None => {
+                                s.add_system_message("main", format!("No profile found for task '{}'. Run /dlprofiler refresh first.", args[0]));
+                            }
+                        }
+                    }
+                }
+                "refresh" => {
+                    download_manager.refresh_task_profiles().await;
+                    let count = download_manager.get_all_task_profiles().await.len();
+                    s.add_system_message("main", format!("Refreshed {} task profiles", count));
+                }
+                "clear" => {
+                    download_manager.clear_task_profiles().await;
+                    s.add_system_message("main", "Cleared all task profiles".to_string());
+                }
+                "config" => {
+                    if args.len() < 2 {
+                        s.add_system_message("main", "Usage: /dlprofiler config <max_samples|stall_threshold|enable|disable> [value]".to_string());
+                    } else {
+                        let mut config = download_manager.get_task_profiler_config().await;
+                        match args[0].as_str() {
+                            "max_samples" => {
+                                if let Ok(v) = args[1].parse::<usize>() {
+                                    config.max_samples_per_task = v;
+                                    download_manager.set_task_profiler_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Max samples per task set to {}", v),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid value for max_samples".to_string(),
+                                    );
+                                }
+                            }
+                            "stall_threshold" => {
+                                if let Ok(v) = args[1].parse::<f64>() {
+                                    config.stall_threshold_bps = v;
+                                    download_manager.set_task_profiler_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Stall threshold set to {:.0} B/s", v),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid value for stall_threshold".to_string(),
+                                    );
+                                }
+                            }
+                            "enable" => {
+                                config.enabled = true;
+                                download_manager.set_task_profiler_config(config).await;
+                                s.add_system_message("main", "Task profiler enabled".to_string());
+                            }
+                            "disable" => {
+                                config.enabled = false;
+                                download_manager.set_task_profiler_config(config).await;
+                                s.add_system_message("main", "Task profiler disabled".to_string());
+                            }
+                            _ => {
+                                s.add_system_message("main", "Usage: /dlprofiler config <max_samples|stall_threshold|enable|disable> [value]".to_string());
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlprofiler <status|summary|profile|refresh|clear|config>"
                             .to_string(),
                     );
                 }
