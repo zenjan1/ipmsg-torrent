@@ -248,6 +248,12 @@ enum Command {
         /// URL of the web page to scrape
         url: String,
     },
+    /// Manage watch folders for automatic URL import
+    DlWatchFolder {
+        /// Action: "list", "add <path> [name]", "remove <id>", "scan", "enable <id>", "disable <id>"
+        action: String,
+        args: Vec<String>,
+    },
     /// Export download tasks to a JSON file
     DlExport {
         /// Output file path (e.g., /tmp/tasks.json)
@@ -390,6 +396,12 @@ enum Command {
     /// Per-domain concurrent download limit (status/enable/disable/set)
     DlDomainLimit {
         /// Subcommand: "status", "enable", "disable", "set <domain> <limit>", "default <limit>"
+        subcommand: String,
+        args: Vec<String>,
+    },
+    /// Per-protocol concurrent download limit (status/enable/disable/set)
+    DlProtoLimit {
+        /// Subcommand: "status", "enable", "disable", "set <protocol> <limit>", "default <limit>"
         subcommand: String,
         args: Vec<String>,
     },
@@ -822,6 +834,19 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dllinks <url>".to_string())
             }
         }
+        "dlwf" | "dl-watch" | "dl-watchfolder" => {
+            // /dlwf [list|add <path> [name]|remove <id>|scan|enable <id>|disable <id>]
+            let args: Vec<&str> = input.split_whitespace().collect();
+            let action = args
+                .get(1)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "list".to_string());
+            let cmd_args: Vec<String> = args.iter().skip(2).map(|s| s.to_string()).collect();
+            Command::DlWatchFolder {
+                action,
+                args: cmd_args,
+            }
+        }
         "dlexport" | "dl-export" => {
             // /dlexport <output_path> [description]
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1102,6 +1127,26 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlprotolimit" | "dl-proto" | "dlpl" => {
+            // /dlprotolimit <status|enable|disable|set|default> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlprotolimit <status|enable|disable|set|default> [args...]".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlProtoLimit {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1271,6 +1316,7 @@ fn command_help() -> String {
         "/dlsegment <url>   - Download URL using multi-segment parallel connections",
         "/dlextract <path>  - Extract download URLs from arbitrary text file",
         "/dllinks <url>     - Scrape web page and extract download links",
+        "/dlwf [cmd]        - Watch folders (list|add <path> [name]|remove <id>|scan|enable|disable)",
         "/dlautoshutdown <disabled|exit|shell:<cmd>> - Auto-shutdown when all downloads complete",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/dlpath <path>       - Set download save path (absolute path)",
@@ -1293,6 +1339,7 @@ fn command_help() -> String {
         "/dlfiles <task_id> [list|all|0,2,4|except:1,3] - View/select torrent files",
         "/dlconflict <get|set|check> - Conflict detection (get strategy / set skip|rename|overwrite / check path)",
         "/dldomainlimit <status|enable|disable|set|default> - Per-domain concurrent download limit",
+        "/dlprotolimit <status|enable|disable|set|default> - Per-protocol concurrent download limit",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -3548,6 +3595,141 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlProtoLimit { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "status" => {
+                    let summary = download_manager.get_protocol_limits_summary().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", summary.format());
+                }
+                "enable" => {
+                    let mut config = download_manager.get_protocol_limits().await;
+                    config.enabled = true;
+                    download_manager.set_protocol_limits(config).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ Per-protocol download limit enabled".to_string(),
+                    );
+                }
+                "disable" => {
+                    let mut config = download_manager.get_protocol_limits().await;
+                    config.enabled = false;
+                    download_manager.set_protocol_limits(config).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ Per-protocol download limit disabled".to_string(),
+                    );
+                }
+                "default" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlprotolimit default <limit>".to_string(),
+                        );
+                        return;
+                    }
+                    match args[0].parse::<u32>() {
+                        Ok(limit) => {
+                            let mut config = download_manager.get_protocol_limits().await;
+                            config.default_max_concurrent = limit;
+                            download_manager.set_protocol_limits(config).await;
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Default protocol limit set to {}", limit),
+                            );
+                        }
+                        Err(_) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "❌ Invalid limit value".to_string());
+                        }
+                    }
+                }
+                "set" => {
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlprotolimit set <protocol> <limit>".to_string(),
+                        );
+                        return;
+                    }
+                    let protocol_str = &args[0];
+                    match args[1].parse::<u32>() {
+                        Ok(limit) => {
+                            if let Some(protocol) =
+                                ipmsg_download::protocol_limits::key_to_protocol(protocol_str)
+                            {
+                                let mut config = download_manager.get_protocol_limits().await;
+                                config.set_limit(protocol, limit, true);
+                                download_manager.set_protocol_limits(config).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Protocol {} limit set to {}", protocol_str, limit),
+                                );
+                            } else {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "❌ Invalid protocol. Use: torrent, ed2k, xunlei, magnet, p2p"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        Err(_) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "❌ Invalid limit value".to_string());
+                        }
+                    }
+                }
+                "remove" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlprotolimit remove <protocol>".to_string(),
+                        );
+                        return;
+                    }
+                    let protocol_str = &args[0];
+                    if let Some(protocol) =
+                        ipmsg_download::protocol_limits::key_to_protocol(protocol_str)
+                    {
+                        let mut config = download_manager.get_protocol_limits().await;
+                        config.remove_limit(protocol);
+                        download_manager.set_protocol_limits(config).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Removed protocol limit for {}", protocol_str),
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "❌ Invalid protocol. Use: torrent, ed2k, xunlei, magnet, p2p"
+                                .to_string(),
+                        );
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlprotolimit <status|enable|disable|default|set|remove> [args...]"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         Command::DlTag { task_id, tags } => {
             let s = state.lock().await;
             let download_manager = s.download_manager.clone();
@@ -4352,6 +4534,155 @@ async fn handle_command(
                 Err(e) => {
                     let mut s = state.lock().await;
                     s.add_system_message("main", format!("❌ {}", e));
+                }
+            }
+        }
+        Command::DlWatchFolder { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match action.as_str() {
+                "list" => {
+                    let summary = download_manager.get_watch_folder_summary().await;
+                    if summary.folders.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "📂 No watch folders configured. Use /dlwf add <path> [name] to add one.".to_string());
+                    } else {
+                        let mut msg = format!(
+                            "📂 Watch Folders ({}/{})\n",
+                            summary.enabled_folders, summary.total_folders
+                        );
+                        for f in &summary.folders {
+                            let status = if f.enabled { "✅" } else { "⏸️" };
+                            let exts = if f.extensions.is_empty() {
+                                "all".to_string()
+                            } else {
+                                f.extensions.join(", ")
+                            };
+                            msg.push_str(&format!(
+                                "  {} [{}] {} (ext: {}, recursive: {})\n",
+                                status, f.id, f.path, exts, f.recursive
+                            ));
+                            if let Some(last) = &f.last_scanned {
+                                msg.push_str(&format!(
+                                    "     Last scanned: {}\n",
+                                    last.format("%Y-%m-%d %H:%M")
+                                ));
+                            }
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "add" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlwf add <path> [name]".to_string());
+                    } else {
+                        let path = std::path::PathBuf::from(&args[0]);
+                        let name = args.get(1).cloned().unwrap_or_else(|| args[0].clone());
+                        match download_manager
+                            .add_watch_folder(name, path, false, vec![], false, vec![], None)
+                            .await
+                        {
+                            Ok(id) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Watch folder added: {}", id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to add watch folder: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "remove" | "del" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlwf remove <id>".to_string());
+                    } else {
+                        match download_manager.remove_watch_folder(&args[0]).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "✅ Watch folder removed.".to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Failed: {}", e));
+                            }
+                        }
+                    }
+                }
+                "scan" => {
+                    let imported = download_manager.scan_watch_folders().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "🔍 Watch folder scan complete. {} URL(s) imported.",
+                            imported
+                        ),
+                    );
+                }
+                "enable" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlwf enable <id>".to_string());
+                    } else {
+                        match download_manager
+                            .set_watch_folder_enabled(&args[0], true)
+                            .await
+                        {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "✅ Watch folder enabled.".to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Failed: {}", e));
+                            }
+                        }
+                    }
+                }
+                "disable" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlwf disable <id>".to_string());
+                    } else {
+                        match download_manager
+                            .set_watch_folder_enabled(&args[0], false)
+                            .await
+                        {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "✅ Watch folder disabled.".to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Failed: {}", e));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Usage: /dlwf [list|add <path> [name]|remove <id>|scan|enable <id>|disable <id>]".to_string());
                 }
             }
         }

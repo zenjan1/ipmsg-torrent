@@ -161,6 +161,8 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/conflict/check", post(check_conflict))
         .route("/api/domain-limit", get(get_domain_limit))
         .route("/api/domain-limit", post(set_domain_limit))
+        .route("/api/protocol-limit", get(get_protocol_limit))
+        .route("/api/protocol-limit", post(set_protocol_limit))
         .route("/api/speed-history", get(get_all_speed_history))
         .route("/api/speed-history/:id", get(get_task_speed_history))
         .route(
@@ -210,6 +212,23 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/url-expander/expand", post(expand_url_handler))
         .route("/api/url-expander/validate", post(validate_url_handler))
         .route("/api/extract-links", post(extract_links_handler))
+        .route(
+            "/api/watch-folders",
+            get(watch_folders_handler).post(add_watch_folder_handler),
+        )
+        .route(
+            "/api/watch-folders/:id/remove",
+            post(remove_watch_folder_handler),
+        )
+        .route(
+            "/api/watch-folders/:id/enable",
+            post(enable_watch_folder_handler),
+        )
+        .route(
+            "/api/watch-folders/:id/disable",
+            post(disable_watch_folder_handler),
+        )
+        .route("/api/watch-folders/scan", post(scan_watch_folders_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -736,6 +755,151 @@ async fn extract_links_handler(
     }
 }
 
+/// GET /api/watch-folders - List all watch folders
+async fn watch_folders_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let summary = state.manager.get_watch_folder_summary().await;
+    Json(serde_json::json!({
+        "success": true,
+        "summary": summary
+    }))
+}
+
+/// POST /api/watch-folders - Add a new watch folder
+async fn add_watch_folder_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let name = req
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("watch-folder")
+        .to_string();
+    let path = match req.get("path").and_then(|v| v.as_str()) {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Missing 'path' field"
+            }));
+        }
+    };
+    let recursive = req
+        .get("recursive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let extensions: Vec<String> = req
+        .get("extensions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let cleanup_after = req
+        .get("cleanup_after")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let tags: Vec<String> = req
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let group = req
+        .get("group")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    match state
+        .manager
+        .add_watch_folder(
+            name,
+            path,
+            recursive,
+            extensions,
+            cleanup_after,
+            tags,
+            group,
+        )
+        .await
+    {
+        Ok(id) => Json(serde_json::json!({
+            "success": true,
+            "id": id,
+            "message": "Watch folder added"
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
+/// POST /api/watch-folders/:id/remove - Remove a watch folder
+async fn remove_watch_folder_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    match state.manager.remove_watch_folder(&id).await {
+        Ok(()) => Json(serde_json::json!({
+            "success": true,
+            "message": "Watch folder removed"
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
+/// POST /api/watch-folders/:id/enable - Enable a watch folder
+async fn enable_watch_folder_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    match state.manager.set_watch_folder_enabled(&id, true).await {
+        Ok(()) => Json(serde_json::json!({
+            "success": true,
+            "message": "Watch folder enabled"
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
+/// POST /api/watch-folders/:id/disable - Disable a watch folder
+async fn disable_watch_folder_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    match state.manager.set_watch_folder_enabled(&id, false).await {
+        Ok(()) => Json(serde_json::json!({
+            "success": true,
+            "message": "Watch folder disabled"
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
+}
+
+/// POST /api/watch-folders/scan - Scan all enabled watch folders
+async fn scan_watch_folders_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let imported = state.manager.scan_watch_folders().await;
+    Json(serde_json::json!({
+        "success": true,
+        "imported": imported,
+        "message": format!("{} URL(s) imported", imported)
+    }))
+}
+
 async fn preview_path_template(
     State(_state): State<Arc<WebState>>,
     Json(req): Json<PathTemplatePreviewRequest>,
@@ -997,6 +1161,54 @@ async fn set_domain_limit(
     }
 
     state.manager.set_domain_limit_config(config).await;
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({"status": "ok"})),
+    )
+}
+
+/// Get per-protocol download limit configuration
+async fn get_protocol_limit(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let summary = state.manager.get_protocol_limits_summary().await;
+    Json(
+        serde_json::to_value(&summary)
+            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})),
+    )
+}
+
+/// Set per-protocol download limit configuration
+async fn set_protocol_limit(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let mut config = state.manager.get_protocol_limits().await;
+
+    // Update enabled flag if provided
+    if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
+        config.enabled = enabled;
+    }
+
+    // Update default_max_concurrent if provided
+    if let Some(limit) = body.get("default_max_concurrent").and_then(|v| v.as_u64()) {
+        config.default_max_concurrent = limit as u32;
+    }
+
+    // Add protocol override if provided
+    if let Some(protocol_str) = body.get("protocol").and_then(|v| v.as_str())
+        && let Some(limit) = body.get("limit").and_then(|v| v.as_u64())
+        && let Some(protocol) = crate::protocol_limits::key_to_protocol(protocol_str)
+    {
+        config.set_limit(protocol, limit as u32, true);
+    }
+
+    // Remove protocol override if requested
+    if let Some(protocol_str) = body.get("remove_protocol").and_then(|v| v.as_str())
+        && let Some(protocol) = crate::protocol_limits::key_to_protocol(protocol_str)
+    {
+        config.remove_limit(protocol);
+    }
+
+    state.manager.set_protocol_limits(config).await;
     (
         axum::http::StatusCode::OK,
         Json(serde_json::json!({"status": "ok"})),

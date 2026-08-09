@@ -33,6 +33,7 @@ pub mod notification;
 pub mod path_template;
 pub mod post_hooks;
 pub mod progress;
+pub mod protocol_limits;
 pub mod proxy;
 pub mod queue_health;
 pub mod rate_limiter;
@@ -48,6 +49,7 @@ pub mod url_dedup;
 pub mod url_expander;
 pub mod url_pattern;
 pub mod url_rewrite;
+pub mod watch_folder;
 pub mod web;
 pub mod xunlei;
 
@@ -737,6 +739,10 @@ pub struct DownloadManager {
     stats_manager: Arc<Mutex<download_stats::StatsManager>>,
     /// URL expander configuration for expanding shortened URLs
     url_expander: Arc<tokio::sync::RwLock<url_expander::UrlExpanderConfig>>,
+    /// Watch folder manager for automatic URL import from monitored directories
+    watch_folder: Arc<Mutex<watch_folder::WatchFolderManager>>,
+    /// Per-protocol concurrent download limits
+    protocol_limits: Arc<tokio::sync::RwLock<protocol_limits::ProtocolLimitsConfig>>,
 }
 
 impl DownloadManager {
@@ -791,6 +797,10 @@ impl DownloadManager {
             stats_manager: Arc::new(Mutex::new(download_stats::StatsManager::new())),
             url_expander: Arc::new(tokio::sync::RwLock::new(
                 url_expander::UrlExpanderConfig::default(),
+            )),
+            watch_folder: Arc::new(Mutex::new(watch_folder::WatchFolderManager::new())),
+            protocol_limits: Arc::new(tokio::sync::RwLock::new(
+                protocol_limits::ProtocolLimitsConfig::new(),
             )),
         };
         dm.start_scheduler();
@@ -979,6 +989,10 @@ impl DownloadManager {
             url_expander: Arc::new(tokio::sync::RwLock::new(
                 url_expander::UrlExpanderConfig::default(),
             )),
+            watch_folder: Arc::new(Mutex::new(watch_folder::WatchFolderManager::new())),
+            protocol_limits: Arc::new(tokio::sync::RwLock::new(
+                protocol_limits::ProtocolLimitsConfig::new(),
+            )),
         };
         // Restore data cap config from disk
         if let Some(loaded_cap) = data_cap::load_data_cap(&dm.data_dir) {
@@ -1060,6 +1074,13 @@ impl DownloadManager {
         {
             dm.path_template.replace_config(template_config).await;
         }
+        // Restore per-protocol limits config from disk
+        let proto_limits_path = dm.data_dir.join("protocol_limits.json");
+        if let Ok(loaded_limits) =
+            protocol_limits::load_protocol_limits_config(&proto_limits_path).await
+        {
+            *dm.protocol_limits.write().await = loaded_limits;
+        }
         dm.start_scheduler();
         dm.start_bandwidth_scheduler();
         dm
@@ -1085,6 +1106,7 @@ impl DownloadManager {
         let max_auto_retries = self.max_auto_retries.clone();
         let auto_retry_base_delay_secs = self.auto_retry_base_delay_secs.clone();
         let domain_limit = self.domain_limit.clone();
+        let protocol_limits = self.protocol_limits.clone();
 
         // Spawn schedule checker (runs every 60 seconds)
         let schedule_check_tasks = self.tasks.clone();
@@ -1170,6 +1192,22 @@ impl DownloadManager {
                                 std::collections::HashMap::new()
                             };
                         drop(domain_cfg);
+                        // Count active downloads per protocol for protocol limiting
+                        let proto_cfg = protocol_limits.blocking_read();
+                        let active_protocol_counts: std::collections::HashMap<String, u32> =
+                            if proto_cfg.enabled {
+                                let mut counts = std::collections::HashMap::new();
+                                for t in tasks_lock.iter() {
+                                    if t.state == DownloadState::Downloading {
+                                        let key = protocol_to_limits_key(t.protocol);
+                                        *counts.entry(key).or_insert(0) += 1;
+                                    }
+                                }
+                                counts
+                            } else {
+                                std::collections::HashMap::new()
+                            };
+                        drop(proto_cfg);
                         tasks_lock
                             .iter()
                             .filter(|t| {
@@ -1198,6 +1236,17 @@ impl DownloadManager {
                                         } else {
                                             true // No source URL, allow
                                         }
+                                    }
+                                    && {
+                                        // Check per-protocol limit
+                                        let proto_cfg_sync = protocol_limits.blocking_read();
+                                        if !proto_cfg_sync.enabled {
+                                            return true;
+                                        }
+                                        let key = protocol_to_limits_key(t.protocol);
+                                        let current =
+                                            active_protocol_counts.get(&key).copied().unwrap_or(0);
+                                        proto_cfg_sync.can_start(t.protocol, current)
                                     }
                             })
                             .max_by(|a, b| {
@@ -2313,6 +2362,146 @@ impl DownloadManager {
         self.url_expander.read().await.clone()
     }
 
+    /// Get the watch folder manager.
+    pub async fn watch_folder(&self) -> watch_folder::WatchFolderManager {
+        self.watch_folder.lock().await.clone()
+    }
+
+    /// Add a watch folder for automatic URL import.
+    pub async fn add_watch_folder(
+        &self,
+        name: String,
+        path: std::path::PathBuf,
+        recursive: bool,
+        extensions: Vec<String>,
+        cleanup_after: bool,
+        tags: Vec<String>,
+        group: Option<String>,
+    ) -> Result<String, watch_folder::WatchFolderError> {
+        let mut mgr = self.watch_folder.lock().await;
+        let id = mgr.add_folder(
+            name,
+            path,
+            recursive,
+            extensions,
+            cleanup_after,
+            tags,
+            group,
+        )?;
+        // Persist
+        let config_path = self.data_dir.join("watch_folders.json");
+        if let Err(e) = mgr.save(&config_path) {
+            tracing::warn!(error = %e, "Failed to persist watch folder config");
+        }
+        Ok(id)
+    }
+
+    /// Remove a watch folder by ID.
+    pub async fn remove_watch_folder(
+        &self,
+        id: &str,
+    ) -> Result<(), watch_folder::WatchFolderError> {
+        let mut mgr = self.watch_folder.lock().await;
+        mgr.remove_folder(id)?;
+        let config_path = self.data_dir.join("watch_folders.json");
+        if let Err(e) = mgr.save(&config_path) {
+            tracing::warn!(error = %e, "Failed to persist watch folder config");
+        }
+        Ok(())
+    }
+
+    /// Enable or disable a watch folder.
+    pub async fn set_watch_folder_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<(), watch_folder::WatchFolderError> {
+        let mut mgr = self.watch_folder.lock().await;
+        mgr.set_enabled(id, enabled)?;
+        let config_path = self.data_dir.join("watch_folders.json");
+        if let Err(e) = mgr.save(&config_path) {
+            tracing::warn!(error = %e, "Failed to persist watch folder config");
+        }
+        Ok(())
+    }
+
+    /// Scan all enabled watch folders and auto-import discovered URLs.
+    /// Returns the number of URLs imported.
+    pub async fn scan_watch_folders(&self) -> usize {
+        let mut mgr = self.watch_folder.lock().await;
+        let urls = mgr.scan_and_collect_urls().await;
+        drop(mgr);
+
+        // Persist
+        let config_path = self.data_dir.join("watch_folders.json");
+        {
+            let mgr = self.watch_folder.lock().await;
+            if let Err(e) = mgr.save(&config_path) {
+                tracing::warn!(error = %e, "Failed to persist watch folder config");
+            }
+        }
+
+        let mut imported = 0;
+        for wfu in urls {
+            // Skip if URL already exists
+            {
+                let tasks = self.tasks.lock().await;
+                if tasks
+                    .iter()
+                    .any(|t| t.source_url.as_deref() == Some(&wfu.url))
+                {
+                    continue;
+                }
+            }
+
+            // Determine protocol and add task
+            let url = wfu.url.clone();
+            let _name = url.rsplit('/').next().unwrap_or("download").to_string();
+            let mut tags = wfu.tags.clone();
+            tags.push("watch-folder".to_string());
+
+            let result = if url.starts_with("magnet:?") {
+                self.add_magnet(&url).await
+            } else if url.starts_with("ed2k://") {
+                // Parse ed2k URL - this is complex, skip for now
+                continue;
+            } else {
+                self.add_url(&url).await
+            };
+
+            if let Ok(task_id) = result {
+                // Apply tags and group from watch folder config
+                if !tags.is_empty() {
+                    self.add_tags(&task_id, tags).await;
+                }
+                if let Some(group) = &wfu.group {
+                    self.set_task_group(&task_id, Some(group.clone())).await;
+                }
+                imported += 1;
+            }
+        }
+        imported
+    }
+
+    /// Get watch folder summary.
+    pub async fn get_watch_folder_summary(&self) -> watch_folder::WatchFolderSummary {
+        let mgr = self.watch_folder.lock().await;
+        mgr.summary()
+    }
+
+    /// Initialize watch folder manager from persisted config.
+    pub async fn init_watch_folder(&mut self) {
+        let config_path = self.data_dir.join("watch_folders.json");
+        match watch_folder::WatchFolderManager::load(&config_path) {
+            Ok(mgr) => {
+                *self.watch_folder.lock().await = mgr;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to load watch folder config");
+            }
+        }
+    }
+
     /// Expand a shortened URL and validate it is reachable.
     /// Returns the expanded URL and validation result.
     pub async fn expand_and_validate_url(
@@ -2754,6 +2943,59 @@ impl DownloadManager {
             domains_at_limit,
             entries,
         }
+    }
+
+    /// Set the per-protocol concurrent download limits configuration.
+    /// Persists to disk automatically.
+    pub async fn set_protocol_limits(&self, config: protocol_limits::ProtocolLimitsConfig) {
+        *self.protocol_limits.write().await = config.clone();
+        let path = self.data_dir.join("protocol_limits.json");
+        if let Err(e) = protocol_limits::save_protocol_limits_config(&config, &path).await {
+            tracing::warn!(error = %e, "Failed to persist protocol limits config");
+        }
+    }
+
+    /// Get the current per-protocol concurrent download limits configuration.
+    pub async fn get_protocol_limits(&self) -> protocol_limits::ProtocolLimitsConfig {
+        self.protocol_limits.read().await.clone()
+    }
+
+    /// Get a summary of per-protocol limits with current running counts.
+    pub async fn get_protocol_limits_summary(&self) -> protocol_limits::ProtocolLimitsSummary {
+        let config = self.protocol_limits.read().await.clone();
+        let tasks = self.tasks.lock().await;
+
+        let mut running_counts: HashMap<String, u32> = HashMap::new();
+        for task in tasks.iter() {
+            if task.state == DownloadState::Downloading {
+                let key = protocol_to_limits_key(task.protocol);
+                *running_counts.entry(key).or_insert(0) += 1;
+            }
+        }
+
+        let mut summary = config.summary();
+        for entry in &mut summary.entries {
+            entry.current_running = running_counts.get(&entry.protocol).copied().unwrap_or(0);
+        }
+        summary
+    }
+
+    /// Check if a protocol can start a new download based on per-protocol limits.
+    pub async fn can_start_protocol_download(&self, protocol: DownloadProtocol) -> bool {
+        let config = self.protocol_limits.read().await.clone();
+        if !config.enabled {
+            return true;
+        }
+
+        let tasks = self.tasks.lock().await;
+        let key = protocol_to_limits_key(protocol);
+        let current_running: u32 = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Downloading)
+            .filter(|t| protocol_to_limits_key(t.protocol) == key)
+            .count() as u32;
+
+        config.can_start(protocol, current_running)
     }
 
     /// Log an audit event
@@ -6030,6 +6272,17 @@ impl DownloadManager {
                 tracing::warn!(error = %e, "Failed to persist task queue");
             }
         });
+    }
+}
+
+/// Convert DownloadProtocol to protocol limits key string.
+fn protocol_to_limits_key(protocol: DownloadProtocol) -> String {
+    match protocol {
+        DownloadProtocol::Torrent => "torrent".to_string(),
+        DownloadProtocol::Ed2k => "ed2k".to_string(),
+        DownloadProtocol::Xunlei => "xunlei".to_string(),
+        DownloadProtocol::Magnet => "magnet".to_string(),
+        DownloadProtocol::P2P => "p2p".to_string(),
     }
 }
 
