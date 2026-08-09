@@ -7,6 +7,7 @@
 
 pub mod adaptive_concurrency;
 pub mod audit_log;
+pub mod auto_actions;
 pub mod auto_categorize;
 pub mod auto_cleanup;
 pub mod auto_pause;
@@ -857,6 +858,8 @@ pub struct DownloadManager {
     adaptive_concurrency: Arc<Mutex<adaptive_concurrency::AdaptiveConcurrencyManager>>,
     /// Download templates for reusable task configurations
     download_templates: Arc<Mutex<download_templates::DownloadTemplateManager>>,
+    /// Auto-actions manager for triggering actions on download completion/failure
+    auto_actions: Arc<Mutex<auto_actions::AutoActionsManager>>,
 }
 
 impl DownloadManager {
@@ -978,6 +981,9 @@ impl DownloadManager {
             download_templates: Arc::new(Mutex::new(
                 download_templates::DownloadTemplateManager::new(),
             )),
+            auto_actions: Arc::new(Mutex::new(auto_actions::AutoActionsManager::new(
+                auto_actions::AutoActionsConfig::default(),
+            ))),
         };
         dm.start_scheduler();
         dm
@@ -1231,6 +1237,9 @@ impl DownloadManager {
             download_templates: Arc::new(Mutex::new(
                 download_templates::DownloadTemplateManager::new(),
             )),
+            auto_actions: Arc::new(Mutex::new(auto_actions::AutoActionsManager::new(
+                auto_actions::AutoActionsConfig::default(),
+            ))),
         };
         // Restore error recovery config from disk
         if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
@@ -1389,6 +1398,14 @@ impl DownloadManager {
             let mut mgr = dm.download_templates.lock().await;
             for t in templates {
                 mgr.add_template(t);
+            }
+        }
+        // Restore auto-actions config from disk
+        {
+            let config_path = dm.data_dir.join("auto_actions_config.json");
+            if let Ok(config) = auto_actions::load_auto_actions_config(&config_path) {
+                let mut mgr = dm.auto_actions.lock().await;
+                mgr.set_config(config);
             }
         }
         dm.start_scheduler();
@@ -9685,9 +9702,7 @@ impl DownloadManager {
     pub async fn set_template_enabled(&self, id: &str, enabled: bool) -> bool {
         let mut mgr = self.download_templates.lock().await;
         let result = mgr.set_enabled(id, enabled);
-        if result
-            && let Err(e) = self.persist_download_templates().await
-        {
+        if result && let Err(e) = self.persist_download_templates().await {
             tracing::warn!(error = %e, "Failed to persist download templates");
         }
         result
@@ -9697,9 +9712,7 @@ impl DownloadManager {
     pub async fn set_template_auto_apply(&self, id: &str, auto_apply: bool) -> bool {
         let mut mgr = self.download_templates.lock().await;
         let result = mgr.set_auto_apply(id, auto_apply);
-        if result
-            && let Err(e) = self.persist_download_templates().await
-        {
+        if result && let Err(e) = self.persist_download_templates().await {
             tracing::warn!(error = %e, "Failed to persist download templates");
         }
         result
