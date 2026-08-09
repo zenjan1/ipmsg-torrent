@@ -243,6 +243,19 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             post(disable_path_rule_handler),
         )
         .route("/api/path-rules/match", post(match_path_rule_handler))
+        .route("/api/archive", get(get_archive_status))
+        .route("/api/archive/list", post(list_archived_tasks))
+        .route("/api/archive/:id/archive", post(archive_task_handler))
+        .route(
+            "/api/archive/:id/restore",
+            post(restore_archived_task_handler),
+        )
+        .route(
+            "/api/archive/:id/delete",
+            post(delete_archived_task_handler),
+        )
+        .route("/api/archive/clear", post(clear_archive_handler))
+        .route("/api/archive/config", post(set_archive_config_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1197,6 +1210,119 @@ async fn set_auto_cleanup(
     Json(config): Json<crate::auto_cleanup::AutoCleanupConfig>,
 ) -> impl axum::response::IntoResponse {
     state.manager.set_auto_cleanup(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get archive status summary
+async fn get_archive_status(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let summary = state.manager.get_archive_summary().await;
+    let config = state.manager.get_archive_config().await;
+    Json(serde_json::json!({
+        "config": config,
+        "summary": summary
+    }))
+}
+
+/// List archived tasks with optional filters
+async fn list_archived_tasks(
+    State(state): State<Arc<WebState>>,
+    Json(filter): Json<serde_json::Value>,
+) -> Json<Vec<crate::task_archive::ArchivedTask>> {
+    let state_filter = filter
+        .get("state")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let protocol_filter = filter
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let tag_filter = filter
+        .get("tag")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let archived = state
+        .manager
+        .list_archived_tasks(
+            state_filter.as_deref(),
+            protocol_filter.as_deref(),
+            tag_filter.as_deref(),
+        )
+        .await;
+    Json(archived)
+}
+
+/// Archive a task
+async fn archive_task_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let reason = body
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    match state.manager.archive_task(&id, reason).await {
+        Ok(()) => (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({"status": "ok"})),
+        ),
+        Err(e) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// Restore an archived task
+async fn restore_archived_task_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.restore_archived_task(&id).await {
+        Ok(new_id) => (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "new_id": new_id})),
+        ),
+        Err(e) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// Delete an archived task permanently
+async fn delete_archived_task_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    if state.manager.delete_archived_task(&id).await {
+        (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({"status": "ok"})),
+        )
+    } else {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Task not found"})),
+        )
+    }
+}
+
+/// Clear all archived tasks
+async fn clear_archive_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_archive().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Set archive configuration
+async fn set_archive_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::task_archive::ArchiveConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_archive_config(config).await;
     Json(serde_json::json!({"status": "ok"}))
 }
 

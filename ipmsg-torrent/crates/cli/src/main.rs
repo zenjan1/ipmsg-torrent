@@ -126,6 +126,11 @@ enum Command {
         /// "status", "enable", "disable", "set <completed_retention> [failed_retention]"
         args: Vec<String>,
     },
+    /// Archive completed/failed tasks instead of deleting them
+    DlArchive {
+        /// "status", "list", "archive <task_id> [reason]", "restore <id>", "delete <id>", "clear"
+        args: Vec<String>,
+    },
     /// Configure URL deduplication policy
     DlDedup {
         /// "status", "set <mode> [strip_query] [strip_fragment]", "enable", "disable"
@@ -615,6 +620,11 @@ fn parse_command(input: &str) -> Command {
                 Some(args[0].to_string())
             };
             Command::DlSpeedHistory { task_id }
+        }
+        "dlarchive" | "dl-archive" | "dla" => {
+            // /dlarchive [status|list|archive <task_id> [reason]|restore <id>|delete <id>|clear]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlArchive { args }
         }
         "dlcleanup" | "dl-cleanup" | "dlcl" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
@@ -1332,6 +1342,7 @@ fn command_help() -> String {
         "/dlhealth        - Show download queue health report",
         "/dlspeedhist [id] - Show speed history (all tasks or specific task)",
         "/dlcleanup [cmd]  - Auto-cleanup completed/failed (status|enable|disable|set|run)",
+        "/dlarchive [cmd]  - Archive tasks (status|list|archive|restore|delete|clear)",
         "/dldedup [cmd]     - URL dedup policy (status|set <mode>|enable|disable)",
         "/dlrewrite [cmd]   - URL rewrite rules (status|add|del|preview|enable|disable)",
         "/dldcap [cmd]      - Daily data cap (status|set <limit>|enable|disable|reset)",
@@ -2462,6 +2473,107 @@ async fn handle_command(
                 s.add_system_message(
                     "main",
                     "Usage: /dlcleanup [status|enable|disable|set <retention> [failed_retention]|run]"
+                        .to_string(),
+                );
+            }
+        }
+        Command::DlArchive { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if args.is_empty() || args[0] == "status" {
+                let summary = download_manager.get_archive_summary().await;
+                let config = download_manager.get_archive_config().await;
+                let msg = format!(
+                    "📦 Archive Status:\n\
+                     Enabled: {}\n\
+                     Max archived: {}\n\
+                     Total archived: {}\n\
+                     Completed: {}\n\
+                     Failed: {}\n\
+                     Other: {}\n\
+                     Total size: {:.2} MB",
+                    config.enabled,
+                    config.max_archived,
+                    summary.total_archived,
+                    summary.completed_count,
+                    summary.failed_count,
+                    summary.other_count,
+                    summary.total_bytes as f64 / 1024.0 / 1024.0
+                );
+                let mut s = state.lock().await;
+                s.add_system_message("main", msg);
+            } else if args[0] == "list" {
+                let archived = download_manager.list_archived_tasks(None, None, None).await;
+                if archived.is_empty() {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "📦 No archived tasks".to_string());
+                } else {
+                    let mut msg = format!("📦 Archived Tasks ({}):\n", archived.len());
+                    for task in archived.iter().take(20) {
+                        msg.push_str(&format!(
+                            "  {} | {} | {} | {:.2} MB | archived {}\n",
+                            task.id,
+                            task.name,
+                            task.final_state,
+                            task.downloaded as f64 / 1024.0 / 1024.0,
+                            task.archived_at.format("%Y-%m-%d %H:%M")
+                        ));
+                    }
+                    if archived.len() > 20 {
+                        msg.push_str(&format!("  ... and {} more\n", archived.len() - 20));
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+            } else if args[0] == "archive" && args.len() >= 2 {
+                let task_id = &args[1];
+                let reason = if args.len() >= 3 {
+                    Some(args[2..].join(" "))
+                } else {
+                    None
+                };
+                match download_manager.archive_task(task_id, reason).await {
+                    Ok(()) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("📦 Task {} archived", task_id));
+                    }
+                    Err(e) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("❌ Failed to archive: {}", e));
+                    }
+                }
+            } else if args[0] == "restore" && args.len() >= 2 {
+                let task_id = &args[1];
+                match download_manager.restore_archived_task(task_id).await {
+                    Ok(new_id) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("✅ Task restored as {}", new_id));
+                    }
+                    Err(e) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("❌ Failed to restore: {}", e));
+                    }
+                }
+            } else if args[0] == "delete" && args.len() >= 2 {
+                let task_id = &args[1];
+                if download_manager.delete_archived_task(task_id).await {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("🗑️ Archived task {} deleted", task_id));
+                } else {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("❌ Archived task {} not found", task_id));
+                }
+            } else if args[0] == "clear" {
+                download_manager.clear_archive().await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", "🗑️ Archive cleared".to_string());
+            } else {
+                let mut s = state.lock().await;
+                s.add_system_message(
+                    "main",
+                    "Usage: /dlarchive [status|list|archive <task_id> [reason]|restore <id>|delete <id>|clear]"
                         .to_string(),
                 );
             }

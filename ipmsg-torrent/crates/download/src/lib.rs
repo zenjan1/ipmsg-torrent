@@ -44,6 +44,7 @@ pub mod save_path_manager;
 pub mod segment_download;
 pub mod speed_history;
 pub mod task_activity;
+pub mod task_archive;
 pub mod task_export;
 pub mod task_queue;
 pub mod torrent;
@@ -749,6 +750,8 @@ pub struct DownloadManager {
     path_validator: Arc<Mutex<path_validator::PathValidator>>,
     /// Path rules for automatic save path assignment
     path_rules: Arc<Mutex<path_rules::PathRuleManager>>,
+    /// Task archive for preserving completed/failed tasks
+    task_archive: Arc<tokio::sync::RwLock<task_archive::ArchiveState>>,
 }
 
 impl DownloadManager {
@@ -810,6 +813,9 @@ impl DownloadManager {
             )),
             path_validator: Arc::new(Mutex::new(path_validator::PathValidator::new())),
             path_rules: Arc::new(Mutex::new(path_rules::PathRuleManager::new())),
+            task_archive: Arc::new(tokio::sync::RwLock::new(
+                task_archive::ArchiveState::default(),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -1003,6 +1009,9 @@ impl DownloadManager {
             )),
             path_validator: Arc::new(Mutex::new(path_validator::PathValidator::new())),
             path_rules: Arc::new(Mutex::new(path_rules::PathRuleManager::new())),
+            task_archive: Arc::new(tokio::sync::RwLock::new(
+                task_archive::ArchiveState::default(),
+            )),
         };
         // Restore path rules from disk
         if let Ok(loaded_rules) =
@@ -1097,6 +1106,8 @@ impl DownloadManager {
         {
             *dm.protocol_limits.write().await = loaded_limits;
         }
+        // Restore task archive from disk
+        dm.restore_archive().await;
         dm.start_scheduler();
         dm.start_bandwidth_scheduler();
         dm
@@ -5256,6 +5267,215 @@ impl DownloadManager {
     #[cfg(test)]
     pub(crate) fn emit_event_for_test(&self, event: TaskEvent) {
         self.emit_event(event);
+    }
+
+    // ─── Task Archive (Phase 78) ───────────────────────────────────────
+
+    /// Archive a task instead of deleting it (preserves metadata for later review).
+    /// The task is removed from the active queue and stored in the archive.
+    pub async fn archive_task(
+        &self,
+        task_id: &str,
+        reason: Option<String>,
+    ) -> Result<(), task_archive::TaskArchiveError> {
+        // Cancel if running
+        {
+            let r = self.running.lock().await;
+            if let Some(rt) = r.get(task_id) {
+                rt.cancel_token.cancel();
+            }
+        }
+
+        self.running.lock().await.remove(task_id);
+        self.task_info.lock().await.remove(task_id);
+        self.eta_estimator.remove_task(task_id).await;
+
+        let mut tasks = self.tasks.lock().await;
+        let removed_task = tasks.iter().find(|t| t.id == task_id).cloned();
+        tasks.retain(|t| t.id != task_id);
+        drop(tasks);
+
+        if let Some(task) = removed_task {
+            let archived = task_archive::create_archived_task(
+                task.id.clone(),
+                task.name.clone(),
+                &format!("{:?}", task.protocol),
+                task.size,
+                task.downloaded,
+                &format!("{:?}", task.state),
+                task.error.clone(),
+                task.save_path.clone(),
+                task.created_at,
+                task.updated_at,
+                task.tags.clone(),
+                task.group.clone(),
+                task.notes.clone(),
+                task.source_url.clone(),
+                task.active_time_seconds,
+                reason,
+            );
+
+            let mut archive = self.task_archive.write().await;
+            archive.archive_task(archived)?;
+
+            // Persist both: task queue (task removed) and archive state
+            self.persist_tasks().await;
+            let archive_path = self.data_dir.join("task_archive.json");
+            let _ = task_archive::save_archive_state(&archive_path, &archive).await;
+
+            self.emit_event(TaskEvent::Removed {
+                task_id: task_id.to_string(),
+            });
+            self.log_audit_event(
+                AuditEventType::TaskRemoved,
+                Some(task_id.to_string()),
+                Some(task.name.clone()),
+                Some(format!("{:?} (archived)", task.protocol)),
+                None,
+            )
+            .await;
+            Ok(())
+        } else {
+            Err(task_archive::TaskArchiveError::TaskNotFound(
+                task_id.to_string(),
+            ))
+        }
+    }
+
+    /// Get archive summary.
+    pub async fn get_archive_summary(&self) -> task_archive::ArchiveSummary {
+        let archive = self.task_archive.read().await;
+        archive.summary()
+    }
+
+    /// Get archive configuration.
+    pub async fn get_archive_config(&self) -> task_archive::ArchiveConfig {
+        let archive = self.task_archive.read().await;
+        archive.config.clone()
+    }
+
+    /// Set archive configuration.
+    pub async fn set_archive_config(&self, config: task_archive::ArchiveConfig) {
+        let mut archive = self.task_archive.write().await;
+        archive.config = config;
+        let archive_path = self.data_dir.join("task_archive.json");
+        let _ = task_archive::save_archive_state(&archive_path, &archive).await;
+    }
+
+    /// List archived tasks with optional filters.
+    pub async fn list_archived_tasks(
+        &self,
+        state_filter: Option<&str>,
+        protocol_filter: Option<&str>,
+        tag_filter: Option<&str>,
+    ) -> Vec<task_archive::ArchivedTask> {
+        let archive = self.task_archive.read().await;
+        archive
+            .list_archived(state_filter, protocol_filter, tag_filter)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Restore an archived task back to the active queue.
+    pub async fn restore_archived_task(
+        &self,
+        task_id: &str,
+    ) -> Result<String, task_archive::TaskArchiveError> {
+        let mut archive = self.task_archive.write().await;
+        let archived = archive
+            .unarchive_task(task_id)
+            .ok_or_else(|| task_archive::TaskArchiveError::TaskNotFound(task_id.to_string()))?;
+
+        // Reconstruct a DownloadTask from the archived data
+        let new_id = uuid::Uuid::new_v4().to_string();
+        // Parse protocol back from string representation
+        let protocol = match archived.protocol.as_str() {
+            "Torrent" => DownloadProtocol::Torrent,
+            "Ed2k" => DownloadProtocol::Ed2k,
+            "Xunlei" => DownloadProtocol::Xunlei,
+            "Magnet" => DownloadProtocol::Magnet,
+            "P2P" => DownloadProtocol::P2P,
+            _ => DownloadProtocol::Xunlei,
+        };
+        let state = if archived.final_state == "Complete" {
+            DownloadState::Complete
+        } else {
+            DownloadState::Paused
+        };
+        let task = DownloadTask {
+            id: new_id.clone(),
+            name: archived.name,
+            protocol,
+            size: archived.size,
+            downloaded: archived.downloaded,
+            state,
+            error: None,
+            speed_bps: 0.0,
+            save_path: archived.save_path,
+            created_at: archived.created_at,
+            updated_at: chrono::Utc::now(),
+            tags: archived.tags,
+            priority: crate::DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: archived.notes,
+            group: archived.group,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: archived.source_url,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: archived.active_time_seconds,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+        };
+
+        self.tasks.lock().await.push(task);
+        self.persist_tasks().await;
+
+        // Persist archive
+        let archive_path = self.data_dir.join("task_archive.json");
+        let _ = task_archive::save_archive_state(&archive_path, &archive).await;
+
+        Ok(new_id)
+    }
+
+    /// Permanently delete an archived task.
+    pub async fn delete_archived_task(&self, task_id: &str) -> bool {
+        let mut archive = self.task_archive.write().await;
+        let removed = archive.unarchive_task(task_id).is_some();
+        if removed {
+            let archive_path = self.data_dir.join("task_archive.json");
+            let _ = task_archive::save_archive_state(&archive_path, &archive).await;
+        }
+        removed
+    }
+
+    /// Clear all archived tasks.
+    pub async fn clear_archive(&self) {
+        let mut archive = self.task_archive.write().await;
+        archive.clear_archive();
+        let archive_path = self.data_dir.join("task_archive.json");
+        let _ = task_archive::save_archive_state(&archive_path, &archive).await;
+    }
+
+    /// Restore archive state from disk on startup.
+    async fn restore_archive(&self) {
+        let archive_path = self.data_dir.join("task_archive.json");
+        match task_archive::load_archive_state(&archive_path).await {
+            Ok(state) => {
+                let mut archive = self.task_archive.write().await;
+                *archive = state;
+            }
+            Err(_) => {}
+        }
     }
 
     /// Get aggregated download statistics.
