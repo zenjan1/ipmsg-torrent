@@ -5,6 +5,7 @@
 //! - eDonkey/eMule (ed2k links)
 //! - Xunlei P2SP (HTTP/FTP + P2P hybrid)
 
+pub mod adaptive_concurrency;
 pub mod audit_log;
 pub mod auto_categorize;
 pub mod auto_cleanup;
@@ -851,6 +852,8 @@ pub struct DownloadManager {
     snapshot_manager: Arc<Mutex<download_snapshot::SnapshotManager>>,
     /// Task performance profiler
     task_profiler: Arc<Mutex<task_profiler::TaskProfiler>>,
+    /// Adaptive download concurrency manager
+    adaptive_concurrency: Arc<Mutex<adaptive_concurrency::AdaptiveConcurrencyManager>>,
 }
 
 impl DownloadManager {
@@ -966,6 +969,9 @@ impl DownloadManager {
                 data_dir.join("snapshots"),
             ))),
             task_profiler: Arc::new(Mutex::new(task_profiler::TaskProfiler::default())),
+            adaptive_concurrency: Arc::new(Mutex::new(
+                adaptive_concurrency::AdaptiveConcurrencyManager::new(),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -1213,6 +1219,9 @@ impl DownloadManager {
                 data_dir.join("snapshots"),
             ))),
             task_profiler: Arc::new(Mutex::new(task_profiler::TaskProfiler::default())),
+            adaptive_concurrency: Arc::new(Mutex::new(
+                adaptive_concurrency::AdaptiveConcurrencyManager::new(),
+            )),
         };
         // Restore error recovery config from disk
         if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
@@ -9514,6 +9523,76 @@ impl DownloadManager {
             let _ = now; // suppress unused warning
             profiler.update_profile(input);
         }
+    }
+
+    // --- Adaptive Concurrency ---
+
+    /// Set adaptive concurrency configuration.
+    pub async fn set_adaptive_concurrency_config(
+        &self,
+        config: adaptive_concurrency::AdaptiveConcurrencyConfig,
+    ) {
+        let mut mgr = self.adaptive_concurrency.lock().await;
+        mgr.set_config(config);
+    }
+
+    /// Get current adaptive concurrency configuration.
+    pub async fn get_adaptive_concurrency_config(
+        &self,
+    ) -> adaptive_concurrency::AdaptiveConcurrencyConfig {
+        let mgr = self.adaptive_concurrency.lock().await;
+        mgr.get_config().clone()
+    }
+
+    /// Register a task for adaptive concurrency tracking.
+    pub async fn register_adaptive_concurrency(&self, task_id: &str) {
+        let mut mgr = self.adaptive_concurrency.lock().await;
+        mgr.register_task(task_id);
+    }
+
+    /// Unregister a task from adaptive concurrency tracking.
+    pub async fn unregister_adaptive_concurrency(&self, task_id: &str) {
+        let mut mgr = self.adaptive_concurrency.lock().await;
+        mgr.unregister_task(task_id);
+    }
+
+    /// Record a response sample for adaptive concurrency evaluation.
+    pub async fn record_adaptive_concurrency_sample(
+        &self,
+        task_id: &str,
+        response_time_ms: f64,
+        success: bool,
+    ) {
+        let mut mgr = self.adaptive_concurrency.lock().await;
+        mgr.record_sample(task_id, response_time_ms, success);
+    }
+
+    /// Get the recommended connection count for a task.
+    pub async fn get_adaptive_connections(&self, task_id: &str) -> u32 {
+        let mgr = self.adaptive_concurrency.lock().await;
+        mgr.get_connections(task_id)
+    }
+
+    /// Evaluate and adjust concurrency for all tasks.
+    pub async fn evaluate_adaptive_concurrency(
+        &self,
+    ) -> Vec<(String, adaptive_concurrency::ConcurrencyDecision)> {
+        let mut mgr = self.adaptive_concurrency.lock().await;
+        mgr.evaluate_all()
+    }
+
+    /// Get adaptive concurrency summary.
+    pub async fn get_adaptive_concurrency_summary(
+        &self,
+    ) -> adaptive_concurrency::AdaptiveConcurrencySummary {
+        let mgr = self.adaptive_concurrency.lock().await;
+        mgr.get_summary()
+    }
+
+    /// Clear all adaptive concurrency state.
+    pub async fn clear_adaptive_concurrency(&self) {
+        let mut mgr = self.adaptive_concurrency.lock().await;
+        mgr.clear();
     }
 }
 

@@ -510,6 +510,12 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Adaptive download concurrency (status|config|evaluate|clear)
+    DlAdaptiveConcurrency {
+        /// Subcommand: status|config|evaluate|clear
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1571,6 +1577,23 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dladaptive" | "dl-adaptive" | "dladapt" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dladaptive <status|config|evaluate|clear>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlAdaptiveConcurrency {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1781,6 +1804,7 @@ fn command_help() -> String {
         "/dlerrrec [cmd]   - Error recovery (status|enable|disable|set <category> <strategy>|reset|test <error>)",
         "/dlchain [cmd]    - Task chains (list|create|delete|add|remove|enable|disable|summary)",
         "/dlprofiler [cmd] - Task performance profiler (status|summary|profile|refresh|clear|config)",
+        "/dladaptive [cmd] - Adaptive concurrency (status|config|evaluate|clear)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -9230,6 +9254,214 @@ async fn handle_command(
                         "main",
                         "Usage: /dlprofiler <status|summary|profile|refresh|clear|config>"
                             .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlAdaptiveConcurrency { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_adaptive_concurrency_config().await;
+                    let summary = download_manager.get_adaptive_concurrency_summary().await;
+                    let mut output = String::new();
+                    output.push_str("📊 Adaptive Concurrency Status\n");
+                    output.push_str(&format!("  Enabled: {}\n", config.enabled));
+                    output.push_str(&format!(
+                        "  Connections: min={}, max={}, initial={}\n",
+                        config.min_connections, config.max_connections, config.initial_connections
+                    ));
+                    output.push_str(&format!(
+                        "  Target response: {}ms, High latency: {}ms\n",
+                        config.target_response_ms, config.high_latency_threshold_ms
+                    ));
+                    output.push_str(&format!(
+                        "  Error rate threshold: {:.1}%\n",
+                        config.error_rate_threshold * 100.0
+                    ));
+                    output.push_str(&format!("  Tracked tasks: {}\n", summary.task_count));
+                    output.push_str(&format!(
+                        "  Total adjustments: {}\n",
+                        summary.total_adjustments
+                    ));
+                    if !summary.tasks.is_empty() {
+                        output.push_str("\n  Task Details:\n");
+                        for task in &summary.tasks {
+                            output.push_str(&format!(
+                                "    {} - {} conn, {:.0}ms avg, {:.1}% err, {} adj\n",
+                                task.task_id,
+                                task.current_connections,
+                                task.avg_response_ms,
+                                task.error_rate * 100.0,
+                                task.total_adjustments
+                            ));
+                        }
+                    }
+                    s.add_system_message("main", output);
+                }
+                "config" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dladaptive config <enabled|min|max|initial|target|threshold> [value]".to_string());
+                    } else {
+                        let mut config = download_manager.get_adaptive_concurrency_config().await;
+                        match args[0].as_str() {
+                            "enabled" => {
+                                if args.len() > 1 {
+                                    config.enabled = args[1].parse().unwrap_or(true);
+                                    download_manager
+                                        .set_adaptive_concurrency_config(config)
+                                        .await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!(
+                                            "Adaptive concurrency {}",
+                                            if config.enabled {
+                                                "enabled"
+                                            } else {
+                                                "disabled"
+                                            }
+                                        ),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Enabled: {}", config.enabled),
+                                    );
+                                }
+                            }
+                            "min" => {
+                                if args.len() > 1 {
+                                    config.min_connections = args[1].parse().unwrap_or(1);
+                                    download_manager
+                                        .set_adaptive_concurrency_config(config)
+                                        .await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Min connections: {}", config.min_connections),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Min connections: {}", config.min_connections),
+                                    );
+                                }
+                            }
+                            "max" => {
+                                if args.len() > 1 {
+                                    config.max_connections = args[1].parse().unwrap_or(16);
+                                    download_manager
+                                        .set_adaptive_concurrency_config(config)
+                                        .await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Max connections: {}", config.max_connections),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Max connections: {}", config.max_connections),
+                                    );
+                                }
+                            }
+                            "initial" => {
+                                if args.len() > 1 {
+                                    config.initial_connections = args[1].parse().unwrap_or(4);
+                                    download_manager
+                                        .set_adaptive_concurrency_config(config)
+                                        .await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!(
+                                            "Initial connections: {}",
+                                            config.initial_connections
+                                        ),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        format!(
+                                            "Initial connections: {}",
+                                            config.initial_connections
+                                        ),
+                                    );
+                                }
+                            }
+                            "target" => {
+                                if args.len() > 1 {
+                                    config.target_response_ms = args[1].parse().unwrap_or(200);
+                                    download_manager
+                                        .set_adaptive_concurrency_config(config)
+                                        .await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Target response: {}ms", config.target_response_ms),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Target response: {}ms", config.target_response_ms),
+                                    );
+                                }
+                            }
+                            "threshold" => {
+                                if args.len() > 1 {
+                                    config.error_rate_threshold =
+                                        args[1].parse::<f64>().unwrap_or(0.1) / 100.0;
+                                    download_manager
+                                        .set_adaptive_concurrency_config(config)
+                                        .await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!(
+                                            "Error rate threshold: {:.1}%",
+                                            config.error_rate_threshold * 100.0
+                                        ),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        format!(
+                                            "Error rate threshold: {:.1}%",
+                                            config.error_rate_threshold * 100.0
+                                        ),
+                                    );
+                                }
+                            }
+                            _ => {
+                                s.add_system_message("main", "Usage: /dladaptive config <enabled|min|max|initial|target|threshold> [value]".to_string());
+                            }
+                        }
+                    }
+                }
+                "evaluate" => {
+                    let decisions = download_manager.evaluate_adaptive_concurrency().await;
+                    if decisions.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "No concurrency adjustments needed at this time.".to_string(),
+                        );
+                    } else {
+                        let mut output = String::new();
+                        output
+                            .push_str(&format!("⚡ Evaluated {} adjustments:\n", decisions.len()));
+                        for (task_id, decision) in &decisions {
+                            output.push_str(&format!("  {} - {:?}\n", task_id, decision));
+                        }
+                        s.add_system_message("main", output);
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_adaptive_concurrency().await;
+                    s.add_system_message("main", "Adaptive concurrency state cleared.".to_string());
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dladaptive <status|config|evaluate|clear>".to_string(),
                     );
                 }
             }

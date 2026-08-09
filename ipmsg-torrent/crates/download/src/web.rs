@@ -323,6 +323,26 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/task-profiler/clear",
             post(clear_task_profiles_handler),
         )
+        .route(
+            "/api/adaptive-concurrency",
+            get(get_adaptive_concurrency_handler),
+        )
+        .route(
+            "/api/adaptive-concurrency",
+            post(set_adaptive_concurrency_handler),
+        )
+        .route(
+            "/api/adaptive-concurrency/summary",
+            get(get_adaptive_concurrency_summary_handler),
+        )
+        .route(
+            "/api/adaptive-concurrency/evaluate",
+            post(evaluate_adaptive_concurrency_handler),
+        )
+        .route(
+            "/api/adaptive-concurrency/clear",
+            post(clear_adaptive_concurrency_handler),
+        )
         .route("/api/task-comments", get(get_all_task_comments_handler))
         .route(
             "/api/task-comments/search",
@@ -1795,6 +1815,52 @@ async fn clear_task_profiles_handler(
     State(state): State<Arc<WebState>>,
 ) -> Json<serde_json::Value> {
     state.manager.clear_task_profiles().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/adaptive-concurrency - Get adaptive concurrency configuration
+async fn get_adaptive_concurrency_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::adaptive_concurrency::AdaptiveConcurrencyConfig> {
+    let config = state.manager.get_adaptive_concurrency_config().await;
+    Json(config)
+}
+
+/// POST /api/adaptive-concurrency - Set adaptive concurrency configuration
+async fn set_adaptive_concurrency_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::adaptive_concurrency::AdaptiveConcurrencyConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_adaptive_concurrency_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/adaptive-concurrency/summary - Get adaptive concurrency summary
+async fn get_adaptive_concurrency_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::adaptive_concurrency::AdaptiveConcurrencySummary> {
+    let summary = state.manager.get_adaptive_concurrency_summary().await;
+    Json(summary)
+}
+
+/// POST /api/adaptive-concurrency/evaluate - Evaluate and adjust concurrency
+async fn evaluate_adaptive_concurrency_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let decisions = state.manager.evaluate_adaptive_concurrency().await;
+    let adjusted = decisions.len();
+    Json(
+        serde_json::json!({"adjusted_tasks": adjusted, "decisions": decisions.iter().map(|(id, d)| {
+        serde_json::json!({"task_id": id, "decision": format!("{:?}", d)})
+    }).collect::<Vec<_>>()}),
+    )
+}
+
+/// POST /api/adaptive-concurrency/clear - Clear all adaptive concurrency state
+async fn clear_adaptive_concurrency_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_adaptive_concurrency().await;
     Json(serde_json::json!({"status": "ok"}))
 }
 
