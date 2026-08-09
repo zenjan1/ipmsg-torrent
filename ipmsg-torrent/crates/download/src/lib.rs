@@ -29,6 +29,7 @@ pub mod download_session;
 pub mod download_stats;
 pub mod download_time_limit;
 pub mod ed2k;
+pub mod error_recovery;
 pub mod eta_estimator;
 pub mod link_extractor;
 pub mod magnet;
@@ -819,6 +820,8 @@ pub struct DownloadManager {
     retry_quota: Arc<Mutex<retry_quota::RetryQuotaManager>>,
     /// TTL manager for auto-pausing tasks that exceed their lifetime
     ttl: Arc<Mutex<ttl::TtlManager>>,
+    /// Error recovery manager for classifying errors and determining recovery strategies
+    error_recovery: Arc<Mutex<error_recovery::ErrorRecoveryManager>>,
 }
 
 impl DownloadManager {
@@ -916,6 +919,7 @@ impl DownloadManager {
                 download_time_limit::DownloadTimeLimitManager::new(),
             )),
             ttl: Arc::new(Mutex::new(ttl::TtlManager::new())),
+            error_recovery: Arc::new(Mutex::new(error_recovery::ErrorRecoveryManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1145,7 +1149,13 @@ impl DownloadManager {
                 download_time_limit::DownloadTimeLimitManager::new(),
             )),
             ttl: Arc::new(Mutex::new(ttl::TtlManager::new())),
+            error_recovery: Arc::new(Mutex::new(error_recovery::ErrorRecoveryManager::new())),
         };
+        // Restore error recovery config from disk
+        if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
+            *dm.error_recovery.lock().await =
+                error_recovery::ErrorRecoveryManager::from_config(recovery_cfg);
+        }
         // Restore progress milestone config from disk
         if let Ok(Some(milestone_cfg)) =
             progress_milestone::load_progress_milestone_config(&dm.data_dir)
@@ -2943,6 +2953,56 @@ impl DownloadManager {
     /// Reset the retry quota (clear all recorded retry timestamps).
     pub async fn reset_retry_quota(&self) {
         self.retry_quota.lock().await.reset();
+    }
+
+    /// Set error recovery configuration.
+    /// Persists to disk for automatic restoration on restart.
+    pub async fn set_error_recovery_config(
+        &self,
+        config: error_recovery::ErrorRecoveryConfig,
+    ) -> Result<(), error_recovery::ErrorRecoveryPersistenceError> {
+        error_recovery::save_error_recovery_config(&config, &self.data_dir)?;
+        let mut mgr = self.error_recovery.lock().await;
+        mgr.set_config(config);
+        Ok(())
+    }
+
+    /// Get current error recovery configuration.
+    pub async fn get_error_recovery_config(&self) -> error_recovery::ErrorRecoveryConfig {
+        self.error_recovery.lock().await.config().clone()
+    }
+
+    /// Classify an error and determine recovery strategy.
+    pub async fn classify_error(
+        &self,
+        error: &str,
+        consecutive_failures: u32,
+    ) -> error_recovery::RecoveryDecision {
+        let mgr = self.error_recovery.lock().await;
+        mgr.classify_and_decide(error, consecutive_failures)
+    }
+
+    /// Set the recovery strategy for a specific error category.
+    pub async fn set_error_category_strategy(
+        &self,
+        category: error_recovery::ErrorCategory,
+        strategy: error_recovery::RecoveryStrategy,
+    ) {
+        let mut mgr = self.error_recovery.lock().await;
+        mgr.set_category_strategy(category, strategy);
+        // Persist updated config
+        if let Err(e) = error_recovery::save_error_recovery_config(mgr.config(), &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist error recovery config");
+        }
+    }
+
+    /// Reset all error recovery strategies to defaults.
+    pub async fn reset_error_recovery_strategies(&self) {
+        let mut mgr = self.error_recovery.lock().await;
+        mgr.reset_strategies();
+        if let Err(e) = error_recovery::save_error_recovery_config(mgr.config(), &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist error recovery config");
+        }
     }
 
     /// Check if a retry attempt is allowed under the daily quota.

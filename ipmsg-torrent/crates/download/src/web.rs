@@ -364,6 +364,9 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/ttl", post(set_ttl_handler))
         .route("/api/ttl/summary", get(get_ttl_summary_handler))
         .route("/api/ttl/check", post(check_ttl_handler))
+        .route("/api/error-recovery", get(get_error_recovery_handler))
+        .route("/api/error-recovery", post(set_error_recovery_handler))
+        .route("/api/error-recovery/classify", post(classify_error_handler))
         .route("/api/speed-burst/start", post(start_speed_burst_handler))
         .route("/api/speed-burst/stop", post(stop_speed_burst_handler))
         .route("/api/ws", get(ws_handler))
@@ -2050,6 +2053,52 @@ async fn check_ttl_handler(
 ) -> impl axum::response::IntoResponse {
     state.manager.check_and_enforce_ttl().await;
     Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get error recovery configuration
+async fn get_error_recovery_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_error_recovery_config().await;
+    Json(serde_json::json!({
+        "enabled": config.enabled,
+        "category_strategies": config.category_strategies,
+        "max_consecutive_failures": config.max_consecutive_failures,
+        "auto_switch_mirror": config.auto_switch_mirror,
+    }))
+}
+
+/// Set error recovery configuration
+async fn set_error_recovery_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::error_recovery::ErrorRecoveryConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_error_recovery_config(config).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+    }
+}
+
+/// Classify an error and determine recovery strategy
+async fn classify_error_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let error_msg = req.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    let consecutive_failures = req
+        .get("consecutive_failures")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let decision = state
+        .manager
+        .classify_error(error_msg, consecutive_failures)
+        .await;
+    Json(serde_json::json!({
+        "category": decision.category,
+        "strategy": decision.strategy,
+        "explanation": decision.explanation,
+        "overridden": decision.overridden,
+    }))
 }
 
 /// Start a speed burst for a task

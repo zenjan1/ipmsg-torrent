@@ -493,6 +493,11 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    DlErrorRecovery {
+        /// Subcommand: status|enable|disable|set|reset|test
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1497,6 +1502,25 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlerrrec" | "dl-errrec" | "dlerr" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlerrrec <status|enable|disable|set <category> <strategy>|reset|test <error_msg>>".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlErrorRecovery {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1704,6 +1728,7 @@ fn command_help() -> String {
         "/dlburst [cmd]     - Speed burst (status|start <task_id> [duration] [multiplier]|stop <task_id>|config)",
         "/dlretryquota [cmd] - Retry quota (status|enable|disable|set <max> [window_secs]|reset)",
         "/dlttl [cmd]      - Task TTL management (status|enable|disable|set <duration> [interval]|task <id> <duration>|summary)",
+        "/dlerrrec [cmd]   - Error recovery (status|enable|disable|set <category> <strategy>|reset|test <error>)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -8670,6 +8695,168 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlttl <status|enable|disable|set|task|summary>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlErrorRecovery { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_error_recovery_config().await;
+                    let mut msg = format!(
+                        "Error Recovery Status:\n  Enabled: {}\n  Max Consecutive Failures: {}\n  Auto Switch Mirror: {}\n\nCategory Strategies:",
+                        config.enabled, config.max_consecutive_failures, config.auto_switch_mirror
+                    );
+                    let categories = [
+                        (
+                            "network",
+                            ipmsg_download::error_recovery::ErrorCategory::Network,
+                        ),
+                        ("disk", ipmsg_download::error_recovery::ErrorCategory::Disk),
+                        (
+                            "auth",
+                            ipmsg_download::error_recovery::ErrorCategory::Authentication,
+                        ),
+                        (
+                            "server",
+                            ipmsg_download::error_recovery::ErrorCategory::Server,
+                        ),
+                        (
+                            "protocol",
+                            ipmsg_download::error_recovery::ErrorCategory::Protocol,
+                        ),
+                        (
+                            "not_found",
+                            ipmsg_download::error_recovery::ErrorCategory::NotFound,
+                        ),
+                        (
+                            "rate_limited",
+                            ipmsg_download::error_recovery::ErrorCategory::RateLimited,
+                        ),
+                        (
+                            "certificate",
+                            ipmsg_download::error_recovery::ErrorCategory::Certificate,
+                        ),
+                        (
+                            "unknown",
+                            ipmsg_download::error_recovery::ErrorCategory::Unknown,
+                        ),
+                    ];
+                    for (name, cat) in categories {
+                        if let Some(strategy) = config.category_strategies.get(&cat) {
+                            let strategy_name = match strategy {
+                                ipmsg_download::error_recovery::RecoveryStrategy::Retry => "retry",
+                                ipmsg_download::error_recovery::RecoveryStrategy::Skip => "skip",
+                                ipmsg_download::error_recovery::RecoveryStrategy::Pause => "pause",
+                                ipmsg_download::error_recovery::RecoveryStrategy::Abort => "abort",
+                            };
+                            msg.push_str(&format!("\n  {}: {}", name, strategy_name));
+                        }
+                    }
+                    s.add_system_message("main", msg);
+                }
+                "enable" => {
+                    let mut config = download_manager.get_error_recovery_config().await;
+                    config.enabled = true;
+                    download_manager
+                        .set_error_recovery_config(config)
+                        .await
+                        .ok();
+                    s.add_system_message("main", "Error recovery enabled".to_string());
+                }
+                "disable" => {
+                    let mut config = download_manager.get_error_recovery_config().await;
+                    config.enabled = false;
+                    download_manager
+                        .set_error_recovery_config(config)
+                        .await
+                        .ok();
+                    s.add_system_message("main", "Error recovery disabled".to_string());
+                }
+                "set" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlerrrec set <category> <strategy>\nCategories: network, disk, auth, server, protocol, not_found, rate_limited, certificate, unknown\nStrategies: retry, skip, pause, abort".to_string(),
+                        );
+                        return;
+                    }
+                    let category = match args[0].to_lowercase().as_str() {
+                        "network" => ipmsg_download::error_recovery::ErrorCategory::Network,
+                        "disk" => ipmsg_download::error_recovery::ErrorCategory::Disk,
+                        "auth" | "authentication" => {
+                            ipmsg_download::error_recovery::ErrorCategory::Authentication
+                        }
+                        "server" => ipmsg_download::error_recovery::ErrorCategory::Server,
+                        "protocol" => ipmsg_download::error_recovery::ErrorCategory::Protocol,
+                        "not_found" | "notfound" => {
+                            ipmsg_download::error_recovery::ErrorCategory::NotFound
+                        }
+                        "rate_limited" | "ratelimited" => {
+                            ipmsg_download::error_recovery::ErrorCategory::RateLimited
+                        }
+                        "certificate" | "cert" => {
+                            ipmsg_download::error_recovery::ErrorCategory::Certificate
+                        }
+                        "unknown" => ipmsg_download::error_recovery::ErrorCategory::Unknown,
+                        _ => {
+                            s.add_system_message("main", format!("Unknown category: {}", args[0]));
+                            return;
+                        }
+                    };
+                    let strategy = match args[1].to_lowercase().as_str() {
+                        "retry" => ipmsg_download::error_recovery::RecoveryStrategy::Retry,
+                        "skip" => ipmsg_download::error_recovery::RecoveryStrategy::Skip,
+                        "pause" => ipmsg_download::error_recovery::RecoveryStrategy::Pause,
+                        "abort" => ipmsg_download::error_recovery::RecoveryStrategy::Abort,
+                        _ => {
+                            s.add_system_message("main", format!("Unknown strategy: {}", args[1]));
+                            return;
+                        }
+                    };
+                    download_manager
+                        .set_error_category_strategy(category, strategy)
+                        .await;
+                    s.add_system_message("main", format!("Set {} → {:?}", args[0], strategy));
+                }
+                "reset" => {
+                    download_manager.reset_error_recovery_strategies().await;
+                    s.add_system_message(
+                        "main",
+                        "Error recovery strategies reset to defaults".to_string(),
+                    );
+                }
+                "test" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlerrrec test <error_message>".to_string(),
+                        );
+                        return;
+                    }
+                    let error_msg = args.join(" ");
+                    let decision = download_manager.classify_error(&error_msg, 0).await;
+                    let strategy_name = match decision.strategy {
+                        ipmsg_download::error_recovery::RecoveryStrategy::Retry => "retry",
+                        ipmsg_download::error_recovery::RecoveryStrategy::Skip => "skip",
+                        ipmsg_download::error_recovery::RecoveryStrategy::Pause => "pause",
+                        ipmsg_download::error_recovery::RecoveryStrategy::Abort => "abort",
+                    };
+                    let msg = format!(
+                        "Error Classification Test:\n  Input: {}\n  Category: {:?}\n  Strategy: {}\n  Explanation: {}",
+                        error_msg, decision.category, strategy_name, decision.explanation
+                    );
+                    s.add_system_message("main", msg);
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlerrrec <status|enable|disable|set|reset|test>".to_string(),
                     );
                 }
             }
