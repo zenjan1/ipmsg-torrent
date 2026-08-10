@@ -166,6 +166,11 @@ enum Command {
         /// "summary [days]", "trend [days]", "today", "records", "config", "prune", "clear"
         args: Vec<String>,
     },
+    /// Download backup management
+    DlBackup {
+        /// "list", "create [description]", "show <path>", "delete <path>"
+        args: Vec<String>,
+    },
     /// View and manage download statistics
     DlStats2 {
         /// "show", "reset"
@@ -867,6 +872,10 @@ fn parse_command(input: &str) -> Command {
         "dlanalytics" | "dl-analytics" | "dlaa" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlAnalytics { args }
+        }
+        "dlbackup" | "dl-backup" | "dlbk" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlBackup { args }
         }
         "dlstats2" | "dl-stats2" => {
             if parts.len() >= 2 {
@@ -2175,6 +2184,7 @@ fn command_help() -> String {
         "/dldcap [cmd]      - Daily data cap (status|set <limit>|enable|disable|reset)",
         "/dlwkbudget [cmd]  - Weekly/monthly budget (status|set <weekly> <monthly>|enable|disable|reset)",
         "/dlanalytics [cmd] - Download analytics (summary [days]|trend [days]|today|records|config|prune|clear)",
+        "/dlbackup [cmd]    - Download backup (list|create [desc]|show <path>|delete <path>)",
         "/dlstats2 [cmd]    - Download statistics (show|reset)",
         "/dlreport [period]  - Generate download report (daily|weekly|monthly)",
         "/dlurlx [cmd]       - URL expansion & validation (status|enable|disable|expand|validate)",
@@ -4198,6 +4208,85 @@ async fn handle_command(
                                 .to_string(),
                         );
                     }
+                }
+            }
+        }
+        Command::DlBackup { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let sub = args.first().map(|s| s.as_str()).unwrap_or("list");
+            match sub {
+                "list" => match download_manager.list_backups().await {
+                    Ok(backups) => {
+                        if backups.is_empty() {
+                            println!("No backups found.");
+                        } else {
+                            println!("Available backups ({}):", backups.len());
+                            for b in &backups {
+                                let desc = b.description.as_deref().unwrap_or("(no description)");
+                                println!(
+                                    "  {} | {} | {} tasks | {} configs",
+                                    b.created_at.format("%Y-%m-%d %H:%M"),
+                                    desc,
+                                    b.task_count,
+                                    b.config_count
+                                );
+                                println!("    Path: {}", b.path.display());
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("Error listing backups: {}", e),
+                },
+                "create" => {
+                    let description = if args.len() >= 2 {
+                        Some(args[1..].join(" "))
+                    } else {
+                        None
+                    };
+                    match download_manager.create_backup(description).await {
+                        Ok(path) => println!("Backup created: {}", path.display()),
+                        Err(e) => eprintln!("Error creating backup: {}", e),
+                    }
+                }
+                "show" => {
+                    if args.len() < 2 {
+                        eprintln!("Usage: /dlbackup show <path>");
+                    } else {
+                        let path = std::path::PathBuf::from(&args[1]);
+                        match download_manager.load_backup(&path).await {
+                            Ok(backup) => {
+                                println!("Backup details:");
+                                println!("  Version: {}", backup.version);
+                                println!(
+                                    "  Created: {}",
+                                    backup.created_at.format("%Y-%m-%d %H:%M:%S")
+                                );
+                                println!("  Source: {}", backup.source);
+                                if let Some(desc) = &backup.description {
+                                    println!("  Description: {}", desc);
+                                }
+                                println!("  Tasks: {}", backup.tasks.tasks.len());
+                                println!("  Configs: {} sections", backup.configs.count_some());
+                            }
+                            Err(e) => eprintln!("Error loading backup: {}", e),
+                        }
+                    }
+                }
+                "delete" => {
+                    if args.len() < 2 {
+                        eprintln!("Usage: /dlbackup delete <path>");
+                    } else {
+                        let path = std::path::PathBuf::from(&args[1]);
+                        match download_manager.delete_backup(&path).await {
+                            Ok(_) => println!("Backup deleted."),
+                            Err(e) => eprintln!("Error deleting backup: {}", e),
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("Unknown subcommand: {}. Use list|create|show|delete", sub);
                 }
             }
         }

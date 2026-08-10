@@ -29,6 +29,7 @@ pub mod dht;
 pub mod disk_monitor;
 pub mod domain_limit;
 pub mod download_analytics;
+pub mod download_backup;
 pub mod download_budget;
 pub mod download_cooldown;
 pub mod download_deadline;
@@ -74,6 +75,7 @@ pub mod retry_quota;
 pub mod rss_feed;
 pub mod save_path_manager;
 pub mod segment_download;
+pub mod smart_queue;
 pub mod source_benchmark;
 pub mod source_rotation;
 pub mod speed_alert;
@@ -952,6 +954,10 @@ pub struct DownloadManager {
     download_budget: Arc<Mutex<download_budget::BudgetManager>>,
     /// Download analytics for historical trend tracking
     download_analytics: Arc<Mutex<download_analytics::AnalyticsManager>>,
+    /// Download backup manager for comprehensive state export/restore
+    backup_manager: Arc<download_backup::BackupManager>,
+    /// Smart queue optimizer for automatic queue reordering
+    smart_queue: Arc<tokio::sync::RwLock<smart_queue::SmartQueueOptimizer>>,
 }
 
 impl DownloadManager {
@@ -1131,6 +1137,10 @@ impl DownloadManager {
             )),
             download_budget: Arc::new(Mutex::new(download_budget::BudgetManager::new())),
             download_analytics: Arc::new(Mutex::new(download_analytics::AnalyticsManager::new())),
+            backup_manager: Arc::new(download_backup::BackupManager::new(data_dir.clone())),
+            smart_queue: Arc::new(tokio::sync::RwLock::new(
+                smart_queue::SmartQueueOptimizer::new(),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -1442,10 +1452,18 @@ impl DownloadManager {
             )),
             download_budget: Arc::new(Mutex::new(download_budget::BudgetManager::new())),
             download_analytics: Arc::new(Mutex::new(download_analytics::AnalyticsManager::new())),
+            backup_manager: Arc::new(download_backup::BackupManager::new(data_dir.clone())),
+            smart_queue: Arc::new(tokio::sync::RwLock::new(
+                smart_queue::SmartQueueOptimizer::new(),
+            )),
         };
         // Restore download budget from disk
         if let Some(budget_mgr) = download_budget::load_budget(&dm.data_dir) {
             *dm.download_budget.lock().await = budget_mgr;
+        }
+        // Restore smart queue config from disk
+        if let Some(sq_cfg) = smart_queue::load_smart_queue_config(&dm.data_dir) {
+            dm.smart_queue.write().await.set_config(sq_cfg);
         }
         // Restore download analytics from disk
         if let Ok(analytics_records) = download_analytics::load_analytics_records(&dm.data_dir) {
@@ -4929,6 +4947,65 @@ impl DownloadManager {
         {
             tracing::warn!(error = %e, "Failed to persist analytics records");
         }
+    }
+
+    // ── Smart Queue Optimizer ──────────────────────────────────────────
+
+    /// Set smart queue optimizer configuration.
+    pub async fn set_smart_queue_config(&self, config: smart_queue::SmartQueueConfig) {
+        let mut sq = self.smart_queue.write().await;
+        sq.set_config(config);
+        if let Err(e) = smart_queue::save_smart_queue_config(sq.get_config(), &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist smart queue config");
+        }
+    }
+
+    /// Get smart queue optimizer configuration.
+    pub async fn get_smart_queue_config(&self) -> smart_queue::SmartQueueConfig {
+        let sq = self.smart_queue.read().await;
+        sq.get_config().clone()
+    }
+
+    /// Run smart queue optimization and return recommendations.
+    pub async fn optimize_smart_queue(&self) -> smart_queue::OptimizationResult {
+        let tasks = self.tasks.lock().await;
+        let task_data: Vec<smart_queue::TaskOptimizationData> = tasks
+            .iter()
+            .map(|t| smart_queue::TaskOptimizationData {
+                id: t.id.clone(),
+                name: t.name.clone(),
+                queue_position: t.queue_position,
+                priority: t.priority as i32,
+                size: t.size,
+                progress: t.downloaded as f32 / t.size.max(1) as f32,
+                state: format!("{:?}", t.state),
+                created_at: t.created_at,
+                deadline: t.deadline,
+                depends_on: t.depends_on.clone(),
+                staleness_promotions: t.staleness_promotion_count,
+                is_favorite: false, // TODO: integrate with favorites manager
+            })
+            .collect();
+
+        let mut sq = self.smart_queue.write().await;
+        sq.optimize(&task_data)
+    }
+
+    /// Get smart queue optimizer summary.
+    pub async fn get_smart_queue_summary(&self) -> smart_queue::SmartQueueSummary {
+        let tasks = self.tasks.lock().await;
+        let queued_count = tasks
+            .iter()
+            .filter(|t| matches!(t.state, DownloadState::Queued))
+            .count();
+        let sq = self.smart_queue.read().await;
+        sq.get_summary(queued_count)
+    }
+
+    /// Get last optimization result.
+    pub async fn get_smart_queue_last_result(&self) -> Option<smart_queue::OptimizationResult> {
+        let sq = self.smart_queue.read().await;
+        sq.get_last_result().cloned()
     }
 
     // ── Download Statistics ──────────────────────────────────────────
@@ -12391,6 +12468,110 @@ impl DownloadManager {
     pub async fn should_pause_global_budget(&self) -> bool {
         let gb = self.global_budget.read().await;
         gb.should_pause_downloads()
+    }
+
+    // ==================== Phase 123: Download Backup System ====================
+
+    /// Create a comprehensive backup of all download state and configurations
+    pub async fn create_backup(
+        &self,
+        description: Option<String>,
+    ) -> Result<PathBuf, download_backup::BackupError> {
+        // Export tasks
+        let tasks = self.tasks.lock().await;
+        let exported_tasks: Vec<crate::task_export::ExportedTask> = tasks
+            .iter()
+            .cloned()
+            .map(crate::task_export::ExportedTask::from)
+            .collect();
+
+        // Collect generations (simplified - just count)
+        let mut generations = std::collections::HashMap::new();
+        generations.insert("task_count".to_string(), tasks.len() as u64);
+
+        // Collect all subsystem configurations
+        let configs = self.collect_backup_configs().await;
+
+        self.backup_manager
+            .create_backup(description, exported_tasks, generations, configs)
+    }
+
+    /// List all available backups
+    pub async fn list_backups(
+        &self,
+    ) -> Result<Vec<download_backup::BackupInfo>, download_backup::BackupError> {
+        self.backup_manager.list_backups()
+    }
+
+    /// Load a backup from file
+    pub async fn load_backup(
+        &self,
+        backup_path: &std::path::Path,
+    ) -> Result<download_backup::DownloadBackup, download_backup::BackupError> {
+        self.backup_manager.load_backup(backup_path)
+    }
+
+    /// Delete a backup file
+    pub async fn delete_backup(
+        &self,
+        backup_path: &std::path::Path,
+    ) -> Result<(), download_backup::BackupError> {
+        self.backup_manager.delete_backup(backup_path)
+    }
+
+    /// Collect all subsystem configurations for backup
+    async fn collect_backup_configs(&self) -> download_backup::BackupConfigs {
+        download_backup::BackupConfigs {
+            auto_cleanup: Some(self.auto_cleanup.read().await.clone()),
+            auto_pause: Some(self.auto_pause.read().await.clone()),
+            bandwidth_allocation: Some(self.bandwidth_allocation.lock().await.config().clone()),
+            cooldown: Some(self.cooldown_config.read().await.clone()),
+            data_cap: Some(self.data_cap.lock().await.config().clone()),
+            domain_limit: Some(self.domain_limit.read().await.clone()),
+            error_recovery: Some(self.error_recovery.lock().await.config().clone()),
+            network_aware: Some(self.network_aware.lock().await.config().clone()),
+            priority_aging: Some(self.priority_aging.read().await.clone()),
+            queue_completion: Some(
+                self.queue_completion_predictor
+                    .read()
+                    .await
+                    .config()
+                    .clone(),
+            ),
+            recycle_bin: Some(self.recycle_bin.lock().await.config().clone()),
+            resume_policy: Some(self.resume_policy.read().await.clone()),
+            speed_alert: Some(self.speed_alerts.get_config().await),
+            url_dedup: Some(self.url_dedup.read().await.clone()),
+            // Optional configs - only include if they have meaningful state
+            automation_rules: None, // TODO: add getter to AutomationRuleManager
+            disk_monitor: None,     // TODO: add getter to DiskSpaceMonitor
+            download_analytics: None, // TODO: add getter to AnalyticsManager
+            download_budget: None,  // TODO: add getter to BudgetManager
+            download_deadline: None, // TODO: add getter to DeadlineManager
+            download_presets: None, // TODO: collect from download_presets
+            download_quota: None,   // TODO: add getter to DownloadQuotaManager
+            download_time_limit: None, // TODO: add getter to DownloadTimeLimitManager
+            duplicate_detection: None, // TODO: add getter to DuplicateDetectionManager
+            global_budget: None,    // TODO: add getter to GlobalBudgetManager
+            integrity: None,        // TODO: add getter to IntegrityManager
+            path_rules: None,       // TODO: collect from path_rules
+            path_template: None,    // TODO: add getter to PathTemplateManager
+            protocol_limits: None,  // TODO: add getter to ProtocolLimitsConfig
+            queue_staleness: Some(self.queue_staleness.read().await.clone()),
+            save_path: None,             // TODO: add getter to SavePathManager
+            speed_profiles: None,        // TODO: collect from speed_profiles
+            task_chains: None,           // TODO: collect from task_chain
+            task_schedule_windows: None, // TODO: collect from task_schedule_windows
+            url_allowlist: Some(self.url_allowlist.read().await.clone()),
+            url_bookmarks: None,      // TODO: collect from url_bookmarks
+            url_normalizer: None,     // TODO: add getter to UrlNormalizer
+            url_rewrite: None,        // TODO: collect from url_rewrite
+            watch_folder: None,       // TODO: add getter to WatchFolderManager
+            categorize_rules: None,   // TODO: collect from categorize_rules
+            conflict_strategy: None,  // TODO: add getter to conflict_detection
+            bandwidth_schedule: None, // TODO: collect from bandwidth_schedule
+            dependency_graph: Some(self.dependency_graph.read().await.config().clone()),
+        }
     }
 }
 

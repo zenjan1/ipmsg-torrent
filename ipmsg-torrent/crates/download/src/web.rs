@@ -820,6 +820,10 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/source-benchmark/cache",
             post(clear_source_benchmark_cache_handler),
         )
+        .route("/api/backup", get(list_backups_handler))
+        .route("/api/backup", post(create_backup_handler))
+        .route("/api/backup/:id", get(get_backup_handler))
+        .route("/api/backup/:id", delete(delete_backup_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -7791,4 +7795,78 @@ async fn clear_source_benchmark_cache_handler(
 ) -> impl axum::response::IntoResponse {
     state.manager.clear_source_benchmark_cache().await;
     Json(serde_json::json!({"status": "ok"}))
+}
+
+// ==================== Phase 123: Download Backup API ====================
+
+/// List all available backups
+async fn list_backups_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.list_backups().await {
+        Ok(backups) => Json(serde_json::json!({
+            "status": "ok",
+            "backups": backups.iter().map(|b| serde_json::json!({
+                "path": b.path.to_string_lossy(),
+                "created_at": b.created_at.to_rfc3339(),
+                "description": b.description,
+                "task_count": b.task_count,
+                "config_count": b.config_count
+            })).collect::<Vec<_>>()
+        })),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Create a new backup
+async fn create_backup_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let description = body
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    match state.manager.create_backup(description).await {
+        Ok(path) => Json(serde_json::json!({
+            "status": "ok",
+            "path": path.to_string_lossy()
+        })),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Get backup details
+async fn get_backup_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let backup_path = std::path::PathBuf::from(&id);
+    match state.manager.load_backup(&backup_path).await {
+        Ok(backup) => Json(serde_json::json!({
+            "status": "ok",
+            "backup": {
+                "version": backup.version,
+                "created_at": backup.created_at.to_rfc3339(),
+                "description": backup.description,
+                "source": backup.source,
+                "task_count": backup.tasks.tasks.len(),
+                "config_count": backup.configs.count_some()
+            }
+        })),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Delete a backup
+async fn delete_backup_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let backup_path = std::path::PathBuf::from(&id);
+    match state.manager.delete_backup(&backup_path).await {
+        Ok(_) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
 }
