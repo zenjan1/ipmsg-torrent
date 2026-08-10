@@ -168,7 +168,7 @@ impl GraphStats {
     /// Format a human-readable summary.
     pub fn format_summary(&self) -> String {
         let mut result = String::new();
-        result.push_str(&format!("📊 Dependency Graph Statistics:\n"));
+        result.push_str("📊 Dependency Graph Statistics:\n");
         result.push_str(&format!("  Total tasks: {}\n", self.total_tasks));
         result.push_str(&format!(
             "  Tasks with dependencies: {}\n",
@@ -253,6 +253,12 @@ pub struct DependencyGraphValidator {
     config: DependencyGraphConfig,
 }
 
+impl Default for DependencyGraphValidator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DependencyGraphValidator {
     /// Create a new validator with default configuration.
     pub fn new() -> Self {
@@ -309,19 +315,19 @@ impl DependencyGraphValidator {
                 }
 
                 // Check dependency on errored task
-                if let Some(dep_task) = task_map.get(dep_id.as_str()) {
-                    if dep_task.is_error {
-                        issues.push(DependencyIssue {
-                            task_id: task.id.clone(),
-                            category: IssueCategory::BlockedByFailure,
-                            severity: IssueSeverity::Warning,
-                            message: format!(
-                                "Dependency '{}' is in error state, task will never start",
-                                dep_id
-                            ),
-                            related_ids: vec![dep_id.clone()],
-                        });
-                    }
+                if let Some(dep_task) = task_map.get(dep_id.as_str())
+                    && dep_task.is_error
+                {
+                    issues.push(DependencyIssue {
+                        task_id: task.id.clone(),
+                        category: IssueCategory::BlockedByFailure,
+                        severity: IssueSeverity::Warning,
+                        message: format!(
+                            "Dependency '{}' is in error state, task will never start",
+                            dep_id
+                        ),
+                        related_ids: vec![dep_id.clone()],
+                    });
                 }
             }
 
@@ -697,10 +703,7 @@ impl DependencyGraphValidator {
         let mut visited = HashSet::new();
         visited.insert(current);
 
-        loop {
-            let Some(task) = task_map.get(current) else {
-                break;
-            };
+        while let Some(task) = task_map.get(current) {
             if task.depends_on.is_empty() {
                 break;
             }

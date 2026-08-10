@@ -40,6 +40,7 @@ pub mod duplicate_detection;
 pub mod ed2k;
 pub mod error_recovery;
 pub mod eta_estimator;
+pub mod health_dashboard;
 pub mod integrity_verification;
 pub mod link_extractor;
 pub mod magnet;
@@ -8066,6 +8067,138 @@ impl DownloadManager {
         drop(tasks);
 
         queue_health::analyze_queue_health(&health_data, config)
+    }
+
+    /// Build comprehensive health dashboard aggregating all monitoring data
+    pub async fn build_health_dashboard(
+        &self,
+        config: &health_dashboard::HealthDashboardConfig,
+    ) -> health_dashboard::HealthDashboard {
+        let tasks = self.tasks.lock().await;
+
+        // Count task states
+        let total_tasks = tasks.len();
+        let downloading = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Downloading)
+            .count();
+        let queued = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Queued)
+            .count();
+        let paused = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Paused)
+            .count();
+        let completed = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Complete)
+            .count();
+        let error_count = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Error)
+            .count();
+
+        // Calculate current speed from tasks
+        let current_speed_bps: u64 = tasks.iter().map(|t| t.speed_bps as u64).sum();
+
+        // Get speed metrics from speed history
+        let speed_history = self.speed_history.lock().await;
+        let task_ids = speed_history.list_task_ids();
+        let mut avg_speed_5min_total: u64 = 0;
+        let mut avg_speed_15min_total: u64 = 0;
+        let mut summary_count: u64 = 0;
+        for tid in task_ids {
+            if let Some(s) = speed_history.get_summary(tid) {
+                avg_speed_5min_total += s.avg_5min as u64;
+                avg_speed_15min_total += s.avg_15min as u64;
+                summary_count += 1;
+            }
+        }
+        let avg_speed_5min = if summary_count > 0 {
+            avg_speed_5min_total / summary_count
+        } else {
+            0
+        };
+        let avg_speed_15min = if summary_count > 0 {
+            avg_speed_15min_total / summary_count
+        } else {
+            0
+        };
+        drop(speed_history);
+
+        // Get speed alerts and anomalies
+        let speed_alert_count = self.speed_alerts.get_alerts(100).await.len();
+        let speed_anomaly_count = self.get_speed_anomalies().await.len();
+
+        // Get network status
+        let network_status = self.get_network_status().await;
+        let network_connected = matches!(network_status, network_aware::NetworkStatus::Connected);
+        let network_summary = self.get_network_summary().await;
+        let network_quality = network_summary.stability_score as u8;
+        let network_issues = 0; // NetworkSummary doesn't have issue_count
+
+        let proxy_config = self.proxy_config.read().await;
+        let proxy_enabled = proxy_config.is_some();
+        drop(proxy_config);
+
+        // Get storage status
+        let disk_available_bytes = 50_000_000_000; // TODO: integrate with disk_monitor
+        let disk_low = disk_available_bytes < config.low_disk_threshold_bytes;
+
+        // Get integrity issues
+        let integrity_summary = self.get_integrity_summary().await;
+        let integrity_issues = integrity_summary.missing + integrity_summary.size_mismatch;
+
+        // Get recycle bin count
+        let recycle_bin_count = self.list_recycled_tasks().await.len();
+
+        // Get error metrics
+        let pending_retry = tasks.iter().filter(|t| t.cooldown.is_some()).count();
+        let audit_log = self.audit_log.lock().await;
+        let retries_today = audit_log
+            .entries()
+            .filter(|e| {
+                matches!(e.event_type, AuditEventType::TaskRetry)
+                    && e.timestamp.date_naive() == chrono::Utc::now().date_naive()
+            })
+            .count() as u32;
+        drop(audit_log);
+
+        let error_recovery_config = self.get_error_recovery_config().await;
+        let recovery_enabled = error_recovery_config.enabled;
+
+        // Get deadline misses
+        let deadline_summary = self.get_deadline_summary().await;
+        let deadline_missed = deadline_summary.missed_count;
+
+        let input = health_dashboard::HealthInput {
+            total_tasks,
+            downloading,
+            queued,
+            paused,
+            completed,
+            error_count,
+            current_speed_bps,
+            avg_speed_5min,
+            avg_speed_15min,
+            speed_alert_count,
+            speed_anomaly_count,
+            network_connected,
+            network_quality,
+            network_issues,
+            proxy_enabled,
+            disk_available_bytes,
+            disk_low,
+            integrity_issues,
+            recycle_bin_count,
+            pending_retry,
+            retries_today,
+            recovery_enabled,
+            deadline_missed,
+        };
+
+        health_dashboard::build_health_dashboard(&input, config)
     }
 
     /// Get speed history summary for a task
