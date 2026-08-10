@@ -56,6 +56,7 @@ pub mod progress;
 pub mod progress_milestone;
 pub mod protocol_limits;
 pub mod proxy;
+pub mod queue_completion;
 pub mod queue_health;
 pub mod queue_staleness;
 pub mod rate_limiter;
@@ -130,6 +131,10 @@ pub use bulk_ops::{
     BulkTagAction, BulkWeightAction,
 };
 pub use eta_estimator::{EtaConfidence, EtaEstimate, EtaEstimator};
+pub use queue_completion::{
+    QueueCompletionConfig, QueueCompletionPrediction, QueueCompletionPredictor,
+    TaskCompletionEstimate,
+};
 pub use integrity_verification::{
     IntegrityConfig, IntegrityManager, IntegritySummary, VerificationResult, VerificationStatus,
 };
@@ -785,6 +790,7 @@ pub struct DownloadManager {
     rss_feed_manager: Option<Arc<FeedSubscriptionManager>>,
     /// ETA estimator for download time prediction
     eta_estimator: Arc<EtaEstimator>,
+    queue_completion_predictor: Arc<tokio::sync::RwLock<QueueCompletionPredictor>>,
     /// Auto-categorization rules for downloads
     categorize_rules: Arc<Mutex<Vec<auto_categorize::CategorizeRule>>>,
     /// Per-task speed history tracking
@@ -939,6 +945,9 @@ impl DownloadManager {
             hook_manager: Arc::new(HookManager::new(data_dir.clone())),
             rss_feed_manager: None,
             eta_estimator: Arc::new(EtaEstimator::new()),
+            queue_completion_predictor: Arc::new(tokio::sync::RwLock::new(
+                QueueCompletionPredictor::new(),
+            )),
             categorize_rules: Arc::new(Mutex::new(Vec::new())),
             speed_history: Arc::new(Mutex::new(speed_history::SpeedHistoryManager::new(360))),
             auto_cleanup: Arc::new(tokio::sync::RwLock::new(
@@ -1214,6 +1223,9 @@ impl DownloadManager {
             hook_manager: Arc::new(HookManager::new(data_dir.clone())),
             rss_feed_manager: None,
             eta_estimator: Arc::new(EtaEstimator::new()),
+            queue_completion_predictor: Arc::new(tokio::sync::RwLock::new(
+                QueueCompletionPredictor::new(),
+            )),
             categorize_rules: Arc::new(Mutex::new(Vec::new())),
             speed_history: Arc::new(Mutex::new(speed_history::SpeedHistoryManager::new(360))),
             auto_cleanup: Arc::new(tokio::sync::RwLock::new(
@@ -5076,6 +5088,27 @@ impl DownloadManager {
         &self.eta_estimator
     }
 
+    /// Predict queue completion time.
+    /// Estimates when all queued downloads will finish based on current speeds and concurrency.
+    pub async fn predict_queue_completion(&self) -> queue_completion::QueueCompletionPrediction {
+        let tasks = self.tasks.lock().await.clone();
+        let max_concurrent = self.get_max_concurrent();
+        let predictor = self.queue_completion_predictor.read().await;
+        predictor.predict(&tasks, &self.eta_estimator, max_concurrent).await
+    }
+
+    /// Get queue completion predictor configuration.
+    pub async fn get_queue_completion_config(&self) -> queue_completion::QueueCompletionConfig {
+        let predictor = self.queue_completion_predictor.read().await;
+        predictor.config().clone()
+    }
+
+    /// Set queue completion predictor configuration.
+    pub async fn set_queue_completion_config(&self, config: queue_completion::QueueCompletionConfig) {
+        let mut predictor = self.queue_completion_predictor.write().await;
+        predictor.set_config(config);
+    }
+
     /// Set proxy configuration for HTTP/HTTPS downloads.
     /// Pass None to disable proxy.
     /// Persists the configuration to disk for automatic restoration on restart.
@@ -8210,6 +8243,12 @@ impl DownloadManager {
         detector.remove_task(task_id);
     }
 
+    /// Clear all speed anomalies
+    pub async fn clear_speed_anomalies(&self) {
+        let mut detector = self.speed_anomaly.lock().await;
+        detector.clear_all_anomalies();
+    }
+
     // --- Download Session Tracking (Phase 84) ---
 
     /// Start a new download session for a task.
@@ -10844,6 +10883,19 @@ impl DownloadManager {
             mgr.set_config(config);
         }
         Ok(())
+    }
+
+    /// Set resume policy configuration
+    pub async fn set_resume_policy_config(&self, config: resume_policy::ResumePolicyConfig) {
+        let _ = resume_policy::save_resume_policy_config(&self.data_dir, &config);
+        let mut policy = self.resume_policy.write().await;
+        *policy = config;
+    }
+
+    /// Get resume policy configuration
+    pub async fn get_resume_policy_config(&self) -> resume_policy::ResumePolicyConfig {
+        let policy = self.resume_policy.read().await;
+        policy.clone()
     }
 }
 

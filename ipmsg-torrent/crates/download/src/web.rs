@@ -154,6 +154,8 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/feeds/:id/poll", post(poll_feed))
         .route("/api/eta", get(get_all_eta))
         .route("/api/eta/:id", get(get_task_eta))
+        .route("/api/queue-completion", get(get_queue_completion_handler))
+        .route("/api/queue-completion", post(set_queue_completion_config_handler))
         .route("/api/auto-rules", get(list_auto_rules))
         .route("/api/auto-rules", post(add_auto_rule))
         .route("/api/auto-rules/:id/remove", post(remove_auto_rule))
@@ -4584,6 +4586,21 @@ async fn get_task_eta(
             serde_json::json!({"error": "Insufficient data for ETA estimate"}),
         )),
     }
+}
+
+/// GET /api/queue-completion — Predict queue completion time
+async fn get_queue_completion_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let prediction = state.manager.predict_queue_completion().await;
+    Json(serde_json::to_value(prediction).unwrap_or(serde_json::json!({"error": "Failed to serialize prediction"})))
+}
+
+/// POST /api/queue-completion — Update queue completion config
+async fn set_queue_completion_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::queue_completion::QueueCompletionConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_queue_completion_config(config.clone()).await;
+    Json(serde_json::json!({"status": "ok", "config": config}))
 }
 
 /// Request to add an auto-categorization rule

@@ -381,6 +381,10 @@ enum Command {
     DlEta {
         task_id: Option<String>,
     },
+    /// Predict queue completion time
+    DlQueueCompletion {
+        subcommand: Option<String>,
+    },
     /// Manage auto-categorization rules
     DlAutoRule {
         subcommand: String,
@@ -569,6 +573,24 @@ enum Command {
     /// Download time limits (status|config|set|clear)
     DlTimeLimit {
         /// Subcommand: status|config|set|clear
+        subcommand: String,
+        args: Vec<String>,
+    },
+    /// Download duplicate detection (status|detect|groups|summary|clear|config)
+    DlDuplicate {
+        /// Subcommand: status|detect|groups|summary|clear|config
+        subcommand: String,
+        args: Vec<String>,
+    },
+    /// Download resume policy (status|set|preview)
+    DlResumePolicy {
+        /// Subcommand: status|set|preview
+        subcommand: String,
+        args: Vec<String>,
+    },
+    /// Download speed anomaly detection (status|list|summary|remove|clear|config)
+    DlSpeedAnomaly {
+        /// Subcommand: status|list|summary|remove|clear|config
         subcommand: String,
         args: Vec<String>,
     },
@@ -1827,6 +1849,57 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dldup" | "dl-dup" | "dlduplicate" | "dl-duplicate" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dldup <status|detect|groups|summary|clear|config>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlDuplicate {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
+        "dlresumepolicy" | "dl-resume-policy" | "dlrsp" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlresumepolicy <status|set|preview>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlResumePolicy {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
+        "dlanomaly" | "dl-anomaly" | "dlspeedanomaly" | "dl-speed-anomaly" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlanomaly <status|list|summary|remove|clear|config>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlSpeedAnomaly {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -1906,6 +1979,9 @@ fn parse_command(input: &str) -> Command {
         }
         "dleta" | "dl-eta" => Command::DlEta {
             task_id: parts.get(1).map(|s| s.to_string()),
+        },
+        "dlqc" | "dl-queuecompletion" => Command::DlQueueCompletion {
+            subcommand: parts.get(1).map(|s| s.to_string()),
         },
         "block" => {
             if parts.len() >= 2 {
@@ -2015,6 +2091,7 @@ fn command_help() -> String {
         "/dlhook <list|add|remove|enable|disable> - Manage post-download hooks",
         "/dlrss <list|add|remove|enable|disable|poll> - Manage RSS/Atom feed subscriptions",
         "/dleta [task_id]   - Show ETA estimates for active downloads",
+        "/dlqc [status|config] - Predict queue completion time",
         "/dlaudit [cmd]     - Audit log (status|recent [n]|task <id>|clear)",
         "/dlbwsched [cmd]   - Bandwidth schedule (status|list|add|del)",
         "/dlpreset [cmd]    - Download presets (list|show|add|del|apply)",
@@ -2037,6 +2114,9 @@ fn command_help() -> String {
         "/dlnetwork [cmd]  - Network-aware download (status|enable|disable|config|summary|probe|paused|clear|reset)",
         "/dlretryquota [cmd] - Retry quota (status|enable|disable|set <max> [window_secs]|reset)",
         "/dlintegrity [cmd] - File integrity verification (status|verify <id>|verify-all|summary|clear|config)",
+        "/dldup [cmd]     - Duplicate detection (status|detect|groups|summary|clear|config)",
+        "/dlresumepolicy [cmd] - Resume policy (status|set|preview)",
+        "/dlanomaly [cmd] - Speed anomaly detection (status|list|summary|remove|clear|config)",
         "/dlttl [cmd]      - Task TTL management (status|enable|disable|set <duration> [interval]|task <id> <duration>|summary)",
         "/dlerrrec [cmd]   - Error recovery (status|enable|disable|set <category> <strategy>|reset|test <error>)",
         "/dlchain [cmd]    - Task chains (list|create|delete|add|remove|enable|disable|summary)",
@@ -7993,6 +8073,70 @@ async fn handle_command(
                 s.add_system_message("main", lines.trim_end().to_string());
             }
         }
+        Command::DlQueueCompletion { subcommand } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+
+            match subcommand.as_deref() {
+                Some("config") => {
+                    let config = download_manager.get_queue_completion_config().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "Queue Completion Config:\n  Enabled: {}\n  Min samples: {}\n  Stalled speed assumption: {} B/s\n  Confidence threshold: {:.2}",
+                            config.enabled,
+                            config.min_samples,
+                            config.stalled_speed_assumption_bps,
+                            config.confidence_threshold
+                        ),
+                    );
+                }
+                _ => {
+                    // Default: show prediction
+                    let prediction = download_manager.predict_queue_completion().await;
+                    let mut s = state.lock().await;
+
+                    if prediction.task_count == 0 {
+                        s.add_system_message("main", "Queue is empty or all tasks are complete.".to_string());
+                    } else {
+                        let completion_str = match prediction.estimated_completion {
+                            Some(dt) => format!("{} ({})", dt.format("%Y-%m-%d %H:%M:%S"), prediction.summary),
+                            None => "Unknown (insufficient data)".to_string(),
+                        };
+
+                        let mut lines = format!(
+                            "Queue Completion Prediction:\n  {}\n  Confidence: {:.0}%\n  Active: {}/{} concurrent\n  Reliable estimates: {}/{}\n\n",
+                            prediction.summary,
+                            prediction.confidence * 100.0,
+                            prediction.active_downloads,
+                            prediction.max_concurrent,
+                            prediction.reliable_estimates,
+                            prediction.task_count
+                        );
+
+                        for est in &prediction.task_estimates {
+                            let eta_str = match est.eta_seconds {
+                                Some(secs) => format!("{}s", secs as u64),
+                                None => "?".to_string(),
+                            };
+                            lines.push_str(&format!(
+                                "  {} [{}] - {:.0}% done, ETA: {}\n",
+                                est.task_name,
+                                est.task_id,
+                                est.progress * 100.0,
+                                eta_str
+                            ));
+                        }
+
+                        lines.push_str(&format!("\nEstimated completion: {}", completion_str));
+                        s.add_system_message("main", lines);
+                    }
+                }
+            }
+        }
         Command::DlTemplate { subcommand, args } => {
             let download_manager = {
                 let s = state.lock().await;
@@ -8566,6 +8710,306 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dltimelimit <status|config|set|clear>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlDuplicate { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_duplicate_detection_config().await;
+                    let mut output = String::new();
+                    output.push_str("🔍 Duplicate Detection Status:\n");
+                    output.push_str(&format!("  Enabled: {}\n", config.enabled));
+                    output.push_str(&format!("  Detect by URL: {}\n", config.detect_by_url));
+                    output.push_str(&format!(
+                        "  Detect by filename: {}\n",
+                        config.detect_by_filename
+                    ));
+                    output.push_str(&format!(
+                        "  Detect by checksum: {}\n",
+                        config.detect_by_checksum
+                    ));
+                    output.push_str(&format!("  Detect by size: {}\n", config.detect_by_size));
+                    output.push_str(&format!(
+                        "  Filename threshold: {:.2}\n",
+                        config.filename_similarity_threshold
+                    ));
+                    output.push_str(&format!("  Max groups: {}\n", config.max_duplicate_groups));
+                    s.add_system_message("main", output);
+                }
+                "detect" => {
+                    let groups = download_manager.detect_duplicate_tasks().await;
+                    if groups.is_empty() {
+                        s.add_system_message("main", "No duplicate tasks detected.".to_string());
+                    } else {
+                        let mut output = format!("Detected {} duplicate group(s):\n", groups.len());
+                        for group in &groups {
+                            output.push_str(&format!(
+                                "\n  Group {} (method: {}):\n",
+                                group.group_id, group.method
+                            ));
+                            for task in &group.tasks {
+                                output.push_str(&format!(
+                                    "    - {} ({}) [{}]\n",
+                                    task.task_id, task.task_name, task.severity
+                                ));
+                            }
+                        }
+                        s.add_system_message("main", output);
+                    }
+                }
+                "groups" => {
+                    let groups = download_manager.get_duplicate_groups().await;
+                    if groups.is_empty() {
+                        s.add_system_message("main", "No duplicate groups.".to_string());
+                    } else {
+                        let mut output = format!("{} duplicate group(s):\n", groups.len());
+                        for group in &groups {
+                            output.push_str(&format!(
+                                "  {} ({}): {} tasks\n",
+                                group.group_id,
+                                group.method,
+                                group.tasks.len()
+                            ));
+                        }
+                        s.add_system_message("main", output);
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_duplicate_summary().await;
+                    let mut output = String::new();
+                    output.push_str("🔍 Duplicate Detection Summary:\n");
+                    output.push_str(&format!("  Total groups: {}\n", summary.total_groups));
+                    output.push_str(&format!(
+                        "  Total duplicates: {}\n",
+                        summary.total_duplicates
+                    ));
+                    output.push_str(&format!(
+                        "  Estimated wasted: {} bytes\n",
+                        summary.estimated_wasted_bytes
+                    ));
+                    if !summary.by_severity.is_empty() {
+                        output.push_str("  By severity:\n");
+                        for (severity, count) in &summary.by_severity {
+                            output.push_str(&format!("    {}: {}\n", severity, count));
+                        }
+                    }
+                    s.add_system_message("main", output);
+                }
+                "clear" => {
+                    download_manager.clear_duplicate_groups().await;
+                    s.add_system_message("main", "Duplicate groups cleared.".to_string());
+                }
+                "config" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dldup config <enabled|disabled> [filename_threshold] [max_groups]".to_string());
+                    } else {
+                        let mut config = download_manager.get_duplicate_detection_config().await;
+                        match args[0].as_str() {
+                            "enabled" => config.enabled = true,
+                            "disabled" => config.enabled = false,
+                            _ => {
+                                s.add_system_message("main", "Usage: /dldup config <enabled|disabled> [filename_threshold] [max_groups]".to_string());
+                                return;
+                            }
+                        }
+                        if args.len() > 1 {
+                            if let Ok(threshold) = args[1].parse::<f64>() {
+                                config.filename_similarity_threshold = threshold;
+                            }
+                        }
+                        if args.len() > 2 {
+                            if let Ok(max) = args[2].parse::<usize>() {
+                                config.max_duplicate_groups = max;
+                            }
+                        }
+                        download_manager
+                            .set_duplicate_detection_config(config)
+                            .await;
+                        s.add_system_message(
+                            "main",
+                            "Duplicate detection config updated.".to_string(),
+                        );
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dldup <status|detect|groups|summary|clear|config>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlResumePolicy { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_resume_policy_config().await;
+                    let mut output = String::new();
+                    output.push_str("🔄 Resume Policy Status:\n");
+                    output.push_str(&format!("  Policy: {}\n", config.policy));
+                    output.push_str(&format!(
+                        "  Auto-retry errors: {}\n",
+                        config.auto_retry_errors
+                    ));
+                    output.push_str(&format!("  Max auto-resume: {}\n", config.max_auto_resume));
+                    s.add_system_message("main", output);
+                }
+                "set" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlresumepolicy set <policy> [auto_retry_errors] [max_auto_resume]".to_string());
+                        s.add_system_message("main", "Policies: keep_paused, auto_resume_all, auto_resume_high_priority, auto_resume_favorites".to_string());
+                    } else {
+                        let mut config = download_manager.get_resume_policy_config().await;
+                        if let Some(policy) =
+                            ipmsg_download::resume_policy::ResumePolicy::from_str_loose(&args[0])
+                        {
+                            config.policy = policy;
+                        } else {
+                            s.add_system_message("main", format!("Unknown policy: {}. Use: keep_paused, auto_resume_all, auto_resume_high_priority, auto_resume_favorites", args[0]));
+                            return;
+                        }
+                        if args.len() > 1 {
+                            match args[1].as_str() {
+                                "true" | "yes" | "1" => config.auto_retry_errors = true,
+                                "false" | "no" | "0" => config.auto_retry_errors = false,
+                                _ => {}
+                            }
+                        }
+                        if args.len() > 2 {
+                            if let Ok(max) = args[2].parse::<usize>() {
+                                config.max_auto_resume = max;
+                            }
+                        }
+                        download_manager.set_resume_policy_config(config).await;
+                        s.add_system_message("main", "Resume policy updated.".to_string());
+                    }
+                }
+                "preview" => {
+                    s.add_system_message("main", "Preview not yet implemented.".to_string());
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlresumepolicy <status|set|preview>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlSpeedAnomaly { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_speed_anomaly_config().await;
+                    let mut output = String::new();
+                    output.push_str("📊 Speed Anomaly Detection Status:\n");
+                    output.push_str(&format!("  Enabled: {}\n", config.enabled));
+                    output.push_str(&format!("  Min samples: {}\n", config.min_samples));
+                    output.push_str(&format!(
+                        "  Threshold multiplier: {:.2}\n",
+                        config.threshold_multiplier
+                    ));
+                    output.push_str(&format!("  Min speed: {:.0} B/s\n", config.min_speed_bps));
+                    output.push_str(&format!(
+                        "  Max anomalies per task: {}\n",
+                        config.max_anomalies_per_task
+                    ));
+                    output.push_str(&format!("  Cooldown: {}s\n", config.cooldown_secs));
+                    s.add_system_message("main", output);
+                }
+                "list" => {
+                    let anomalies = download_manager.get_speed_anomalies().await;
+                    if anomalies.is_empty() {
+                        s.add_system_message("main", "No speed anomalies detected.".to_string());
+                    } else {
+                        let mut output = format!("{} speed anomalie(s):\n", anomalies.len());
+                        for anomaly in &anomalies {
+                            output.push_str(&format!(
+                                "  {} {}: {:.0} B/s (expected {:.0} B/s)\n",
+                                anomaly.severity.emoji(),
+                                anomaly.task_id,
+                                anomaly.current_speed_bps,
+                                anomaly.expected_speed_bps
+                            ));
+                        }
+                        s.add_system_message("main", output);
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_speed_anomaly_summary().await;
+                    let mut output = String::new();
+                    output.push_str("📊 Speed Anomaly Summary:\n");
+                    output.push_str(&format!("  Enabled: {}\n", summary.enabled));
+                    output.push_str(&format!("  Total anomalies: {}\n", summary.total_anomalies));
+                    output.push_str(&format!("  Tracked tasks: {}\n", summary.tracked_tasks));
+                    output.push_str(&format!("  Severe: {}\n", summary.severe_count));
+                    output.push_str(&format!("  Moderate: {}\n", summary.moderate_count));
+                    output.push_str(&format!("  Mild: {}\n", summary.mild_count));
+                    s.add_system_message("main", output);
+                }
+                "remove" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlanomaly remove <task_id>".to_string(),
+                        );
+                    } else {
+                        download_manager.remove_speed_anomaly_task(&args[0]).await;
+                        s.add_system_message(
+                            "main",
+                            format!("Anomalies removed for task {}", args[0]),
+                        );
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_speed_anomalies().await;
+                    s.add_system_message("main", "Speed anomalies cleared.".to_string());
+                }
+                "config" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlanomaly config <enabled|disabled> [min_samples] [threshold_multiplier]".to_string());
+                    } else {
+                        let mut config = download_manager.get_speed_anomaly_config().await;
+                        match args[0].as_str() {
+                            "enabled" => config.enabled = true,
+                            "disabled" => config.enabled = false,
+                            _ => {
+                                s.add_system_message("main", "Usage: /dlanomaly config <enabled|disabled> [min_samples] [threshold_multiplier]".to_string());
+                                return;
+                            }
+                        }
+                        if args.len() > 1 {
+                            if let Ok(samples) = args[1].parse::<usize>() {
+                                config.min_samples = samples;
+                            }
+                        }
+                        if args.len() > 2 {
+                            if let Ok(threshold) = args[2].parse::<f64>() {
+                                config.threshold_multiplier = threshold;
+                            }
+                        }
+                        download_manager.set_speed_anomaly_config(config).await;
+                        s.add_system_message("main", "Speed anomaly config updated.".to_string());
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlanomaly <status|list|summary|remove|clear|config>".to_string(),
                     );
                 }
             }
