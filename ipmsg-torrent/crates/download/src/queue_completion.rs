@@ -8,8 +8,8 @@
 //!
 //! Useful for planning and resource allocation decisions.
 
-use crate::eta_estimator::{EtaConfidence, EtaEstimator};
 use crate::DownloadTask;
+use crate::eta_estimator::{EtaConfidence, EtaEstimator};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -182,9 +182,11 @@ impl QueueCompletionPredictor {
 
         // Sort by priority (high to low), then by queue position
         task_estimates.sort_by(|a, b| {
-            b.priority
-                .cmp(&a.priority)
-                .then_with(|| a.progress.partial_cmp(&b.progress).unwrap_or(std::cmp::Ordering::Equal))
+            b.priority.cmp(&a.priority).then_with(|| {
+                a.progress
+                    .partial_cmp(&b.progress)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
 
         // Calculate total completion time accounting for concurrency
