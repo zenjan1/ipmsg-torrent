@@ -8100,10 +8100,17 @@ async fn handle_command(
                     let mut s = state.lock().await;
 
                     if prediction.task_count == 0 {
-                        s.add_system_message("main", "Queue is empty or all tasks are complete.".to_string());
+                        s.add_system_message(
+                            "main",
+                            "Queue is empty or all tasks are complete.".to_string(),
+                        );
                     } else {
                         let completion_str = match prediction.estimated_completion {
-                            Some(dt) => format!("{} ({})", dt.format("%Y-%m-%d %H:%M:%S"), prediction.summary),
+                            Some(dt) => format!(
+                                "{} ({})",
+                                dt.format("%Y-%m-%d %H:%M:%S"),
+                                prediction.summary
+                            ),
                             None => "Unknown (insufficient data)".to_string(),
                         };
 

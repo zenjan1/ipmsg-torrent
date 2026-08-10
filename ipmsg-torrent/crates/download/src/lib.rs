@@ -22,6 +22,7 @@ pub mod connection_health;
 pub mod connection_pool;
 pub mod csv_export;
 pub mod data_cap;
+pub mod dependency_graph;
 pub mod dht;
 pub mod disk_monitor;
 pub mod domain_limit;
@@ -130,17 +131,21 @@ pub use bulk_ops::{
     BulkFilter, BulkGroupAction, BulkPriorityAction, BulkResult, BulkSpeedLimitAction,
     BulkTagAction, BulkWeightAction,
 };
-pub use eta_estimator::{EtaConfidence, EtaEstimate, EtaEstimator};
-pub use queue_completion::{
-    QueueCompletionConfig, QueueCompletionPrediction, QueueCompletionPredictor,
-    TaskCompletionEstimate,
+pub use dependency_graph::{
+    DependencyGraphConfig, DependencyGraphValidator, DependencyIssue, GraphStats, IssueCategory,
+    IssueSeverity, TaskDepData, TopologicalOrder, ValidationResult,
 };
+pub use eta_estimator::{EtaConfidence, EtaEstimate, EtaEstimator};
 pub use integrity_verification::{
     IntegrityConfig, IntegrityManager, IntegritySummary, VerificationResult, VerificationStatus,
 };
 pub use mirror_health::{MirrorHealth, MirrorHealthConfig, MirrorSummary};
 pub use notification::{
     NotificationChannel, NotificationConfig, NotificationError, NotificationEvent,
+};
+pub use queue_completion::{
+    QueueCompletionConfig, QueueCompletionPrediction, QueueCompletionPredictor,
+    TaskCompletionEstimate,
 };
 pub use rate_limiter::{DownloadRateController, RateLimiter};
 pub use save_path_manager::{
@@ -909,6 +914,8 @@ pub struct DownloadManager {
     resume_policy: Arc<tokio::sync::RwLock<resume_policy::ResumePolicyConfig>>,
     /// Duplicate detection manager for identifying redundant download tasks
     duplicate_detection: Arc<Mutex<duplicate_detection::DuplicateDetectionManager>>,
+    /// Dependency graph validator for checking task dependency integrity
+    dependency_graph: Arc<tokio::sync::RwLock<dependency_graph::DependencyGraphValidator>>,
 }
 
 impl DownloadManager {
@@ -1054,6 +1061,9 @@ impl DownloadManager {
             )),
             duplicate_detection: Arc::new(Mutex::new(
                 duplicate_detection::DuplicateDetectionManager::new(),
+            )),
+            dependency_graph: Arc::new(tokio::sync::RwLock::new(
+                dependency_graph::DependencyGraphValidator::new(),
             )),
         };
         dm.start_scheduler();
@@ -1332,6 +1342,9 @@ impl DownloadManager {
             )),
             duplicate_detection: Arc::new(Mutex::new(
                 duplicate_detection::DuplicateDetectionManager::new(),
+            )),
+            dependency_graph: Arc::new(tokio::sync::RwLock::new(
+                dependency_graph::DependencyGraphValidator::new(),
             )),
         };
         // Restore resume policy config from disk
@@ -5094,7 +5107,9 @@ impl DownloadManager {
         let tasks = self.tasks.lock().await.clone();
         let max_concurrent = self.get_max_concurrent();
         let predictor = self.queue_completion_predictor.read().await;
-        predictor.predict(&tasks, &self.eta_estimator, max_concurrent).await
+        predictor
+            .predict(&tasks, &self.eta_estimator, max_concurrent)
+            .await
     }
 
     /// Get queue completion predictor configuration.
@@ -5104,7 +5119,10 @@ impl DownloadManager {
     }
 
     /// Set queue completion predictor configuration.
-    pub async fn set_queue_completion_config(&self, config: queue_completion::QueueCompletionConfig) {
+    pub async fn set_queue_completion_config(
+        &self,
+        config: queue_completion::QueueCompletionConfig,
+    ) {
         let mut predictor = self.queue_completion_predictor.write().await;
         predictor.set_config(config);
     }
@@ -8550,6 +8568,107 @@ impl DownloadManager {
                 .iter()
                 .all(|d| completed.contains(d.as_str())),
         )
+    }
+
+    /// Validate the dependency graph and return any issues found.
+    pub async fn validate_dependency_graph(&self) -> dependency_graph::ValidationResult {
+        let tasks = self.tasks.lock().await;
+        let task_data: Vec<dependency_graph::TaskDepData> = tasks
+            .iter()
+            .map(|t| dependency_graph::TaskDepData {
+                id: t.id.clone(),
+                depends_on: t.depends_on.clone(),
+                is_complete: t.state == DownloadState::Complete,
+                is_error: t.state == DownloadState::Error,
+            })
+            .collect();
+        let validator = self.dependency_graph.read().await;
+        validator.validate(&task_data)
+    }
+
+    /// Get dependency graph statistics.
+    pub async fn get_dependency_graph_stats(&self) -> dependency_graph::GraphStats {
+        let tasks = self.tasks.lock().await;
+        let task_data: Vec<dependency_graph::TaskDepData> = tasks
+            .iter()
+            .map(|t| dependency_graph::TaskDepData {
+                id: t.id.clone(),
+                depends_on: t.depends_on.clone(),
+                is_complete: t.state == DownloadState::Complete,
+                is_error: t.state == DownloadState::Error,
+            })
+            .collect();
+        let validator = self.dependency_graph.read().await;
+        validator.compute_stats(&task_data)
+    }
+
+    /// Get topological ordering of download tasks.
+    pub async fn get_dependency_topological_order(&self) -> dependency_graph::TopologicalOrder {
+        let tasks = self.tasks.lock().await;
+        let task_data: Vec<dependency_graph::TaskDepData> = tasks
+            .iter()
+            .map(|t| dependency_graph::TaskDepData {
+                id: t.id.clone(),
+                depends_on: t.depends_on.clone(),
+                is_complete: t.state == DownloadState::Complete,
+                is_error: t.state == DownloadState::Error,
+            })
+            .collect();
+        let validator = self.dependency_graph.read().await;
+        validator.topological_sort(&task_data)
+    }
+
+    /// Get the dependency graph validator configuration.
+    pub async fn get_dependency_graph_config(&self) -> dependency_graph::DependencyGraphConfig {
+        let validator = self.dependency_graph.read().await;
+        validator.config().clone()
+    }
+
+    /// Update the dependency graph validator configuration.
+    pub async fn set_dependency_graph_config(
+        &self,
+        config: dependency_graph::DependencyGraphConfig,
+    ) {
+        let mut validator = self.dependency_graph.write().await;
+        validator.set_config(config);
+    }
+
+    /// Get all transitive dependencies for a task.
+    pub async fn get_task_dependency_chain(&self, task_id: &str) -> Option<Vec<String>> {
+        let tasks = self.tasks.lock().await;
+        if !tasks.iter().any(|t| t.id == task_id) {
+            return None;
+        }
+        let task_data: Vec<dependency_graph::TaskDepData> = tasks
+            .iter()
+            .map(|t| dependency_graph::TaskDepData {
+                id: t.id.clone(),
+                depends_on: t.depends_on.clone(),
+                is_complete: t.state == DownloadState::Complete,
+                is_error: t.state == DownloadState::Error,
+            })
+            .collect();
+        let validator = self.dependency_graph.read().await;
+        Some(validator.get_dependency_chain(task_id, &task_data))
+    }
+
+    /// Get all tasks that depend on a given task (directly or transitively).
+    pub async fn get_task_dependents(&self, task_id: &str) -> Option<Vec<String>> {
+        let tasks = self.tasks.lock().await;
+        if !tasks.iter().any(|t| t.id == task_id) {
+            return None;
+        }
+        let task_data: Vec<dependency_graph::TaskDepData> = tasks
+            .iter()
+            .map(|t| dependency_graph::TaskDepData {
+                id: t.id.clone(),
+                depends_on: t.depends_on.clone(),
+                is_complete: t.state == DownloadState::Complete,
+                is_error: t.state == DownloadState::Error,
+            })
+            .collect();
+        let validator = self.dependency_graph.read().await;
+        Some(validator.get_dependents(task_id, &task_data))
     }
 
     /// Rename a download task.
