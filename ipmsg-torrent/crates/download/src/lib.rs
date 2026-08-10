@@ -59,6 +59,7 @@ pub mod queue_health;
 pub mod queue_staleness;
 pub mod rate_limiter;
 pub mod recycle_bin;
+pub mod resume_policy;
 pub mod retry_quota;
 pub mod rss_feed;
 pub mod save_path_manager;
@@ -897,6 +898,8 @@ pub struct DownloadManager {
     download_deadline: Arc<Mutex<download_deadline::DeadlineManager>>,
     /// Integrity verification manager for checking file existence and size
     integrity: Arc<Mutex<integrity_verification::IntegrityManager>>,
+    /// Resume policy configuration for controlling task restoration on startup
+    resume_policy: Arc<tokio::sync::RwLock<resume_policy::ResumePolicyConfig>>,
 }
 
 impl DownloadManager {
@@ -1034,6 +1037,9 @@ impl DownloadManager {
             network_monitor: Arc::new(Mutex::new(network_monitor::NetworkMonitor::new())),
             download_deadline: Arc::new(Mutex::new(download_deadline::DeadlineManager::new())),
             integrity: Arc::new(Mutex::new(integrity_verification::IntegrityManager::new())),
+            resume_policy: Arc::new(tokio::sync::RwLock::new(
+                resume_policy::ResumePolicyConfig::default(),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -1303,7 +1309,75 @@ impl DownloadManager {
             network_monitor: Arc::new(Mutex::new(network_monitor::NetworkMonitor::new())),
             download_deadline: Arc::new(Mutex::new(download_deadline::DeadlineManager::new())),
             integrity: Arc::new(Mutex::new(integrity_verification::IntegrityManager::new())),
+            resume_policy: Arc::new(tokio::sync::RwLock::new(
+                resume_policy::ResumePolicyConfig::default(),
+            )),
         };
+        // Restore resume policy config from disk
+        if let Some(policy_cfg) = resume_policy::load_resume_policy_config(&dm.data_dir) {
+            *dm.resume_policy.write().await = policy_cfg;
+        }
+        // Apply resume policy to tasks that were downloading
+        {
+            let policy_cfg = dm.resume_policy.read().await.clone();
+            let favorite_ids: Vec<String> = dm
+                .task_favorites
+                .lock()
+                .await
+                .get_favorite_ids()
+                .into_iter()
+                .collect();
+            let task_resume_data: Vec<resume_policy::TaskResumeData> = dm
+                .tasks
+                .lock()
+                .await
+                .iter()
+                .map(|t| {
+                    let state = match t.state {
+                        DownloadState::Downloading => {
+                            resume_policy::TaskStateForResume::Downloading
+                        }
+                        DownloadState::Paused => resume_policy::TaskStateForResume::Paused,
+                        DownloadState::Queued => resume_policy::TaskStateForResume::Queued,
+                        DownloadState::Complete => resume_policy::TaskStateForResume::Complete,
+                        DownloadState::Error => resume_policy::TaskStateForResume::Error,
+                    };
+                    let priority = match t.priority {
+                        DownloadPriority::High => resume_policy::TaskPriorityForResume::High,
+                        DownloadPriority::Normal => resume_policy::TaskPriorityForResume::Normal,
+                        DownloadPriority::Low => resume_policy::TaskPriorityForResume::Low,
+                    };
+                    let is_fav = favorite_ids.contains(&t.id);
+                    resume_policy::TaskResumeData {
+                        id: t.id.clone(),
+                        state,
+                        priority,
+                        is_favorite: is_fav,
+                    }
+                })
+                .collect();
+            let changes = resume_policy::apply_resume_policy(&policy_cfg, &task_resume_data);
+            let change_map: std::collections::HashMap<String, _> = changes.into_iter().collect();
+            for task in dm.tasks.lock().await.iter_mut() {
+                if let Some(new_state) = change_map.get(&task.id) {
+                    match new_state {
+                        resume_policy::TaskStateForResume::Queued => {
+                            task.state = DownloadState::Queued;
+                        }
+                        resume_policy::TaskStateForResume::Paused => {
+                            task.state = DownloadState::Paused;
+                            task.speed_bps = 0.0;
+                        }
+                        _ => {}
+                    }
+                }
+                // Also reset any still-downloading tasks to their policy-determined state
+                if task.state == DownloadState::Downloading && !change_map.contains_key(&task.id) {
+                    task.state = DownloadState::Paused;
+                    task.speed_bps = 0.0;
+                }
+            }
+        }
         // Restore error recovery config from disk
         if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
             *dm.error_recovery.lock().await =
