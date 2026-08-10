@@ -4992,6 +4992,7 @@ impl DownloadManager {
     /// Run smart queue optimization and return recommendations.
     pub async fn optimize_smart_queue(&self) -> smart_queue::OptimizationResult {
         let tasks = self.tasks.lock().await;
+        let favorites = self.task_favorites.lock().await.get_favorite_ids();
         let task_data: Vec<smart_queue::TaskOptimizationData> = tasks
             .iter()
             .map(|t| smart_queue::TaskOptimizationData {
@@ -5006,7 +5007,7 @@ impl DownloadManager {
                 deadline: t.deadline,
                 depends_on: t.depends_on.clone(),
                 staleness_promotions: t.staleness_promotion_count,
-                is_favorite: false, // TODO: integrate with favorites manager
+                is_favorite: favorites.contains(&t.id),
             })
             .collect();
 
@@ -12720,34 +12721,70 @@ impl DownloadManager {
             resume_policy: Some(self.resume_policy.read().await.clone()),
             speed_alert: Some(self.speed_alerts.get_config().await),
             url_dedup: Some(self.url_dedup.read().await.clone()),
-            // Optional configs - only include if they have meaningful state
-            automation_rules: None, // TODO: add getter to AutomationRuleManager
-            disk_monitor: None,     // TODO: add getter to DiskSpaceMonitor
-            download_analytics: None, // TODO: add getter to AnalyticsManager
-            download_budget: None,  // TODO: add getter to BudgetManager
-            download_deadline: None, // TODO: add getter to DeadlineManager
-            download_presets: None, // TODO: collect from download_presets
-            download_quota: None,   // TODO: add getter to DownloadQuotaManager
-            download_time_limit: None, // TODO: add getter to DownloadTimeLimitManager
-            duplicate_detection: None, // TODO: add getter to DuplicateDetectionManager
-            global_budget: None,    // TODO: add getter to GlobalBudgetManager
-            integrity: None,        // TODO: add getter to IntegrityManager
-            path_rules: None,       // TODO: collect from path_rules
-            path_template: None,    // TODO: add getter to PathTemplateManager
-            protocol_limits: None,  // TODO: add getter to ProtocolLimitsConfig
+            automation_rules: Some(self.automation_rules.read().await.get_config().clone()),
+            disk_monitor: Some(disk_monitor::DiskMonitorConfig {
+                enabled: self.disk_monitor.lock().await.is_running().await,
+                safety_margin_bytes: self.disk_monitor.lock().await.safety_margin_bytes(),
+                check_interval_secs: self.disk_monitor.lock().await.check_interval_secs(),
+                auto_pause_on_critical: true,
+                auto_resume_on_recovery: true,
+            }),
+            download_analytics: Some(self.download_analytics.lock().await.config().clone()),
+            download_budget: Some(self.download_budget.lock().await.config().clone()),
+            download_deadline: Some(self.download_deadline.lock().await.config().clone()),
+            download_presets: Some(self.download_presets.lock().await.clone()),
+            download_quota: Some(self.download_quota.lock().await.get_config().clone()),
+            download_time_limit: Some(self.download_time_limit.lock().await.config().clone()),
+            duplicate_detection: Some(self.duplicate_detection.lock().await.config().clone()),
+            global_budget: Some(self.global_budget.read().await.config.clone()),
+            integrity: Some(self.integrity.lock().await.config().clone()),
+            path_rules: Some(self.path_rules.lock().await.list_rules().to_vec()),
+            path_template: Some(self.path_template.get_config().await),
+            protocol_limits: Some(self.protocol_limits.read().await.clone()),
             queue_staleness: Some(self.queue_staleness.read().await.clone()),
-            save_path: None,             // TODO: add getter to SavePathManager
-            speed_profiles: None,        // TODO: collect from speed_profiles
-            task_chains: None,           // TODO: collect from task_chain
-            task_schedule_windows: None, // TODO: collect from task_schedule_windows
+            save_path: Some(self.save_path_manager.get_config().await),
+            speed_profiles: Some(
+                self.speed_profiles
+                    .read()
+                    .await
+                    .list_profiles()
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+            ),
+            task_chains: Some(
+                self.task_chain
+                    .lock()
+                    .await
+                    .list_chains()
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+            ),
+            task_schedule_windows: Some(
+                self.task_schedule_windows
+                    .read()
+                    .await
+                    .get_all_windows()
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect(),
+            ),
             url_allowlist: Some(self.url_allowlist.read().await.clone()),
-            url_bookmarks: None,      // TODO: collect from url_bookmarks
-            url_normalizer: None,     // TODO: add getter to UrlNormalizer
-            url_rewrite: None,        // TODO: collect from url_rewrite
-            watch_folder: None,       // TODO: add getter to WatchFolderManager
-            categorize_rules: None,   // TODO: collect from categorize_rules
-            conflict_strategy: None,  // TODO: add getter to conflict_detection
-            bandwidth_schedule: None, // TODO: collect from bandwidth_schedule
+            url_bookmarks: Some(self.url_bookmarks.lock().await.clone()),
+            url_normalizer: Some(self.url_normalizer.read().await.config().clone()),
+            url_rewrite: Some(self.url_rewrite.lock().await.list_rules().to_vec()),
+            watch_folder: Some(
+                self.watch_folder
+                    .lock()
+                    .await
+                    .get_auto_scan_config()
+                    .clone(),
+            ),
+            categorize_rules: Some(self.categorize_rules.lock().await.clone()),
+            conflict_strategy: Some(*self.conflict_strategy.read().await),
+            bandwidth_schedule: Some(self.bandwidth_schedule.lock().await.list_rules().to_vec()),
             dependency_graph: Some(self.dependency_graph.read().await.config().clone()),
         }
     }

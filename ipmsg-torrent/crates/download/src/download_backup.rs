@@ -714,4 +714,123 @@ mod tests {
         let content = std::fs::read_to_string(&backup_path).unwrap();
         let _: DownloadBackup = serde_json::from_str(&content).unwrap();
     }
+
+    #[test]
+    fn test_backup_with_newly_integrated_configs() {
+        // Test that all the previously-None config fields can be serialized/deserialized
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let configs = BackupConfigs {
+            automation_rules: Some(crate::automation_rules::AutomationConfig::default()),
+            disk_monitor: Some(crate::disk_monitor::DiskMonitorConfig::default()),
+            download_analytics: Some(crate::download_analytics::AnalyticsConfig::default()),
+            download_budget: Some(crate::download_budget::BudgetConfig::default()),
+            download_deadline: Some(crate::download_deadline::DeadlineConfig::default()),
+            download_presets: Some(vec![]),
+            download_quota: Some(crate::download_quota::QuotaSystemConfig::default()),
+            download_time_limit: Some(
+                crate::download_time_limit::DownloadTimeLimitConfig::default(),
+            ),
+            duplicate_detection: Some(
+                crate::duplicate_detection::DuplicateDetectionConfig::default(),
+            ),
+            global_budget: Some(crate::global_budget::GlobalBudgetConfig::default()),
+            integrity: Some(crate::integrity_verification::IntegrityConfig::default()),
+            path_rules: Some(vec![]),
+            path_template: Some(crate::path_template::PathTemplateConfig::default()),
+            protocol_limits: Some(crate::protocol_limits::ProtocolLimitsConfig::new()),
+            save_path: Some(crate::save_path_manager::SavePathConfig::default()),
+            speed_profiles: Some(vec![]),
+            task_chains: Some(vec![]),
+            task_schedule_windows: Some(vec![]),
+            url_bookmarks: Some(vec![]),
+            url_normalizer: Some(crate::url_normalizer::UrlNormalizerConfig::default()),
+            url_rewrite: Some(vec![]),
+            watch_folder: Some(crate::watch_folder::WatchFolderAutoScanConfig::default()),
+            categorize_rules: Some(vec![]),
+            conflict_strategy: Some(crate::conflict_detection::ConflictStrategy::default()),
+            bandwidth_schedule: Some(vec![]),
+            ..Default::default()
+        };
+
+        let backup_path = manager
+            .create_backup(None, Vec::new(), HashMap::new(), configs)
+            .unwrap();
+
+        let loaded = manager.load_backup(&backup_path).unwrap();
+
+        // Verify all newly integrated configs are present
+        assert!(loaded.configs.automation_rules.is_some());
+        assert!(loaded.configs.disk_monitor.is_some());
+        assert!(loaded.configs.download_analytics.is_some());
+        assert!(loaded.configs.download_budget.is_some());
+        assert!(loaded.configs.download_deadline.is_some());
+        assert!(loaded.configs.download_presets.is_some());
+        assert!(loaded.configs.download_quota.is_some());
+        assert!(loaded.configs.download_time_limit.is_some());
+        assert!(loaded.configs.duplicate_detection.is_some());
+        assert!(loaded.configs.global_budget.is_some());
+        assert!(loaded.configs.integrity.is_some());
+        assert!(loaded.configs.path_rules.is_some());
+        assert!(loaded.configs.path_template.is_some());
+        assert!(loaded.configs.protocol_limits.is_some());
+        assert!(loaded.configs.save_path.is_some());
+        assert!(loaded.configs.speed_profiles.is_some());
+        assert!(loaded.configs.task_chains.is_some());
+        assert!(loaded.configs.task_schedule_windows.is_some());
+        assert!(loaded.configs.url_bookmarks.is_some());
+        assert!(loaded.configs.url_normalizer.is_some());
+        assert!(loaded.configs.url_rewrite.is_some());
+        assert!(loaded.configs.watch_folder.is_some());
+        assert!(loaded.configs.categorize_rules.is_some());
+        assert!(loaded.configs.conflict_strategy.is_some());
+        assert!(loaded.configs.bandwidth_schedule.is_some());
+
+        // Verify count_some() includes all fields
+        assert!(loaded.configs.count_some() >= 25);
+    }
+
+    #[test]
+    fn test_backup_config_roundtrip_values() {
+        // Test that specific config values survive the backup/restore cycle
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let mut disk_config = crate::disk_monitor::DiskMonitorConfig::default();
+        disk_config.safety_margin_bytes = 500_000_000; // 500MB
+        disk_config.check_interval_secs = 60;
+
+        let mut normalizer_config = crate::url_normalizer::UrlNormalizerConfig::default();
+        normalizer_config.remove_www = false;
+
+        let conflict = crate::conflict_detection::ConflictStrategy::Rename;
+
+        let configs = BackupConfigs {
+            disk_monitor: Some(disk_config.clone()),
+            url_normalizer: Some(normalizer_config.clone()),
+            conflict_strategy: Some(conflict),
+            ..Default::default()
+        };
+
+        let backup_path = manager
+            .create_backup(None, Vec::new(), HashMap::new(), configs)
+            .unwrap();
+
+        let loaded = manager.load_backup(&backup_path).unwrap();
+
+        // Verify values survived roundtrip
+        let loaded_disk = loaded.configs.disk_monitor.unwrap();
+        assert_eq!(loaded_disk.safety_margin_bytes, 500_000_000);
+        assert_eq!(loaded_disk.check_interval_secs, 60);
+
+        let loaded_normalizer = loaded.configs.url_normalizer.unwrap();
+        assert!(!loaded_normalizer.remove_www);
+
+        let loaded_conflict = loaded.configs.conflict_strategy.unwrap();
+        assert_eq!(
+            loaded_conflict,
+            crate::conflict_detection::ConflictStrategy::Rename
+        );
+    }
 }
