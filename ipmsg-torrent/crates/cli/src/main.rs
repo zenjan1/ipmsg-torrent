@@ -217,6 +217,12 @@ enum Command {
     DlTags {
         tag: Option<String>,
     },
+    /// Event webhook system (Phase 130)
+    DlWebhook {
+        /// "status", "add", "del", "list", "update", "history", "clear", "config"
+        action: String,
+        args: Vec<String>,
+    },
     /// Download cost tracker (Phase 127)
     DlCost {
         /// "status", "config", "set", "summary", "month", "all", "tasks", "daily", "clear"
@@ -963,6 +969,18 @@ fn parse_command(input: &str) -> Command {
         "dltags" | "dl-tags" => {
             let tag = parts.get(1).map(|s| s.to_string());
             Command::DlTags { tag }
+        }
+        "dlwebhook" | "dl-webhook" | "dlwh" => {
+            if parts.len() < 2 {
+                Command::DlWebhook {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlWebhook { action, args }
+            }
         }
         "dlcost" | "dl-cost" => {
             if parts.len() < 2 {
@@ -6245,6 +6263,185 @@ async fn handle_command(
                     s.add_system_message("main", "No tags found".to_string());
                 } else {
                     s.add_system_message("main", format!("All tags: {}", tags.join(", ")));
+                }
+            }
+        }
+        Command::DlWebhook { action, args } => {
+            let s = state.lock().await;
+            let dm = s.download_manager.clone();
+            drop(s);
+
+            match action.as_str() {
+                "status" => {
+                    let summary = dm.get_webhook_summary().await;
+                    let mut msg = format!(
+                        "Webhook Summary:\n  Endpoints: {} total, {} enabled\n  Deliveries: {} total, {} successful, {} failed\n  Success Rate: {:.1}%",
+                        summary.total_endpoints,
+                        summary.enabled_endpoints,
+                        summary.total_deliveries,
+                        summary.successful_deliveries,
+                        summary.failed_deliveries,
+                        summary.success_rate
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "list" => {
+                    let endpoints = dm.list_webhook_endpoints().await;
+                    let mut s = state.lock().await;
+                    if endpoints.is_empty() {
+                        s.add_system_message("main", "No webhook endpoints configured".to_string());
+                    } else {
+                        let mut msg = String::from("Webhook Endpoints:\n");
+                        for ep in endpoints {
+                            msg.push_str(&format!(
+                                "  [{}] {} - {} ({})\n    Events: {}\n    Timeout: {}s, Retries: {}\n",
+                                ep.id,
+                                ep.name,
+                                ep.url,
+                                if ep.enabled { "enabled" } else { "disabled" },
+                                if ep.events.is_empty() { "all" } else { &ep.events.iter().map(|e| e.label()).collect::<Vec<_>>().join(", ") },
+                                ep.timeout_secs,
+                                ep.max_retries
+                            ));
+                        }
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "add" => {
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlwebhook add <url> <name>".to_string(),
+                        );
+                    } else {
+                        let url = args[0].clone();
+                        let name = args[1].clone();
+                        let endpoint =
+                            ipmsg_download::event_webhook::WebhookEndpoint::new(url, name);
+                        match dm.add_webhook_endpoint(endpoint).await {
+                            Ok(id) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Added webhook endpoint: {}", id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Failed to add webhook: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "del" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlwebhook del <endpoint_id>".to_string(),
+                        );
+                    } else {
+                        let id = &args[0];
+                        match dm.remove_webhook_endpoint(id).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Removed webhook endpoint: {}", id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Failed to remove webhook: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "history" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlwebhook history <endpoint_id> [limit]".to_string(),
+                        );
+                    } else {
+                        let id = &args[0];
+                        let limit = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10);
+                        let history = dm.get_webhook_history(id, limit).await;
+                        let mut s = state.lock().await;
+                        if history.is_empty() {
+                            s.add_system_message("main", "No delivery history found".to_string());
+                        } else {
+                            let mut msg = String::from("Delivery History:\n");
+                            for d in history {
+                                msg.push_str(&format!(
+                                    "  [{}] {} - {} (retries: {})\n",
+                                    d.sent_at.format("%Y-%m-%d %H:%M:%S"),
+                                    d.event.label(),
+                                    match d.status {
+                                        ipmsg_download::event_webhook::DeliveryStatus::Success =>
+                                            "✓ Success".to_string(),
+                                        ipmsg_download::event_webhook::DeliveryStatus::Failed =>
+                                            format!(
+                                                "✗ Failed: {}",
+                                                d.error.as_deref().unwrap_or("unknown")
+                                            ),
+                                        ipmsg_download::event_webhook::DeliveryStatus::Pending =>
+                                            "⏳ Pending".to_string(),
+                                    },
+                                    d.retry_count
+                                ));
+                            }
+                            s.add_system_message("main", msg);
+                        }
+                    }
+                }
+                "clear" => {
+                    if args.is_empty() {
+                        dm.clear_all_webhook_history().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Cleared all webhook history".to_string());
+                    } else {
+                        let id = &args[0];
+                        match dm.clear_webhook_history(id).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Cleared webhook history for: {}", id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Failed to clear history: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "config" => {
+                    let cfg = dm.get_webhook_config().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!(
+                        "Webhook Config:\n  Enabled: {}\n  Max History: {}\n  Log Deliveries: {}",
+                        cfg.enabled,
+                        cfg.max_history_per_endpoint,
+                        cfg.log_deliveries
+                    ));
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Unknown webhook action. Use: status, list, add, del, history, clear, config".to_string());
                 }
             }
         }

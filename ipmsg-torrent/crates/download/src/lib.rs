@@ -48,6 +48,7 @@ pub mod duplicate_detection;
 pub mod ed2k;
 pub mod error_recovery;
 pub mod eta_estimator;
+pub mod event_webhook;
 pub mod global_budget;
 pub mod health_dashboard;
 pub mod integrity_verification;
@@ -986,6 +987,8 @@ pub struct DownloadManager {
     history_analytics: Arc<Mutex<download_history_analytics::HistoryAnalyticsManager>>,
     /// Speed benchmark manager for pre-download URL speed testing
     speed_benchmark: Arc<Mutex<speed_benchmark::SpeedBenchmarkManager>>,
+    /// Event webhook manager for sending HTTP notifications on download events
+    event_webhook: Arc<Mutex<event_webhook::WebhookManager>>,
 }
 
 impl DownloadManager {
@@ -1180,6 +1183,9 @@ impl DownloadManager {
                 download_history_analytics::HistoryAnalyticsManager::new(),
             )),
             speed_benchmark: Arc::new(Mutex::new(speed_benchmark::SpeedBenchmarkManager::new())),
+            event_webhook: Arc::new(Mutex::new(event_webhook::WebhookManager::new(
+                data_dir.clone(),
+            ))),
         };
         dm.start_scheduler();
         dm
@@ -1506,6 +1512,9 @@ impl DownloadManager {
                 download_history_analytics::HistoryAnalyticsManager::new(),
             )),
             speed_benchmark: Arc::new(Mutex::new(speed_benchmark::SpeedBenchmarkManager::new())),
+            event_webhook: Arc::new(Mutex::new(event_webhook::WebhookManager::new(
+                data_dir.clone(),
+            ))),
         };
         // Restore tag manager from disk
         dm.tag_manager.restore().await;
@@ -1538,6 +1547,10 @@ impl DownloadManager {
         // Restore resume policy config from disk
         if let Some(policy_cfg) = resume_policy::load_resume_policy_config(&dm.data_dir) {
             *dm.resume_policy.write().await = policy_cfg;
+        }
+        // Restore event webhook config from disk
+        if let Ok(()) = dm.event_webhook.lock().await.load_config().await {
+            // Config loaded successfully
         }
         // Apply resume policy to tasks that were downloading
         {
@@ -9707,6 +9720,125 @@ impl DownloadManager {
     /// Format benchmark summary for display
     pub async fn format_benchmark_summary(&self) -> String {
         self.speed_benchmark.lock().await.format_summary()
+    }
+
+    // ========== Event Webhook API ==========
+
+    /// Get webhook configuration
+    pub async fn get_webhook_config(&self) -> event_webhook::WebhookConfig {
+        self.event_webhook.lock().await.config().clone()
+    }
+
+    /// Set webhook configuration
+    pub async fn set_webhook_config(&self, config: event_webhook::WebhookConfig) {
+        self.event_webhook.lock().await.set_config(config);
+    }
+
+    /// Add a webhook endpoint
+    pub async fn add_webhook_endpoint(
+        &self,
+        endpoint: event_webhook::WebhookEndpoint,
+    ) -> Result<String, event_webhook::WebhookError> {
+        self.event_webhook.lock().await.add_endpoint(endpoint)
+    }
+
+    /// Remove a webhook endpoint
+    pub async fn remove_webhook_endpoint(
+        &self,
+        endpoint_id: &str,
+    ) -> Result<(), event_webhook::WebhookError> {
+        self.event_webhook.lock().await.remove_endpoint(endpoint_id)
+    }
+
+    /// Get webhook endpoint by ID
+    pub async fn get_webhook_endpoint(
+        &self,
+        endpoint_id: &str,
+    ) -> Option<event_webhook::WebhookEndpoint> {
+        self.event_webhook
+            .lock()
+            .await
+            .get_endpoint(endpoint_id)
+            .cloned()
+    }
+
+    /// List all webhook endpoints
+    pub async fn list_webhook_endpoints(&self) -> Vec<event_webhook::WebhookEndpoint> {
+        self.event_webhook
+            .lock()
+            .await
+            .list_endpoints()
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Update webhook endpoint
+    pub async fn update_webhook_endpoint(
+        &self,
+        endpoint_id: &str,
+        updates: event_webhook::WebhookEndpointUpdate,
+    ) -> Result<(), event_webhook::WebhookError> {
+        self.event_webhook
+            .lock()
+            .await
+            .update_endpoint(endpoint_id, updates)
+    }
+
+    /// Get webhook delivery history for an endpoint
+    pub async fn get_webhook_history(
+        &self,
+        endpoint_id: &str,
+        limit: usize,
+    ) -> Vec<event_webhook::WebhookDelivery> {
+        self.event_webhook
+            .lock()
+            .await
+            .get_history(endpoint_id, limit)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Clear webhook delivery history for an endpoint
+    pub async fn clear_webhook_history(
+        &self,
+        endpoint_id: &str,
+    ) -> Result<(), event_webhook::WebhookError> {
+        self.event_webhook.lock().await.clear_history(endpoint_id)
+    }
+
+    /// Clear all webhook delivery history
+    pub async fn clear_all_webhook_history(&self) {
+        self.event_webhook.lock().await.clear_all_history();
+    }
+
+    /// Get webhook summary
+    pub async fn get_webhook_summary(&self) -> event_webhook::WebhookSummary {
+        self.event_webhook.lock().await.get_summary()
+    }
+
+    /// Send webhook event
+    pub async fn send_webhook_event(
+        &self,
+        event: event_webhook::WebhookEvent,
+        payload: event_webhook::WebhookPayload,
+    ) -> Vec<event_webhook::WebhookDelivery> {
+        self.event_webhook
+            .lock()
+            .await
+            .send_event(event, payload)
+            .await
+    }
+
+    /// Save webhook configuration to disk
+    pub async fn save_webhook_config(&self) -> Result<(), event_webhook::WebhookError> {
+        self.event_webhook.lock().await.save_config().await
+    }
+
+    /// Load webhook configuration from disk
+    pub async fn load_webhook_config(&self) -> Result<(), event_webhook::WebhookError> {
+        self.event_webhook.lock().await.load_config().await
     }
 
     /// Set the priority of a download task.

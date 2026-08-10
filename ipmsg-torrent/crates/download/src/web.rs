@@ -856,6 +856,38 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/speed-test/latest", get(get_speed_test_latest_handler))
         .route("/api/speed-test/clear", post(clear_speed_test_handler))
+        .route("/api/webhook", get(get_webhook_summary_handler))
+        .route("/api/webhook/config", get(get_webhook_config_handler))
+        .route("/api/webhook/config", post(set_webhook_config_handler))
+        .route(
+            "/api/webhook/endpoints",
+            get(list_webhook_endpoints_handler),
+        )
+        .route("/api/webhook/endpoints", post(add_webhook_endpoint_handler))
+        .route(
+            "/api/webhook/endpoints/:id",
+            get(get_webhook_endpoint_handler),
+        )
+        .route(
+            "/api/webhook/endpoints/:id",
+            put(update_webhook_endpoint_handler),
+        )
+        .route(
+            "/api/webhook/endpoints/:id",
+            delete(remove_webhook_endpoint_handler),
+        )
+        .route(
+            "/api/webhook/endpoints/:id/history",
+            get(get_webhook_history_handler),
+        )
+        .route(
+            "/api/webhook/endpoints/:id/history",
+            post(clear_webhook_history_handler),
+        )
+        .route(
+            "/api/webhook/history",
+            post(clear_all_webhook_history_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -8125,4 +8157,155 @@ async fn clear_speed_test_handler(
 ) -> impl axum::response::IntoResponse {
     state.manager.clear_speed_test_history().await;
     Json(serde_json::json!({"status": "ok"}))
+}
+
+// --- Event Webhook (Phase 130) ---
+
+/// GET /api/webhook - Get webhook summary
+async fn get_webhook_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_webhook_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/webhook/config - Get webhook configuration
+async fn get_webhook_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_webhook_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/webhook/config - Update webhook configuration
+async fn set_webhook_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::event_webhook::WebhookConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_webhook_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/webhook/endpoints - List all webhook endpoints
+async fn list_webhook_endpoints_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let endpoints = state.manager.list_webhook_endpoints().await;
+    Json(serde_json::to_value(endpoints).unwrap_or_default())
+}
+
+/// POST /api/webhook/endpoints - Add a new webhook endpoint
+async fn add_webhook_endpoint_handler(
+    State(state): State<Arc<WebState>>,
+    Json(endpoint): Json<crate::event_webhook::WebhookEndpoint>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.add_webhook_endpoint(endpoint).await {
+        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({"id": id}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/webhook/endpoints/:id - Get a specific webhook endpoint
+async fn get_webhook_endpoint_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.get_webhook_endpoint(&id).await {
+        Some(endpoint) => Json(serde_json::to_value(endpoint).unwrap_or_default()).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "endpoint not found"})),
+        )
+            .into_response(),
+    }
+}
+
+/// PUT /api/webhook/endpoints/:id - Update a webhook endpoint
+async fn update_webhook_endpoint_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+    Json(updates): Json<WebhookEndpointUpdateRequest>,
+) -> impl axum::response::IntoResponse {
+    let update = crate::event_webhook::WebhookEndpointUpdate {
+        url: updates.url,
+        name: updates.name,
+        enabled: updates.enabled,
+        secret: updates.secret,
+        timeout_secs: updates.timeout_secs,
+        max_retries: updates.max_retries,
+        events: updates.events,
+        headers: updates.headers,
+    };
+    match state.manager.update_webhook_endpoint(&id, update).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /api/webhook/endpoints/:id - Remove a webhook endpoint
+async fn remove_webhook_endpoint_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.remove_webhook_endpoint(&id).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/webhook/endpoints/:id/history - Get delivery history for an endpoint
+async fn get_webhook_history_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> impl axum::response::IntoResponse {
+    let history = state.manager.get_webhook_history(&id, 50).await;
+    Json(serde_json::to_value(history).unwrap_or_default())
+}
+
+/// POST /api/webhook/endpoints/:id/history - Clear delivery history for an endpoint
+async fn clear_webhook_history_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.clear_webhook_history(&id).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/webhook/history - Clear all webhook delivery history
+async fn clear_all_webhook_history_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_all_webhook_history().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Request body for updating webhook endpoint
+#[derive(Debug, Deserialize)]
+struct WebhookEndpointUpdateRequest {
+    url: Option<String>,
+    name: Option<String>,
+    enabled: Option<bool>,
+    secret: Option<String>,
+    timeout_secs: Option<u64>,
+    max_retries: Option<u32>,
+    events: Option<Vec<crate::event_webhook::WebhookEvent>>,
+    headers: Option<std::collections::HashMap<String, String>>,
 }
