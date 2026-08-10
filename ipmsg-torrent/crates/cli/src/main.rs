@@ -342,6 +342,13 @@ enum Command {
         /// Output file path
         path: String,
     },
+    /// Per-task proxy override management (Phase 106)
+    DlTaskProxy {
+        /// Subcommand: status|list|set|remove|enable|disable|notes|clear
+        subcommand: String,
+        /// Arguments for the subcommand
+        args: Vec<String>,
+    },
     /// Set or clear mirror/fallback URLs for a download task
     DlMirror {
         /// Task ID to set mirrors for
@@ -491,6 +498,11 @@ enum Command {
     },
     DlBurst {
         /// Subcommand: status|start|stop|config
+        subcommand: String,
+        args: Vec<String>,
+    },
+    DlNetworkAware {
+        /// Subcommand: status|enable|disable|config|summary|probe|paused|clear|reset
         subcommand: String,
         args: Vec<String>,
     },
@@ -1168,6 +1180,31 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown("/dlexportcsv <output_path>".to_string())
             }
         }
+        "dltp" | "dltaskproxy" | "dl-taskproxy" => {
+            // /dltp <subcommand> [args...]
+            let args: Vec<&str> = input.splitn(2, ' ').collect();
+            if args.len() >= 2 {
+                let rest = args[1].trim();
+                let sub_parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                let subcommand = sub_parts[0].to_string();
+                let sub_args = if sub_parts.len() > 1 {
+                    sub_parts[1]
+                        .split_whitespace()
+                        .map(|s| s.to_string())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                Command::DlTaskProxy {
+                    subcommand,
+                    args: sub_args,
+                }
+            } else {
+                Command::Unknown(
+                    "/dltp <status|list|set|remove|enable|disable|notes|clear>".to_string(),
+                )
+            }
+        }
         "dlarule" | "dl-auto-rule" | "dlar" => {
             // /dlarule <add|list|del> [args...]
             let args: Vec<&str> = input.splitn(2, ' ').collect();
@@ -1544,6 +1581,26 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlnetwork" | "dl-network" | "dlnet" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlnetwork <status|enable|disable|config|summary|probe|paused|clear|reset>"
+                        .to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlNetworkAware {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlretryquota" | "dl-retryquota" | "dlrq" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
@@ -1903,6 +1960,7 @@ fn command_help() -> String {
         "/dlgroup <id> [group|clear] - Set or clear task group",
         "/dlgroups           - List all download groups",
         "/dlclone <id>       - Clone (duplicate) a download task",
+        "/dltp [cmd]         - Per-task proxy override (status|list|set|remove|enable|disable|notes|clear)",
         "/dlmirror <id> <urls> - Set mirror URLs (comma-separated, 'clear' to remove)",
         "/dlmirrors <id>     - List mirrors for a task",
         "/dlchecksum <id> <hash> [algo] - Set checksum for verification (algo: md5/sha1/sha256/ed2k)",
@@ -1928,6 +1986,7 @@ fn command_help() -> String {
         "/dlallowlist [cmd] - URL allowlist (status|enable|disable|add|del|list|check)",
         "/dlrecycle [cmd]   - Recycle bin (list|restore|purge|empty|config|summary|autopause)",
         "/dlburst [cmd]     - Speed burst (status|start <task_id> [duration] [multiplier]|stop <task_id>|config)",
+        "/dlnetwork [cmd]  - Network-aware download (status|enable|disable|config|summary|probe|paused|clear|reset)",
         "/dlretryquota [cmd] - Retry quota (status|enable|disable|set <max> [window_secs]|reset)",
         "/dlttl [cmd]      - Task TTL management (status|enable|disable|set <duration> [interval]|task <id> <duration>|summary)",
         "/dlerrrec [cmd]   - Error recovery (status|enable|disable|set <category> <strategy>|reset|test <error>)",
@@ -6803,6 +6862,293 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlTaskProxy { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "status" => {
+                    let summary = download_manager.get_task_proxy_summary().await;
+                    let msg = format!(
+                        "🌐 Per-Task Proxy Overrides: {} total ({} enabled, {} disabled)",
+                        summary.total_overrides,
+                        summary.enabled_overrides,
+                        summary.disabled_overrides
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "list" => {
+                    let proxies = download_manager.list_task_proxies().await;
+                    if proxies.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "🌐 No per-task proxy overrides configured.".to_string(),
+                        );
+                    } else {
+                        let mut lines = "🌐 Per-Task Proxy Overrides:\n".to_string();
+                        for p in &proxies {
+                            let status = if p.enabled { "✅" } else { "❌" };
+                            let notes_str = p.notes.as_deref().unwrap_or("");
+                            lines.push_str(&format!(
+                                "  {} {} → {}:{} ({:?}){}\n",
+                                status,
+                                p.task_id,
+                                p.proxy.host,
+                                p.proxy.port,
+                                p.proxy.proxy_type,
+                                if notes_str.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" - {}", notes_str)
+                                }
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", lines.trim_end().to_string());
+                    }
+                }
+                "set" => {
+                    // /dltp set <task_id> <proxy_url> [notes]
+                    let task_id = args.first().map(|s| s.as_str()).unwrap_or("");
+                    let proxy_url = args.get(1).map(|s| s.as_str()).unwrap_or("");
+                    let notes = if args.len() > 2 {
+                        Some(args[2..].join(" "))
+                    } else {
+                        None
+                    };
+
+                    if task_id.is_empty() || proxy_url.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dltp set <task_id> <proxy_url> [notes]\nExample: /dltp set abc123 socks5://127.0.0.1:1080 My proxy".to_string(),
+                        );
+                    } else {
+                        // Parse proxy URL
+                        let proxy_config = if let Some(rest) = proxy_url.strip_prefix("socks5://") {
+                            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                            if parts.len() != 2 {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "❌ Invalid socks5 URL format. Expected socks5://host:port"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                            let port: u16 = match parts[1].parse() {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "❌ Invalid port number".to_string(),
+                                    );
+                                    return;
+                                }
+                            };
+                            ipmsg_download::proxy::ProxyConfig::new(
+                                ipmsg_download::proxy::ProxyType::Socks5,
+                                parts[0].to_string(),
+                                port,
+                            )
+                        } else if let Some(rest) = proxy_url.strip_prefix("http://") {
+                            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                            if parts.len() != 2 {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "❌ Invalid http proxy URL format. Expected http://host:port"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                            let port: u16 = match parts[1].parse() {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "❌ Invalid port number".to_string(),
+                                    );
+                                    return;
+                                }
+                            };
+                            ipmsg_download::proxy::ProxyConfig::new(
+                                ipmsg_download::proxy::ProxyType::Http,
+                                parts[0].to_string(),
+                                port,
+                            )
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "❌ Proxy URL must start with socks5:// or http://".to_string(),
+                            );
+                            return;
+                        };
+
+                        match download_manager
+                            .set_task_proxy(task_id.to_string(), proxy_config, notes)
+                            .await
+                        {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "✅ Set per-task proxy for {} → {}",
+                                        task_id, proxy_url
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to set task proxy: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "remove" | "del" => {
+                    let task_id = args.first().map(|s| s.as_str()).unwrap_or("");
+                    if task_id.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dltp remove <task_id>".to_string());
+                    } else {
+                        match download_manager.remove_task_proxy(task_id).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Removed per-task proxy for {}", task_id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to remove task proxy: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "enable" => {
+                    let task_id = args.first().map(|s| s.as_str()).unwrap_or("");
+                    if task_id.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dltp enable <task_id>".to_string());
+                    } else {
+                        match download_manager.set_task_proxy_enabled(task_id, true).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Enabled per-task proxy for {}", task_id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to enable task proxy: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "disable" => {
+                    let task_id = args.first().map(|s| s.as_str()).unwrap_or("");
+                    if task_id.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dltp disable <task_id>".to_string());
+                    } else {
+                        match download_manager
+                            .set_task_proxy_enabled(task_id, false)
+                            .await
+                        {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Disabled per-task proxy for {}", task_id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to disable task proxy: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "notes" => {
+                    // /dltp notes <task_id> [notes...]
+                    let task_id = args.first().map(|s| s.as_str()).unwrap_or("");
+                    if task_id.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dltp notes <task_id> [notes...]".to_string(),
+                        );
+                    } else {
+                        let notes = if args.len() > 1 {
+                            Some(args[1..].join(" "))
+                        } else {
+                            None
+                        };
+                        match download_manager.set_task_proxy_notes(task_id, notes).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Updated notes for task proxy {}", task_id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to update notes: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "clear" => match download_manager.clear_task_proxies().await {
+                    Ok(()) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "✅ Cleared all per-task proxy overrides".to_string(),
+                        );
+                    }
+                    Err(e) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("❌ Failed to clear task proxies: {}", e),
+                        );
+                    }
+                },
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dltp <status|list|set|remove|enable|disable|notes|clear>"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         Command::DlAutoRule { subcommand, args } => {
             let s = state.lock().await;
             let download_manager = s.download_manager.clone();
@@ -8536,7 +8882,7 @@ async fn handle_command(
                 "summary" => {
                     let summary = download_manager.get_recycle_bin_summary().await;
                     let mut out = String::new();
-                    out.push_str(&format!("Recycle bin summary:\n"));
+                    out.push_str("Recycle bin summary:\n");
                     out.push_str(&format!("  Total entries: {}\n", summary.total_entries));
                     out.push_str(&format!("  Total size: {} bytes\n", summary.total_size));
                     out.push_str(&format!(
@@ -9707,6 +10053,319 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlburst <status|start|stop|config>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlNetworkAware { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_network_aware_config().await;
+                    let status = download_manager.get_network_status().await;
+                    let summary = download_manager.get_network_aware_summary().await;
+                    let enabled_str = if config.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    };
+                    let msg = format!(
+                        "Network-Aware Download Status:\n\
+                         Status: {}\n\
+                         Mode: {}\n\
+                         Check interval: {}s\n\
+                         Disconnect threshold: {}\n\
+                         Reconnect threshold: {}\n\
+                         Auto-resume: {}\n\
+                         Probe host: {}:{}\n\
+                         Probe timeout: {}s\n\
+                         Consecutive successes: {}\n\
+                         Consecutive failures: {}\n\
+                         Auto-paused tasks: {}\n\
+                         Total auto-pauses: {}\n\
+                         Total auto-resumes: {}",
+                        status,
+                        enabled_str,
+                        config.check_interval_secs,
+                        config.disconnect_threshold,
+                        config.reconnect_threshold,
+                        if config.auto_resume { "yes" } else { "no" },
+                        config.probe_host,
+                        config.probe_port,
+                        config.probe_timeout_secs,
+                        summary.consecutive_successes,
+                        summary.consecutive_failures,
+                        summary.auto_paused_task_ids.len(),
+                        summary.total_auto_pauses,
+                        summary.total_auto_resumes,
+                    );
+                    s.add_system_message("main", msg);
+                }
+                "enable" => {
+                    let mut config = download_manager.get_network_aware_config().await;
+                    config.enabled = true;
+                    download_manager.set_network_aware_config(config).await;
+                    s.add_system_message(
+                        "main",
+                        "Network-aware download management enabled".to_string(),
+                    );
+                }
+                "disable" => {
+                    let mut config = download_manager.get_network_aware_config().await;
+                    config.enabled = false;
+                    download_manager.set_network_aware_config(config).await;
+                    s.add_system_message(
+                        "main",
+                        "Network-aware download management disabled".to_string(),
+                    );
+                }
+                "config" => {
+                    // Re-split args since splitn(3, ' ') bundles everything after 2nd space
+                    let config_args: Vec<&str> =
+                        args.iter().flat_map(|s| s.split_whitespace()).collect();
+                    if config_args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlnetwork config <interval|disconnect|reconnect|auto-resume|probe> <value>".to_string(),
+                        );
+                    } else {
+                        let mut config = download_manager.get_network_aware_config().await;
+                        match config_args[0] {
+                            "interval" => match config_args[1].parse::<u64>() {
+                                Ok(v) => {
+                                    config.check_interval_secs = v;
+                                    download_manager.set_network_aware_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Check interval set to {}s", v),
+                                    );
+                                }
+                                Err(_) => {
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid interval value".to_string(),
+                                    );
+                                }
+                            },
+                            "disconnect" => match config_args[1].parse::<u32>() {
+                                Ok(v) => {
+                                    config.disconnect_threshold = v;
+                                    download_manager.set_network_aware_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Disconnect threshold set to {}", v),
+                                    );
+                                }
+                                Err(_) => {
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid threshold value".to_string(),
+                                    );
+                                }
+                            },
+                            "reconnect" => match config_args[1].parse::<u32>() {
+                                Ok(v) => {
+                                    config.reconnect_threshold = v;
+                                    download_manager.set_network_aware_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Reconnect threshold set to {}", v),
+                                    );
+                                }
+                                Err(_) => {
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid threshold value".to_string(),
+                                    );
+                                }
+                            },
+                            "auto-resume" => match config_args[1] {
+                                "yes" | "true" | "1" => {
+                                    config.auto_resume = true;
+                                    download_manager.set_network_aware_config(config).await;
+                                    s.add_system_message("main", "Auto-resume enabled".to_string());
+                                }
+                                "no" | "false" | "0" => {
+                                    config.auto_resume = false;
+                                    download_manager.set_network_aware_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        "Auto-resume disabled".to_string(),
+                                    );
+                                }
+                                _ => {
+                                    s.add_system_message(
+                                        "main",
+                                        "Usage: auto-resume <yes|no>".to_string(),
+                                    );
+                                }
+                            },
+                            "probe" => {
+                                if config_args.len() < 3 {
+                                    s.add_system_message(
+                                        "main",
+                                        "Usage: probe <host> <port>".to_string(),
+                                    );
+                                } else {
+                                    match config_args[2].parse::<u16>() {
+                                        Ok(port) => {
+                                            config.probe_host = config_args[1].to_string();
+                                            config.probe_port = port;
+                                            download_manager.set_network_aware_config(config).await;
+                                            s.add_system_message(
+                                                "main",
+                                                format!(
+                                                    "Probe host set to {}:{}",
+                                                    config_args[1], port
+                                                ),
+                                            );
+                                        }
+                                        Err(_) => {
+                                            s.add_system_message(
+                                                "main",
+                                                "Invalid port number".to_string(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                s.add_system_message(
+                                    "main",
+                                    "Unknown config key. Use: interval|disconnect|reconnect|auto-resume|probe".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_network_aware_summary().await;
+                    let mut msg = format!(
+                        "Network-Aware Summary:\n\
+                         Status: {}\n\
+                         Auto-paused tasks: {}\n\
+                         Total pauses: {}\n\
+                         Total resumes: {}",
+                        summary.status,
+                        summary.auto_paused_task_ids.len(),
+                        summary.total_auto_pauses,
+                        summary.total_auto_resumes,
+                    );
+                    if !summary.auto_paused_task_ids.is_empty() {
+                        msg.push_str("\n\nAuto-paused task IDs:");
+                        for id in &summary.auto_paused_task_ids {
+                            msg.push_str(&format!("\n  - {}", id));
+                        }
+                    }
+                    if !summary.recent_transitions.is_empty() {
+                        msg.push_str("\n\nRecent transitions:");
+                        for t in summary.recent_transitions.iter().take(5) {
+                            msg.push_str(&format!(
+                                "\n  {} {} -> {}",
+                                t.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                                t.from,
+                                t.to
+                            ));
+                        }
+                    }
+                    s.add_system_message("main", msg);
+                }
+                "probe" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: probe <success|failure>".to_string());
+                    } else {
+                        match args[0].as_str() {
+                            "success" => {
+                                let transitioned =
+                                    download_manager.record_network_probe_success().await;
+                                let status = download_manager.get_network_status().await;
+                                if transitioned {
+                                    s.add_system_message(
+                                        "main",
+                                        format!(
+                                            "Probe success recorded, status transitioned to {}",
+                                            status
+                                        ),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        format!(
+                                            "Probe success recorded, current status: {}",
+                                            status
+                                        ),
+                                    );
+                                }
+                            }
+                            "failure" => {
+                                let transitioned =
+                                    download_manager.record_network_probe_failure().await;
+                                let status = download_manager.get_network_status().await;
+                                if transitioned {
+                                    s.add_system_message(
+                                        "main",
+                                        format!(
+                                            "Probe failure recorded, status transitioned to {}",
+                                            status
+                                        ),
+                                    );
+                                } else {
+                                    s.add_system_message(
+                                        "main",
+                                        format!(
+                                            "Probe failure recorded, current status: {}",
+                                            status
+                                        ),
+                                    );
+                                }
+                            }
+                            _ => {
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: probe <success|failure>".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                "paused" => {
+                    let task_ids = download_manager.get_network_auto_paused_tasks().await;
+                    if task_ids.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "No tasks are currently auto-paused due to network issues".to_string(),
+                        );
+                    } else {
+                        let mut msg = format!("Auto-paused tasks ({}):", task_ids.len());
+                        for id in &task_ids {
+                            msg.push_str(&format!("\n  - {}", id));
+                        }
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_network_auto_paused().await;
+                    s.add_system_message(
+                        "main",
+                        "Cleared all auto-paused task tracking".to_string(),
+                    );
+                }
+                "reset" => {
+                    download_manager.reset_network_aware().await;
+                    s.add_system_message(
+                        "main",
+                        "Reset network-aware state (status, counters, and auto-paused tracking)"
+                            .to_string(),
+                    );
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlnetwork <status|enable|disable|config|summary|probe|paused|clear|reset>".to_string(),
                     );
                 }
             }
@@ -11214,6 +11873,68 @@ mod tests {
         assert!(help.contains("/dlrmcompleted"));
         assert!(help.contains("/dlrmfailed"));
         assert!(help.contains("/dlstats"));
+        assert!(help.contains("/dlnetwork"));
+    }
+
+    #[test]
+    fn test_parse_dlnetwork_commands() {
+        // Status
+        assert!(matches!(
+            parse_command("/dlnetwork status"),
+            Command::DlNetworkAware { subcommand, .. } if subcommand == "status"
+        ));
+        // Enable
+        assert!(matches!(
+            parse_command("/dlnetwork enable"),
+            Command::DlNetworkAware { subcommand, .. } if subcommand == "enable"
+        ));
+        // Disable
+        assert!(matches!(
+            parse_command("/dlnetwork disable"),
+            Command::DlNetworkAware { subcommand, .. } if subcommand == "disable"
+        ));
+        // Config with args
+        assert!(matches!(
+            parse_command("/dlnetwork config interval 60"),
+            Command::DlNetworkAware { subcommand, args } if subcommand == "config" && args.len() == 1 && args[0] == "interval 60"
+        ));
+        // Summary
+        assert!(matches!(
+            parse_command("/dlnetwork summary"),
+            Command::DlNetworkAware { subcommand, .. } if subcommand == "summary"
+        ));
+        // Probe success
+        assert!(matches!(
+            parse_command("/dlnetwork probe success"),
+            Command::DlNetworkAware { subcommand, args } if subcommand == "probe" && args == vec!["success"]
+        ));
+        // Paused
+        assert!(matches!(
+            parse_command("/dlnetwork paused"),
+            Command::DlNetworkAware { subcommand, .. } if subcommand == "paused"
+        ));
+        // Clear
+        assert!(matches!(
+            parse_command("/dlnetwork clear"),
+            Command::DlNetworkAware { subcommand, .. } if subcommand == "clear"
+        ));
+        // Reset
+        assert!(matches!(
+            parse_command("/dlnetwork reset"),
+            Command::DlNetworkAware { subcommand, .. } if subcommand == "reset"
+        ));
+        // Alias dl-network
+        assert!(matches!(
+            parse_command("/dl-network status"),
+            Command::DlNetworkAware { subcommand, .. } if subcommand == "status"
+        ));
+        // Alias dlnet
+        assert!(matches!(
+            parse_command("/dlnet status"),
+            Command::DlNetworkAware { subcommand, .. } if subcommand == "status"
+        ));
+        // No args returns Unknown
+        assert!(matches!(parse_command("/dlnetwork"), Command::Unknown(_)));
     }
 }
 
@@ -11832,5 +12553,77 @@ mod save_path_tests {
     fn test_help_contains_autoaction() {
         let help = command_help();
         assert!(help.contains("/dlautoaction"));
+    }
+
+    #[test]
+    fn test_parse_command_dltp_status() {
+        let cmd = parse_command("/dltp status");
+        match cmd {
+            Command::DlTaskProxy { subcommand, .. } => assert_eq!(subcommand, "status"),
+            other => panic!("Expected DlTaskProxy, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_command_dltp_set() {
+        let cmd = parse_command("/dltp set task-123 socks5://127.0.0.1:1080 my proxy");
+        match cmd {
+            Command::DlTaskProxy { subcommand, args } => {
+                assert_eq!(subcommand, "set");
+                assert_eq!(args.len(), 3);
+                assert_eq!(args[0], "task-123");
+                assert_eq!(args[1], "socks5://127.0.0.1:1080");
+                assert_eq!(args[2], "my");
+            }
+            other => panic!("Expected DlTaskProxy, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_command_dltp_list() {
+        let cmd = parse_command("/dltaskproxy list");
+        match cmd {
+            Command::DlTaskProxy { subcommand, .. } => assert_eq!(subcommand, "list"),
+            other => panic!("Expected DlTaskProxy, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_command_dltp_remove() {
+        let cmd = parse_command("/dltp remove task-456");
+        match cmd {
+            Command::DlTaskProxy { subcommand, args } => {
+                assert_eq!(subcommand, "remove");
+                assert_eq!(args[0], "task-456");
+            }
+            other => panic!("Expected DlTaskProxy, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_command_dltp_clear() {
+        let cmd = parse_command("/dltp clear");
+        match cmd {
+            Command::DlTaskProxy { subcommand, .. } => assert_eq!(subcommand, "clear"),
+            other => panic!("Expected DlTaskProxy, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_command_dltp_alias() {
+        let cmd = parse_command("/dl-taskproxy enable task-789");
+        match cmd {
+            Command::DlTaskProxy { subcommand, args } => {
+                assert_eq!(subcommand, "enable");
+                assert_eq!(args[0], "task-789");
+            }
+            other => panic!("Expected DlTaskProxy, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_dltp() {
+        let help = command_help();
+        assert!(help.contains("/dltp"));
     }
 }

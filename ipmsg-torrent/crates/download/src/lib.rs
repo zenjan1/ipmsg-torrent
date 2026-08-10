@@ -41,6 +41,7 @@ pub mod link_extractor;
 pub mod magnet;
 pub mod metadata_cache;
 pub mod mirror_health;
+pub mod network_aware;
 pub mod network_monitor;
 pub mod notification;
 pub mod path_rules;
@@ -865,6 +866,8 @@ pub struct DownloadManager {
     task_chain: Arc<Mutex<task_chain::TaskChainManager>>,
     /// Download queue snapshot manager
     snapshot_manager: Arc<Mutex<download_snapshot::SnapshotManager>>,
+    /// Network-aware download manager
+    network_aware: Arc<Mutex<network_aware::NetworkStateManager>>,
     /// Task performance profiler
     task_profiler: Arc<Mutex<task_profiler::TaskProfiler>>,
     /// Adaptive download concurrency manager
@@ -994,6 +997,7 @@ impl DownloadManager {
             snapshot_manager: Arc::new(Mutex::new(download_snapshot::SnapshotManager::new(
                 data_dir.join("snapshots"),
             ))),
+            network_aware: Arc::new(Mutex::new(network_aware::NetworkStateManager::new())),
             task_profiler: Arc::new(Mutex::new(task_profiler::TaskProfiler::default())),
             adaptive_concurrency: Arc::new(Mutex::new(
                 adaptive_concurrency::AdaptiveConcurrencyManager::new(),
@@ -1257,6 +1261,7 @@ impl DownloadManager {
             snapshot_manager: Arc::new(Mutex::new(download_snapshot::SnapshotManager::new(
                 data_dir.join("snapshots"),
             ))),
+            network_aware: Arc::new(Mutex::new(network_aware::NetworkStateManager::new())),
             task_profiler: Arc::new(Mutex::new(task_profiler::TaskProfiler::default())),
             adaptive_concurrency: Arc::new(Mutex::new(
                 adaptive_concurrency::AdaptiveConcurrencyManager::new(),
@@ -9768,6 +9773,69 @@ impl DownloadManager {
         url_allowlist::check_url_allowlist(url, &config)
     }
 
+    // ========== Phase 106: Per-Task Proxy Override ==========
+
+    /// Set a per-task proxy override. Takes precedence over the global proxy.
+    pub async fn set_task_proxy(
+        &self,
+        task_id: String,
+        proxy: proxy::ProxyConfig,
+        notes: Option<String>,
+    ) -> Result<(), task_proxy::TaskProxyError> {
+        let mut mgr = self.task_proxy.lock().await;
+        mgr.set_task_proxy(task_id, proxy, notes).await
+    }
+
+    /// Remove a per-task proxy override.
+    pub async fn remove_task_proxy(&self, task_id: &str) -> Result<(), task_proxy::TaskProxyError> {
+        let mut mgr = self.task_proxy.lock().await;
+        mgr.remove_task_proxy(task_id).await
+    }
+
+    /// Get the active proxy override for a task (if any and enabled).
+    pub async fn get_task_proxy(&self, task_id: &str) -> Option<task_proxy::TaskProxyConfig> {
+        let mgr = self.task_proxy.lock().await;
+        mgr.get_task_proxy(task_id).cloned()
+    }
+
+    /// List all per-task proxy overrides.
+    pub async fn list_task_proxies(&self) -> Vec<task_proxy::TaskProxyConfig> {
+        let mgr = self.task_proxy.lock().await;
+        mgr.list_overrides().into_iter().cloned().collect()
+    }
+
+    /// Enable or disable a per-task proxy override.
+    pub async fn set_task_proxy_enabled(
+        &self,
+        task_id: &str,
+        enabled: bool,
+    ) -> Result<(), task_proxy::TaskProxyError> {
+        let mut mgr = self.task_proxy.lock().await;
+        mgr.set_enabled(task_id, enabled).await
+    }
+
+    /// Update notes for a per-task proxy override.
+    pub async fn set_task_proxy_notes(
+        &self,
+        task_id: &str,
+        notes: Option<String>,
+    ) -> Result<(), task_proxy::TaskProxyError> {
+        let mut mgr = self.task_proxy.lock().await;
+        mgr.set_notes(task_id, notes).await
+    }
+
+    /// Clear all per-task proxy overrides.
+    pub async fn clear_task_proxies(&self) -> Result<(), task_proxy::TaskProxyError> {
+        let mut mgr = self.task_proxy.lock().await;
+        mgr.clear_all().await
+    }
+
+    /// Get summary of per-task proxy overrides.
+    pub async fn get_task_proxy_summary(&self) -> task_proxy::TaskProxySummary {
+        let mgr = self.task_proxy.lock().await;
+        mgr.get_summary()
+    }
+
     // ─── Task Snooze (Phase 90) ───────────────────────────────────────
 
     /// Set task snooze configuration.
@@ -9959,6 +10027,99 @@ impl DownloadManager {
     ) -> Result<(), download_snapshot::SnapshotError> {
         let mut mgr = self.snapshot_manager.lock().await;
         mgr.delete_snapshot(id)
+    }
+
+    // ===== Network-Aware Download Management =====
+
+    /// Set network-aware configuration.
+    pub async fn set_network_aware_config(&self, config: network_aware::NetworkAwareConfig) {
+        let mut mgr = self.network_aware.lock().await;
+        mgr.set_config(config);
+    }
+
+    /// Get network-aware configuration.
+    pub async fn get_network_aware_config(&self) -> network_aware::NetworkAwareConfig {
+        let mgr = self.network_aware.lock().await;
+        mgr.config().clone()
+    }
+
+    /// Get current network status.
+    pub async fn get_network_status(&self) -> network_aware::NetworkStatus {
+        let mgr = self.network_aware.lock().await;
+        mgr.status()
+    }
+
+    /// Get network-aware summary.
+    pub async fn get_network_aware_summary(&self) -> network_aware::NetworkAwareSummary {
+        let mgr = self.network_aware.lock().await;
+        mgr.summary()
+    }
+
+    /// Record a connectivity probe success.
+    pub async fn record_network_probe_success(&self) -> bool {
+        let mut mgr = self.network_aware.lock().await;
+        mgr.record_probe_success().is_some()
+    }
+
+    /// Record a connectivity probe failure.
+    pub async fn record_network_probe_failure(&self) -> bool {
+        let mut mgr = self.network_aware.lock().await;
+        mgr.record_probe_failure().is_some()
+    }
+
+    /// Force-set network status (for testing or manual override).
+    pub async fn force_set_network_status(&self, status: network_aware::NetworkStatus) {
+        let mut mgr = self.network_aware.lock().await;
+        mgr.force_set_status(status);
+    }
+
+    /// Record that a task was auto-paused due to network disconnection.
+    pub async fn record_network_auto_pause(&self, task_id: &str, was_running: bool) -> bool {
+        let mut mgr = self.network_aware.lock().await;
+        mgr.record_auto_pause(task_id, was_running)
+    }
+
+    /// Record that a task was auto-resumed after network recovery.
+    pub async fn record_network_auto_resume(&self, task_id: &str) -> Option<bool> {
+        let mut mgr = self.network_aware.lock().await;
+        mgr.record_auto_resume(task_id)
+    }
+
+    /// Get list of task IDs that were auto-paused due to network disconnection.
+    pub async fn get_network_auto_paused_tasks(&self) -> Vec<String> {
+        let mgr = self.network_aware.lock().await;
+        mgr.auto_paused_task_ids()
+    }
+
+    /// Check if a specific task was auto-paused due to network disconnection.
+    pub async fn is_network_auto_paused(&self, task_id: &str) -> bool {
+        let mgr = self.network_aware.lock().await;
+        mgr.is_auto_paused(task_id)
+    }
+
+    /// Clear all network auto-paused task tracking.
+    pub async fn clear_network_auto_paused(&self) {
+        let mut mgr = self.network_aware.lock().await;
+        mgr.clear_auto_paused_tasks();
+    }
+
+    /// Reset network-aware state (keeps config).
+    pub async fn reset_network_aware(&self) {
+        let mut mgr = self.network_aware.lock().await;
+        mgr.reset();
+    }
+
+    /// Save network-aware configuration to disk.
+    pub async fn save_network_aware_config(&self) -> Result<(), network_aware::NetworkAwareError> {
+        let mgr = self.network_aware.lock().await;
+        network_aware::save_config(mgr.config(), &self.data_dir).await
+    }
+
+    /// Load network-aware configuration from disk.
+    pub async fn load_network_aware_config(
+        &self,
+    ) -> Result<network_aware::NetworkAwareConfig, network_aware::NetworkAwareError> {
+        network_aware::load_config(&self.data_dir).await
     }
 
     // ===== Task Performance Profiler =====
@@ -15860,5 +16021,116 @@ mod url_allowlist_tests {
     async fn test_speed_prediction_clear_no_panic() {
         let dm = DownloadManager::new(std::path::PathBuf::from("/tmp/test_sp_clear"));
         dm.clear_all_speed_predictions().await;
+    }
+
+    // ========== Phase 106: Per-Task Proxy Override Tests ==========
+
+    #[tokio::test]
+    async fn test_task_proxy_set_and_get() {
+        let dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(dir.path().to_path_buf());
+        let proxy =
+            proxy::ProxyConfig::new(proxy::ProxyType::Socks5, "127.0.0.1".to_string(), 1080);
+        let result = dm
+            .set_task_proxy("task-1".to_string(), proxy, Some("test".to_string()))
+            .await;
+        assert!(result.is_ok());
+        let got = dm.get_task_proxy("task-1").await;
+        assert!(got.is_some());
+        let cfg = got.unwrap();
+        assert_eq!(cfg.task_id, "task-1");
+        assert_eq!(cfg.proxy.host, "127.0.0.1");
+        assert!(cfg.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_task_proxy_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(dir.path().to_path_buf());
+        let proxy =
+            proxy::ProxyConfig::new(proxy::ProxyType::Socks5, "127.0.0.1".to_string(), 1080);
+        dm.set_task_proxy("task-1".to_string(), proxy, None)
+            .await
+            .unwrap();
+        assert!(dm.get_task_proxy("task-1").await.is_some());
+        dm.remove_task_proxy("task-1").await.unwrap();
+        assert!(dm.get_task_proxy("task-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_task_proxy_enable_disable() {
+        let dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(dir.path().to_path_buf());
+        let proxy =
+            proxy::ProxyConfig::new(proxy::ProxyType::Socks5, "127.0.0.1".to_string(), 1080);
+        dm.set_task_proxy("task-1".to_string(), proxy, None)
+            .await
+            .unwrap();
+        // Disable
+        dm.set_task_proxy_enabled("task-1", false).await.unwrap();
+        // get_task_proxy returns None when disabled
+        assert!(dm.get_task_proxy("task-1").await.is_none());
+        // Re-enable
+        dm.set_task_proxy_enabled("task-1", true).await.unwrap();
+        assert!(dm.get_task_proxy("task-1").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_task_proxy_list_and_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(dir.path().to_path_buf());
+        let proxy1 =
+            proxy::ProxyConfig::new(proxy::ProxyType::Socks5, "10.0.0.1".to_string(), 1080);
+        let proxy2 = proxy::ProxyConfig::new(proxy::ProxyType::Http, "10.0.0.2".to_string(), 8080);
+        dm.set_task_proxy("task-1".to_string(), proxy1, None)
+            .await
+            .unwrap();
+        dm.set_task_proxy("task-2".to_string(), proxy2, None)
+            .await
+            .unwrap();
+        let list = dm.list_task_proxies().await;
+        assert_eq!(list.len(), 2);
+        let summary = dm.get_task_proxy_summary().await;
+        assert_eq!(summary.total_overrides, 2);
+        assert_eq!(summary.enabled_overrides, 2);
+    }
+
+    #[tokio::test]
+    async fn test_task_proxy_clear_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(dir.path().to_path_buf());
+        let proxy = proxy::ProxyConfig::new(proxy::ProxyType::Socks5, "10.0.0.1".to_string(), 1080);
+        dm.set_task_proxy("task-1".to_string(), proxy.clone(), None)
+            .await
+            .unwrap();
+        dm.set_task_proxy("task-2".to_string(), proxy, None)
+            .await
+            .unwrap();
+        dm.clear_task_proxies().await.unwrap();
+        let list = dm.list_task_proxies().await;
+        assert_eq!(list.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_task_proxy_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(dir.path().to_path_buf());
+        let proxy = proxy::ProxyConfig::new(proxy::ProxyType::Socks5, "10.0.0.1".to_string(), 1080);
+        dm.set_task_proxy("task-1".to_string(), proxy, None)
+            .await
+            .unwrap();
+        dm.set_task_proxy_notes("task-1", Some("updated notes".to_string()))
+            .await
+            .unwrap();
+        let cfg = dm.get_task_proxy("task-1").await.unwrap();
+        assert_eq!(cfg.notes, Some("updated notes".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_task_proxy_enable_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(dir.path().to_path_buf());
+        let result = dm.set_task_proxy_enabled("nonexistent", true).await;
+        assert!(result.is_err());
     }
 }

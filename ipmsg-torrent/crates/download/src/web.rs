@@ -475,6 +475,17 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/url-allowlist", get(get_allowlist_handler))
         .route("/api/url-allowlist", post(set_allowlist_handler))
         .route("/api/url-allowlist/check", post(check_allowlist_handler))
+        // Phase 106: Per-task proxy override
+        .route("/api/task-proxy", get(get_task_proxy_summary_handler))
+        .route("/api/task-proxy/list", get(list_task_proxies_handler))
+        .route("/api/task-proxy/set", post(set_task_proxy_handler))
+        .route("/api/task-proxy/remove", post(remove_task_proxy_handler))
+        .route(
+            "/api/task-proxy/enable",
+            post(set_task_proxy_enabled_handler),
+        )
+        .route("/api/task-proxy/notes", post(set_task_proxy_notes_handler))
+        .route("/api/task-proxy/clear", post(clear_task_proxies_handler))
         .route("/api/task-snooze", get(get_snooze_handler))
         .route("/api/task-snooze", post(set_snooze_handler))
         .route("/api/task-snooze/config", get(get_snooze_config_handler))
@@ -489,6 +500,33 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/speed-burst", get(get_speed_burst_handler))
         .route("/api/speed-burst", post(set_speed_burst_config_handler))
+        .route("/api/network-aware", get(get_network_aware_handler))
+        .route("/api/network-aware", post(set_network_aware_config_handler))
+        .route("/api/network-aware/status", get(get_network_status_handler))
+        .route(
+            "/api/network-aware/summary",
+            get(get_network_aware_summary_handler),
+        )
+        .route(
+            "/api/network-aware/probe/success",
+            post(record_probe_success_handler),
+        )
+        .route(
+            "/api/network-aware/probe/failure",
+            post(record_probe_failure_handler),
+        )
+        .route(
+            "/api/network-aware/auto-paused",
+            get(get_auto_paused_tasks_handler),
+        )
+        .route(
+            "/api/network-aware/auto-paused/clear",
+            post(clear_auto_paused_handler),
+        )
+        .route(
+            "/api/network-aware/reset",
+            post(reset_network_aware_handler),
+        )
         .route("/api/retry-quota", get(get_retry_quota_handler))
         .route("/api/retry-quota", post(set_retry_quota_handler))
         .route("/api/retry-quota/reset", post(reset_retry_quota_handler))
@@ -2428,6 +2466,162 @@ async fn check_allowlist_handler(
     Json(serde_json::to_value(result).unwrap_or_default())
 }
 
+// ─── Phase 106: Per-Task Proxy Override Handlers ────────────────────────
+
+/// Get summary of per-task proxy overrides
+async fn get_task_proxy_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_task_proxy_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// List all per-task proxy overrides
+async fn list_task_proxies_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let proxies = state.manager.list_task_proxies().await;
+    Json(serde_json::json!({
+        "proxies": proxies,
+        "count": proxies.len()
+    }))
+}
+
+/// Set a per-task proxy override
+async fn set_task_proxy_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let task_id = match body.get("task_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => return Json(serde_json::json!({"error": "missing or empty task_id field"})),
+    };
+    let proxy_url = match body.get("proxy_url").and_then(|v| v.as_str()) {
+        Some(url) if !url.is_empty() => url.to_string(),
+        _ => return Json(serde_json::json!({"error": "missing or empty proxy_url field"})),
+    };
+    let notes = body
+        .get("notes")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Parse proxy URL (supports socks5://host:port and http://host:port)
+    let proxy_config = match parse_proxy_url_for_task(&proxy_url) {
+        Ok(config) => config,
+        Err(e) => return Json(serde_json::json!({"error": e})),
+    };
+
+    match state
+        .manager
+        .set_task_proxy(task_id, proxy_config, notes)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Remove a per-task proxy override
+async fn remove_task_proxy_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let task_id = match body.get("task_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.is_empty() => id,
+        _ => return Json(serde_json::json!({"error": "missing or empty task_id field"})),
+    };
+
+    match state.manager.remove_task_proxy(task_id).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Enable or disable a per-task proxy override
+async fn set_task_proxy_enabled_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let task_id = match body.get("task_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.is_empty() => id,
+        _ => return Json(serde_json::json!({"error": "missing or empty task_id field"})),
+    };
+    let enabled = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    match state.manager.set_task_proxy_enabled(task_id, enabled).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok", "enabled": enabled})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Update notes for a per-task proxy override
+async fn set_task_proxy_notes_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let task_id = match body.get("task_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.is_empty() => id,
+        _ => return Json(serde_json::json!({"error": "missing or empty task_id field"})),
+    };
+    let notes = body
+        .get("notes")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    match state.manager.set_task_proxy_notes(task_id, notes).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Clear all per-task proxy overrides
+async fn clear_task_proxies_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.clear_task_proxies().await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Parse a proxy URL string into a ProxyConfig for task proxy
+fn parse_proxy_url_for_task(url: &str) -> Result<crate::proxy::ProxyConfig, String> {
+    use crate::proxy::{ProxyConfig, ProxyType};
+
+    if let Some(rest) = url.strip_prefix("socks5://") {
+        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err("invalid socks5 URL format, expected socks5://host:port".to_string());
+        }
+        let port: u16 = parts[1]
+            .parse()
+            .map_err(|_| "invalid port number".to_string())?;
+        Ok(ProxyConfig::new(
+            ProxyType::Socks5,
+            parts[0].to_string(),
+            port,
+        ))
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err("invalid http proxy URL format, expected http://host:port".to_string());
+        }
+        let port: u16 = parts[1]
+            .parse()
+            .map_err(|_| "invalid port number".to_string())?;
+        Ok(ProxyConfig::new(
+            ProxyType::Http,
+            parts[0].to_string(),
+            port,
+        ))
+    } else {
+        Err("proxy URL must start with socks5:// or http://".to_string())
+    }
+}
+
 /// Get task snooze status (list of snoozed tasks)
 async fn get_snooze_handler(
     State(state): State<Arc<WebState>>,
@@ -2541,6 +2735,91 @@ async fn set_speed_burst_config_handler(
     Json(config): Json<crate::speed_burst::SpeedBurstConfig>,
 ) -> impl axum::response::IntoResponse {
     state.manager.set_speed_burst_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get network-aware configuration and current status
+async fn get_network_aware_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_network_aware_config().await;
+    let status = state.manager.get_network_status().await;
+    Json(serde_json::json!({
+        "config": config,
+        "status": status.to_string()
+    }))
+}
+
+/// Set network-aware configuration
+async fn set_network_aware_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::network_aware::NetworkAwareConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_network_aware_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get current network status
+async fn get_network_status_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let status = state.manager.get_network_status().await;
+    Json(serde_json::json!({"status": status.to_string()}))
+}
+
+/// Get network-aware summary
+async fn get_network_aware_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_network_aware_summary().await;
+    Json(summary)
+}
+
+/// Record a successful connectivity probe
+async fn record_probe_success_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let transitioned = state.manager.record_network_probe_success().await;
+    let status = state.manager.get_network_status().await;
+    Json(serde_json::json!({
+        "transitioned": transitioned,
+        "status": status.to_string()
+    }))
+}
+
+/// Record a failed connectivity probe
+async fn record_probe_failure_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let transitioned = state.manager.record_network_probe_failure().await;
+    let status = state.manager.get_network_status().await;
+    Json(serde_json::json!({
+        "transitioned": transitioned,
+        "status": status.to_string()
+    }))
+}
+
+/// Get list of auto-paused task IDs
+async fn get_auto_paused_tasks_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let task_ids = state.manager.get_network_auto_paused_tasks().await;
+    Json(serde_json::json!({"auto_paused_tasks": task_ids}))
+}
+
+/// Clear auto-paused task tracking
+async fn clear_auto_paused_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_network_auto_paused().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Reset network-aware state
+async fn reset_network_aware_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.reset_network_aware().await;
     Json(serde_json::json!({"status": "ok"}))
 }
 
