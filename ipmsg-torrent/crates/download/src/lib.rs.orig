@@ -35,7 +35,6 @@ pub mod download_cooldown;
 pub mod download_cost;
 pub mod download_deadline;
 pub mod download_history;
-pub mod download_history_analytics;
 pub mod download_presets;
 pub mod download_quota;
 pub mod download_report;
@@ -83,12 +82,10 @@ pub mod source_benchmark;
 pub mod source_rotation;
 pub mod speed_alert;
 pub mod speed_anomaly;
-pub mod speed_boost;
 pub mod speed_burst;
 pub mod speed_history;
 pub mod speed_prediction;
 pub mod speed_profiles;
-pub mod speed_test;
 pub mod tag_management;
 pub mod task_activity;
 pub mod task_archive;
@@ -834,8 +831,6 @@ pub struct DownloadManager {
     speed_prediction: Arc<Mutex<speed_prediction::SpeedPredictionManager>>,
     /// Speed profiles manager for named speed limit presets
     speed_profiles: Arc<tokio::sync::RwLock<speed_profiles::SpeedProfileManager>>,
-    /// Speed test manager for pre-download throughput measurement
-    speed_test: Arc<Mutex<speed_test::SpeedTestManager>>,
     /// Per-task download session tracking
     download_sessions: Arc<Mutex<download_session::DownloadSessionManager>>,
     /// Auto-cleanup configuration for completed/failed tasks
@@ -904,8 +899,6 @@ pub struct DownloadManager {
         Arc<tokio::sync::RwLock<progress_milestone::ProgressMilestoneConfig>>,
     /// Speed burst manager for temporary speed boosts
     speed_burst: Arc<Mutex<speed_burst::SpeedBurstManager>>,
-    /// System-wide speed boost manager for global temporary speed overrides
-    speed_boost: Arc<Mutex<speed_boost::SpeedBoostManager>>,
     /// Daily retry quota manager for limiting total retry attempts
     retry_quota: Arc<Mutex<retry_quota::RetryQuotaManager>>,
     /// TTL manager for auto-pausing tasks that exceed their lifetime
@@ -981,8 +974,6 @@ pub struct DownloadManager {
     tag_manager: Arc<tag_management::TagManager>,
     /// Download cost tracker for estimating monetary cost of data usage
     cost_tracker: Arc<Mutex<download_cost::CostTracker>>,
-    /// Download history analytics for insights and statistics
-    history_analytics: Arc<Mutex<download_history_analytics::HistoryAnalyticsManager>>,
 }
 
 impl DownloadManager {
@@ -1000,7 +991,6 @@ impl DownloadManager {
             speed_profiles: Arc::new(tokio::sync::RwLock::new(
                 speed_profiles::SpeedProfileManager::new(&data_dir),
             )),
-            speed_test: Arc::new(Mutex::new(speed_test::SpeedTestManager::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
@@ -1089,7 +1079,6 @@ impl DownloadManager {
                 progress_milestone::ProgressMilestoneConfig::default(),
             )),
             speed_burst: Arc::new(Mutex::new(speed_burst::SpeedBurstManager::new())),
-            speed_boost: Arc::new(Mutex::new(speed_boost::SpeedBoostManager::new())),
             retry_quota: Arc::new(Mutex::new(retry_quota::RetryQuotaManager::new())),
             download_time_limit: Arc::new(Mutex::new(
                 download_time_limit::DownloadTimeLimitManager::new(),
@@ -1173,9 +1162,6 @@ impl DownloadManager {
             )),
             tag_manager: Arc::new(tag_management::TagManager::new(&data_dir)),
             cost_tracker: Arc::new(Mutex::new(download_cost::CostTracker::new())),
-            history_analytics: Arc::new(Mutex::new(
-                download_history_analytics::HistoryAnalyticsManager::new(),
-            )),
         };
         dm.start_scheduler();
         dm
@@ -1325,7 +1311,6 @@ impl DownloadManager {
             speed_profiles: Arc::new(tokio::sync::RwLock::new(
                 speed_profiles::SpeedProfileManager::new(&data_dir),
             )),
-            speed_test: Arc::new(Mutex::new(speed_test::SpeedTestManager::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
@@ -1414,7 +1399,6 @@ impl DownloadManager {
                 progress_milestone::ProgressMilestoneConfig::default(),
             )),
             speed_burst: Arc::new(Mutex::new(speed_burst::SpeedBurstManager::new())),
-            speed_boost: Arc::new(Mutex::new(speed_boost::SpeedBoostManager::new())),
             retry_quota: Arc::new(Mutex::new(retry_quota::RetryQuotaManager::new())),
             download_time_limit: Arc::new(Mutex::new(
                 download_time_limit::DownloadTimeLimitManager::new(),
@@ -1498,9 +1482,6 @@ impl DownloadManager {
             )),
             tag_manager: Arc::new(tag_management::TagManager::new(&data_dir)),
             cost_tracker: Arc::new(Mutex::new(download_cost::CostTracker::new())),
-            history_analytics: Arc::new(Mutex::new(
-                download_history_analytics::HistoryAnalyticsManager::new(),
-            )),
         };
         // Restore tag manager from disk
         dm.tag_manager.restore().await;
@@ -1665,13 +1646,6 @@ impl DownloadManager {
         // Restore notification configuration from disk
         if let Ok(Some(notif_cfg)) = notification::load_notification_config(&dm.data_dir) {
             dm.notifier.update_config(notif_cfg);
-        }
-        // Restore history analytics configuration from disk
-        if let Ok(Some(analytics_cfg)) =
-            download_history_analytics::load_analytics_config(&dm.data_dir)
-        {
-            *dm.history_analytics.lock().await =
-                download_history_analytics::HistoryAnalyticsManager::with_config(analytics_cfg);
         }
         // Restore auto-shutdown configuration from disk
         if let Ok(Some(shutdown_cfg)) = auto_shutdown::load_auto_shutdown_config(&dm.data_dir) {
@@ -3256,101 +3230,6 @@ impl DownloadManager {
         }
     }
 
-    // ===== System-Wide Speed Boost =====
-
-    /// Start a system-wide speed boost.
-    pub async fn start_speed_boost(
-        &self,
-        duration_secs: Option<u64>,
-        multiplier: Option<f64>,
-    ) -> speed_boost::BoostStartResult {
-        let current_limit = {
-            let limit = self.rate_limiter.global().speed_limit().await;
-            if limit > 0 { Some(limit) } else { None }
-        };
-        let mut boost_mgr = self.speed_boost.lock().await;
-        boost_mgr.start_boost(current_limit, duration_secs, multiplier)
-    }
-
-    /// Start a speed boost using a named preset.
-    pub async fn start_speed_boost_preset(
-        &self,
-        preset_name: &str,
-    ) -> speed_boost::BoostStartResult {
-        let current_limit = {
-            let limit = self.rate_limiter.global().speed_limit().await;
-            if limit > 0 { Some(limit) } else { None }
-        };
-        let mut boost_mgr = self.speed_boost.lock().await;
-        boost_mgr.start_preset_boost(preset_name, current_limit)
-    }
-
-    /// Stop the active system-wide speed boost.
-    pub async fn stop_speed_boost(&self) -> bool {
-        let mut boost_mgr = self.speed_boost.lock().await;
-        boost_mgr.stop_boost()
-    }
-
-    /// Get the current speed boost status.
-    pub async fn get_speed_boost_status(&self) -> speed_boost::SpeedBoostStatus {
-        let boost_mgr = self.speed_boost.lock().await;
-        boost_mgr.status()
-    }
-
-    /// Get the effective global speed limit (considering active boost).
-    pub async fn get_effective_speed_limit(&self) -> Option<u64> {
-        let base_limit = {
-            let limit = self.rate_limiter.global().speed_limit().await;
-            if limit > 0 { Some(limit) } else { None }
-        };
-        let boost_mgr = self.speed_boost.lock().await;
-        boost_mgr.effective_limit(base_limit)
-    }
-
-    /// Set speed boost configuration.
-    pub async fn set_speed_boost_config(&self, config: speed_boost::SpeedBoostConfig) {
-        let mut boost_mgr = self.speed_boost.lock().await;
-        boost_mgr.set_config(config);
-    }
-
-    /// Get speed boost configuration.
-    pub async fn get_speed_boost_config(&self) -> speed_boost::SpeedBoostConfig {
-        let boost_mgr = self.speed_boost.lock().await;
-        boost_mgr.config().clone()
-    }
-
-    /// Add a named boost preset.
-    pub async fn add_speed_boost_preset(&self, id: &str, preset: speed_boost::BoostPreset) -> bool {
-        let mut boost_mgr = self.speed_boost.lock().await;
-        boost_mgr.add_preset(id, preset)
-    }
-
-    /// Remove a named boost preset.
-    pub async fn remove_speed_boost_preset(&self, id: &str) -> bool {
-        let mut boost_mgr = self.speed_boost.lock().await;
-        boost_mgr.remove_preset(id)
-    }
-
-    /// Add a scheduled boost window.
-    pub async fn add_scheduled_boost_window(
-        &self,
-        window: speed_boost::ScheduledBoostWindow,
-    ) -> bool {
-        let mut boost_mgr = self.speed_boost.lock().await;
-        boost_mgr.add_scheduled_window(window)
-    }
-
-    /// Remove a scheduled boost window.
-    pub async fn remove_scheduled_boost_window(&self, id: &str) -> bool {
-        let mut boost_mgr = self.speed_boost.lock().await;
-        boost_mgr.remove_scheduled_window(id)
-    }
-
-    /// Process expired speed boosts.
-    pub async fn process_expired_speed_boosts(&self) {
-        let mut boost_mgr = self.speed_boost.lock().await;
-        boost_mgr.process_expired();
-    }
     // ===== Auto-Actions =====
 
     /// Set auto-actions configuration.
@@ -9102,66 +8981,6 @@ impl DownloadManager {
         Some(profile.to_info(true))
     }
 
-    // --- Speed Test (Phase 128) ---
-
-    /// Get the current speed test configuration.
-    pub async fn get_speed_test_config(&self) -> speed_test::SpeedTestConfig {
-        let mgr = self.speed_test.lock().await;
-        mgr.get_config().clone()
-    }
-
-    /// Update the speed test configuration.
-    pub async fn set_speed_test_config(&self, config: speed_test::SpeedTestConfig) {
-        let mut mgr = self.speed_test.lock().await;
-        mgr.set_config(config);
-    }
-
-    /// Perform a speed test to the given URL and return the result.
-    pub async fn run_speed_test(&self, url: &str) -> speed_test::SpeedTestResult {
-        let mut mgr = self.speed_test.lock().await;
-        mgr.test_url(url).await
-    }
-
-    /// Get the speed test summary (statistics over all recorded tests).
-    pub async fn get_speed_test_summary(&self) -> speed_test::SpeedTestSummary {
-        let mgr = self.speed_test.lock().await;
-        mgr.get_summary()
-    }
-
-    /// Get the full speed test history.
-    pub async fn get_speed_test_history(&self) -> Vec<speed_test::SpeedTestResult> {
-        let mgr = self.speed_test.lock().await;
-        mgr.get_history().to_vec()
-    }
-
-    /// Get the most recent speed test result.
-    pub async fn get_latest_speed_test(&self) -> Option<speed_test::SpeedTestResult> {
-        let mgr = self.speed_test.lock().await;
-        mgr.get_latest().cloned()
-    }
-
-    /// Clear all speed test history.
-    pub async fn clear_speed_test_history(&self) {
-        let mut mgr = self.speed_test.lock().await;
-        mgr.clear_history();
-    }
-
-    /// Save speed test config and history to disk.
-    pub async fn save_speed_test_data(&self) -> Result<(), String> {
-        let mgr = self.speed_test.lock().await;
-        mgr.save_config(&self.data_dir)?;
-        mgr.save_history(&self.data_dir)?;
-        Ok(())
-    }
-
-    /// Load speed test config and history from disk.
-    pub async fn load_speed_test_data(&self) -> Result<(), String> {
-        let mut mgr = self.speed_test.lock().await;
-        mgr.load_config(&self.data_dir)?;
-        mgr.load_history(&self.data_dir)?;
-        Ok(())
-    }
-
     // --- Download Session Tracking (Phase 84) ---
 
     /// Start a new download session for a task.
@@ -9570,73 +9389,6 @@ impl DownloadManager {
     /// Prune old daily usage records (Phase 127)
     pub async fn prune_cost_daily_usage(&self, keep_days: u32) {
         self.cost_tracker.lock().await.prune_daily_usage(keep_days);
-    }
-
-    // ─── Phase 128: Download History Analytics ───
-
-    /// Get history analytics config (Phase 128)
-    pub async fn get_history_analytics_config(
-        &self,
-    ) -> download_history_analytics::HistoryAnalyticsConfig {
-        self.history_analytics.lock().await.config.clone()
-    }
-
-    /// Set history analytics config (Phase 128)
-    pub async fn set_history_analytics_config(
-        &self,
-        config: download_history_analytics::HistoryAnalyticsConfig,
-    ) {
-        let mut mgr = self.history_analytics.lock().await;
-        mgr.set_config(config.clone());
-        if let Err(e) = download_history_analytics::save_analytics_config(&config, &self.data_dir) {
-            tracing::warn!(error = %e, "Failed to save history analytics config");
-        }
-    }
-
-    /// Generate analytics summary from download history (Phase 128)
-    pub async fn get_history_analytics(
-        &self,
-    ) -> download_history_analytics::HistoryAnalyticsSummary {
-        let mgr = self.history_analytics.lock().await;
-        let entries = self.get_download_history_entries().await;
-        mgr.analyze(&entries)
-    }
-
-    /// Generate analytics summary for a custom period (Phase 128)
-    pub async fn get_history_analytics_for_period(
-        &self,
-        period_days: i64,
-    ) -> download_history_analytics::HistoryAnalyticsSummary {
-        let mgr_guard = self.history_analytics.lock().await;
-        let mut mgr = mgr_guard.clone();
-        mgr.config.default_period_days = period_days;
-        let entries = self.get_download_history_entries().await;
-        mgr.analyze(&entries)
-    }
-
-    /// Format analytics summary for display (Phase 128)
-    pub async fn format_history_analytics(
-        &self,
-        summary: &download_history_analytics::HistoryAnalyticsSummary,
-    ) -> String {
-        self.history_analytics.lock().await.format_summary(summary)
-    }
-
-    /// Get download history entries for analytics (Phase 128)
-    pub async fn get_download_history_entries(&self) -> Vec<download_history::HistoryEntry> {
-        match download_history::load_history(&self.data_dir) {
-            Ok(entries) => entries,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to load download history for analytics");
-                Vec::new()
-            }
-        }
-    }
-
-    /// Clear history analytics data (Phase 128)
-    pub async fn clear_history_analytics(&self) {
-        let mgr = self.history_analytics.lock().await;
-        let _ = download_history_analytics::save_analytics_config(&mgr.config, &self.data_dir);
     }
 
     /// Set the priority of a download task.

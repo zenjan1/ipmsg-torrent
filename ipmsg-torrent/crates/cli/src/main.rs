@@ -218,6 +218,12 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
+    /// Speed test - measure download throughput to a URL
+    DlSpeedTest {
+        /// "status", "run", "summary", "history", "latest", "clear", "config"
+        action: String,
+        args: Vec<String>,
+    },
     /// Search/filter/sort download tasks
     DlFind {
         /// Search query (substring match in name, case-insensitive)
@@ -959,6 +965,18 @@ fn parse_command(input: &str) -> Command {
                 let action = parts[1].to_string();
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlCost { action, args }
+            }
+        }
+        "dlspeedtest" | "dl-speedtest" | "dlst" => {
+            if parts.len() < 2 {
+                Command::DlSpeedTest {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlSpeedTest { action, args }
             }
         }
         "dlfind" | "dl-find" | "dlf" => {
@@ -2288,6 +2306,7 @@ fn command_help() -> String {
         "/dlnetmon [cmd]  - Network monitor (status|config <max_samples|sample_interval>|clear)",
         "/dltimelimit [cmd] - Download time limits (status|config <enabled|default> <value>|set <task_id> <secs>|clear <task_id>)",
         "/dlautoaction [cmd] - Auto-actions on completion (status|enable|disable|add|del|list|rule-enable|task|task-remove|summary|clear)",
+        "/dlspeedtest [cmd] - Speed test (status|run <url>|summary|history|latest|clear|config)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -6296,6 +6315,136 @@ async fn handle_command(
                 _ => {
                     let mut s = state.lock().await;
                     s.add_system_message("main", "Usage: /dlcost [status|config|set|enable|disable|summary|all|tasks|daily|clear]".to_string());
+                }
+            }
+        }
+        Command::DlSpeedTest { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            match action.as_str() {
+                "status" => {
+                    let config = download_manager.get_speed_test_config().await;
+                    let summary = download_manager.get_speed_test_summary().await;
+                    let msg = format!(
+                        "Speed Test Status:\n\
+                         Config: sample_size={} bytes, timeout={}s, parallel={}\n\
+                         Thresholds: good={} B/s, acceptable={} B/s\n\
+                         Tests: {} total, {} success, {} failed\n\
+                         Avg Speed: {:.0} B/s | Rating: {}",
+                        config.sample_size_bytes,
+                        config.timeout_secs,
+                        config.parallel_connections,
+                        config.good_speed_threshold_bps,
+                        config.acceptable_speed_threshold_bps,
+                        summary.test_count,
+                        summary.success_count,
+                        summary.failed_count,
+                        summary.avg_speed_bps,
+                        summary.overall_rating
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "run" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlspeedtest run <url>".to_string());
+                    } else {
+                        let url = &args[0];
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("Testing speed to {}...", url));
+                        drop(s);
+                        let result = download_manager.run_speed_test(url).await;
+                        let msg = ipmsg_download::speed_test::format_result(&result);
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_speed_test_summary().await;
+                    let msg = ipmsg_download::speed_test::format_summary(&summary);
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "history" => {
+                    let history = download_manager.get_speed_test_history().await;
+                    if history.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No speed test history".to_string());
+                    } else {
+                        let mut msg = format!("Speed Test History ({} tests):\n", history.len());
+                        for (i, result) in history.iter().take(10).enumerate() {
+                            if result.success {
+                                msg.push_str(&format!(
+                                    "  {}. {} - {} ({})\n",
+                                    i + 1,
+                                    result.url,
+                                    ipmsg_download::speed_test::format_speed_bps(result.speed_bps),
+                                    result.rating
+                                ));
+                            } else {
+                                msg.push_str(&format!(
+                                    "  {}. {} - FAILED ({})\n",
+                                    i + 1,
+                                    result.url,
+                                    result.error.as_deref().unwrap_or("unknown error")
+                                ));
+                            }
+                        }
+                        if history.len() > 10 {
+                            msg.push_str(&format!("  ... and {} more\n", history.len() - 10));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "latest" => match download_manager.get_latest_speed_test().await {
+                    Some(result) => {
+                        let msg = ipmsg_download::speed_test::format_result(&result);
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                    None => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No speed test recorded yet".to_string());
+                    }
+                },
+                "clear" => {
+                    download_manager.clear_speed_test_history().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Speed test history cleared".to_string());
+                }
+                "config" => {
+                    let config = download_manager.get_speed_test_config().await;
+                    let msg = format!(
+                        "Speed Test Config:\n\
+                         Sample Size: {} bytes ({:.1} MB)\n\
+                         Timeout: {}s\n\
+                         Parallel Connections: {}\n\
+                         Include DNS Time: {}\n\
+                         Good Threshold: {} B/s ({:.0} KB/s)\n\
+                         Acceptable Threshold: {} B/s ({:.0} KB/s)",
+                        config.sample_size_bytes,
+                        config.sample_size_bytes as f64 / 1_048_576.0,
+                        config.timeout_secs,
+                        config.parallel_connections,
+                        config.include_dns_time,
+                        config.good_speed_threshold_bps,
+                        config.good_speed_threshold_bps as f64 / 1024.0,
+                        config.acceptable_speed_threshold_bps,
+                        config.acceptable_speed_threshold_bps as f64 / 1024.0
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlspeedtest [status|run|summary|history|latest|clear|config]"
+                            .to_string(),
+                    );
                 }
             }
         }

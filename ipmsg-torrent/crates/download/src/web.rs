@@ -835,6 +835,19 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/cost/tasks", get(get_cost_tasks_handler))
         .route("/api/cost/daily", get(get_cost_daily_handler))
         .route("/api/cost/clear", post(clear_cost_handler))
+        .route("/api/speed-test", get(get_speed_test_config_handler))
+        .route("/api/speed-test", post(set_speed_test_config_handler))
+        .route("/api/speed-test/run", post(run_speed_test_handler))
+        .route(
+            "/api/speed-test/summary",
+            get(get_speed_test_summary_handler),
+        )
+        .route(
+            "/api/speed-test/history",
+            get(get_speed_test_history_handler),
+        )
+        .route("/api/speed-test/latest", get(get_speed_test_latest_handler))
+        .route("/api/speed-test/clear", post(clear_speed_test_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -7985,5 +7998,71 @@ async fn clear_cost_handler(
     State(state): State<Arc<WebState>>,
 ) -> impl axum::response::IntoResponse {
     state.manager.clear_cost_data().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+// --- Speed Test (Phase 128) ---
+
+/// GET /api/speed-test - Get speed test configuration
+async fn get_speed_test_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_speed_test_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/speed-test - Update speed test configuration
+async fn set_speed_test_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::speed_test::SpeedTestConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_speed_test_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/speed-test/run - Run a speed test against a URL
+async fn run_speed_test_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+    if url.is_empty() {
+        return Json(serde_json::json!({"error": "url is required"}));
+    }
+    let result = state.manager.run_speed_test(url).await;
+    Json(serde_json::to_value(result).unwrap_or_default())
+}
+
+/// GET /api/speed-test/summary - Get speed test summary
+async fn get_speed_test_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_speed_test_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/speed-test/history - Get speed test history
+async fn get_speed_test_history_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let history = state.manager.get_speed_test_history().await;
+    Json(serde_json::to_value(history).unwrap_or_default())
+}
+
+/// GET /api/speed-test/latest - Get latest speed test result
+async fn get_speed_test_latest_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.get_latest_speed_test().await {
+        Some(result) => Json(serde_json::to_value(result).unwrap_or_default()),
+        None => Json(serde_json::json!({"error": "no speed test recorded"})),
+    }
+}
+
+/// POST /api/speed-test/clear - Clear speed test history
+async fn clear_speed_test_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_speed_test_history().await;
     Json(serde_json::json!({"status": "ok"}))
 }
