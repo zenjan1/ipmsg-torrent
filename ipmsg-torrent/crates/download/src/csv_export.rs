@@ -334,6 +334,7 @@ mod tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
         }
     }
 

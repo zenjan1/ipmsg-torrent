@@ -26,6 +26,7 @@ pub mod dht;
 pub mod disk_monitor;
 pub mod domain_limit;
 pub mod download_cooldown;
+pub mod download_deadline;
 pub mod download_history;
 pub mod download_presets;
 pub mod download_report;
@@ -246,6 +247,8 @@ pub struct TaskInfoEvent {
     pub proxy_override: Option<proxy::ProxyConfig>,
     /// Number of times this task has been auto-promoted by queue staleness detection
     pub staleness_promotion_count: u32,
+    /// Optional deadline for this task (for WebSocket push)
+    pub deadline: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl TaskInfoEvent {
@@ -284,6 +287,7 @@ impl TaskInfoEvent {
             max_download_time_secs: task.max_download_time_secs,
             proxy_override: task.proxy_override.clone(),
             staleness_promotion_count: task.staleness_promotion_count,
+            deadline: task.deadline,
         }
     }
 }
@@ -406,6 +410,8 @@ pub struct DownloadTask {
     pub proxy_override: Option<proxy::ProxyConfig>,
     /// Number of times this task has been auto-promoted by queue staleness detection
     pub staleness_promotion_count: u32,
+    /// Optional deadline for this download (UTC timestamp)
+    pub deadline: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Per-task retry policy configuration
@@ -880,6 +886,8 @@ pub struct DownloadManager {
     queue_staleness: Arc<tokio::sync::RwLock<queue_staleness::StalenessConfig>>,
     /// Network condition monitor for tracking overall network quality
     network_monitor: Arc<Mutex<network_monitor::NetworkMonitor>>,
+    /// Download deadline manager for task urgency tracking
+    download_deadline: Arc<Mutex<download_deadline::DeadlineManager>>,
 }
 
 impl DownloadManager {
@@ -1012,6 +1020,7 @@ impl DownloadManager {
                 queue_staleness::StalenessConfig::default(),
             )),
             network_monitor: Arc::new(Mutex::new(network_monitor::NetworkMonitor::new())),
+            download_deadline: Arc::new(Mutex::new(download_deadline::DeadlineManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1276,6 +1285,7 @@ impl DownloadManager {
                 queue_staleness::StalenessConfig::default(),
             )),
             network_monitor: Arc::new(Mutex::new(network_monitor::NetworkMonitor::new())),
+            download_deadline: Arc::new(Mutex::new(download_deadline::DeadlineManager::new())),
         };
         // Restore error recovery config from disk
         if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
@@ -1375,6 +1385,12 @@ impl DownloadManager {
             network_monitor::NetworkMonitor::load(&dm.data_dir.join("network_monitor.json")).await
         {
             *dm.network_monitor.lock().await = monitor;
+        }
+        // Restore download deadline configuration from disk
+        if let Ok(deadline_cfg) =
+            download_deadline::load_deadline_config(&dm.data_dir.join("deadline_config.json")).await
+        {
+            dm.download_deadline.lock().await.set_config(deadline_cfg);
         }
         // Restore URL expander configuration from disk
         if let Some(expander_cfg) = url_expander::load_url_expander_config(&dm.data_dir) {
@@ -2669,6 +2685,7 @@ impl DownloadManager {
                         max_download_time_secs: None,
                         proxy_override: None,
                         staleness_promotion_count: 0,
+                        deadline: None,
                         current_session_start: None,
                     };
 
@@ -2713,6 +2730,7 @@ impl DownloadManager {
                             max_download_time_secs: None,
                             proxy_override: None,
                             staleness_promotion_count: 0,
+                            deadline: None,
                             is_favorite: false,
                         },
                     });
@@ -5237,6 +5255,7 @@ impl DownloadManager {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -5321,6 +5340,7 @@ impl DownloadManager {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -5397,6 +5417,7 @@ impl DownloadManager {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -5476,6 +5497,7 @@ impl DownloadManager {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -5546,6 +5568,7 @@ impl DownloadManager {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -5854,6 +5877,7 @@ impl DownloadManager {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -7661,6 +7685,7 @@ impl DownloadManager {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
         };
 
         self.tasks.lock().await.push(task);
@@ -8398,6 +8423,7 @@ impl DownloadManager {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
         };
 
         // Append " (copy)" to name if it doesn't already end with it
@@ -10122,6 +10148,74 @@ impl DownloadManager {
         network_aware::load_config(&self.data_dir).await
     }
 
+    // ===== Download Deadline Management (Phase 107) =====
+
+    /// Set deadline configuration.
+    pub async fn set_deadline_config(&self, config: download_deadline::DeadlineConfig) {
+        let mut mgr = self.download_deadline.lock().await;
+        mgr.set_config(config);
+    }
+
+    /// Get deadline configuration.
+    pub async fn get_deadline_config(&self) -> download_deadline::DeadlineConfig {
+        let mgr = self.download_deadline.lock().await;
+        mgr.config().clone()
+    }
+
+    /// Set a deadline for a specific task.
+    pub async fn set_task_deadline(
+        &self,
+        task_id: &str,
+        deadline: chrono::DateTime<chrono::Utc>,
+        enabled: bool,
+    ) {
+        let mut mgr = self.download_deadline.lock().await;
+        mgr.set_deadline(task_id, deadline, enabled);
+    }
+
+    /// Remove a deadline for a specific task.
+    pub async fn remove_task_deadline(&self, task_id: &str) -> bool {
+        let mut mgr = self.download_deadline.lock().await;
+        mgr.remove_deadline(task_id)
+    }
+
+    /// Get deadline data for a specific task.
+    pub async fn get_task_deadline(
+        &self,
+        task_id: &str,
+    ) -> Option<download_deadline::DeadlineData> {
+        let mgr = self.download_deadline.lock().await;
+        mgr.get_deadline(task_id).cloned()
+    }
+
+    /// Get deadline summary.
+    pub async fn get_deadline_summary(&self) -> download_deadline::DeadlineSummary {
+        let mgr = self.download_deadline.lock().await;
+        mgr.summary()
+    }
+
+    /// Refresh urgency levels for all deadlines.
+    pub async fn refresh_deadlines(&self) {
+        let mut mgr = self.download_deadline.lock().await;
+        mgr.refresh_all();
+    }
+
+    /// Clear all deadlines.
+    pub async fn clear_all_deadlines(&self) {
+        let mut mgr = self.download_deadline.lock().await;
+        mgr.clear_all();
+    }
+
+    /// Save deadline configuration to disk.
+    pub async fn save_deadline_config(&self) -> std::io::Result<()> {
+        let mgr = self.download_deadline.lock().await;
+        download_deadline::save_deadline_config(
+            mgr.config(),
+            &self.data_dir.join("deadline_config.json"),
+        )
+        .await
+    }
+
     // ===== Task Performance Profiler =====
 
     /// Set task profiler configuration.
@@ -10695,6 +10789,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10731,6 +10826,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -10767,6 +10863,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -10895,6 +10992,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -10958,6 +11056,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -11014,6 +11113,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11050,6 +11150,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11086,6 +11187,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -11145,6 +11247,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11181,6 +11284,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -11230,6 +11334,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -11279,6 +11384,7 @@ mod tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
         assert!(task.tags.is_empty());
@@ -11322,6 +11428,7 @@ mod tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -11382,6 +11489,7 @@ mod tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -11434,6 +11542,7 @@ mod tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -11486,6 +11595,7 @@ mod tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -11538,6 +11648,7 @@ mod tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -11597,6 +11708,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -11633,6 +11745,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -11669,6 +11782,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             },
         ];
@@ -11720,6 +11834,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -11756,6 +11871,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -11792,6 +11908,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             },
         ];
@@ -11839,6 +11956,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -11875,6 +11993,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             },
             DownloadTask {
@@ -11911,6 +12030,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             },
         ];
@@ -11960,6 +12080,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -11996,6 +12117,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -12043,6 +12165,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12079,6 +12202,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12115,6 +12239,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -12167,6 +12292,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12203,6 +12329,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12239,6 +12366,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -12367,6 +12495,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -12423,6 +12552,7 @@ mod tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -12574,6 +12704,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -12647,6 +12778,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -12701,6 +12833,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12737,6 +12870,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -12773,6 +12907,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -12853,6 +12988,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -12906,6 +13042,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -12956,6 +13093,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -13038,6 +13176,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -13097,6 +13236,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13133,6 +13273,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -13186,6 +13327,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13222,6 +13364,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -13275,6 +13418,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13311,6 +13455,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13347,6 +13492,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -13398,6 +13544,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13434,6 +13581,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13470,6 +13618,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -13522,6 +13671,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13558,6 +13708,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
             tasks.push(DownloadTask {
@@ -13594,6 +13745,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
                 current_session_start: None,
             });
         }
@@ -14207,6 +14359,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
             };
             dm.tasks.lock().await.push(task);
         }
@@ -14814,6 +14967,7 @@ mod max_concurrent_tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -14870,6 +15024,7 @@ mod max_concurrent_tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -14925,6 +15080,7 @@ mod max_concurrent_tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         };
 
@@ -14986,6 +15142,7 @@ mod max_concurrent_tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         });
         drop(tasks);
@@ -15057,6 +15214,7 @@ mod max_concurrent_tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         });
         drop(tasks);
@@ -15126,6 +15284,7 @@ mod max_concurrent_tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
             current_session_start: None,
         });
         drop(tasks);

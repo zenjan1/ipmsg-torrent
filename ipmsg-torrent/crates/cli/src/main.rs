@@ -506,6 +506,11 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    DlDeadline {
+        /// Subcommand: status|set|remove|list|summary|refresh|clear
+        subcommand: String,
+        args: Vec<String>,
+    },
     DlRetryQuota {
         /// Subcommand: status|enable|disable|set|reset
         subcommand: String,
@@ -1596,6 +1601,25 @@ fn parse_command(input: &str) -> Command {
                     Vec::new()
                 };
                 Command::DlNetworkAware {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
+        "dldeadline" | "dl-deadline" | "dlddl" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dldeadline <status|set|remove|list|summary|refresh|clear>".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlDeadline {
                     subcommand,
                     args: cmd_args,
                 }
@@ -10366,6 +10390,144 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlnetwork <status|enable|disable|config|summary|probe|paused|clear|reset>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlDeadline { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_deadline_config().await;
+                    let summary = download_manager.get_deadline_summary().await;
+                    let enabled_str = if config.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    };
+                    let msg = format!(
+                        "Download Deadline Status:\n\
+                         Status: {}\n\
+                         Auto-boost priority: {}\n\
+                         Notify approaching: {}\n\
+                         Notify hours before: {:.1}\n\
+                         Auto-pause non-urgent: {}\n\
+                         Low threshold: {:.1}h\n\
+                         Medium threshold: {:.1}h\n\
+                         High threshold: {:.1}h\n\
+                         {}",
+                        enabled_str,
+                        if config.auto_boost_priority {
+                            "yes"
+                        } else {
+                            "no"
+                        },
+                        if config.notify_approaching {
+                            "yes"
+                        } else {
+                            "no"
+                        },
+                        config.notify_hours_before,
+                        if config.auto_pause_non_urgent {
+                            "yes"
+                        } else {
+                            "no"
+                        },
+                        config.low_threshold_hours,
+                        config.medium_threshold_hours,
+                        config.high_threshold_hours,
+                        summary.format_summary(),
+                    );
+                    s.add_system_message("main", msg);
+                }
+                "set" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dldeadline set <task_id> <deadline_rfc3339> [enabled]"
+                                .to_string(),
+                        );
+                    } else {
+                        let task_id = &args[0];
+                        let deadline_str = &args[1];
+                        let enabled = args.get(2).map(|s| s == "true" || s == "1").unwrap_or(true);
+
+                        match chrono::DateTime::parse_from_rfc3339(deadline_str) {
+                            Ok(dt) => {
+                                download_manager
+                                    .set_task_deadline(
+                                        task_id,
+                                        dt.with_timezone(&chrono::Utc),
+                                        enabled,
+                                    )
+                                    .await;
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "Set deadline for task {} to {} (enabled: {})",
+                                        task_id, dt, enabled
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                s.add_system_message(
+                                    "main",
+                                    format!("Invalid deadline format: {}. Use RFC3339 format (e.g., 2026-08-10T15:00:00Z)", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "remove" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dldeadline remove <task_id>".to_string(),
+                        );
+                    } else {
+                        let task_id = &args[0];
+                        let removed = download_manager.remove_task_deadline(task_id).await;
+                        if removed {
+                            s.add_system_message(
+                                "main",
+                                format!("Removed deadline for task {}", task_id),
+                            );
+                        } else {
+                            s.add_system_message(
+                                "main",
+                                format!("No deadline found for task {}", task_id),
+                            );
+                        }
+                    }
+                }
+                "list" => {
+                    let summary = download_manager.get_deadline_summary().await;
+                    s.add_system_message("main", summary.format_summary());
+                }
+                "summary" => {
+                    let summary = download_manager.get_deadline_summary().await;
+                    s.add_system_message("main", summary.format_summary());
+                }
+                "refresh" => {
+                    download_manager.refresh_deadlines().await;
+                    s.add_system_message(
+                        "main",
+                        "Refreshed all deadline urgency levels".to_string(),
+                    );
+                }
+                "clear" => {
+                    download_manager.clear_all_deadlines().await;
+                    s.add_system_message("main", "Cleared all deadlines".to_string());
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dldeadline <status|set|remove|list|summary|refresh|clear>"
+                            .to_string(),
                     );
                 }
             }

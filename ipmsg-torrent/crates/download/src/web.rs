@@ -630,6 +630,19 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/auto-actions/history/clear",
             post(clear_auto_actions_history_handler),
         )
+        .route("/api/deadline", get(get_deadline_handler))
+        .route("/api/deadline", post(set_deadline_handler))
+        .route("/api/deadline/summary", get(get_deadline_summary_handler))
+        .route("/api/deadline/refresh", post(refresh_deadlines_handler))
+        .route("/api/deadline/clear", post(clear_deadlines_handler))
+        .route(
+            "/api/deadline/task/:task_id",
+            post(set_task_deadline_handler),
+        )
+        .route(
+            "/api/deadline/task/:task_id",
+            axum::routing::delete(remove_task_deadline_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -2821,6 +2834,86 @@ async fn reset_network_aware_handler(
 ) -> impl axum::response::IntoResponse {
     state.manager.reset_network_aware().await;
     Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get deadline configuration
+async fn get_deadline_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_deadline_config().await;
+    Json(serde_json::json!({
+        "config": config,
+        "enabled": config.enabled,
+        "low_threshold_hours": config.low_threshold_hours,
+        "medium_threshold_hours": config.medium_threshold_hours,
+        "high_threshold_hours": config.high_threshold_hours
+    }))
+}
+
+/// Set deadline configuration
+async fn set_deadline_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::download_deadline::DeadlineConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_deadline_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get deadline summary
+async fn get_deadline_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_deadline_summary().await;
+    Json(summary)
+}
+
+/// Refresh all deadline urgency levels
+async fn refresh_deadlines_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.refresh_deadlines().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Clear all deadlines
+async fn clear_deadlines_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_all_deadlines().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Set deadline for a specific task
+async fn set_task_deadline_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let deadline_str = body.get("deadline").and_then(|v| v.as_str()).unwrap_or("");
+    let enabled = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    match chrono::DateTime::parse_from_rfc3339(deadline_str) {
+        Ok(dt) => {
+            state
+                .manager
+                .set_task_deadline(&task_id, dt.with_timezone(&chrono::Utc), enabled)
+                .await;
+            Json(serde_json::json!({"status": "ok", "task_id": task_id}))
+        }
+        Err(e) => Json(serde_json::json!({"error": format!("Invalid deadline format: {}", e)})),
+    }
+}
+
+/// Remove deadline for a specific task
+async fn remove_task_deadline_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let removed = state.manager.remove_task_deadline(&task_id).await;
+    Json(serde_json::json!({"removed": removed, "task_id": task_id}))
 }
 
 /// Get retry quota usage
@@ -5339,6 +5432,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
             },
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -5856,6 +5950,7 @@ mod tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
         };
         let info = TaskInfo::from(task);
         assert_eq!(info.depends_on, vec!["task-0".to_string()]);

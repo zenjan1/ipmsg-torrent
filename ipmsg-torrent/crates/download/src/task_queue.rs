@@ -61,6 +61,9 @@ pub struct PersistedTask {
     /// Number of times this task has been auto-promoted by queue staleness detection
     #[serde(default)]
     pub staleness_promotion_count: u32,
+    /// Optional deadline (UTC timestamp)
+    #[serde(default)]
+    pub deadline: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn default_bandwidth_weight() -> u8 {
@@ -166,6 +169,7 @@ impl From<DownloadTask> for PersistedTask {
             notes: t.notes,
             max_download_time_secs: t.max_download_time_secs,
             staleness_promotion_count: t.staleness_promotion_count,
+            deadline: t.deadline,
         }
     }
 }
@@ -207,6 +211,7 @@ impl From<PersistedTask> for DownloadTask {
             max_download_time_secs: t.max_download_time_secs,
             proxy_override: None,
             staleness_promotion_count: t.staleness_promotion_count,
+            deadline: t.deadline,
         }
     }
 }
@@ -327,6 +332,7 @@ mod tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
         };
 
         let persisted: PersistedTask = task.clone().into();
@@ -400,6 +406,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
             },
             DownloadTask {
                 id: "task-2".to_string(),
@@ -436,6 +443,7 @@ mod tests {
                 max_download_time_secs: None,
                 proxy_override: None,
                 staleness_promotion_count: 0,
+                deadline: None,
             },
         ];
 
@@ -501,6 +509,7 @@ mod tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();
@@ -551,6 +560,7 @@ mod tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
         };
 
         save_task_queue(&[task], data_dir).unwrap();
@@ -598,6 +608,7 @@ mod tests {
             max_download_time_secs: None,
             proxy_override: None,
             staleness_promotion_count: 0,
+            deadline: None,
         };
 
         save_task_queue(&[task2], data_dir).unwrap();
