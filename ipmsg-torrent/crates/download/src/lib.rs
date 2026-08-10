@@ -35,6 +35,7 @@ pub mod download_snapshot;
 pub mod download_stats;
 pub mod download_templates;
 pub mod download_time_limit;
+pub mod duplicate_detection;
 pub mod ed2k;
 pub mod error_recovery;
 pub mod eta_estimator;
@@ -900,6 +901,8 @@ pub struct DownloadManager {
     integrity: Arc<Mutex<integrity_verification::IntegrityManager>>,
     /// Resume policy configuration for controlling task restoration on startup
     resume_policy: Arc<tokio::sync::RwLock<resume_policy::ResumePolicyConfig>>,
+    /// Duplicate detection manager for identifying redundant download tasks
+    duplicate_detection: Arc<Mutex<duplicate_detection::DuplicateDetectionManager>>,
 }
 
 impl DownloadManager {
@@ -1039,6 +1042,9 @@ impl DownloadManager {
             integrity: Arc::new(Mutex::new(integrity_verification::IntegrityManager::new())),
             resume_policy: Arc::new(tokio::sync::RwLock::new(
                 resume_policy::ResumePolicyConfig::default(),
+            )),
+            duplicate_detection: Arc::new(Mutex::new(
+                duplicate_detection::DuplicateDetectionManager::new(),
             )),
         };
         dm.start_scheduler();
@@ -1311,6 +1317,9 @@ impl DownloadManager {
             integrity: Arc::new(Mutex::new(integrity_verification::IntegrityManager::new())),
             resume_policy: Arc::new(tokio::sync::RwLock::new(
                 resume_policy::ResumePolicyConfig::default(),
+            )),
+            duplicate_detection: Arc::new(Mutex::new(
+                duplicate_detection::DuplicateDetectionManager::new(),
             )),
         };
         // Restore resume policy config from disk
@@ -10740,6 +10749,101 @@ impl DownloadManager {
         let mgr = self.download_templates.lock().await;
         let templates = mgr.list_templates();
         download_templates::save_templates(templates, &self.data_dir)
+    }
+
+    // ========== Duplicate Detection ==========
+
+    /// Set duplicate detection configuration
+    pub async fn set_duplicate_detection_config(
+        &self,
+        config: duplicate_detection::DuplicateDetectionConfig,
+    ) {
+        let mut mgr = self.duplicate_detection.lock().await;
+        mgr.set_config(config);
+    }
+
+    /// Get duplicate detection configuration
+    pub async fn get_duplicate_detection_config(
+        &self,
+    ) -> duplicate_detection::DuplicateDetectionConfig {
+        let mgr = self.duplicate_detection.lock().await;
+        mgr.config().clone()
+    }
+
+    /// Detect duplicates among current download tasks
+    pub async fn detect_duplicate_tasks(&self) -> Vec<duplicate_detection::DuplicateGroup> {
+        let tasks = self.tasks.lock().await;
+        let task_data: Vec<duplicate_detection::TaskDuplicateData> = tasks
+            .iter()
+            .map(|t| {
+                // Convert chrono DateTime to SystemTime
+                let created_at = std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_secs(t.created_at.timestamp() as u64);
+
+                duplicate_detection::TaskDuplicateData {
+                    task_id: t.id.clone(),
+                    task_name: t.name.clone(),
+                    url: t.source_url.clone().unwrap_or_default(),
+                    checksum: t.expected_checksum.clone(),
+                    file_size: Some(t.size),
+                    state: format!("{:?}", t.state),
+                    priority: match t.priority {
+                        DownloadPriority::High => 2,
+                        DownloadPriority::Normal => 1,
+                        DownloadPriority::Low => 0,
+                    },
+                    created_at,
+                }
+            })
+            .collect();
+
+        let mut mgr = self.duplicate_detection.lock().await;
+        mgr.detect_duplicates(&task_data)
+    }
+
+    /// Get all duplicate groups
+    pub async fn get_duplicate_groups(&self) -> Vec<duplicate_detection::DuplicateGroup> {
+        let mgr = self.duplicate_detection.lock().await;
+        mgr.get_duplicate_groups().into_iter().cloned().collect()
+    }
+
+    /// Get duplicate group for a specific task
+    pub async fn get_task_duplicate_group(
+        &self,
+        task_id: &str,
+    ) -> Option<duplicate_detection::DuplicateGroup> {
+        let mgr = self.duplicate_detection.lock().await;
+        mgr.get_task_duplicate_group(task_id).cloned()
+    }
+
+    /// Get duplicate detection summary
+    pub async fn get_duplicate_summary(&self) -> duplicate_detection::DuplicateSummary {
+        let mgr = self.duplicate_detection.lock().await;
+        mgr.get_summary()
+    }
+
+    /// Clear all duplicate detection results
+    pub async fn clear_duplicate_groups(&self) {
+        let mut mgr = self.duplicate_detection.lock().await;
+        mgr.clear_duplicate_groups();
+    }
+
+    /// Save duplicate detection configuration to disk
+    pub async fn save_duplicate_detection_config(&self) -> std::io::Result<()> {
+        let mgr = self.duplicate_detection.lock().await;
+        let path = self.data_dir.join("duplicate_detection_config.json");
+        mgr.save_config(&path)
+    }
+
+    /// Load duplicate detection configuration from disk
+    pub async fn load_duplicate_detection_config(&self) -> std::io::Result<()> {
+        let path = self.data_dir.join("duplicate_detection_config.json");
+        if path.exists() {
+            let config = duplicate_detection::DuplicateDetectionManager::load_config(&path)?;
+            let mut mgr = self.duplicate_detection.lock().await;
+            mgr.set_config(config);
+        }
+        Ok(())
     }
 }
 
