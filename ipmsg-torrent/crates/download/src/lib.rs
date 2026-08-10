@@ -24,6 +24,7 @@ pub mod connection_health;
 pub mod connection_pool;
 pub mod csv_export;
 pub mod data_cap;
+pub mod data_retention;
 pub mod dependency_graph;
 pub mod dht;
 pub mod disk_monitor;
@@ -60,6 +61,7 @@ pub mod mirror_health;
 pub mod network_aware;
 pub mod network_monitor;
 pub mod notification;
+pub mod path_organizer;
 pub mod path_rules;
 pub mod path_template;
 pub mod path_validator;
@@ -82,6 +84,7 @@ pub mod save_path_manager;
 pub mod segment_download;
 pub mod smart_queue;
 pub mod source_benchmark;
+pub mod source_quality;
 pub mod source_rotation;
 pub mod speed_alert;
 pub mod speed_anomaly;
@@ -992,6 +995,12 @@ pub struct DownloadManager {
     speed_benchmark: Arc<Mutex<speed_benchmark::SpeedBenchmarkManager>>,
     /// Event webhook manager for sending HTTP notifications on download events
     event_webhook: Arc<Mutex<event_webhook::WebhookManager>>,
+    /// Path organizer manager for automatic file organization by extension
+    path_organizer: Arc<Mutex<path_organizer::PathOrganizerManager>>,
+    /// Data retention policy manager for automatic lifecycle management
+    data_retention: Arc<Mutex<data_retention::DataRetentionManager>>,
+    /// Download source quality tracker for long-term reliability scoring
+    source_quality: Arc<Mutex<source_quality::SourceQualityManager>>,
 }
 
 impl DownloadManager {
@@ -1190,6 +1199,13 @@ impl DownloadManager {
             )),
             speed_benchmark: Arc::new(Mutex::new(speed_benchmark::SpeedBenchmarkManager::new())),
             event_webhook: Arc::new(Mutex::new(event_webhook::WebhookManager::new(
+                data_dir.clone(),
+            ))),
+            path_organizer: Arc::new(Mutex::new(path_organizer::PathOrganizerManager::new())),
+            data_retention: Arc::new(Mutex::new(data_retention::DataRetentionManager::new(
+                data_dir.clone(),
+            ))),
+            source_quality: Arc::new(Mutex::new(source_quality::SourceQualityManager::new(
                 data_dir.clone(),
             ))),
         };
@@ -1524,6 +1540,13 @@ impl DownloadManager {
             event_webhook: Arc::new(Mutex::new(event_webhook::WebhookManager::new(
                 data_dir.clone(),
             ))),
+            path_organizer: Arc::new(Mutex::new(path_organizer::PathOrganizerManager::new())),
+            data_retention: Arc::new(Mutex::new(data_retention::DataRetentionManager::new(
+                data_dir.clone(),
+            ))),
+            source_quality: Arc::new(Mutex::new(source_quality::SourceQualityManager::new(
+                data_dir.clone(),
+            ))),
         };
         // Restore tag manager from disk
         dm.tag_manager.restore().await;
@@ -1560,6 +1583,20 @@ impl DownloadManager {
         // Restore event webhook config from disk
         if let Ok(()) = dm.event_webhook.lock().await.load_config().await {
             // Config loaded successfully
+        }
+        // Restore path organizer config from disk
+        let path_organizer_config_path = dm.data_dir.join("path_organizer_config.json");
+        if let Ok(loaded_manager) =
+            path_organizer::load_path_organizer_config(&path_organizer_config_path).await
+        {
+            *dm.path_organizer.lock().await = loaded_manager;
+        }
+        // Restore source quality config from disk
+        if let Ok(()) = dm.source_quality.lock().await.load_config().await {
+            // Config loaded successfully
+        }
+        if let Ok(()) = dm.source_quality.lock().await.load_sources().await {
+            // Sources loaded successfully
         }
         // Apply resume policy to tasks that were downloading
         {
@@ -9848,6 +9885,306 @@ impl DownloadManager {
     /// Load webhook configuration from disk
     pub async fn load_webhook_config(&self) -> Result<(), event_webhook::WebhookError> {
         self.event_webhook.lock().await.load_config().await
+    }
+
+    // ── Path Organizer API ───────────────────────────────────────────────
+
+    /// Get path organizer configuration
+    pub async fn get_path_organizer_config(&self) -> path_organizer::PathOrganizerConfig {
+        self.path_organizer.lock().await.config.clone()
+    }
+
+    /// Set path organizer configuration
+    pub async fn set_path_organizer_config(&self, config: path_organizer::PathOrganizerConfig) {
+        self.path_organizer.lock().await.config = config;
+    }
+
+    /// Enable or disable path organizer
+    pub async fn set_path_organizer_enabled(&self, enabled: bool) {
+        self.path_organizer.lock().await.set_enabled(enabled);
+    }
+
+    /// Add a custom file category
+    pub async fn add_file_category(&self, category: path_organizer::FileCategory) {
+        self.path_organizer.lock().await.add_category(category);
+    }
+
+    /// Remove a file category by name
+    pub async fn remove_file_category(&self, name: &str) -> bool {
+        self.path_organizer.lock().await.remove_category(name)
+    }
+
+    /// List all file categories
+    pub async fn list_file_categories(&self) -> Vec<path_organizer::FileCategory> {
+        self.path_organizer.lock().await.list_categories().to_vec()
+    }
+
+    /// Get path organizer summary/statistics
+    pub async fn get_path_organizer_summary(&self) -> path_organizer::PathOrganizerSummary {
+        self.path_organizer.lock().await.get_summary().clone()
+    }
+
+    /// Reset path organizer statistics
+    pub async fn reset_path_organizer_summary(&self) {
+        self.path_organizer.lock().await.reset_summary();
+    }
+
+    /// Organize a completed download file into category directory
+    pub async fn organize_completed_file(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<path_organizer::OrganizeResult>, path_organizer::PathOrganizerError> {
+        let tasks = self.tasks.lock().await;
+        let task = tasks.iter().find(|t| t.id == task_id);
+        let (file_path, save_path) = match task {
+            Some(t) => (
+                t.save_path.clone(),
+                t.save_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_default(),
+            ),
+            None => return Ok(None),
+        };
+        drop(tasks);
+
+        if !file_path.exists() {
+            return Err(path_organizer::PathOrganizerError::FileNotFound(
+                file_path.display().to_string(),
+            ));
+        }
+
+        let result = self
+            .path_organizer
+            .lock()
+            .await
+            .organize_file(&file_path, &save_path)
+            .await?;
+
+        // Update task save_path if file was moved
+        if let Some(ref r) = result
+            && r.moved
+        {
+            let mut tasks = self.tasks.lock().await;
+            if let Some(t) = tasks.iter_mut().find(|t| t.id == task_id) {
+                t.save_path = r.new_path.clone();
+                drop(tasks);
+                self.persist_tasks().await;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Save path organizer configuration to disk
+    pub async fn save_path_organizer_config(
+        &self,
+    ) -> Result<(), path_organizer::PathOrganizerError> {
+        let config_path = self.data_dir.join("path_organizer_config.json");
+        let manager = self.path_organizer.lock().await;
+        path_organizer::save_path_organizer_config(&manager, &config_path).await
+    }
+
+    /// Load path organizer configuration from disk
+    pub async fn load_path_organizer_config(
+        &self,
+    ) -> Result<(), path_organizer::PathOrganizerError> {
+        let config_path = self.data_dir.join("path_organizer_config.json");
+        let manager = path_organizer::load_path_organizer_config(&config_path).await?;
+        *self.path_organizer.lock().await = manager;
+        Ok(())
+    }
+
+    // ===== Data Retention Policy API =====
+
+    /// Get data retention configuration.
+    pub async fn get_data_retention_config(&self) -> data_retention::DataRetentionConfig {
+        self.data_retention.lock().await.get_config().clone()
+    }
+
+    /// Set data retention configuration.
+    pub async fn set_data_retention_config(
+        &self,
+        config: data_retention::DataRetentionConfig,
+    ) -> Result<(), data_retention::DataRetentionError> {
+        self.data_retention.lock().await.set_config(config)
+    }
+
+    /// Enable or disable data retention.
+    pub async fn set_data_retention_enabled(&self, enabled: bool) {
+        let mut manager = self.data_retention.lock().await;
+        let mut config = manager.get_config().clone();
+        config.enabled = enabled;
+        let _ = manager.set_config(config);
+    }
+
+    /// Add a data retention rule.
+    pub async fn add_data_retention_rule(
+        &self,
+        rule: data_retention::RetentionRule,
+    ) -> Result<(), data_retention::DataRetentionError> {
+        self.data_retention.lock().await.add_rule(rule)
+    }
+
+    /// Remove a data retention rule.
+    pub async fn remove_data_retention_rule(&self, rule_id: &str) -> bool {
+        self.data_retention.lock().await.remove_rule(rule_id)
+    }
+
+    /// List all data retention rules.
+    pub async fn list_data_retention_rules(&self) -> Vec<data_retention::RetentionRule> {
+        self.data_retention.lock().await.list_rules().to_vec()
+    }
+
+    /// Get data retention summary.
+    pub async fn get_data_retention_summary(&self) -> data_retention::DataRetentionSummary {
+        self.data_retention.lock().await.get_summary()
+    }
+
+    /// Register a completed download for retention tracking.
+    pub async fn register_completed_download(&self, download: data_retention::CompletedDownload) {
+        self.data_retention
+            .lock()
+            .await
+            .register_completed(download);
+    }
+
+    /// Find cleanup candidates based on a reason.
+    pub async fn find_retention_cleanup_candidates(
+        &self,
+        reason: data_retention::CleanupReason,
+    ) -> Vec<data_retention::CompletedDownload> {
+        self.data_retention
+            .lock()
+            .await
+            .find_cleanup_candidates(&reason)
+    }
+
+    /// Execute retention cleanup.
+    pub async fn execute_retention_cleanup(
+        &self,
+        reason: data_retention::CleanupReason,
+    ) -> Result<data_retention::CleanupResult, data_retention::DataRetentionError> {
+        let candidates = self
+            .data_retention
+            .lock()
+            .await
+            .find_cleanup_candidates(&reason);
+        self.data_retention
+            .lock()
+            .await
+            .execute_cleanup(candidates, reason)
+    }
+
+    /// Get cleanup history.
+    pub async fn get_data_retention_history(&self) -> Vec<data_retention::CleanupResult> {
+        self.data_retention
+            .lock()
+            .await
+            .get_cleanup_history()
+            .to_vec()
+    }
+
+    /// Clear data retention cleanup history.
+    pub async fn clear_data_retention_history(&self) {
+        self.data_retention.lock().await.clear_history();
+    }
+
+    /// Check if disk pressure cleanup should trigger.
+    pub async fn check_data_retention_disk_pressure(
+        &self,
+        free_space_mb: u64,
+        total_space_mb: u64,
+    ) -> bool {
+        self.data_retention
+            .lock()
+            .await
+            .check_disk_pressure(free_space_mb, total_space_mb)
+    }
+
+    // ── Source Quality API ───────────────────────────────────────────────
+
+    /// Get source quality configuration
+    pub async fn get_source_quality_config(&self) -> source_quality::SourceQualityConfig {
+        self.source_quality.lock().await.get_config().clone()
+    }
+
+    /// Set source quality configuration
+    pub async fn set_source_quality_config(&self, config: source_quality::SourceQualityConfig) {
+        self.source_quality.lock().await.set_config(config);
+    }
+
+    /// Record a successful download for source quality tracking (with speed)
+    pub async fn record_source_success_with_speed(
+        &self,
+        source_id: &str,
+        bytes: u64,
+        speed_bps: f64,
+    ) {
+        self.source_quality
+            .lock()
+            .await
+            .record_success(source_id, bytes, speed_bps);
+    }
+
+    /// Record a failed download for source quality tracking
+    pub async fn record_source_quality_failure(&self, source_id: &str) {
+        self.source_quality.lock().await.record_failure(source_id);
+    }
+
+    /// Get quality info for a specific source
+    pub async fn get_source_quality(
+        &self,
+        source_id: &str,
+    ) -> Option<source_quality::SourceQuality> {
+        self.source_quality
+            .lock()
+            .await
+            .get_source(source_id)
+            .cloned()
+    }
+
+    /// Get source quality summary/statistics
+    pub async fn get_source_quality_summary(&self) -> source_quality::SourceQualitySummary {
+        self.source_quality.lock().await.get_summary()
+    }
+
+    /// Recommend the best source from a list of candidates
+    pub async fn recommend_source_quality(&self, candidates: &[String]) -> Option<String> {
+        self.source_quality
+            .lock()
+            .await
+            .recommend_source(candidates)
+    }
+
+    /// Check if a source is currently blocked
+    pub async fn is_source_quality_blocked(&self, source_id: &str) -> bool {
+        self.source_quality.lock().await.is_blocked(source_id)
+    }
+
+    /// Manually unblock a source
+    pub async fn unblock_source_quality(&self, source_id: &str) -> bool {
+        self.source_quality.lock().await.unblock_source(source_id)
+    }
+
+    /// Remove a source from quality tracking
+    pub async fn remove_source_quality(&self, source_id: &str) -> bool {
+        self.source_quality.lock().await.remove_source(source_id)
+    }
+
+    /// Clear all source quality data
+    pub async fn clear_source_quality(&self) {
+        self.source_quality.lock().await.clear_all();
+    }
+
+    /// Save source quality config to disk
+    pub async fn save_source_quality_config(&self) -> Result<(), std::io::Error> {
+        self.source_quality.lock().await.save_config().await
+    }
+
+    /// Load source quality config from disk
+    pub async fn load_source_quality_config(&self) -> Result<(), std::io::Error> {
+        self.source_quality.lock().await.load_config().await
     }
 
     /// Set the priority of a download task.
@@ -19293,5 +19630,66 @@ mod url_allowlist_tests {
         let dm = DownloadManager::new(dir.path().to_path_buf());
         let result = dm.set_task_proxy_enabled("nonexistent", true).await;
         assert!(result.is_err());
+    }
+
+    // ========== Phase 134: Config Persistence Restoration Tests ==========
+
+    #[tokio::test]
+    async fn test_path_organizer_config_restore_on_startup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        // Create first DM and configure path organizer
+        let dm1 = DownloadManager::new(temp_dir.path().to_path_buf());
+        dm1.set_path_organizer_enabled(true).await;
+        let category = path_organizer::FileCategory {
+            name: "test_category".to_string(),
+            extensions: vec![".test".to_string()],
+            target_dir: "test_output".to_string(),
+            enabled: true,
+        };
+        dm1.add_file_category(category).await;
+        // Save config to disk
+        dm1.save_path_organizer_config().await.unwrap();
+
+        // Create new DM via new_with_restore (simulates restart)
+        let dm2 = DownloadManager::new_with_restore(temp_dir.path().to_path_buf()).await;
+        let config = dm2.get_path_organizer_config().await;
+        assert!(config.enabled);
+        assert!(
+            config.categories.iter().any(|c| c.name == "test_category"),
+            "Path organizer categories should be restored"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_source_quality_config_restore_on_startup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        // Create first DM and configure source quality
+        let dm1 = DownloadManager::new(temp_dir.path().to_path_buf());
+        let mut config = dm1.get_source_quality_config().await;
+        config.block_duration_secs = 9999;
+        dm1.set_source_quality_config(config).await;
+        dm1.save_source_quality_config().await.unwrap();
+
+        // Create new DM via new_with_restore (simulates restart)
+        let dm2 = DownloadManager::new_with_restore(temp_dir.path().to_path_buf()).await;
+        let config2 = dm2.get_source_quality_config().await;
+        assert_eq!(
+            config2.block_duration_secs, 9999,
+            "Source quality config should be restored"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_phase134_restore_no_config_files() {
+        // Verify new_with_restore works fine when no config files exist
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new_with_restore(temp_dir.path().to_path_buf()).await;
+        let po_config = dm.get_path_organizer_config().await;
+        assert!(
+            !po_config.enabled,
+            "Path organizer should default to disabled"
+        );
+        let sq_config = dm.get_source_quality_config().await;
+        assert_eq!(sq_config.block_duration_secs, 3600);
     }
 }

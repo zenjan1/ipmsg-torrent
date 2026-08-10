@@ -888,6 +888,108 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/webhook/history",
             post(clear_all_webhook_history_handler),
         )
+        .route(
+            "/api/path-organizer",
+            get(get_path_organizer_config_handler),
+        )
+        .route(
+            "/api/path-organizer",
+            post(set_path_organizer_config_handler),
+        )
+        .route(
+            "/api/path-organizer/summary",
+            get(get_path_organizer_summary_handler),
+        )
+        .route(
+            "/api/path-organizer/reset",
+            post(reset_path_organizer_summary_handler),
+        )
+        .route(
+            "/api/path-organizer/categories",
+            get(list_file_categories_handler),
+        )
+        .route(
+            "/api/path-organizer/categories",
+            post(add_file_category_handler),
+        )
+        .route(
+            "/api/path-organizer/categories/:name",
+            delete(remove_file_category_handler),
+        )
+        .route(
+            "/api/path-organizer/organize/:task_id",
+            post(organize_task_handler),
+        )
+        // Data Retention API
+        .route(
+            "/api/data-retention",
+            get(get_data_retention_config_handler),
+        )
+        .route(
+            "/api/data-retention",
+            post(set_data_retention_config_handler),
+        )
+        .route(
+            "/api/data-retention/summary",
+            get(get_data_retention_summary_handler),
+        )
+        .route(
+            "/api/data-retention/rules",
+            get(list_data_retention_rules_handler),
+        )
+        .route(
+            "/api/data-retention/rules",
+            post(add_data_retention_rule_handler),
+        )
+        .route(
+            "/api/data-retention/rules/:id",
+            delete(remove_data_retention_rule_handler),
+        )
+        .route(
+            "/api/data-retention/cleanup",
+            post(execute_data_retention_cleanup_handler),
+        )
+        .route(
+            "/api/data-retention/history",
+            get(get_data_retention_history_handler),
+        )
+        .route(
+            "/api/data-retention/history/clear",
+            post(clear_data_retention_history_handler),
+        )
+        // Source Quality API
+        .route(
+            "/api/source-quality",
+            get(get_source_quality_config_handler),
+        )
+        .route(
+            "/api/source-quality",
+            post(set_source_quality_config_handler),
+        )
+        .route(
+            "/api/source-quality/summary",
+            get(get_source_quality_summary_handler),
+        )
+        .route(
+            "/api/source-quality/:source_id",
+            get(get_source_quality_detail_handler),
+        )
+        .route(
+            "/api/source-quality/:source_id/unblock",
+            post(unblock_source_quality_handler),
+        )
+        .route(
+            "/api/source-quality/:source_id",
+            delete(remove_source_quality_handler),
+        )
+        .route(
+            "/api/source-quality/recommend",
+            post(recommend_source_quality_handler),
+        )
+        .route(
+            "/api/source-quality/clear",
+            post(clear_source_quality_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -8308,4 +8410,314 @@ struct WebhookEndpointUpdateRequest {
     max_retries: Option<u32>,
     events: Option<Vec<crate::event_webhook::WebhookEvent>>,
     headers: Option<std::collections::HashMap<String, String>>,
+}
+
+// ===== Path Organizer API Handlers =====
+
+/// GET /api/path-organizer - Get path organizer configuration
+async fn get_path_organizer_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_path_organizer_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/path-organizer - Set path organizer configuration
+async fn set_path_organizer_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::path_organizer::PathOrganizerConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_path_organizer_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/path-organizer/summary - Get path organizer summary
+async fn get_path_organizer_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_path_organizer_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// POST /api/path-organizer/reset - Reset path organizer summary
+async fn reset_path_organizer_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.reset_path_organizer_summary().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/path-organizer/categories - List file categories
+async fn list_file_categories_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let categories = state.manager.list_file_categories().await;
+    Json(serde_json::to_value(categories).unwrap_or_default())
+}
+
+/// POST /api/path-organizer/categories - Add a file category
+async fn add_file_category_handler(
+    State(state): State<Arc<WebState>>,
+    Json(category): Json<crate::path_organizer::FileCategory>,
+) -> impl axum::response::IntoResponse {
+    state.manager.add_file_category(category).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// DELETE /api/path-organizer/categories/:name - Remove a file category
+async fn remove_file_category_handler(
+    State(state): State<Arc<WebState>>,
+    Path(name): Path<String>,
+) -> impl axum::response::IntoResponse {
+    if state.manager.remove_file_category(&name).await {
+        Json(serde_json::json!({"status": "ok"})).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "category not found"})),
+        )
+            .into_response()
+    }
+}
+
+/// POST /api/path-organizer/organize/:task_id - Organize a task's file
+async fn organize_task_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> impl axum::response::IntoResponse {
+    let tasks = state.manager.list_tasks().await;
+    let task = tasks.iter().find(|t| t.id == task_id);
+    match task {
+        Some(t) => match state.manager.organize_completed_file(&t.id).await {
+            Ok(Some(result)) => {
+                Json(serde_json::to_value(result).unwrap_or_default()).into_response()
+            }
+            Ok(None) => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "file not found or already organized"})),
+            )
+                .into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response(),
+        },
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "task not found"})),
+        )
+            .into_response(),
+    }
+}
+
+// ===== Data Retention API Handlers =====
+
+/// GET /api/data-retention - Get data retention configuration
+async fn get_data_retention_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_data_retention_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/data-retention - Set data retention configuration
+async fn set_data_retention_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::data_retention::DataRetentionConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_data_retention_config(config).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/data-retention/summary - Get data retention summary
+async fn get_data_retention_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_data_retention_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/data-retention/rules - List retention rules
+async fn list_data_retention_rules_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let rules = state.manager.list_data_retention_rules().await;
+    Json(serde_json::to_value(rules).unwrap_or_default())
+}
+
+/// POST /api/data-retention/rules - Add a retention rule
+async fn add_data_retention_rule_handler(
+    State(state): State<Arc<WebState>>,
+    Json(rule): Json<crate::data_retention::RetentionRule>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.add_data_retention_rule(rule).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /api/data-retention/rules/:id - Remove a retention rule
+async fn remove_data_retention_rule_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> impl axum::response::IntoResponse {
+    if state.manager.remove_data_retention_rule(&id).await {
+        Json(serde_json::json!({"status": "ok"})).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "rule not found"})),
+        )
+            .into_response()
+    }
+}
+
+/// POST /api/data-retention/cleanup - Execute retention cleanup
+async fn execute_data_retention_cleanup_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let reason = match body.get("reason").and_then(|v| v.as_str()) {
+        Some("manual") => crate::data_retention::CleanupReason::Manual,
+        Some("retention_expired") => crate::data_retention::CleanupReason::RetentionExpired,
+        Some("disk_pressure") => crate::data_retention::CleanupReason::DiskPressure,
+        Some("size_limit") => crate::data_retention::CleanupReason::SizeLimitExceeded,
+        Some(r) => crate::data_retention::CleanupReason::RuleBased(r.to_string()),
+        None => crate::data_retention::CleanupReason::Manual,
+    };
+
+    match state.manager.execute_retention_cleanup(reason).await {
+        Ok(result) => Json(serde_json::to_value(result).unwrap_or_default()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/data-retention/history - Get cleanup history
+async fn get_data_retention_history_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let history = state.manager.get_data_retention_history().await;
+    Json(serde_json::to_value(history).unwrap_or_default())
+}
+
+/// POST /api/data-retention/history/clear - Clear cleanup history
+async fn clear_data_retention_history_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_data_retention_history().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+// ===== Source Quality API Handlers =====
+
+/// GET /api/source-quality - Get source quality configuration
+async fn get_source_quality_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_source_quality_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/source-quality - Set source quality configuration
+async fn set_source_quality_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::source_quality::SourceQualityConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_source_quality_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/source-quality/summary - Get source quality summary
+async fn get_source_quality_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_source_quality_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/source-quality/:source_id - Get quality details for a specific source
+async fn get_source_quality_detail_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(source_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.get_source_quality(&source_id).await {
+        Some(detail) => Json(serde_json::to_value(detail).unwrap_or_default()).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "source not found"})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/source-quality/:source_id/unblock - Unblock a source
+async fn unblock_source_quality_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(source_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let ok = state.manager.unblock_source_quality(&source_id).await;
+    if ok {
+        Json(serde_json::json!({"status": "ok"})).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "source not found"})),
+        )
+            .into_response()
+    }
+}
+
+/// DELETE /api/source-quality/:source_id - Remove a source from tracking
+async fn remove_source_quality_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(source_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let ok = state.manager.remove_source_quality(&source_id).await;
+    if ok {
+        Json(serde_json::json!({"status": "ok"})).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "source not found"})),
+        )
+            .into_response()
+    }
+}
+
+/// POST /api/source-quality/recommend - Recommend best source from candidates
+async fn recommend_source_quality_handler(
+    State(state): State<Arc<WebState>>,
+    Json(candidates): Json<Vec<String>>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.recommend_source_quality(&candidates).await {
+        Some(recommended) => Json(serde_json::json!({"recommended": recommended})).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no suitable source found"})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/source-quality/clear - Clear all source quality data
+async fn clear_source_quality_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_source_quality().await;
+    Json(serde_json::json!({"status": "ok"}))
 }

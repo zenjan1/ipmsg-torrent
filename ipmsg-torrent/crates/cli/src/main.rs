@@ -235,6 +235,24 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
+    /// Path organizer - auto-organize files by extension (Phase 133)
+    DlPathOrganizer {
+        /// "status", "enable", "disable", "add", "remove", "list", "organize"
+        action: String,
+        args: Vec<String>,
+    },
+    /// Data retention - auto-cleanup completed downloads (Phase 133)
+    DlDataRetention {
+        /// "status", "enable", "disable", "add", "remove", "list", "cleanup", "history"
+        action: String,
+        args: Vec<String>,
+    },
+    /// Source quality - track and score download sources (Phase 133)
+    DlSourceQuality {
+        /// "status", "summary", "unblock", "remove", "recommend", "clear"
+        action: String,
+        args: Vec<String>,
+    },
     /// Search/filter/sort download tasks
     DlFind {
         /// Search query (substring match in name, case-insensitive)
@@ -1004,6 +1022,42 @@ fn parse_command(input: &str) -> Command {
                 let action = parts[1].to_string();
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlSpeedTest { action, args }
+            }
+        }
+        "dlpathorg" | "dl-pathorg" | "dlpo" => {
+            if parts.len() < 2 {
+                Command::DlPathOrganizer {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlPathOrganizer { action, args }
+            }
+        }
+        "dlretention" | "dl-retention" => {
+            if parts.len() < 2 {
+                Command::DlDataRetention {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlDataRetention { action, args }
+            }
+        }
+        "dlsq" | "dl-sq" | "dlsourceq" => {
+            if parts.len() < 2 {
+                Command::DlSourceQuality {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlSourceQuality { action, args }
             }
         }
         "dlfind" | "dl-find" | "dlf" => {
@@ -6274,7 +6328,7 @@ async fn handle_command(
             match action.as_str() {
                 "status" => {
                     let summary = dm.get_webhook_summary().await;
-                    let mut msg = format!(
+                    let msg = format!(
                         "Webhook Summary:\n  Endpoints: {} total, {} enabled\n  Deliveries: {} total, {} successful, {} failed\n  Success Rate: {:.1}%",
                         summary.total_endpoints,
                         summary.enabled_endpoints,
@@ -6744,6 +6798,464 @@ async fn handle_command(
                 }
             }
         }
+
+        Command::DlPathOrganizer { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            match action.as_str() {
+                "status" => {
+                    let config = download_manager.get_path_organizer_config().await;
+                    let summary = download_manager.get_path_organizer_summary().await;
+                    let msg = format!(
+                        "Path Organizer Status:\n\
+                         Enabled: {}\n\
+                         Categories: {}\n\
+                         Files Organized: {}\n\
+                         Total Bytes Moved: {}",
+                        config.enabled,
+                        config.categories.len(),
+                        summary.total_organized,
+                        summary.total_bytes_moved
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "enable" => {
+                    download_manager.set_path_organizer_enabled(true).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Path organizer enabled".to_string());
+                }
+                "disable" => {
+                    download_manager.set_path_organizer_enabled(false).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Path organizer disabled".to_string());
+                }
+                "list" => {
+                    let categories = download_manager.list_file_categories().await;
+                    if categories.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No file categories defined".to_string());
+                    } else {
+                        let mut msg = format!("File Categories ({}):\n", categories.len());
+                        for cat in categories {
+                            msg.push_str(&format!(
+                                "  {} - extensions: {:?}\n",
+                                cat.name, cat.extensions
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "add" => {
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpathorg add <name> <ext1,ext2,...>".to_string(),
+                        );
+                    } else {
+                        let name = &args[0];
+                        let extensions: Vec<String> =
+                            args[1].split(',').map(|s| s.trim().to_string()).collect();
+                        let category = ipmsg_download::path_organizer::FileCategory {
+                            name: name.clone(),
+                            extensions,
+                            directory: name.to_lowercase(),
+                        };
+                        download_manager.add_file_category(category).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("Category '{}' added", name));
+                    }
+                }
+                "remove" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlpathorg remove <name>".to_string());
+                    } else {
+                        let name = &args[0];
+                        if download_manager.remove_file_category(name).await {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("Category '{}' removed", name));
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("Category '{}' not found", name));
+                        }
+                    }
+                }
+                "organize" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpathorg organize <task_id>".to_string(),
+                        );
+                    } else {
+                        let task_id = &args[0];
+                        match download_manager.organize_completed_file(task_id).await {
+                            Ok(Some(result)) => {
+                                let msg = format!(
+                                    "File organized:\n  Category: {}\n  Path: {}\n  Moved: {}",
+                                    result.category,
+                                    result.new_path.display(),
+                                    result.moved
+                                );
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", msg);
+                            }
+                            Ok(None) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "File not found or not completed".to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("Error: {}", e));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlpathorg [status|enable|disable|list|add|remove|organize]"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        Command::DlDataRetention { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            match action.as_str() {
+                "status" => {
+                    let config = download_manager.get_data_retention_config().await;
+                    let summary = download_manager.get_data_retention_summary().await;
+                    let msg = format!(
+                        "Data Retention Status:\n\
+                         Enabled: {}\n\
+                         Default Retention Days: {:?}\n\
+                         Max Total Size (MB): {:?}\n\
+                         Auto Cleanup on Pressure: {}\n\
+                         Total Completed: {}\n\
+                         Total Size: {:.2} MB\n\
+                         Estimated Cleanup Count: {}\n\
+                         Estimated Cleanup Size: {:.2} MB",
+                        config.enabled,
+                        config.default_retention_days,
+                        config.max_total_size_mb,
+                        config.auto_cleanup_on_pressure,
+                        summary.total_completed,
+                        summary.total_size_bytes as f64 / 1_048_576.0,
+                        summary.estimated_cleanup_count,
+                        summary.estimated_cleanup_bytes as f64 / 1_048_576.0
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "enable" => {
+                    download_manager.set_data_retention_enabled(true).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Data retention enabled".to_string());
+                }
+                "disable" => {
+                    download_manager.set_data_retention_enabled(false).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Data retention disabled".to_string());
+                }
+                "list" => {
+                    let rules = download_manager.list_data_retention_rules().await;
+                    if rules.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No retention rules defined".to_string());
+                    } else {
+                        let mut msg = format!("Retention Rules ({}):\n", rules.len());
+                        for rule in rules {
+                            msg.push_str(&format!(
+                                "  {} - {}: {:?}, days: {:?}, max_size: {:?} MB, enabled: {}\n",
+                                rule.id,
+                                if rule.is_tag { "tag" } else { "group" },
+                                rule.tag_or_group,
+                                rule.retention_days,
+                                rule.max_size_mb,
+                                rule.enabled
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "add" => {
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlretention add <tag|group> <value> <days>".to_string(),
+                        );
+                    } else {
+                        let rule_type = &args[0];
+                        let value = &args[1];
+                        let days: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
+                        let rule = match rule_type.as_str() {
+                            "tag" => ipmsg_download::data_retention::RetentionRule {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                tag_or_group: Some(value.clone()),
+                                is_tag: true,
+                                retention_days: Some(days),
+                                max_size_mb: None,
+                                cleanup_strategy:
+                                    ipmsg_download::data_retention::CleanupStrategy::OldestFirst,
+                                enabled: true,
+                                priority: 0,
+                            },
+                            "group" => ipmsg_download::data_retention::RetentionRule {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                tag_or_group: Some(value.clone()),
+                                is_tag: false,
+                                retention_days: Some(days),
+                                max_size_mb: None,
+                                cleanup_strategy:
+                                    ipmsg_download::data_retention::CleanupStrategy::OldestFirst,
+                                enabled: true,
+                                priority: 0,
+                            },
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Rule type must be 'tag' or 'group'".to_string(),
+                                );
+                                return;
+                            }
+                        };
+                        if let Err(e) = download_manager.add_data_retention_rule(rule).await {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("Error: {}", e));
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "Retention rule added".to_string());
+                        }
+                    }
+                }
+                "remove" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlretention remove <rule_id>".to_string(),
+                        );
+                    } else {
+                        let rule_id = &args[0];
+                        if download_manager.remove_data_retention_rule(rule_id).await {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "Rule removed".to_string());
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "Rule not found".to_string());
+                        }
+                    }
+                }
+                "cleanup" => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Running retention cleanup...".to_string());
+                    drop(s);
+                    let result = download_manager
+                        .execute_retention_cleanup(
+                            ipmsg_download::data_retention::CleanupReason::Manual,
+                        )
+                        .await;
+                    match result {
+                        Ok(cleaned) => {
+                            let msg = format!(
+                                "Cleanup complete:\n  Files removed: {}\n  Space freed: {:.2} GB",
+                                cleaned.files_deleted,
+                                cleaned.bytes_freed as f64 / 1_073_741_824.0
+                            );
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", msg);
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("Error: {}", e));
+                        }
+                    }
+                }
+                "history" => {
+                    let history = download_manager.get_data_retention_history().await;
+                    if history.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No cleanup history".to_string());
+                    } else {
+                        let mut msg = format!("Cleanup History ({}):\n", history.len());
+                        for entry in history.iter().take(10) {
+                            msg.push_str(&format!(
+                                "  {} - {} files, {:.2} GB freed\n",
+                                entry.cleaned_at,
+                                entry.files_deleted,
+                                entry.bytes_freed as f64 / 1_073_741_824.0
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlretention [status|enable|disable|list|add|remove|cleanup|history]"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        Command::DlSourceQuality { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            match action.as_str() {
+                "status" => {
+                    let config = download_manager.get_source_quality_config().await;
+                    let summary = download_manager.get_source_quality_summary().await;
+                    let msg = format!(
+                        "Source Quality Status:\n\
+                         Enabled: {}\n\
+                         Min Samples: {}\n\
+                         Block Threshold: {}\n\
+                         Block Duration: {}s\n\
+                         Total Sources: {}\n\
+                         Excellent: {}\n\
+                         Good: {}\n\
+                         Average: {}\n\
+                         Poor: {}\n\
+                         Blocked: {}",
+                        config.enabled,
+                        config.min_samples,
+                        config.block_threshold,
+                        config.block_duration_secs,
+                        summary.total_sources,
+                        summary.excellent_count,
+                        summary.good_count,
+                        summary.average_count,
+                        summary.poor_count,
+                        summary.blocked_count
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "summary" => {
+                    let summary = download_manager.get_source_quality_summary().await;
+                    let msg = format!(
+                        "Source Quality Summary:\n\
+                         Total Sources: {}\n\
+                         Excellent (80+): {}\n\
+                         Good (60-79): {}\n\
+                         Average (40-59): {}\n\
+                         Poor (20-39): {}\n\
+                         Unreliable (<20): {}\n\
+                         Blocked: {}",
+                        summary.total_sources,
+                        summary.excellent_count,
+                        summary.good_count,
+                        summary.average_count,
+                        summary.poor_count,
+                        summary.unreliable_count,
+                        summary.blocked_count
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "unblock" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlsq unblock <source_id>".to_string(),
+                        );
+                    } else {
+                        let source_id = &args[0];
+                        if download_manager.unblock_source_quality(source_id).await {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("Source '{}' unblocked", source_id),
+                            );
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("Source '{}' not found", source_id),
+                            );
+                        }
+                    }
+                }
+                "remove" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlsq remove <source_id>".to_string());
+                    } else {
+                        let source_id = &args[0];
+                        if download_manager.remove_source_quality(source_id).await {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("Source '{}' removed", source_id));
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("Source '{}' not found", source_id),
+                            );
+                        }
+                    }
+                }
+                "recommend" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlsq recommend <url1> <url2> ...".to_string(),
+                        );
+                    } else {
+                        let candidates: Vec<String> = args.to_vec();
+                        match download_manager.recommend_source_quality(&candidates).await {
+                            Some(recommended) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Recommended source: {}", recommended),
+                                );
+                            }
+                            None => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "No suitable source found among candidates".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_source_quality().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Source quality data cleared".to_string());
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlsq [status|summary|unblock|remove|recommend|clear]".to_string(),
+                    );
+                }
+            }
+        }
+
         Command::DlFind {
             query,
             state_filter,
