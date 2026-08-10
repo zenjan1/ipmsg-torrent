@@ -936,6 +936,10 @@ pub struct DownloadManager {
     /// Per-task schedule windows for controlling when tasks are allowed to run
     task_schedule_windows:
         Arc<tokio::sync::RwLock<task_schedule_windows::TaskScheduleWindowsManager>>,
+    /// Disk space monitor for tracking available disk space
+    disk_monitor: Arc<Mutex<disk_monitor::DiskSpaceMonitor>>,
+    /// Disk monitor configuration
+    disk_monitor_config: Arc<tokio::sync::RwLock<disk_monitor::DiskMonitorConfig>>,
 }
 
 impl DownloadManager {
@@ -1098,6 +1102,14 @@ impl DownloadManager {
             )),
             task_schedule_windows: Arc::new(tokio::sync::RwLock::new(
                 task_schedule_windows::TaskScheduleWindowsManager::new(),
+            )),
+            disk_monitor: Arc::new(Mutex::new(disk_monitor::DiskSpaceMonitor::new(
+                data_dir.join("downloads"),
+                100_000_000, // 100MB default
+                30,
+            ))),
+            disk_monitor_config: Arc::new(tokio::sync::RwLock::new(
+                disk_monitor::DiskMonitorConfig::default(),
             )),
         };
         dm.start_scheduler();
@@ -1394,7 +1406,19 @@ impl DownloadManager {
             task_schedule_windows: Arc::new(tokio::sync::RwLock::new(
                 task_schedule_windows::TaskScheduleWindowsManager::new(),
             )),
+            disk_monitor: Arc::new(Mutex::new(disk_monitor::DiskSpaceMonitor::new(
+                data_dir.join("downloads"),
+                100_000_000, // 100MB default
+                30,
+            ))),
+            disk_monitor_config: Arc::new(tokio::sync::RwLock::new(
+                disk_monitor::DiskMonitorConfig::default(),
+            )),
         };
+        // Restore disk monitor config from disk
+        if let Some(disk_cfg) = disk_monitor::load_disk_monitor_config(&dm.data_dir).await {
+            *dm.disk_monitor_config.write().await = disk_cfg;
+        }
         // Restore download quota config from disk
         if let Some(quota_mgr) = download_quota::load_download_quota(&dm.data_dir) {
             *dm.download_quota.lock().await = quota_mgr;
@@ -8207,7 +8231,7 @@ impl DownloadManager {
         drop(proxy_config);
 
         // Get storage status
-        let disk_available_bytes = 50_000_000_000; // TODO: integrate with disk_monitor
+        let disk_available_bytes = disk_monitor::get_available_space(&self.get_save_path().await).unwrap_or_default();
         let disk_low = disk_available_bytes < config.low_disk_threshold_bytes;
 
         // Get integrity issues
@@ -11328,6 +11352,66 @@ impl DownloadManager {
     ) -> Result<(), download_snapshot::SnapshotError> {
         let mut mgr = self.snapshot_manager.lock().await;
         mgr.delete_snapshot(id)
+    }
+
+    // ===== Disk Space Monitor Management (Phase 120) =====
+
+    /// Set disk monitor configuration and persist to disk.
+    pub async fn set_disk_monitor_config(&self, config: disk_monitor::DiskMonitorConfig) {
+        *self.disk_monitor_config.write().await = config.clone();
+        let _ = disk_monitor::save_disk_monitor_config(&config, &self.data_dir).await;
+    }
+
+    /// Get disk monitor configuration.
+    pub async fn get_disk_monitor_config(&self) -> disk_monitor::DiskMonitorConfig {
+        self.disk_monitor_config.read().await.clone()
+    }
+
+    /// Get disk monitor summary.
+    pub async fn get_disk_monitor_summary(&self) -> disk_monitor::DiskMonitorSummary {
+        let config = self.disk_monitor_config.read().await.clone();
+        let monitor = self.disk_monitor.lock().await;
+        let status = monitor.get_status().await;
+        let is_monitoring = monitor.is_running().await;
+        let auto_paused_count = monitor.auto_paused_count().await;
+        let auto_resumed_count = monitor.auto_resumed_count().await;
+        let available_bytes = disk_monitor::get_available_space(monitor.monitor_path()).unwrap_or_default();
+        disk_monitor::DiskMonitorSummary {
+            enabled: config.enabled,
+            status,
+            available_bytes,
+            safety_margin_bytes: config.safety_margin_bytes,
+            check_interval_secs: config.check_interval_secs,
+            is_monitoring,
+            auto_pause_on_critical: config.auto_pause_on_critical,
+            auto_resume_on_recovery: config.auto_resume_on_recovery,
+            auto_paused_count,
+            auto_resumed_count,
+        }
+    }
+
+    /// Get current disk space status.
+    pub async fn get_disk_status(&self) -> disk_monitor::DiskSpaceStatus {
+        let monitor = self.disk_monitor.lock().await;
+        monitor.get_status().await
+    }
+
+    /// Check disk space now and return status.
+    pub async fn check_disk_space_now(&self) -> disk_monitor::DiskSpaceStatus {
+        let monitor = self.disk_monitor.lock().await;
+        monitor.check().await
+    }
+
+    /// Start background disk monitoring.
+    pub async fn start_disk_monitoring(&self) {
+        let monitor = self.disk_monitor.lock().await;
+        monitor.start_monitoring(|| async {}, || async {}).await;
+    }
+
+    /// Stop background disk monitoring.
+    pub async fn stop_disk_monitoring(&self) {
+        let monitor = self.disk_monitor.lock().await;
+        monitor.stop_monitoring().await;
     }
 
     // ===== Network-Aware Download Management =====

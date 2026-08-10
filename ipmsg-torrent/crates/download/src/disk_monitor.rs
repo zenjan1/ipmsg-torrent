@@ -6,13 +6,14 @@
 //! - Automatic pause when disk space is critically low
 //! - Automatic resume when space is freed
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 /// Result of a disk space check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiskSpaceStatus {
     /// Plenty of space available (> 2x safety margin)
     Sufficient,
@@ -20,6 +21,79 @@ pub enum DiskSpaceStatus {
     Low,
     /// Space is critically low (< safety margin)
     Critical,
+}
+
+impl std::fmt::Display for DiskSpaceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DiskSpaceStatus::Sufficient => write!(f, "Sufficient"),
+            DiskSpaceStatus::Low => write!(f, "Low"),
+            DiskSpaceStatus::Critical => write!(f, "Critical"),
+        }
+    }
+}
+
+/// Configuration for disk space monitoring.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskMonitorConfig {
+    /// Whether disk monitoring is enabled
+    pub enabled: bool,
+    /// Safety margin in bytes (space to keep free)
+    pub safety_margin_bytes: u64,
+    /// Check interval in seconds
+    pub check_interval_secs: u64,
+    /// Automatically pause downloads when disk space is critical
+    pub auto_pause_on_critical: bool,
+    /// Automatically resume downloads when disk space recovers
+    pub auto_resume_on_recovery: bool,
+}
+
+impl Default for DiskMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            safety_margin_bytes: 100_000_000, // 100MB
+            check_interval_secs: 30,
+            auto_pause_on_critical: true,
+            auto_resume_on_recovery: true,
+        }
+    }
+}
+
+/// Summary of disk monitor state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskMonitorSummary {
+    pub enabled: bool,
+    pub status: DiskSpaceStatus,
+    pub available_bytes: u64,
+    pub safety_margin_bytes: u64,
+    pub check_interval_secs: u64,
+    pub is_monitoring: bool,
+    pub auto_pause_on_critical: bool,
+    pub auto_resume_on_recovery: bool,
+    pub auto_paused_count: u32,
+    pub auto_resumed_count: u32,
+}
+
+/// Save disk monitor configuration to disk (atomic write).
+pub async fn save_disk_monitor_config(
+    config: &DiskMonitorConfig,
+    data_dir: &Path,
+) -> std::io::Result<()> {
+    let path = data_dir.join("disk_monitor_config.json");
+    let tmp_path = data_dir.join("disk_monitor_config.json.tmp");
+    let json = serde_json::to_string_pretty(config)
+        .map_err(std::io::Error::other)?;
+    tokio::fs::write(&tmp_path, json.as_bytes()).await?;
+    tokio::fs::rename(&tmp_path, &path).await?;
+    Ok(())
+}
+
+/// Load disk monitor configuration from disk.
+pub async fn load_disk_monitor_config(data_dir: &Path) -> Option<DiskMonitorConfig> {
+    let path = data_dir.join("disk_monitor_config.json");
+    let data = tokio::fs::read_to_string(&path).await.ok()?;
+    serde_json::from_str(&data).ok()
 }
 
 /// Error type for disk space operations.
@@ -113,6 +187,10 @@ pub struct DiskSpaceMonitor {
     running: Arc<Mutex<bool>>,
     /// Cancellation token for the background task
     cancel_token: Arc<Mutex<Option<CancellationToken>>>,
+    /// Count of auto-paused events
+    auto_paused_count: Arc<Mutex<u32>>,
+    /// Count of auto-resumed events
+    auto_resumed_count: Arc<Mutex<u32>>,
 }
 
 impl DiskSpaceMonitor {
@@ -130,6 +208,8 @@ impl DiskSpaceMonitor {
             status: Arc::new(Mutex::new(DiskSpaceStatus::Sufficient)),
             running: Arc::new(Mutex::new(false)),
             cancel_token: Arc::new(Mutex::new(None)),
+            auto_paused_count: Arc::new(Mutex::new(0)),
+            auto_resumed_count: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -253,6 +333,33 @@ impl DiskSpaceMonitor {
     pub fn safety_margin_bytes(&self) -> u64 {
         self.safety_margin_bytes
     }
+
+    /// Get the configured check interval in seconds.
+    pub fn check_interval_secs(&self) -> u64 {
+        self.check_interval_secs
+    }
+
+    /// Get the auto-paused count.
+    pub async fn auto_paused_count(&self) -> u32 {
+        *self.auto_paused_count.lock().await
+    }
+
+    /// Get the auto-resumed count.
+    pub async fn auto_resumed_count(&self) -> u32 {
+        *self.auto_resumed_count.lock().await
+    }
+
+    /// Increment the auto-paused counter.
+    pub async fn increment_auto_paused(&self) {
+        let mut count = self.auto_paused_count.lock().await;
+        *count += 1;
+    }
+
+    /// Increment the auto-resumed counter.
+    pub async fn increment_auto_resumed(&self) {
+        let mut count = self.auto_resumed_count.lock().await;
+        *count += 1;
+    }
 }
 
 #[cfg(test)]
@@ -352,5 +459,75 @@ mod tests {
         let monitor = DiskSpaceMonitor::new(PathBuf::from("/tmp/dl"), 500_000_000, 30);
         assert_eq!(monitor.monitor_path(), Path::new("/tmp/dl"));
         assert_eq!(monitor.safety_margin_bytes(), 500_000_000);
+    }
+
+    #[test]
+    fn test_disk_monitor_config_default() {
+        let config = DiskMonitorConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.safety_margin_bytes, 100_000_000);
+        assert_eq!(config.check_interval_secs, 30);
+        assert!(config.auto_pause_on_critical);
+        assert!(config.auto_resume_on_recovery);
+    }
+
+    #[test]
+    fn test_disk_monitor_summary_serialization() {
+        let summary = DiskMonitorSummary {
+            enabled: true,
+            status: DiskSpaceStatus::Sufficient,
+            available_bytes: 1_000_000_000,
+            safety_margin_bytes: 100_000_000,
+            check_interval_secs: 30,
+            is_monitoring: false,
+            auto_pause_on_critical: true,
+            auto_resume_on_recovery: true,
+            auto_paused_count: 0,
+            auto_resumed_count: 0,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: DiskMonitorSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.enabled, true);
+        assert_eq!(deserialized.status, DiskSpaceStatus::Sufficient);
+        assert_eq!(deserialized.available_bytes, 1_000_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_config_save_load() {
+        let tmp_dir = std::env::temp_dir().join("disk_monitor_test_config");
+        let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+
+        let config = DiskMonitorConfig {
+            enabled: false,
+            safety_margin_bytes: 50_000_000,
+            check_interval_secs: 60,
+            auto_pause_on_critical: false,
+            auto_resume_on_recovery: false,
+        };
+
+        save_disk_monitor_config(&config, &tmp_dir).await.unwrap();
+        let loaded = load_disk_monitor_config(&tmp_dir).await.unwrap();
+        assert_eq!(loaded.enabled, false);
+        assert_eq!(loaded.safety_margin_bytes, 50_000_000);
+        assert_eq!(loaded.check_interval_secs, 60);
+        assert_eq!(loaded.auto_pause_on_critical, false);
+        assert_eq!(loaded.auto_resume_on_recovery, false);
+
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_config_load_missing_file() {
+        let tmp_dir = std::env::temp_dir().join("disk_monitor_test_missing");
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        let result = load_disk_monitor_config(&tmp_dir).await;
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_disk_space_status_display() {
+        assert_eq!(format!("{}", DiskSpaceStatus::Sufficient), "Sufficient");
+        assert_eq!(format!("{}", DiskSpaceStatus::Low), "Low");
+        assert_eq!(format!("{}", DiskSpaceStatus::Critical), "Critical");
     }
 }

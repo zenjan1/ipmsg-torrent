@@ -525,6 +525,11 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    DlDiskMonitor {
+        /// Subcommand: status|config|check|start|stop
+        subcommand: String,
+        args: Vec<String>,
+    },
     DlRetryQuota {
         /// Subcommand: status|enable|disable|set|reset
         subcommand: String,
@@ -1688,6 +1693,23 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dldisk" | "dl-disk" | "dldiskmon" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dldisk <status|config|check|start|stop>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlDiskMonitor {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlretryquota" | "dl-retryquota" | "dlrq" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
@@ -2170,6 +2192,7 @@ fn command_help() -> String {
         "/dlnetwork [cmd]  - Network-aware download (status|enable|disable|config|summary|probe|paused|clear|reset)",
         "/dlretryquota [cmd] - Retry quota (status|enable|disable|set <max> [window_secs]|reset)",
         "/dlintegrity [cmd] - File integrity verification (status|verify <id>|verify-all|summary|clear|config)",
+        "/dldisk [cmd]     - Disk space monitor (status|config|check|start|stop)",
         "/dldup [cmd]     - Duplicate detection (status|detect|groups|summary|clear|config)",
         "/dlresumepolicy [cmd] - Resume policy (status|set|preview)",
         "/dlanomaly [cmd] - Speed anomaly detection (status|list|summary|remove|clear|config)",
@@ -11682,6 +11705,160 @@ async fn handle_command(
                         "main",
                         "Usage: /dlintegrity <status|verify|verify-all|summary|clear|config>"
                             .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlDiskMonitor { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_disk_monitor_config().await;
+                    let summary = download_manager.get_disk_monitor_summary().await;
+                    let msg = format!(
+                        "Disk Monitor Status:\n\
+                         Enabled: {}\n\
+                         Safety margin: {} MB\n\
+                         Check interval: {}s\n\
+                         Auto-pause on critical: {}\n\
+                         Auto-resume on recovery: {}\n\
+                         \n\
+                         Current Status:\n\
+                         Available space: {} MB\n\
+                         Status: {}\n\
+                         Monitoring: {}\n\
+                         Auto-paused count: {}\n\
+                         Auto-resumed count: {}",
+                        config.enabled,
+                        config.safety_margin_bytes / 1_000_000,
+                        config.check_interval_secs,
+                        if config.auto_pause_on_critical {
+                            "yes"
+                        } else {
+                            "no"
+                        },
+                        if config.auto_resume_on_recovery {
+                            "yes"
+                        } else {
+                            "no"
+                        },
+                        summary.available_bytes / 1_000_000,
+                        summary.status,
+                        if summary.is_monitoring { "yes" } else { "no" },
+                        summary.auto_paused_count,
+                        summary.auto_resumed_count,
+                    );
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dldisk config <enabled|margin|interval|auto-pause|auto-resume> <value>"
+                                .to_string(),
+                        );
+                    } else {
+                        let key = &args[0];
+                        let value = &args[1];
+                        let mut config = download_manager.get_disk_monitor_config().await;
+
+                        match key.as_str() {
+                            "enabled" => {
+                                config.enabled = value == "true" || value == "1";
+                                download_manager.set_disk_monitor_config(config).await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Set disk monitor enabled to {}", value),
+                                );
+                            }
+                            "margin" => match value.parse::<u64>() {
+                                Ok(mb) => {
+                                    config.safety_margin_bytes = mb * 1_000_000;
+                                    download_manager.set_disk_monitor_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Set safety margin to {} MB", mb),
+                                    );
+                                }
+                                Err(_) => {
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid margin value. Use megabytes (e.g., 100)"
+                                            .to_string(),
+                                    );
+                                }
+                            },
+                            "interval" => match value.parse::<u64>() {
+                                Ok(secs) => {
+                                    config.check_interval_secs = secs;
+                                    download_manager.set_disk_monitor_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Set check interval to {}s", secs),
+                                    );
+                                }
+                                Err(_) => {
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid interval value. Use seconds (e.g., 30)"
+                                            .to_string(),
+                                    );
+                                }
+                            },
+                            "auto-pause" => {
+                                config.auto_pause_on_critical = value == "true" || value == "1";
+                                download_manager.set_disk_monitor_config(config).await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Set auto-pause on critical to {}", value),
+                                );
+                            }
+                            "auto-resume" => {
+                                config.auto_resume_on_recovery = value == "true" || value == "1";
+                                download_manager.set_disk_monitor_config(config).await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Set auto-resume on recovery to {}", value),
+                                );
+                            }
+                            _ => {
+                                s.add_system_message(
+                                    "main",
+                                    "Unknown config key. Use: enabled|margin|interval|auto-pause|auto-resume"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                "check" => {
+                    let status = download_manager.check_disk_space_now().await;
+                    let summary = download_manager.get_disk_monitor_summary().await;
+                    let msg = format!(
+                        "Disk Space Check:\n\
+                         Available: {} MB\n\
+                         Status: {}",
+                        summary.available_bytes / 1_000_000,
+                        status
+                    );
+                    s.add_system_message("main", msg);
+                }
+                "start" => {
+                    download_manager.start_disk_monitoring().await;
+                    s.add_system_message("main", "Started disk monitoring".to_string());
+                }
+                "stop" => {
+                    download_manager.stop_disk_monitoring().await;
+                    s.add_system_message("main", "Stopped disk monitoring".to_string());
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dldisk <status|config|check|start|stop>".to_string(),
                     );
                 }
             }

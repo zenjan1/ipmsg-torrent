@@ -748,6 +748,11 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             post(verify_task_integrity_handler),
         )
         .route("/api/integrity/clear", post(clear_integrity_handler))
+        .route("/api/disk-monitor", get(get_disk_monitor_handler))
+        .route("/api/disk-monitor", post(set_disk_monitor_handler))
+        .route("/api/disk-monitor/check", post(check_disk_space_handler))
+        .route("/api/disk-monitor/start", post(start_disk_monitor_handler))
+        .route("/api/disk-monitor/stop", post(stop_disk_monitor_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -3156,6 +3161,55 @@ async fn clear_integrity_handler(
     State(state): State<Arc<WebState>>,
 ) -> impl axum::response::IntoResponse {
     state.manager.clear_integrity_results().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get disk monitor config and summary
+async fn get_disk_monitor_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_disk_monitor_config().await;
+    let summary = state.manager.get_disk_monitor_summary().await;
+    Json(serde_json::json!({
+        "config": config,
+        "summary": summary
+    }))
+}
+
+/// Set disk monitor configuration
+async fn set_disk_monitor_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::disk_monitor::DiskMonitorConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_disk_monitor_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Check disk space now
+async fn check_disk_space_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let status = state.manager.check_disk_space_now().await;
+    let summary = state.manager.get_disk_monitor_summary().await;
+    Json(serde_json::json!({
+        "status": status,
+        "summary": summary
+    }))
+}
+
+/// Start background disk monitoring
+async fn start_disk_monitor_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.start_disk_monitoring().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Stop background disk monitoring
+async fn stop_disk_monitor_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.stop_disk_monitoring().await;
     Json(serde_json::json!({"status": "ok"}))
 }
 
