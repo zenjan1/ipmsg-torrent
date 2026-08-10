@@ -248,8 +248,10 @@ impl DeadlineManager {
 
     /// Get a summary of all deadlines
     pub fn summary(&self) -> DeadlineSummary {
-        let mut summary = DeadlineSummary::default();
-        summary.tasks_with_deadlines = self.deadlines.len();
+        let mut summary = DeadlineSummary {
+            tasks_with_deadlines: self.deadlines.len(),
+            ..Default::default()
+        };
 
         for data in self.deadlines.values() {
             if data.missed {
@@ -348,8 +350,7 @@ pub fn format_remaining(deadline: &DateTime<Utc>, now: &DateTime<Utc>) -> String
 
 /// Persistence helpers
 pub async fn save_deadline_config(config: &DeadlineConfig, path: &Path) -> std::io::Result<()> {
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(config).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, json.as_bytes()).await?;
     fs::rename(&tmp, path).await?;

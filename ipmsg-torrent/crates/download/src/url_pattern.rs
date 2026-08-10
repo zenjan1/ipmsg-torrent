@@ -110,7 +110,7 @@ fn parse_pattern(pattern: &str) -> Result<Vec<PatternSegment>, PatternError> {
             // Parse pattern content until '}'
             let mut pattern_content = String::new();
             let mut found_close = false;
-            while let Some(inner_ch) = chars.next() {
+            for inner_ch in chars.by_ref() {
                 if inner_ch == '}' {
                     found_close = true;
                     break;

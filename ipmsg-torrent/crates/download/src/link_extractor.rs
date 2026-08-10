@@ -80,15 +80,15 @@ fn extract_filename_from_url(url: &str) -> Option<String> {
     // Try to parse as a standard URL
     if let Ok(parsed) = url::Url::parse(url) {
         let path = parsed.path();
-        if let Some(last_segment) = path.rsplit('/').next() {
-            if !last_segment.is_empty() {
-                // URL-decode the filename
-                return Some(
-                    urlencoding::decode(last_segment)
-                        .unwrap_or(std::borrow::Cow::Borrowed(last_segment))
-                        .into_owned(),
-                );
-            }
+        if let Some(last_segment) = path.rsplit('/').next()
+            && !last_segment.is_empty()
+        {
+            // URL-decode the filename
+            return Some(
+                urlencoding::decode(last_segment)
+                    .unwrap_or(std::borrow::Cow::Borrowed(last_segment))
+                    .into_owned(),
+            );
         }
         return None;
     }
@@ -253,12 +253,11 @@ fn resolve_url(href: &str, base_url: Option<&str>) -> String {
     }
 
     // Try to resolve relative URL
-    if let Some(base) = base_url {
-        if let Ok(base_parsed) = url::Url::parse(base) {
-            if let Ok(resolved) = base_parsed.join(href) {
-                return resolved.to_string();
-            }
-        }
+    if let Some(base) = base_url
+        && let Ok(base_parsed) = url::Url::parse(base)
+        && let Ok(resolved) = base_parsed.join(href)
+    {
+        return resolved.to_string();
     }
 
     String::new()

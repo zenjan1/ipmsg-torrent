@@ -268,10 +268,7 @@ mod inner {
                 Err(_) => return None,
             };
             let result = stmt.query_row(params![peer_id], |row| row.get::<_, Vec<u8>>(0));
-            match result {
-                Ok(key) => Some(key),
-                Err(_) => None,
-            }
+            result.ok()
         }
 
         pub fn get_known_addresses(&self, max_age_days: i64) -> Vec<(String, Vec<String>)> {

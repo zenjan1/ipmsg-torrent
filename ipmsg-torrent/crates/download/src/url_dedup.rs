@@ -155,17 +155,17 @@ pub fn extract_dedup_key(url: &str, config: &DedupConfig) -> Option<String> {
                 parsed.host_str()?,
                 parsed.path()
             );
-            if !config.strip_query {
-                if let Some(query) = parsed.query() {
-                    key.push('?');
-                    key.push_str(query);
-                }
+            if !config.strip_query
+                && let Some(query) = parsed.query()
+            {
+                key.push('?');
+                key.push_str(query);
             }
-            if !config.strip_fragment {
-                if let Some(fragment) = parsed.fragment() {
-                    key.push('#');
-                    key.push_str(fragment);
-                }
+            if !config.strip_fragment
+                && let Some(fragment) = parsed.fragment()
+            {
+                key.push('#');
+                key.push_str(fragment);
             }
             Some(key)
         }
@@ -265,8 +265,7 @@ pub fn find_duplicate_url(
 /// Persistence functions for dedup configuration
 pub fn save_dedup_config(config: &DedupConfig, data_dir: &Path) -> Result<(), std::io::Error> {
     let config_path = data_dir.join("dedup_config.json");
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(config).map_err(std::io::Error::other)?;
 
     // Atomic write
     let temp_path = data_dir.join("dedup_config.json.tmp");

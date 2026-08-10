@@ -126,12 +126,12 @@ pub fn check_task_conflict(
 
 /// Check if a file already exists on disk
 pub fn check_file_exists_on_disk(path: &Path) -> Option<ConflictType> {
-    if let Ok(metadata) = std::fs::metadata(path) {
-        if metadata.is_file() {
-            return Some(ConflictType::FileExists {
-                existing_size: metadata.len(),
-            });
-        }
+    if let Ok(metadata) = std::fs::metadata(path)
+        && metadata.is_file()
+    {
+        return Some(ConflictType::FileExists {
+            existing_size: metadata.len(),
+        });
     }
     None
 }
@@ -217,17 +217,15 @@ pub fn detect_conflicts(
     }
 
     // 2. Check disk conflict
-    if check_disk {
-        if let Some(conflict) = check_file_exists_on_disk(&new_task.save_path) {
-            return ConflictReport {
-                task_id: new_task.id.clone(),
-                task_name: new_task.name.clone(),
-                target_path: new_task.save_path.clone(),
-                conflict: Some(conflict),
-                resolved_path: new_task.save_path.clone(),
-                action: ConflictAction::Skipped,
-            };
-        }
+    if check_disk && let Some(conflict) = check_file_exists_on_disk(&new_task.save_path) {
+        return ConflictReport {
+            task_id: new_task.id.clone(),
+            task_name: new_task.name.clone(),
+            target_path: new_task.save_path.clone(),
+            conflict: Some(conflict),
+            resolved_path: new_task.save_path.clone(),
+            action: ConflictAction::Skipped,
+        };
     }
 
     // No conflict

@@ -204,10 +204,10 @@ impl AdaptiveConcurrencyManager {
         };
 
         // Check cooldown
-        if let Some(last) = state.last_adjustment {
-            if last.elapsed() < Duration::from_secs(self.config.adjustment_cooldown_secs) {
-                return ConcurrencyDecision::Hold;
-            }
+        if let Some(last) = state.last_adjustment
+            && last.elapsed() < Duration::from_secs(self.config.adjustment_cooldown_secs)
+        {
+            return ConcurrencyDecision::Hold;
         }
 
         // Need enough samples
@@ -347,7 +347,7 @@ impl AdaptiveConcurrencyManager {
 
         AdaptiveConcurrencySummary {
             enabled: self.config.enabled,
-            config: self.config.clone(),
+            config: self.config,
             task_count: self.states.len(),
             tasks,
             total_adjustments,

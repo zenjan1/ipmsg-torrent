@@ -286,20 +286,20 @@ impl ArchiveState {
         self.archived
             .iter()
             .filter(|t| {
-                if let Some(state) = state_filter {
-                    if t.final_state != state {
-                        return false;
-                    }
+                if let Some(state) = state_filter
+                    && t.final_state != state
+                {
+                    return false;
                 }
-                if let Some(protocol) = protocol_filter {
-                    if t.protocol != protocol {
-                        return false;
-                    }
+                if let Some(protocol) = protocol_filter
+                    && t.protocol != protocol
+                {
+                    return false;
                 }
-                if let Some(tag) = tag_filter {
-                    if !t.tags.contains(&tag.to_string()) {
-                        return false;
-                    }
+                if let Some(tag) = tag_filter
+                    && !t.tags.contains(&tag.to_string())
+                {
+                    return false;
                 }
                 true
             })

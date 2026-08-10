@@ -511,6 +511,11 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    DlIntegrity {
+        /// Subcommand: status|verify|verify-all|summary|clear|config
+        subcommand: String,
+        args: Vec<String>,
+    },
     DlRetryQuota {
         /// Subcommand: status|enable|disable|set|reset
         subcommand: String,
@@ -1625,6 +1630,25 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlintegrity" | "dl-integrity" | "dli" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlintegrity <status|verify|verify-all|summary|clear|config>".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlIntegrity {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlretryquota" | "dl-retryquota" | "dlrq" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
@@ -2012,6 +2036,7 @@ fn command_help() -> String {
         "/dlburst [cmd]     - Speed burst (status|start <task_id> [duration] [multiplier]|stop <task_id>|config)",
         "/dlnetwork [cmd]  - Network-aware download (status|enable|disable|config|summary|probe|paused|clear|reset)",
         "/dlretryquota [cmd] - Retry quota (status|enable|disable|set <max> [window_secs]|reset)",
+        "/dlintegrity [cmd] - File integrity verification (status|verify <id>|verify-all|summary|clear|config)",
         "/dlttl [cmd]      - Task TTL management (status|enable|disable|set <duration> [interval]|task <id> <duration>|summary)",
         "/dlerrrec [cmd]   - Error recovery (status|enable|disable|set <category> <strategy>|reset|test <error>)",
         "/dlchain [cmd]    - Task chains (list|create|delete|add|remove|enable|disable|summary)",
@@ -10532,6 +10557,221 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlIntegrity { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_integrity_config().await;
+                    let summary = download_manager.get_integrity_summary().await;
+                    let auto_verify = if config.auto_verify_on_complete {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    };
+                    let periodic = if config.periodic_verification {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    };
+                    let msg = format!(
+                        "Download Integrity Status:\n\
+                         Auto-verify on complete: {}\n\
+                         Periodic verification: {}\n\
+                         Verification interval: {}s\n\
+                         Only verify completed: {}\n\
+                         Max batch size: {}\n\
+                         \n\
+                         Verification Summary:\n\
+                         Total tasks: {}\n\
+                         Verified: {}\n\
+                         Size mismatch: {}\n\
+                         Missing: {}\n\
+                         Empty: {}\n\
+                         Errors: {}\n\
+                         Pending: {}",
+                        auto_verify,
+                        periodic,
+                        config.verification_interval_secs,
+                        if config.only_verify_completed {
+                            "yes"
+                        } else {
+                            "no"
+                        },
+                        config.max_batch_size,
+                        summary.total_tasks,
+                        summary.verified,
+                        summary.size_mismatch,
+                        summary.missing,
+                        summary.empty,
+                        summary.errors,
+                        summary.pending,
+                    );
+                    s.add_system_message("main", msg);
+                }
+                "verify" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlintegrity verify <task_id>".to_string(),
+                        );
+                    } else {
+                        let task_id = &args[0];
+                        match download_manager.verify_task_integrity(task_id).await {
+                            Some(result) => {
+                                let msg = format!(
+                                    "Task {} integrity:\n\
+                                     Status: {}\n\
+                                     Expected size: {} bytes\n\
+                                     Actual size: {} bytes\n\
+                                     File: {}",
+                                    task_id,
+                                    result.status,
+                                    result.expected_size,
+                                    result.actual_size,
+                                    result.file_path.display()
+                                );
+                                s.add_system_message("main", msg);
+                            }
+                            None => {
+                                s.add_system_message("main", format!("Task {} not found", task_id));
+                            }
+                        }
+                    }
+                }
+                "verify-all" => {
+                    s.add_system_message("main", "Verifying all completed tasks...".to_string());
+                    let results = download_manager.verify_all_integrity().await;
+                    let summary = download_manager.get_integrity_summary().await;
+
+                    let mut msg = format!(
+                        "Integrity Verification Results:\n\
+                         Verified: {}\n\
+                         Size mismatch: {}\n\
+                         Missing: {}\n\
+                         Empty: {}\n\
+                         Errors: {}\n\n",
+                        summary.verified,
+                        summary.size_mismatch,
+                        summary.missing,
+                        summary.empty,
+                        summary.errors
+                    );
+
+                    if summary.has_issues() {
+                        msg.push_str("Tasks with issues:\n");
+                        for result in &results {
+                            if result.needs_repair() {
+                                msg.push_str(&format!(
+                                    "  - {} ({})\n",
+                                    result.task_name, result.status
+                                ));
+                            }
+                        }
+                    }
+
+                    s.add_system_message("main", msg);
+                }
+                "summary" => {
+                    let summary = download_manager.get_integrity_summary().await;
+                    let msg = format!(
+                        "Integrity Verification Summary:\n\
+                         Total tasks: {}\n\
+                         Verified: {}\n\
+                         Size mismatch: {}\n\
+                         Missing: {}\n\
+                         Empty: {}\n\
+                         Errors: {}\n\
+                         Pending: {}\n\
+                         All verified: {}\n\
+                         Has issues: {}",
+                        summary.total_tasks,
+                        summary.verified,
+                        summary.size_mismatch,
+                        summary.missing,
+                        summary.empty,
+                        summary.errors,
+                        summary.pending,
+                        if summary.all_verified() { "yes" } else { "no" },
+                        if summary.has_issues() { "yes" } else { "no" }
+                    );
+                    s.add_system_message("main", msg);
+                }
+                "clear" => {
+                    download_manager.clear_integrity_results().await;
+                    s.add_system_message(
+                        "main",
+                        "Cleared all integrity verification results".to_string(),
+                    );
+                }
+                "config" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlintegrity config <auto-verify|periodic|interval> <value>"
+                                .to_string(),
+                        );
+                    } else {
+                        let key = &args[0];
+                        let value = &args[1];
+                        let mut config = download_manager.get_integrity_config().await;
+
+                        match key.as_str() {
+                            "auto-verify" => {
+                                config.auto_verify_on_complete = value == "true" || value == "1";
+                                download_manager.set_integrity_config(config).await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Set auto-verify on complete to {}", value),
+                                );
+                            }
+                            "periodic" => {
+                                config.periodic_verification = value == "true" || value == "1";
+                                download_manager.set_integrity_config(config).await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Set periodic verification to {}", value),
+                                );
+                            }
+                            "interval" => match value.parse::<u64>() {
+                                Ok(secs) => {
+                                    config.verification_interval_secs = secs;
+                                    download_manager.set_integrity_config(config).await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("Set verification interval to {}s", secs),
+                                    );
+                                }
+                                Err(_) => {
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid interval value. Use seconds (e.g., 3600)"
+                                            .to_string(),
+                                    );
+                                }
+                            },
+                            _ => {
+                                s.add_system_message(
+                                    "main",
+                                    "Unknown config key. Use: auto-verify|periodic|interval"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlintegrity <status|verify|verify-all|summary|clear|config>"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         Command::DlRetryQuota { subcommand, args } => {
             let download_manager = {
                 let s = state.lock().await;
@@ -12787,5 +13027,84 @@ mod save_path_tests {
     fn test_help_contains_dltp() {
         let help = command_help();
         assert!(help.contains("/dltp"));
+    }
+
+    #[test]
+    fn test_parse_dlintegrity_status() {
+        let cmd = parse_command("/dlintegrity status");
+        match cmd {
+            Command::DlIntegrity { subcommand, args } => {
+                assert_eq!(subcommand, "status");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlIntegrity, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlintegrity_verify() {
+        let cmd = parse_command("/dlintegrity verify task-123");
+        match cmd {
+            Command::DlIntegrity { subcommand, args } => {
+                assert_eq!(subcommand, "verify");
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0], "task-123");
+            }
+            other => panic!("Expected DlIntegrity, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlintegrity_verify_all() {
+        let cmd = parse_command("/dlintegrity verify-all");
+        match cmd {
+            Command::DlIntegrity { subcommand, args } => {
+                assert_eq!(subcommand, "verify-all");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlIntegrity, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlintegrity_config() {
+        let cmd = parse_command("/dlintegrity config auto-verify true");
+        match cmd {
+            Command::DlIntegrity { subcommand, args } => {
+                assert_eq!(subcommand, "config");
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0], "auto-verify");
+                assert_eq!(args[1], "true");
+            }
+            other => panic!("Expected DlIntegrity, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlintegrity_alias() {
+        let cmd = parse_command("/dli summary");
+        match cmd {
+            Command::DlIntegrity { subcommand, args } => {
+                assert_eq!(subcommand, "summary");
+            }
+            other => panic!("Expected DlIntegrity, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlintegrity_no_args() {
+        let cmd = parse_command("/dlintegrity");
+        match cmd {
+            Command::Unknown(msg) => {
+                assert!(msg.contains("/dlintegrity"));
+            }
+            other => panic!("Expected Unknown, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_dlintegrity() {
+        let help = command_help();
+        assert!(help.contains("/dlintegrity"));
     }
 }

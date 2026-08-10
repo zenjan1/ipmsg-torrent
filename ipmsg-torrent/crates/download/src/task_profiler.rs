@@ -244,21 +244,12 @@ pub struct TaskProfileInput {
 }
 
 /// Task profiler manager
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TaskProfiler {
     /// Configuration
     pub config: TaskProfilerConfig,
     /// Task profiles indexed by task ID
     pub profiles: HashMap<String, TaskProfile>,
-}
-
-impl Default for TaskProfiler {
-    fn default() -> Self {
-        Self {
-            config: TaskProfilerConfig::default(),
-            profiles: HashMap::new(),
-        }
-    }
 }
 
 impl TaskProfiler {
@@ -727,8 +718,7 @@ pub fn save_task_profiler(
     profiler: &TaskProfiler,
     path: &std::path::Path,
 ) -> Result<(), std::io::Error> {
-    let json = serde_json::to_string_pretty(profiler)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(profiler).map_err(std::io::Error::other)?;
     let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, &json)?;
     std::fs::rename(&tmp_path, path)?;

@@ -296,7 +296,7 @@ impl BandwidthScheduleManager {
 
     /// Sort rules by priority (descending)
     fn sort_rules(&mut self) {
-        self.rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        self.rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
     }
 
     /// Find the first matching rule for the current time

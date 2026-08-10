@@ -269,12 +269,11 @@ impl DownloadSessionManager {
 
     /// Update peak speed for the active session.
     pub fn update_peak_speed(&mut self, task_id: &str, speed_bps: u64) {
-        if let Some(task_sessions) = self.sessions.get_mut(task_id) {
-            if let Some(active) = task_sessions.iter_mut().rev().find(|s| s.is_active()) {
-                if speed_bps > active.peak_speed_bps {
-                    active.peak_speed_bps = speed_bps;
-                }
-            }
+        if let Some(task_sessions) = self.sessions.get_mut(task_id)
+            && let Some(active) = task_sessions.iter_mut().rev().find(|s| s.is_active())
+            && speed_bps > active.peak_speed_bps
+        {
+            active.peak_speed_bps = speed_bps;
         }
     }
 

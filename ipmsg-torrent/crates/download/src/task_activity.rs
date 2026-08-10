@@ -423,7 +423,7 @@ impl ActivityLogManager {
                 log.events
                     .back()
                     .map(|e| e.timestamp)
-                    .unwrap_or_else(|| Utc::now())
+                    .unwrap_or_else(Utc::now)
             })
             .map(|(id, _)| id.clone())
         {

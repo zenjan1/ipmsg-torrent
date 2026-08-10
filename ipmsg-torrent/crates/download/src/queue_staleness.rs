@@ -270,7 +270,7 @@ pub fn analyze_staleness(
     }
 
     // Sort by queued duration descending
-    stale_tasks.sort_by(|a, b| b.queued_duration_secs.cmp(&a.queued_duration_secs));
+    stale_tasks.sort_by_key(|t| std::cmp::Reverse(t.queued_duration_secs));
 
     StalenessSummary {
         total_queued,
@@ -288,8 +288,7 @@ pub async fn save_staleness_config(
     data_dir: &Path,
 ) -> Result<(), std::io::Error> {
     let path = data_dir.join("staleness_config.json");
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(config).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, json.as_bytes()).await?;
     fs::rename(&tmp, &path).await?;

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Main configuration structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     /// Network configuration
     #[serde(default)]
@@ -22,17 +22,6 @@ pub struct Config {
     /// Download configuration
     #[serde(default)]
     pub download: DownloadConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            network: NetworkConfig::default(),
-            storage: StorageConfig::default(),
-            ui: UiConfig::default(),
-            download: DownloadConfig::default(),
-        }
-    }
 }
 
 /// Network-related configuration
@@ -230,10 +219,10 @@ impl Config {
 
     /// Override config with environment variables
     pub fn apply_env_overrides(&mut self) {
-        if let Ok(port) = std::env::var("IPMSG_PORT") {
-            if let Ok(p) = port.parse() {
-                self.network.port = p;
-            }
+        if let Ok(port) = std::env::var("IPMSG_PORT")
+            && let Ok(p) = port.parse()
+        {
+            self.network.port = p;
         }
 
         if let Ok(username) = std::env::var("IPMSG_USERNAME") {

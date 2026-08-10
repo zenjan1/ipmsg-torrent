@@ -204,17 +204,17 @@ impl TaskChainManager {
         task_id: &str,
     ) -> Result<Option<(String, String)>, TaskChainError> {
         // Find the chain containing this task
-        if let Some(chain_id) = self.task_to_chain.get(task_id).cloned() {
-            if let Some(chain) = self.chains.get_mut(&chain_id) {
-                if chain.auto_remove_completed {
-                    chain.pop_completed_task();
-                    self.task_to_chain.remove(task_id);
-                }
+        if let Some(chain_id) = self.task_to_chain.get(task_id).cloned()
+            && let Some(chain) = self.chains.get_mut(&chain_id)
+        {
+            if chain.auto_remove_completed {
+                chain.pop_completed_task();
+                self.task_to_chain.remove(task_id);
+            }
 
-                // Get the next task
-                if let Some(next_task_id) = chain.get_next_task() {
-                    return Ok(Some((chain_id, next_task_id.to_string())));
-                }
+            // Get the next task
+            if let Some(next_task_id) = chain.get_next_task() {
+                return Ok(Some((chain_id, next_task_id.to_string())));
             }
         }
         Ok(None)

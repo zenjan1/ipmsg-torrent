@@ -291,8 +291,7 @@ impl SpeedBurstManager {
 
     /// Save configuration to file
     pub fn save_config(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(&self.config)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(&self.config).map_err(std::io::Error::other)?;
         // Atomic write: write to temp file then rename
         let tmp_path = path.with_extension("json.tmp");
         std::fs::write(&tmp_path, json)?;

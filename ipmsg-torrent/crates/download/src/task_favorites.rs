@@ -22,16 +22,10 @@ pub struct FavoriteTask {
 }
 
 /// Favorites configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FavoritesConfig {
     /// Maximum number of favorites (0 = unlimited)
     pub max_favorites: usize,
-}
-
-impl Default for FavoritesConfig {
-    fn default() -> Self {
-        Self { max_favorites: 0 }
-    }
 }
 
 /// Favorites manager

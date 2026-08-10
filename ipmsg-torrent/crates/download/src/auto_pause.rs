@@ -83,10 +83,10 @@ impl PeakHours {
         let end_minutes = self.end_hour as u32 * 60 + self.end_minute as u32;
 
         // Check if today is in the allowed days
-        if let Some(ref days) = self.days {
-            if !days.contains(&time.weekday()) {
-                return false;
-            }
+        if let Some(ref days) = self.days
+            && !days.contains(&time.weekday())
+        {
+            return false;
         }
 
         // Handle wrap-around (e.g., 22:00 to 06:00)

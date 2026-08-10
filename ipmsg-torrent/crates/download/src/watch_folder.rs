@@ -130,7 +130,7 @@ fn generate_id() -> String {
 }
 
 /// Persistence functions.
-
+///
 pub fn save_watch_folders(path: &Path, state: &WatchFolderState) -> Result<(), WatchFolderError> {
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(state)?;
@@ -163,10 +163,10 @@ pub fn extract_urls_from_text(text: &str) -> Vec<String> {
         }
         // Try to extract URLs from each line
         for word in line.split_whitespace() {
-            if let Some(url) = extract_url_from_token(word) {
-                if seen.insert(url.clone()) {
-                    urls.push(url);
-                }
+            if let Some(url) = extract_url_from_token(word)
+                && seen.insert(url.clone())
+            {
+                urls.push(url);
             }
         }
     }

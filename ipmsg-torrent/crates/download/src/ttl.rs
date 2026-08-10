@@ -255,10 +255,10 @@ impl TtlManager {
 
     /// Get effective max lifetime for a task (per-task override or global default).
     pub fn effective_max_lifetime(&self, task_id: &str) -> Option<u64> {
-        if let Some(state) = self.task_states.get(task_id) {
-            if let Some(override_val) = state.max_lifetime_secs {
-                return Some(override_val);
-            }
+        if let Some(state) = self.task_states.get(task_id)
+            && let Some(override_val) = state.max_lifetime_secs
+        {
+            return Some(override_val);
         }
         self.config.default_max_lifetime_secs
     }

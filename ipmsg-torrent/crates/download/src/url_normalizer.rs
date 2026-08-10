@@ -307,10 +307,10 @@ impl UrlNormalizer {
 
             // If query string is now empty, remove the trailing '?'
             let url_str = parsed.to_string();
-            if url_str.ends_with('?') {
-                if let Ok(stripped) = Url::parse(&url_str[..url_str.len() - 1]) {
-                    parsed = stripped;
-                }
+            if url_str.ends_with('?')
+                && let Ok(stripped) = Url::parse(&url_str[..url_str.len() - 1])
+            {
+                parsed = stripped;
             }
         }
 

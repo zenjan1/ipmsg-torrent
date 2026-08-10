@@ -485,8 +485,8 @@ impl P2PEngine {
                                             if !msg.signature.is_empty() {
                                                 let digest = msg.signing_bytes();
                                                 // Try to verify with peer's public key if available
-                                                if let Some(peer_key) = self.store.get_peer_public_key(&msg.from) {
-                                                    if !Self::verify_message_signature(&peer_key, &digest, &msg.signature) {
+                                                if let Some(peer_key) = self.store.get_peer_public_key(&msg.from)
+                                                    && !Self::verify_message_signature(&peer_key, &digest, &msg.signature) {
                                                         tracing::warn!(from = %msg.from, id = %msg.id, "Invalid message signature, dropping");
                                                         self.peer_scores.record_behavior(
                                                             &msg.from,
@@ -494,7 +494,6 @@ impl P2PEngine {
                                                         );
                                                         continue;
                                                     }
-                                                }
                                                 // If no known key, accept but log for future verification
                                             }
                                             if self.dedup.is_duplicate(&msg.id) {

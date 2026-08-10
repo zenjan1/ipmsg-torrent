@@ -285,8 +285,6 @@ impl SourceRotationManager {
     }
 
     /// Get available sources for a task (not on cooldown, active)
-
-    /// Get available sources for a task (not on cooldown, active)
     pub fn get_available_sources(&self, task_id: &str) -> Vec<&DownloadSource> {
         let mut available: Vec<&DownloadSource> = self
             .sources
@@ -315,7 +313,7 @@ impl SourceRotationManager {
             .values()
             .filter(|s| s.task_id == task_id)
             .collect();
-        sources.sort_by(|a, b| a.priority.cmp(&b.priority));
+        sources.sort_by_key(|a| a.priority);
         sources
     }
 

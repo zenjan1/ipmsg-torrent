@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// Download time limit configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DownloadTimeLimitConfig {
     /// Enable automatic time limit enforcement
     pub enabled: bool,
@@ -16,16 +16,6 @@ pub struct DownloadTimeLimitConfig {
     pub default_limit_secs: Option<u64>,
     /// Per-task time limit overrides (task_id -> limit_secs)
     pub task_limits: HashMap<String, u64>,
-}
-
-impl Default for DownloadTimeLimitConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            default_limit_secs: None,
-            task_limits: HashMap::new(),
-        }
-    }
 }
 
 /// Download time limit manager

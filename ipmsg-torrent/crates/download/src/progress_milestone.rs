@@ -226,7 +226,7 @@ impl ProgressMilestoneTracker {
 }
 
 /// Persistence functions
-
+///
 /// Save progress milestone config to disk
 pub fn save_progress_milestone_config(
     config: &ProgressMilestoneConfig,

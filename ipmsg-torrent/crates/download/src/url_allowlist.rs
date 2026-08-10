@@ -63,22 +63,13 @@ pub struct AllowlistCheckResult {
 }
 
 /// Allowlist configuration (persisted)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AllowlistConfig {
     /// Whether allowlist enforcement is enabled.
     /// When true, only URLs matching an entry are permitted.
     pub enabled: bool,
     /// List of allowlist entries
     pub entries: Vec<AllowlistEntry>,
-}
-
-impl Default for AllowlistConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            entries: Vec::new(),
-        }
-    }
 }
 
 /// Persistence error

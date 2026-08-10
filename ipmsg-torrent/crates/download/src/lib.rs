@@ -38,6 +38,7 @@ pub mod download_time_limit;
 pub mod ed2k;
 pub mod error_recovery;
 pub mod eta_estimator;
+pub mod integrity_verification;
 pub mod link_extractor;
 pub mod magnet;
 pub mod metadata_cache;
@@ -126,6 +127,9 @@ pub use bulk_ops::{
     BulkTagAction, BulkWeightAction,
 };
 pub use eta_estimator::{EtaConfidence, EtaEstimate, EtaEstimator};
+pub use integrity_verification::{
+    IntegrityConfig, IntegrityManager, IntegritySummary, VerificationResult, VerificationStatus,
+};
 pub use mirror_health::{MirrorHealth, MirrorHealthConfig, MirrorSummary};
 pub use notification::{
     NotificationChannel, NotificationConfig, NotificationError, NotificationEvent,
@@ -888,6 +892,8 @@ pub struct DownloadManager {
     network_monitor: Arc<Mutex<network_monitor::NetworkMonitor>>,
     /// Download deadline manager for task urgency tracking
     download_deadline: Arc<Mutex<download_deadline::DeadlineManager>>,
+    /// Integrity verification manager for checking file existence and size
+    integrity: Arc<Mutex<integrity_verification::IntegrityManager>>,
 }
 
 impl DownloadManager {
@@ -1021,6 +1027,7 @@ impl DownloadManager {
             )),
             network_monitor: Arc::new(Mutex::new(network_monitor::NetworkMonitor::new())),
             download_deadline: Arc::new(Mutex::new(download_deadline::DeadlineManager::new())),
+            integrity: Arc::new(Mutex::new(integrity_verification::IntegrityManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1286,6 +1293,7 @@ impl DownloadManager {
             )),
             network_monitor: Arc::new(Mutex::new(network_monitor::NetworkMonitor::new())),
             download_deadline: Arc::new(Mutex::new(download_deadline::DeadlineManager::new())),
+            integrity: Arc::new(Mutex::new(integrity_verification::IntegrityManager::new())),
         };
         // Restore error recovery config from disk
         if let Ok(Some(recovery_cfg)) = error_recovery::load_error_recovery_config(&dm.data_dir) {
@@ -1450,10 +1458,10 @@ impl DownloadManager {
         }
         // Restore retry quota config from disk
         let retry_quota_path = dm.data_dir.join("retry_quota.json");
-        if retry_quota::RetryQuotaManager::state_file_exists(&retry_quota_path) {
-            if let Ok(loaded) = retry_quota::RetryQuotaManager::load(&retry_quota_path) {
-                *dm.retry_quota.lock().await = loaded;
-            }
+        if retry_quota::RetryQuotaManager::state_file_exists(&retry_quota_path)
+            && let Ok(loaded) = retry_quota::RetryQuotaManager::load(&retry_quota_path)
+        {
+            *dm.retry_quota.lock().await = loaded;
         }
         // Restore download templates from disk
         if let Ok(templates) = download_templates::load_templates(&dm.data_dir) {
@@ -2307,13 +2315,12 @@ impl DownloadManager {
     /// Remove a bandwidth schedule rule
     pub async fn remove_bandwidth_schedule_rule(&self, id: &str) -> bool {
         let removed = self.bandwidth_schedule.lock().await.remove_rule(id);
-        if removed {
-            if let Err(e) =
+        if removed
+            && let Err(e) =
                 save_bandwidth_schedule(&*self.bandwidth_schedule.lock().await, &self.data_dir)
                     .await
-            {
-                tracing::warn!(error = %e, "Failed to save bandwidth schedule");
-            }
+        {
+            tracing::warn!(error = %e, "Failed to save bandwidth schedule");
         }
         removed
     }
@@ -2352,10 +2359,8 @@ impl DownloadManager {
         let len_before = presets.len();
         presets.retain(|p| p.id != id);
         let removed = presets.len() < len_before;
-        if removed {
-            if let Err(e) = download_presets::save_presets(&presets, &self.data_dir) {
-                tracing::warn!(error = %e, "Failed to persist download presets");
-            }
+        if removed && let Err(e) = download_presets::save_presets(&presets, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist download presets");
         }
         removed
     }
@@ -3332,14 +3337,14 @@ impl DownloadManager {
 
         for task_id in expired_ids {
             let mut tasks = self.tasks.lock().await;
-            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
-                if task.state == crate::DownloadState::Downloading {
-                    task.state = crate::DownloadState::Paused;
-                    task.error = Some("TTL expired".to_string());
-                    task.finalize_active_time();
-                    self.ttl.lock().await.mark_expired(&task_id);
-                    tracing::info!(task_id = %task_id, "Auto-paused due to TTL expiry");
-                }
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id)
+                && task.state == crate::DownloadState::Downloading
+            {
+                task.state = crate::DownloadState::Paused;
+                task.error = Some("TTL expired".to_string());
+                task.finalize_active_time();
+                self.ttl.lock().await.mark_expired(&task_id);
+                tracing::info!(task_id = %task_id, "Auto-paused due to TTL expiry");
             }
         }
     }
@@ -3919,22 +3924,22 @@ impl DownloadManager {
         // Apply promotions to actual tasks when auto_promote is enabled
         if config.auto_promote {
             for stale_task in &summary.tasks {
-                if stale_task.promoted {
-                    if let Some(task) = tasks.iter_mut().find(|t| t.id == stale_task.id) {
-                        // Apply priority promotion
-                        if let Some(new_priority_str) = &stale_task.new_priority {
-                            let new_priority = match new_priority_str.as_str() {
-                                "low" => DownloadPriority::Low,
-                                "normal" => DownloadPriority::Normal,
-                                "high" => DownloadPriority::High,
-                                _ => DownloadPriority::High,
-                            };
-                            task.priority = new_priority;
-                        }
-                        // Update promotion count
-                        task.staleness_promotion_count = stale_task.promotion_count;
-                        task.updated_at = chrono::Utc::now();
+                if stale_task.promoted
+                    && let Some(task) = tasks.iter_mut().find(|t| t.id == stale_task.id)
+                {
+                    // Apply priority promotion
+                    if let Some(new_priority_str) = &stale_task.new_priority {
+                        let new_priority = match new_priority_str.as_str() {
+                            "low" => DownloadPriority::Low,
+                            "normal" => DownloadPriority::Normal,
+                            "high" => DownloadPriority::High,
+                            _ => DownloadPriority::High,
+                        };
+                        task.priority = new_priority;
                     }
+                    // Update promotion count
+                    task.staleness_promotion_count = stale_task.promotion_count;
+                    task.updated_at = chrono::Utc::now();
                 }
             }
             // Persist updated tasks
@@ -4315,10 +4320,8 @@ impl DownloadManager {
     pub async fn remove_url_rewrite_rule(&self, id: &str) -> bool {
         let mut mgr = self.url_rewrite.lock().await;
         let removed = mgr.remove_rule(id);
-        if removed {
-            if let Err(e) = url_rewrite::save_url_rewrite_manager(&mgr, &self.data_dir) {
-                tracing::warn!(error = %e, "Failed to persist URL rewrite rules");
-            }
+        if removed && let Err(e) = url_rewrite::save_url_rewrite_manager(&mgr, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist URL rewrite rules");
         }
         removed
     }
@@ -4349,10 +4352,10 @@ impl DownloadManager {
         let mut mgr = self.url_rewrite.lock().await;
         let rewritten = mgr.rewrite_url(url);
         // Persist to save updated apply_count
-        if rewritten != url {
-            if let Err(e) = url_rewrite::save_url_rewrite_manager(&mgr, &self.data_dir) {
-                tracing::warn!(error = %e, "Failed to persist URL rewrite rules after apply");
-            }
+        if rewritten != url
+            && let Err(e) = url_rewrite::save_url_rewrite_manager(&mgr, &self.data_dir)
+        {
+            tracing::warn!(error = %e, "Failed to persist URL rewrite rules after apply");
         }
         rewritten
     }
@@ -5451,12 +5454,12 @@ impl DownloadManager {
             xunlei::XunleiSource::Http { url, .. } => Some(url.clone()),
             _ => None,
         });
-        if let Some(url) = source_url.as_ref() {
-            if let Some(existing_id) = self.find_duplicate_by_source(url).await {
-                match self.handle_duplicate(&existing_id, url).await? {
-                    Some(task_id) => return Ok(task_id), // Skip policy: return existing task ID
-                    None => {} // Allow or PauseExisting policy: continue to create new task
-                }
+        if let Some(url) = source_url.as_ref()
+            && let Some(existing_id) = self.find_duplicate_by_source(url).await
+        {
+            match self.handle_duplicate(&existing_id, url).await? {
+                Some(task_id) => return Ok(task_id), // Skip policy: return existing task ID
+                None => {} // Allow or PauseExisting policy: continue to create new task
             }
         }
 
@@ -6314,12 +6317,10 @@ impl DownloadManager {
                             let mut tasks_lock = tasks.lock().await;
                             if let Some(next_task) =
                                 tasks_lock.iter_mut().find(|t| t.id == next_task_id)
+                                && (next_task.state == DownloadState::Paused
+                                    || next_task.state == DownloadState::Queued)
                             {
-                                if next_task.state == DownloadState::Paused
-                                    || next_task.state == DownloadState::Queued
-                                {
-                                    next_task.state = DownloadState::Queued;
-                                }
+                                next_task.state = DownloadState::Queued;
                             }
                             drop(tasks_lock);
                             task_complete_notify.notify_one();
@@ -7720,12 +7721,9 @@ impl DownloadManager {
     /// Restore archive state from disk on startup.
     async fn restore_archive(&self) {
         let archive_path = self.data_dir.join("task_archive.json");
-        match task_archive::load_archive_state(&archive_path).await {
-            Ok(state) => {
-                let mut archive = self.task_archive.write().await;
-                *archive = state;
-            }
-            Err(_) => {}
+        if let Ok(state) = task_archive::load_archive_state(&archive_path).await {
+            let mut archive = self.task_archive.write().await;
+            *archive = state;
         }
     }
 
@@ -8848,10 +8846,10 @@ impl DownloadManager {
                     }
                 }
                 // Filter by group
-                if let Some(ref group) = filter.group {
-                    if t.group.as_deref() != Some(group.as_str()) {
-                        return false;
-                    }
+                if let Some(ref group) = filter.group
+                    && t.group.as_deref() != Some(group.as_str())
+                {
+                    return false;
                 }
                 true
             })
@@ -9893,15 +9891,15 @@ impl DownloadManager {
 
         // Pause the task if it's currently running or queued
         let mut tasks = self.tasks.lock().await;
-        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
-            if task.state == DownloadState::Downloading || task.state == DownloadState::Queued {
-                task.state = DownloadState::Paused;
-                task.updated_at = chrono::Utc::now();
-                task.error = Some(format!(
-                    "Snoozed until {}",
-                    until.format("%Y-%m-%d %H:%M UTC")
-                ));
-            }
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id)
+            && (task.state == DownloadState::Downloading || task.state == DownloadState::Queued)
+        {
+            task.state = DownloadState::Paused;
+            task.updated_at = chrono::Utc::now();
+            task.error = Some(format!(
+                "Snoozed until {}",
+                until.format("%Y-%m-%d %H:%M UTC")
+            ));
         }
         drop(tasks);
 
@@ -9921,12 +9919,12 @@ impl DownloadManager {
 
         // Move task back to Queued
         let mut tasks = self.tasks.lock().await;
-        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
-            if task.state == DownloadState::Paused {
-                task.state = DownloadState::Queued;
-                task.updated_at = chrono::Utc::now();
-                task.error = None;
-            }
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id)
+            && task.state == DownloadState::Paused
+        {
+            task.state = DownloadState::Queued;
+            task.updated_at = chrono::Utc::now();
+            task.error = None;
         }
         drop(tasks);
 
@@ -10216,6 +10214,96 @@ impl DownloadManager {
         .await
     }
 
+    // ===== Integrity Verification =====
+
+    /// Set integrity verification configuration.
+    pub async fn set_integrity_config(&self, config: integrity_verification::IntegrityConfig) {
+        let mut mgr = self.integrity.lock().await;
+        mgr.set_config(config);
+    }
+
+    /// Get integrity verification configuration.
+    pub async fn get_integrity_config(&self) -> integrity_verification::IntegrityConfig {
+        let mgr = self.integrity.lock().await;
+        mgr.config().clone()
+    }
+
+    /// Verify a single download task's file integrity.
+    pub async fn verify_task_integrity(
+        &self,
+        task_id: &str,
+    ) -> Option<integrity_verification::VerificationResult> {
+        let tasks = self.tasks.lock().await;
+        let task = tasks.iter().find(|t| t.id == task_id)?;
+
+        let mut mgr = self.integrity.lock().await;
+        let result = mgr
+            .verify_file(
+                task.id.clone(),
+                task.name.clone(),
+                task.save_path.clone(),
+                task.size,
+            )
+            .await;
+        Some(result)
+    }
+
+    /// Verify all completed tasks' file integrity.
+    pub async fn verify_all_integrity(&self) -> Vec<integrity_verification::VerificationResult> {
+        let tasks = self.tasks.lock().await;
+        let completed_tasks: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Complete)
+            .map(|t| (t.id.clone(), t.name.clone(), t.save_path.clone(), t.size))
+            .collect();
+        drop(tasks);
+
+        let mut mgr = self.integrity.lock().await;
+        mgr.verify_batch(completed_tasks).await
+    }
+
+    /// Get verification result for a specific task.
+    pub async fn get_integrity_result(
+        &self,
+        task_id: &str,
+    ) -> Option<integrity_verification::VerificationResult> {
+        let mgr = self.integrity.lock().await;
+        mgr.get_result(task_id).cloned()
+    }
+
+    /// Get all verification results.
+    pub async fn get_all_integrity_results(
+        &self,
+    ) -> Vec<integrity_verification::VerificationResult> {
+        let mgr = self.integrity.lock().await;
+        mgr.all_results().into_iter().cloned().collect()
+    }
+
+    /// Get integrity verification summary.
+    pub async fn get_integrity_summary(&self) -> integrity_verification::IntegritySummary {
+        let mgr = self.integrity.lock().await;
+        mgr.summary()
+    }
+
+    /// Clear all integrity verification results.
+    pub async fn clear_integrity_results(&self) {
+        let mut mgr = self.integrity.lock().await;
+        mgr.clear();
+    }
+
+    /// Save integrity configuration to disk.
+    pub async fn save_integrity_config(&self) -> std::io::Result<()> {
+        let mgr = self.integrity.lock().await;
+        mgr.save_config(&self.data_dir).await
+    }
+
+    /// Load integrity configuration from disk.
+    pub async fn load_integrity_config(
+        &self,
+    ) -> std::io::Result<integrity_verification::IntegrityConfig> {
+        integrity_verification::IntegrityManager::load_config(&self.data_dir).await
+    }
+
     // ===== Task Performance Profiler =====
 
     /// Set task profiler configuration.
@@ -10303,7 +10391,7 @@ impl DownloadManager {
         &self,
     ) -> adaptive_concurrency::AdaptiveConcurrencyConfig {
         let mgr = self.adaptive_concurrency.lock().await;
-        mgr.get_config().clone()
+        *mgr.get_config()
     }
 
     /// Register a task for adaptive concurrency tracking.

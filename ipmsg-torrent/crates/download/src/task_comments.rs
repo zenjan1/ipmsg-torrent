@@ -188,7 +188,7 @@ impl TaskCommentsManager {
 
     /// Remove a comment by ID from any task.
     pub fn remove_comment(&mut self, comment_id: &str) -> Result<TaskComment, TaskCommentError> {
-        for (_task_id, comments) in self.comments.iter_mut() {
+        for comments in self.comments.values_mut() {
             if let Some(pos) = comments.iter().position(|c| c.id == comment_id) {
                 return Ok(comments.remove(pos));
             }
@@ -272,7 +272,7 @@ impl TaskCommentsManager {
         }
 
         // Sort by task_id for deterministic output
-        matches.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+        matches.sort_by_key(|c| c.task_id.clone());
 
         CommentSearchResult {
             query: query.to_string(),
@@ -292,7 +292,7 @@ impl TaskCommentsManager {
                 }
             }
         }
-        results.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        results.sort_by_key(|a| a.created_at);
         results
     }
 
@@ -331,15 +331,15 @@ impl TaskCommentsManager {
                 all_comments.push((task_id.clone(), idx, comment.created_at));
             }
         }
-        all_comments.sort_by(|a, b| a.2.cmp(&b.2));
+        all_comments.sort_by_key(|a| a.2);
 
         // Remove oldest until under limit
         let to_remove = total - self.config.max_total_comments;
         for (task_id, _idx, _created) in all_comments.into_iter().take(to_remove) {
-            if let Some(comments) = self.comments.get_mut(&task_id) {
-                if !comments.is_empty() {
-                    comments.remove(0);
-                }
+            if let Some(comments) = self.comments.get_mut(&task_id)
+                && !comments.is_empty()
+            {
+                comments.remove(0);
             }
         }
 

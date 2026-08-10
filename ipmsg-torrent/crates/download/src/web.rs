@@ -643,6 +643,15 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/deadline/task/:task_id",
             axum::routing::delete(remove_task_deadline_handler),
         )
+        .route("/api/integrity", get(get_integrity_handler))
+        .route("/api/integrity", post(set_integrity_handler))
+        .route("/api/integrity/summary", get(get_integrity_summary_handler))
+        .route("/api/integrity/verify", post(verify_integrity_handler))
+        .route(
+            "/api/integrity/verify/:task_id",
+            post(verify_task_integrity_handler),
+        )
+        .route("/api/integrity/clear", post(clear_integrity_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -2916,6 +2925,73 @@ async fn remove_task_deadline_handler(
     Json(serde_json::json!({"removed": removed, "task_id": task_id}))
 }
 
+/// Get integrity verification configuration
+async fn get_integrity_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_integrity_config().await;
+    Json(serde_json::json!({
+        "config": config,
+        "auto_verify_on_complete": config.auto_verify_on_complete,
+        "periodic_verification": config.periodic_verification,
+        "verification_interval_secs": config.verification_interval_secs
+    }))
+}
+
+/// Set integrity verification configuration
+async fn set_integrity_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::integrity_verification::IntegrityConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_integrity_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get integrity verification summary
+async fn get_integrity_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_integrity_summary().await;
+    Json(summary)
+}
+
+/// Verify all completed tasks' integrity
+async fn verify_integrity_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let results = state.manager.verify_all_integrity().await;
+    let summary = state.manager.get_integrity_summary().await;
+    Json(serde_json::json!({
+        "results": results,
+        "summary": summary
+    }))
+}
+
+/// Verify a specific task's integrity
+async fn verify_task_integrity_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.verify_task_integrity(&task_id).await {
+        Some(result) => Json(serde_json::json!({
+            "found": true,
+            "result": result
+        })),
+        None => Json(serde_json::json!({
+            "found": false,
+            "error": "Task not found"
+        })),
+    }
+}
+
+/// Clear all integrity verification results
+async fn clear_integrity_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_integrity_results().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
 /// Get retry quota usage
 async fn get_retry_quota_handler(
     State(state): State<Arc<WebState>>,
@@ -4892,7 +4968,7 @@ async fn apply_download_preset(
         message: if applied {
             format!("Applied preset {} to task {}", preset_id, task_id)
         } else {
-            format!("Failed to apply preset (not found, disabled, or task not found)")
+            "Failed to apply preset (not found, disabled, or task not found)".to_string()
         },
         task_id: Some(task_id),
     })

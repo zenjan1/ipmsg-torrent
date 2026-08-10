@@ -217,10 +217,10 @@ impl PathValidator {
             }
 
             // Check for reserved names (Windows compatibility)
-            if self.config.check_reserved_names {
-                if let Some(reserved) = self.check_reserved_name(&component_str) {
-                    return ValidationResult::invalid(format!("Reserved name: '{}'", reserved));
-                }
+            if self.config.check_reserved_names
+                && let Some(reserved) = self.check_reserved_name(&component_str)
+            {
+                return ValidationResult::invalid(format!("Reserved name: '{}'", reserved));
             }
         }
 
@@ -243,12 +243,11 @@ impl PathValidator {
                 // Path doesn't exist yet, try to create it
                 if self.config.auto_create_dirs {
                     // First ensure the parent directory exists
-                    if let Some(parent) = full_path.parent() {
-                        if !parent.exists() {
-                            if let Err(e) = self.auto_create_directory(parent).await {
-                                return ValidationResult::invalid(e.to_string());
-                            }
-                        }
+                    if let Some(parent) = full_path.parent()
+                        && !parent.exists()
+                        && let Err(e) = self.auto_create_directory(parent).await
+                    {
+                        return ValidationResult::invalid(e.to_string());
                     }
                     // Now create the target directory
                     if let Err(e) = self.auto_create_directory(&full_path).await {
@@ -308,13 +307,7 @@ impl PathValidator {
         }
 
         // Check for control characters
-        for c in component.chars() {
-            if c.is_control() {
-                return Some(c);
-            }
-        }
-
-        None
+        component.chars().find(|&c| c.is_control())
     }
 
     /// Check for reserved names (Windows compatibility)
@@ -329,13 +322,7 @@ impl PathValidator {
         let name = component.split('.').next().unwrap_or(component);
         let name_upper = name.to_uppercase();
 
-        for r in &reserved {
-            if name_upper == *r {
-                return Some(r);
-            }
-        }
-
-        None
+        reserved.iter().find(|&r| name_upper == *r).map(|v| v as _)
     }
 
     /// Check if a path attempts to traverse outside the base directory
@@ -344,10 +331,10 @@ impl PathValidator {
         let canonical_base = tokio::fs::canonicalize(&self.config.base_dir)
             .await
             .map_err(|e| {
-                PathValidationError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to canonicalize base directory: {}", e),
-                ))
+                PathValidationError::Io(std::io::Error::other(format!(
+                    "Failed to canonicalize base directory: {}",
+                    e
+                )))
             })?;
 
         // Try to canonicalize the path
@@ -355,17 +342,17 @@ impl PathValidator {
             Ok(p) => p,
             Err(_) => {
                 // Path doesn't exist yet, check the parent
-                if let Some(parent) = path.parent() {
-                    if parent.exists() {
-                        let canonical_parent = tokio::fs::canonicalize(parent).await?;
-                        if !canonical_parent.starts_with(&canonical_base) {
-                            return Err(PathValidationError::PathTraversal(format!(
-                                "Path {:?} is outside base directory {:?}",
-                                path, self.config.base_dir
-                            )));
-                        }
-                        return Ok(());
+                if let Some(parent) = path.parent()
+                    && parent.exists()
+                {
+                    let canonical_parent = tokio::fs::canonicalize(parent).await?;
+                    if !canonical_parent.starts_with(&canonical_base) {
+                        return Err(PathValidationError::PathTraversal(format!(
+                            "Path {:?} is outside base directory {:?}",
+                            path, self.config.base_dir
+                        )));
                     }
+                    return Ok(());
                 }
                 // If parent doesn't exist either, we'll create it later
                 return Ok(());

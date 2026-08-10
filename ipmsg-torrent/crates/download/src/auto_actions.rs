@@ -32,19 +32,15 @@ pub enum AutoAction {
 /// Configuration for when auto-actions should trigger
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AutoActionTrigger {
     /// Trigger only when task completes successfully
+    #[default]
     OnComplete,
     /// Trigger when task completes or fails
     OnCompleteOrFail,
     /// Trigger only when task fails
     OnFail,
-}
-
-impl Default for AutoActionTrigger {
-    fn default() -> Self {
-        Self::OnComplete
-    }
 }
 
 /// A rule that associates conditions with actions
@@ -356,17 +352,17 @@ impl AutoActionsManager {
                     }
                 }
                 // Check group filter
-                if let Some(ref group_filter) = rule.group_filter {
-                    if group != Some(group_filter.as_str()) {
-                        return false;
-                    }
+                if let Some(ref group_filter) = rule.group_filter
+                    && group != Some(group_filter.as_str())
+                {
+                    return false;
                 }
                 true
             })
             .collect();
 
         // Sort by priority descending
-        matching_rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        matching_rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
 
         matching_rules
             .into_iter()

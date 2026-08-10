@@ -188,11 +188,10 @@ fn extract_captures(pattern: &RewritePattern, url: &str) -> Option<Vec<String>> 
                     }
                 } else if part.is_empty() {
                     // Empty part between two *s
-                } else if let Some(found) = url[pos..].find(part) {
+                } else {
+                    let found = url[pos..].find(part)?;
                     captures.push(url[pos..pos + found].to_string());
                     pos += found + part.len();
-                } else {
-                    return None;
                 }
             }
 
@@ -365,7 +364,7 @@ impl UrlRewriteManager {
 
     /// Sort rules by priority (descending)
     fn sort_rules(&mut self) {
-        self.rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        self.rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
     }
 
     /// Get summary of all rules
@@ -457,7 +456,7 @@ impl UrlRewriteSummary {
 }
 
 /// Persistence functions
-
+///
 /// Save URL rewrite rules to disk (atomic write)
 pub fn save_url_rewrite_manager(
     manager: &UrlRewriteManager,
