@@ -65,6 +65,7 @@ pub mod save_path_manager;
 pub mod segment_download;
 pub mod source_rotation;
 pub mod speed_alert;
+pub mod speed_anomaly;
 pub mod speed_burst;
 pub mod speed_history;
 pub mod speed_prediction;
@@ -788,6 +789,8 @@ pub struct DownloadManager {
     speed_history: Arc<Mutex<speed_history::SpeedHistoryManager>>,
     /// Speed trend alert manager
     speed_alerts: Arc<speed_alert::SpeedAlertManager>,
+    /// Speed anomaly detector for per-task speed anomaly detection
+    speed_anomaly: Arc<Mutex<speed_anomaly::SpeedAnomalyDetector>>,
     /// Speed prediction manager for domain-based speed forecasting
     speed_prediction: Arc<Mutex<speed_prediction::SpeedPredictionManager>>,
     /// Per-task download session tracking
@@ -902,6 +905,9 @@ impl DownloadManager {
         let dm = Self {
             tasks: Arc::new(Mutex::new(Vec::new())),
             speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
+            speed_anomaly: Arc::new(Mutex::new(speed_anomaly::SpeedAnomalyDetector::new(
+                speed_anomaly::AnomalyConfig::default(),
+            ))),
             speed_prediction: Arc::new(Mutex::new(speed_prediction::SpeedPredictionManager::new(
                 speed_prediction::SpeedPredictionConfig::default(),
             ))),
@@ -1168,6 +1174,9 @@ impl DownloadManager {
         let dm = Self {
             tasks: Arc::new(Mutex::new(tasks)),
             speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
+            speed_anomaly: Arc::new(Mutex::new(speed_anomaly::SpeedAnomalyDetector::new(
+                speed_anomaly::AnomalyConfig::default(),
+            ))),
             speed_prediction: Arc::new(Mutex::new(speed_prediction::SpeedPredictionManager::new(
                 speed_prediction::SpeedPredictionConfig::default(),
             ))),
@@ -6432,6 +6441,7 @@ impl DownloadManager {
         let eta_estimator = self.eta_estimator.clone();
         let speed_history = self.speed_history.clone();
         let speed_alerts = self.speed_alerts.clone();
+        let speed_anomaly = self.speed_anomaly.clone();
         let speed_prediction = self.speed_prediction.clone();
         let progress_milestone = self.progress_milestone.clone();
         let progress_milestone_config = self.progress_milestone_config.clone();
@@ -6557,6 +6567,13 @@ impl DownloadManager {
                         let _alerts = speed_alerts
                             .record_speed(&task_id, &task_name, avg_speed, now_secs)
                             .await;
+                    }
+
+                    // Check speed anomalies
+                    {
+                        let mut anomaly = speed_anomaly.lock().await;
+                        anomaly.record_speed(&task_id, avg_speed);
+                        let _anomaly_detected = anomaly.check_for_anomalies(&task_id, avg_speed);
                     }
 
                     // Update bandwidth monitor with aggregate speed
@@ -8029,6 +8046,85 @@ impl DownloadManager {
     pub async fn clear_all_speed_predictions(&self) {
         let mut sp = self.speed_prediction.lock().await;
         sp.clear_all();
+    }
+
+    // --- Speed Anomaly Detection (Phase 109) ---
+
+    /// Set speed anomaly detection configuration.
+    pub async fn set_speed_anomaly_config(&self, config: speed_anomaly::AnomalyConfig) {
+        let mut detector = self.speed_anomaly.lock().await;
+        detector.set_config(config);
+    }
+
+    /// Get current speed anomaly detection configuration.
+    pub async fn get_speed_anomaly_config(&self) -> speed_anomaly::AnomalyConfig {
+        let detector = self.speed_anomaly.lock().await;
+        detector.config().clone()
+    }
+
+    /// Get all detected speed anomalies.
+    pub async fn get_speed_anomalies(&self) -> Vec<speed_anomaly::SpeedAnomaly> {
+        let detector = self.speed_anomaly.lock().await;
+        detector.get_all_anomalies().to_vec()
+    }
+
+    /// Get speed anomalies for a specific task.
+    pub async fn get_task_speed_anomalies(
+        &self,
+        task_id: &str,
+    ) -> Vec<speed_anomaly::SpeedAnomaly> {
+        let detector = self.speed_anomaly.lock().await;
+        detector
+            .get_anomalies(task_id)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Clear speed anomalies for a specific task.
+    pub async fn clear_task_speed_anomalies(&self, task_id: &str) {
+        let mut detector = self.speed_anomaly.lock().await;
+        detector.clear_anomalies(task_id);
+    }
+
+    /// Clear all speed anomalies.
+    pub async fn clear_all_speed_anomalies(&self) {
+        let mut detector = self.speed_anomaly.lock().await;
+        detector.clear_all_anomalies();
+    }
+
+    /// Get speed anomaly summary.
+    pub async fn get_speed_anomaly_summary(&self) -> speed_anomaly::SpeedAnomalySummary {
+        let detector = self.speed_anomaly.lock().await;
+        let anomalies = detector.get_all_anomalies();
+        let total = anomalies.len();
+        let severe = anomalies
+            .iter()
+            .filter(|a| a.severity == speed_anomaly::AnomalySeverity::Severe)
+            .count();
+        let moderate = anomalies
+            .iter()
+            .filter(|a| a.severity == speed_anomaly::AnomalySeverity::Moderate)
+            .count();
+        let mild = anomalies
+            .iter()
+            .filter(|a| a.severity == speed_anomaly::AnomalySeverity::Mild)
+            .count();
+        let tracked_tasks = detector.tracked_task_count();
+        speed_anomaly::SpeedAnomalySummary {
+            enabled: detector.config().enabled,
+            total_anomalies: total,
+            severe_count: severe,
+            moderate_count: moderate,
+            mild_count: mild,
+            tracked_tasks,
+        }
+    }
+
+    /// Remove a task from speed anomaly tracking.
+    pub async fn remove_speed_anomaly_task(&self, task_id: &str) {
+        let mut detector = self.speed_anomaly.lock().await;
+        detector.remove_task(task_id);
     }
 
     // --- Download Session Tracking (Phase 84) ---
