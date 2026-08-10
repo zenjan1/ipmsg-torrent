@@ -45,6 +45,7 @@ pub mod download_stats;
 pub mod download_templates;
 pub mod download_time_limit;
 pub mod duplicate_detection;
+pub mod dynamic_priority;
 pub mod ed2k;
 pub mod error_recovery;
 pub mod eta_estimator;
@@ -949,6 +950,8 @@ pub struct DownloadManager {
     resume_policy: Arc<tokio::sync::RwLock<resume_policy::ResumePolicyConfig>>,
     /// Duplicate detection manager for identifying redundant download tasks
     duplicate_detection: Arc<Mutex<duplicate_detection::DuplicateDetectionManager>>,
+    /// Dynamic priority adjustment manager for automatic priority optimization
+    dynamic_priority: Arc<tokio::sync::RwLock<dynamic_priority::DynamicPriorityManager>>,
     /// Dependency graph validator for checking task dependency integrity
     dependency_graph: Arc<tokio::sync::RwLock<dependency_graph::DependencyGraphValidator>>,
     /// Download quota manager for per-tag/group data limits
@@ -1140,6 +1143,9 @@ impl DownloadManager {
             )),
             duplicate_detection: Arc::new(Mutex::new(
                 duplicate_detection::DuplicateDetectionManager::new(),
+            )),
+            dynamic_priority: Arc::new(tokio::sync::RwLock::new(
+                dynamic_priority::DynamicPriorityManager::new(),
             )),
             dependency_graph: Arc::new(tokio::sync::RwLock::new(
                 dependency_graph::DependencyGraphValidator::new(),
@@ -1469,6 +1475,9 @@ impl DownloadManager {
             )),
             duplicate_detection: Arc::new(Mutex::new(
                 duplicate_detection::DuplicateDetectionManager::new(),
+            )),
+            dynamic_priority: Arc::new(tokio::sync::RwLock::new(
+                dynamic_priority::DynamicPriorityManager::new(),
             )),
             dependency_graph: Arc::new(tokio::sync::RwLock::new(
                 dependency_graph::DependencyGraphValidator::new(),
@@ -13002,6 +13011,122 @@ impl DownloadManager {
     ) -> duplicate_detection::DuplicateDetectionConfig {
         let mgr = self.duplicate_detection.lock().await;
         mgr.config().clone()
+    }
+
+    /// Set dynamic priority adjustment configuration
+    pub async fn set_dynamic_priority_config(
+        &self,
+        config: dynamic_priority::DynamicPriorityConfig,
+    ) {
+        let mut mgr = self.dynamic_priority.write().await;
+        mgr.set_config(config);
+    }
+
+    /// Get dynamic priority adjustment configuration
+    pub async fn get_dynamic_priority_config(&self) -> dynamic_priority::DynamicPriorityConfig {
+        let mgr = self.dynamic_priority.read().await;
+        mgr.get_config().clone()
+    }
+
+    /// Enable or disable dynamic priority adjustment
+    pub async fn set_dynamic_priority_enabled(&self, enabled: bool) {
+        let mut mgr = self.dynamic_priority.write().await;
+        mgr.set_enabled(enabled);
+    }
+
+    /// Get dynamic priority adjustment summary
+    pub async fn get_dynamic_priority_summary(&self) -> dynamic_priority::DynamicPrioritySummary {
+        let mgr = self.dynamic_priority.read().await;
+        mgr.get_summary(0, 0)
+    }
+
+    /// Run dynamic priority adjustment cycle
+    pub async fn run_dynamic_priority_adjustment(
+        &self,
+    ) -> Vec<dynamic_priority::PriorityAdjustment> {
+        let tasks = self.tasks.lock().await;
+        let mgr = self.dynamic_priority.read().await;
+
+        if !mgr.is_enabled() {
+            return Vec::new();
+        }
+
+        let task_inputs: Vec<dynamic_priority::TaskPriorityInput> = tasks
+            .iter()
+            .filter(|t| {
+                t.state == crate::DownloadState::Queued
+                    || t.state == crate::DownloadState::Downloading
+            })
+            .map(|t| {
+                let current_speed = if t.state == crate::DownloadState::Downloading {
+                    t.speed_bps as u64
+                } else {
+                    0
+                };
+                let progress_pct = if t.size > 0 {
+                    ((t.downloaded as f64 / t.size as f64) * 100.0) as u32
+                } else {
+                    0
+                };
+                let is_queued = t.state == crate::DownloadState::Queued;
+
+                dynamic_priority::TaskPriorityInput {
+                    task_id: t.id.clone(),
+                    current_priority: dynamic_priority::DynamicPriority::from_download_priority(
+                        t.priority,
+                    ),
+                    current_speed_bps: current_speed,
+                    progress_pct,
+                    retry_count: t.auto_retry_count,
+                    file_size_bytes: t.size,
+                    created_at: t.created_at,
+                    is_queued,
+                }
+            })
+            .collect();
+
+        drop(tasks);
+
+        let adjustments = mgr.evaluate(&task_inputs);
+        drop(mgr);
+
+        if !adjustments.is_empty() {
+            let mut mgr = self.dynamic_priority.write().await;
+            mgr.record_adjustments(adjustments.clone());
+
+            // Apply priority changes
+            let mut tasks = self.tasks.lock().await;
+            for adj in &adjustments {
+                if let Some(task) = tasks.iter_mut().find(|t| t.id == adj.task_id) {
+                    let old_priority = task.priority;
+                    task.priority = adj.new_priority.to_download_priority();
+                    task.updated_at = chrono::Utc::now();
+
+                    self.emit_event(crate::TaskEvent::Updated {
+                        task: crate::TaskInfoEvent::from_task(task),
+                    });
+
+                    tracing::info!(
+                        task_id = %adj.task_id,
+                        old_priority = ?old_priority,
+                        new_priority = ?task.priority,
+                        score = adj.score,
+                        reason = %adj.reason,
+                        "Dynamic priority adjustment"
+                    );
+                }
+            }
+            drop(tasks);
+            self.persist_tasks().await;
+        }
+
+        adjustments
+    }
+
+    /// Clear dynamic priority adjustment history
+    pub async fn clear_dynamic_priority_history(&self) {
+        let mut mgr = self.dynamic_priority.write().await;
+        mgr.clear_records();
     }
 
     /// Detect duplicates among current download tasks

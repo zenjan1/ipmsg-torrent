@@ -6294,13 +6294,22 @@ async fn handle_command(
                     } else {
                         let mut msg = String::from("Webhook Endpoints:\n");
                         for ep in endpoints {
+                            let events_str = if ep.events.is_empty() {
+                                "all".to_string()
+                            } else {
+                                ep.events
+                                    .iter()
+                                    .map(|e| e.label())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            };
                             msg.push_str(&format!(
                                 "  [{}] {} - {} ({})\n    Events: {}\n    Timeout: {}s, Retries: {}\n",
                                 ep.id,
                                 ep.name,
                                 ep.url,
                                 if ep.enabled { "enabled" } else { "disabled" },
-                                if ep.events.is_empty() { "all" } else { &ep.events.iter().map(|e| e.label()).collect::<Vec<_>>().join(", ") },
+                                events_str,
                                 ep.timeout_secs,
                                 ep.max_retries
                             ));
