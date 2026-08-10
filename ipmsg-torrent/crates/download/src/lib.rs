@@ -32,6 +32,7 @@ pub mod download_analytics;
 pub mod download_backup;
 pub mod download_budget;
 pub mod download_cooldown;
+pub mod download_cost;
 pub mod download_deadline;
 pub mod download_history;
 pub mod download_presets;
@@ -971,6 +972,8 @@ pub struct DownloadManager {
     preflight_checker: Arc<tokio::sync::RwLock<preflight_check::PreflightChecker>>,
     /// Tag management system for cross-task tag operations
     tag_manager: Arc<tag_management::TagManager>,
+    /// Download cost tracker for estimating monetary cost of data usage
+    cost_tracker: Arc<Mutex<download_cost::CostTracker>>,
 }
 
 impl DownloadManager {
@@ -1158,6 +1161,7 @@ impl DownloadManager {
                 preflight_check::PreflightChecker::new(&data_dir),
             )),
             tag_manager: Arc::new(tag_management::TagManager::new(&data_dir)),
+            cost_tracker: Arc::new(Mutex::new(download_cost::CostTracker::new())),
         };
         dm.start_scheduler();
         dm
@@ -1477,6 +1481,7 @@ impl DownloadManager {
                 preflight_check::PreflightChecker::new(&data_dir),
             )),
             tag_manager: Arc::new(tag_management::TagManager::new(&data_dir)),
+            cost_tracker: Arc::new(Mutex::new(download_cost::CostTracker::new())),
         };
         // Restore tag manager from disk
         dm.tag_manager.restore().await;
@@ -7018,6 +7023,7 @@ impl DownloadManager {
         let progress_milestone = self.progress_milestone.clone();
         let progress_milestone_config = self.progress_milestone_config.clone();
         let network_monitor = self.network_monitor.clone();
+        let cost_tracker = self.cost_tracker.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -7146,6 +7152,30 @@ impl DownloadManager {
                         let mut anomaly = speed_anomaly.lock().await;
                         anomaly.record_speed(&task_id, avg_speed);
                         let _anomaly_detected = anomaly.check_for_anomalies(&task_id, avg_speed);
+                    }
+
+                    // Record cost for this tick (Phase 127)
+                    {
+                        let (task_name, bytes_this_tick) = {
+                            let t = tasks.lock().await;
+                            t.iter()
+                                .find(|t| t.id == task_id)
+                                .map(|t| {
+                                    // Estimate bytes downloaded this tick from speed
+                                    let bytes_tick = (avg_speed * 2.0) as u64; // ~2s tick
+                                    (t.name.clone(), bytes_tick)
+                                })
+                                .unwrap_or_default()
+                        };
+                        if bytes_this_tick > 0 {
+                            let mut ct = cost_tracker.lock().await;
+                            ct.record_task_usage(
+                                &task_id,
+                                &task_name,
+                                bytes_this_tick,
+                                chrono::Utc::now(),
+                            );
+                        }
                     }
 
                     // Update bandwidth monitor with aggregate speed
@@ -9267,6 +9297,98 @@ impl DownloadManager {
     pub async fn get_all_tag_info(&self) -> Vec<tag_management::TagInfo> {
         self.sync_tag_manager().await;
         self.tag_manager.get_all_tags().await
+    }
+
+    // ─── Phase 127: Download Cost Tracker ───
+
+    /// Get cost tracker config (Phase 127)
+    pub async fn get_cost_config(&self) -> download_cost::CostConfig {
+        self.cost_tracker.lock().await.config().clone()
+    }
+
+    /// Set cost tracker config (Phase 127)
+    pub async fn set_cost_config(&self, config: download_cost::CostConfig) {
+        let mut tracker = self.cost_tracker.lock().await;
+        tracker.set_config(config);
+        let path = self.data_dir.join("download_cost_config.json");
+        let _ = tracker.save_config(&path);
+    }
+
+    /// Record cost for a task based on bytes downloaded (Phase 127)
+    pub async fn record_cost(&self, task_id: &str, task_name: &str, bytes: u64) {
+        let mut tracker = self.cost_tracker.lock().await;
+        tracker.record_task_usage(task_id, task_name, bytes, chrono::Utc::now());
+    }
+
+    /// Get cost record for a specific task (Phase 127)
+    pub async fn get_task_cost(&self, task_id: &str) -> Option<download_cost::TaskCostRecord> {
+        self.cost_tracker
+            .lock()
+            .await
+            .get_task_cost(task_id)
+            .cloned()
+    }
+
+    /// Get cost summary for the current month (Phase 127)
+    pub async fn get_cost_summary_current_month(&self) -> download_cost::CostSummary {
+        self.cost_tracker.lock().await.summary_current_month()
+    }
+
+    /// Get cost summary for a specific date (Phase 127)
+    pub async fn get_cost_summary_for_date(&self, date: &str) -> download_cost::CostSummary {
+        self.cost_tracker.lock().await.summary_for_date(date)
+    }
+
+    /// Get all-time cost summary (Phase 127)
+    pub async fn get_cost_summary_all(&self) -> download_cost::CostSummary {
+        self.cost_tracker.lock().await.summary_all()
+    }
+
+    /// Format cost summary for display (Phase 127)
+    pub async fn format_cost_summary(&self, summary: &download_cost::CostSummary) -> String {
+        self.cost_tracker.lock().await.format_summary(summary)
+    }
+
+    /// Check if budget alert threshold is exceeded (Phase 127)
+    pub async fn is_over_cost_budget(&self) -> bool {
+        self.cost_tracker.lock().await.is_over_budget_alert()
+    }
+
+    /// Remove a task from cost tracking (Phase 127)
+    pub async fn remove_task_cost(&self, task_id: &str) -> Option<download_cost::TaskCostRecord> {
+        self.cost_tracker.lock().await.remove_task(task_id)
+    }
+
+    /// Clear all cost tracking data (Phase 127)
+    pub async fn clear_cost_data(&self) {
+        self.cost_tracker.lock().await.clear();
+    }
+
+    /// Get all task cost records (Phase 127)
+    pub async fn get_all_task_costs(&self) -> Vec<download_cost::TaskCostRecord> {
+        self.cost_tracker
+            .lock()
+            .await
+            .all_task_records()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Get daily cost usage records (Phase 127)
+    pub async fn get_daily_cost_usage(&self) -> Vec<download_cost::DailyCostUsage> {
+        self.cost_tracker
+            .lock()
+            .await
+            .daily_usage()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Prune old daily usage records (Phase 127)
+    pub async fn prune_cost_daily_usage(&self, keep_days: u32) {
+        self.cost_tracker.lock().await.prune_daily_usage(keep_days);
     }
 
     /// Set the priority of a download task.

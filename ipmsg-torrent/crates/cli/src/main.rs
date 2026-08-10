@@ -212,6 +212,12 @@ enum Command {
     DlTags {
         tag: Option<String>,
     },
+    /// Download cost tracker (Phase 127)
+    DlCost {
+        /// "status", "config", "set", "summary", "month", "all", "tasks", "daily", "clear"
+        action: String,
+        args: Vec<String>,
+    },
     /// Search/filter/sort download tasks
     DlFind {
         /// Search query (substring match in name, case-insensitive)
@@ -942,6 +948,18 @@ fn parse_command(input: &str) -> Command {
         "dltags" | "dl-tags" => {
             let tag = parts.get(1).map(|s| s.to_string());
             Command::DlTags { tag }
+        }
+        "dlcost" | "dl-cost" => {
+            if parts.len() < 2 {
+                Command::DlCost {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlCost { action, args }
+            }
         }
         "dlfind" | "dl-find" | "dlf" => {
             // /dlfind [query] [--state=running] [--protocol=torrent] [--sort=name] [--asc]
@@ -6118,6 +6136,166 @@ async fn handle_command(
                     s.add_system_message("main", "No tags found".to_string());
                 } else {
                     s.add_system_message("main", format!("All tags: {}", tags.join(", ")));
+                }
+            }
+        }
+        Command::DlCost { action, args } => {
+            let s = state.lock().await;
+            let dm = s.download_manager.clone();
+            drop(s);
+
+            match action.as_str() {
+                "status" => {
+                    let cfg = dm.get_cost_config().await;
+                    let summary = dm.get_cost_summary_current_month().await;
+                    let mut msg = format!(
+                        "Cost Tracker: {}\nCurrency: {}\nRates: {}\nMonthly Budget: {}\nAlert Threshold: {:.0}%\n",
+                        if cfg.enabled { "Enabled" } else { "Disabled" },
+                        cfg.currency,
+                        cfg.rates.len(),
+                        if cfg.monthly_budget > 0.0 {
+                            format!("{}{}", cfg.currency, cfg.monthly_budget)
+                        } else {
+                            "No limit".to_string()
+                        },
+                        cfg.alert_threshold * 100.0
+                    );
+                    msg.push_str(&format!(
+                        "\nCurrent Month:\n  Total: {}{}\n  Tasks: {}\n  Budget Usage: {:.1}%",
+                        cfg.currency,
+                        summary.total_cost,
+                        summary.task_count,
+                        summary.budget_usage_pct * 100.0
+                    ));
+                    if summary.budget_alert {
+                        msg.push_str(" ⚠️ OVER BUDGET");
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    let cfg = dm.get_cost_config().await;
+                    let mut msg = format!(
+                        "Cost Config:\n  Enabled: {}\n  Currency: {}\n  Monthly Budget: {}{}\n  Alert Threshold: {:.0}%\n  Rates:\n",
+                        cfg.enabled,
+                        cfg.currency,
+                        cfg.currency,
+                        cfg.monthly_budget,
+                        cfg.alert_threshold * 100.0
+                    );
+                    for rate in &cfg.rates {
+                        msg.push_str(&format!(
+                            "    - {}: {}/GB ({} - {})\n",
+                            rate.name,
+                            rate.cost_per_gb,
+                            rate.start_time.format("%H:%M"),
+                            rate.end_time.format("%H:%M")
+                        ));
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "set" => {
+                    // /dlcost set <currency> <cost_per_gb> [monthly_budget]
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlcost set <currency> <cost_per_gb> [monthly_budget]"
+                                .to_string(),
+                        );
+                    } else {
+                        let currency = args[0].clone();
+                        let cost_per_gb: f64 = args[1].parse().unwrap_or(0.0);
+                        let monthly_budget: f64 =
+                            args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                        let mut cfg = dm.get_cost_config().await;
+                        cfg.enabled = true;
+                        cfg.currency = currency;
+                        cfg.rates = vec![ipmsg_download::download_cost::CostRate::flat(
+                            "Default",
+                            cost_per_gb,
+                        )];
+                        cfg.monthly_budget = monthly_budget;
+                        dm.set_cost_config(cfg).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "Cost tracker configured: {}/GB, budget: {}",
+                                cost_per_gb, monthly_budget
+                            ),
+                        );
+                    }
+                }
+                "enable" => {
+                    let mut cfg = dm.get_cost_config().await;
+                    cfg.enabled = true;
+                    dm.set_cost_config(cfg).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Cost tracker enabled".to_string());
+                }
+                "disable" => {
+                    let mut cfg = dm.get_cost_config().await;
+                    cfg.enabled = false;
+                    dm.set_cost_config(cfg).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Cost tracker disabled".to_string());
+                }
+                "summary" => {
+                    let summary = dm.get_cost_summary_current_month().await;
+                    let formatted = dm.format_cost_summary(&summary).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", formatted);
+                }
+                "all" => {
+                    let summary = dm.get_cost_summary_all().await;
+                    let formatted = dm.format_cost_summary(&summary).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", formatted);
+                }
+                "tasks" => {
+                    let records = dm.get_all_task_costs().await;
+                    if records.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No cost records found".to_string());
+                    } else {
+                        let mut msg = "Per-task costs:\n".to_string();
+                        for r in &records {
+                            msg.push_str(&format!(
+                                "  {} ({}): {} bytes, {}\n",
+                                r.task_name, r.task_id, r.bytes_downloaded, r.cost
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "daily" => {
+                    let records = dm.get_daily_cost_usage().await;
+                    if records.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No daily usage records found".to_string());
+                    } else {
+                        let mut msg = "Daily cost usage:\n".to_string();
+                        for r in records.iter().take(30) {
+                            msg.push_str(&format!(
+                                "  {}: {} bytes, {} tasks\n",
+                                r.date, r.bytes_downloaded, r.task_count
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "clear" => {
+                    dm.clear_cost_data().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Cost data cleared".to_string());
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Usage: /dlcost [status|config|set|enable|disable|summary|all|tasks|daily|clear]".to_string());
                 }
             }
         }

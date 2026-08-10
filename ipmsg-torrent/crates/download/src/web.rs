@@ -827,6 +827,14 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/preflight", get(get_preflight_handler))
         .route("/api/preflight", post(set_preflight_handler))
         .route("/api/preflight/run", post(run_preflight_handler))
+        .route("/api/cost", get(get_cost_config_handler))
+        .route("/api/cost", post(set_cost_config_handler))
+        .route("/api/cost/summary", get(get_cost_summary_handler))
+        .route("/api/cost/summary/month", get(get_cost_monthly_handler))
+        .route("/api/cost/summary/all", get(get_cost_all_handler))
+        .route("/api/cost/tasks", get(get_cost_tasks_handler))
+        .route("/api/cost/daily", get(get_cost_daily_handler))
+        .route("/api/cost/clear", post(clear_cost_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -7902,4 +7910,80 @@ async fn run_preflight_handler(
 ) -> impl axum::response::IntoResponse {
     let report = state.manager.run_preflight_check(input).await;
     Json(serde_json::to_value(report).unwrap_or_default())
+}
+
+// ── Cost Tracker Handlers (Phase 127) ──────────────────────────
+
+/// GET /api/cost - Get cost tracker configuration
+async fn get_cost_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_cost_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/cost - Set cost tracker configuration
+async fn set_cost_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::download_cost::CostConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_cost_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/cost/summary - Get current month cost summary
+async fn get_cost_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_cost_summary_current_month().await;
+    let formatted = state.manager.format_cost_summary(&summary).await;
+    Json(serde_json::json!({
+        "summary": summary,
+        "formatted": formatted
+    }))
+}
+
+/// GET /api/cost/summary/month?date=YYYY-MM - Get monthly cost summary
+async fn get_cost_monthly_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl axum::response::IntoResponse {
+    let date = params
+        .get("date")
+        .cloned()
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m").to_string());
+    let summary = state.manager.get_cost_summary_for_date(&date).await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/cost/summary/all - Get all-time cost summary
+async fn get_cost_all_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_cost_summary_all().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/cost/tasks - Get per-task cost records
+async fn get_cost_tasks_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let records = state.manager.get_all_task_costs().await;
+    Json(serde_json::to_value(records).unwrap_or_default())
+}
+
+/// GET /api/cost/daily - Get daily cost usage records
+async fn get_cost_daily_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let records = state.manager.get_daily_cost_usage().await;
+    Json(serde_json::to_value(records).unwrap_or_default())
+}
+
+/// POST /api/cost/clear - Clear all cost tracking data
+async fn clear_cost_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_cost_data().await;
+    Json(serde_json::json!({"status": "ok"}))
 }
