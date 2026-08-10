@@ -82,8 +82,7 @@ pub async fn save_disk_monitor_config(
 ) -> std::io::Result<()> {
     let path = data_dir.join("disk_monitor_config.json");
     let tmp_path = data_dir.join("disk_monitor_config.json.tmp");
-    let json = serde_json::to_string_pretty(config)
-        .map_err(std::io::Error::other)?;
+    let json = serde_json::to_string_pretty(config).map_err(std::io::Error::other)?;
     tokio::fs::write(&tmp_path, json.as_bytes()).await?;
     tokio::fs::rename(&tmp_path, &path).await?;
     Ok(())

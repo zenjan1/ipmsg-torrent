@@ -28,6 +28,7 @@ pub mod dependency_graph;
 pub mod dht;
 pub mod disk_monitor;
 pub mod domain_limit;
+pub mod download_budget;
 pub mod download_cooldown;
 pub mod download_deadline;
 pub mod download_history;
@@ -43,6 +44,7 @@ pub mod duplicate_detection;
 pub mod ed2k;
 pub mod error_recovery;
 pub mod eta_estimator;
+pub mod global_budget;
 pub mod health_dashboard;
 pub mod integrity_verification;
 pub mod link_extractor;
@@ -71,6 +73,7 @@ pub mod retry_quota;
 pub mod rss_feed;
 pub mod save_path_manager;
 pub mod segment_download;
+pub mod source_benchmark;
 pub mod source_rotation;
 pub mod speed_alert;
 pub mod speed_anomaly;
@@ -940,6 +943,12 @@ pub struct DownloadManager {
     disk_monitor: Arc<Mutex<disk_monitor::DiskSpaceMonitor>>,
     /// Disk monitor configuration
     disk_monitor_config: Arc<tokio::sync::RwLock<disk_monitor::DiskMonitorConfig>>,
+    /// Source benchmark manager for pre-download speed testing
+    source_benchmark: Arc<Mutex<source_benchmark::SourceBenchmarkManager>>,
+    /// Global download budget manager for weekly/monthly data limits
+    global_budget: Arc<tokio::sync::RwLock<global_budget::GlobalBudgetManager>>,
+    /// Weekly/monthly download budget manager
+    download_budget: Arc<Mutex<download_budget::BudgetManager>>,
 }
 
 impl DownloadManager {
@@ -1111,6 +1120,13 @@ impl DownloadManager {
             disk_monitor_config: Arc::new(tokio::sync::RwLock::new(
                 disk_monitor::DiskMonitorConfig::default(),
             )),
+            source_benchmark: Arc::new(Mutex::new(source_benchmark::SourceBenchmarkManager::new(
+                data_dir.clone(),
+            ))),
+            global_budget: Arc::new(tokio::sync::RwLock::new(
+                global_budget::GlobalBudgetManager::new(),
+            )),
+            download_budget: Arc::new(Mutex::new(download_budget::BudgetManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1414,7 +1430,18 @@ impl DownloadManager {
             disk_monitor_config: Arc::new(tokio::sync::RwLock::new(
                 disk_monitor::DiskMonitorConfig::default(),
             )),
+            source_benchmark: Arc::new(Mutex::new(source_benchmark::SourceBenchmarkManager::new(
+                data_dir.clone(),
+            ))),
+            global_budget: Arc::new(tokio::sync::RwLock::new(
+                global_budget::GlobalBudgetManager::new(),
+            )),
+            download_budget: Arc::new(Mutex::new(download_budget::BudgetManager::new())),
         };
+        // Restore download budget from disk
+        if let Some(budget_mgr) = download_budget::load_budget(&dm.data_dir) {
+            *dm.download_budget.lock().await = budget_mgr;
+        }
         // Restore disk monitor config from disk
         if let Some(disk_cfg) = disk_monitor::load_disk_monitor_config(&dm.data_dir).await {
             *dm.disk_monitor_config.write().await = disk_cfg;
@@ -4706,6 +4733,100 @@ impl DownloadManager {
         dc.reset_today();
         if let Err(e) = data_cap::save_data_cap(&dc, &self.data_dir) {
             tracing::warn!(error = %e, "Failed to persist data cap reset");
+        }
+    }
+
+    // ── Download Budget (Weekly/Monthly) ─────────────────────────────
+
+    /// Set the download budget configuration.
+    pub async fn set_download_budget_config(&self, config: download_budget::BudgetConfig) {
+        let mut bm = self.download_budget.lock().await;
+        bm.set_config(config);
+        if let Err(e) = download_budget::save_budget(&bm, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist download budget config");
+        }
+    }
+
+    /// Get the download budget configuration.
+    pub async fn get_download_budget_config(&self) -> download_budget::BudgetConfig {
+        let bm = self.download_budget.lock().await;
+        bm.config().clone()
+    }
+
+    /// Get the full download budget summary.
+    pub async fn get_download_budget_summary(&self) -> download_budget::BudgetSummary {
+        let bm = self.download_budget.lock().await;
+        bm.summary()
+    }
+
+    /// Enable or disable the download budget system.
+    pub async fn set_download_budget_enabled(&self, enabled: bool) {
+        let mut bm = self.download_budget.lock().await;
+        bm.set_enabled(enabled);
+        if let Err(e) = download_budget::save_budget(&bm, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist download budget enabled state");
+        }
+    }
+
+    /// Set the weekly budget limit in bytes.
+    pub async fn set_download_budget_weekly_limit(&self, bytes: u64) {
+        let mut bm = self.download_budget.lock().await;
+        bm.set_weekly_limit(bytes);
+        if let Err(e) = download_budget::save_budget(&bm, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist weekly limit");
+        }
+    }
+
+    /// Set the monthly budget limit in bytes.
+    pub async fn set_download_budget_monthly_limit(&self, bytes: u64) {
+        let mut bm = self.download_budget.lock().await;
+        bm.set_monthly_limit(bytes);
+        if let Err(e) = download_budget::save_budget(&bm, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist monthly limit");
+        }
+    }
+
+    /// Record bytes downloaded for budget tracking.
+    /// Returns true if this caused any budget to be newly exhausted.
+    pub async fn record_download_budget(&self, task_id: &str, bytes: u64) -> bool {
+        let mut bm = self.download_budget.lock().await;
+        let crossed = bm.record_download(task_id, bytes);
+        if let Err(e) = download_budget::save_budget(&bm, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist download budget usage");
+        }
+        crossed
+    }
+
+    /// Check if downloads should be paused due to budget exhaustion.
+    pub async fn should_pause_for_download_budget(&self) -> bool {
+        let bm = self.download_budget.lock().await;
+        bm.should_pause_downloads()
+    }
+
+    /// Mark downloads as auto-paused due to budget exhaustion.
+    pub async fn mark_download_budget_paused(&self) {
+        let mut bm = self.download_budget.lock().await;
+        bm.mark_auto_paused();
+        if let Err(e) = download_budget::save_budget(&bm, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist download budget auto-pause");
+        }
+    }
+
+    /// Clear the download budget auto-pause flag.
+    pub async fn clear_download_budget_paused(&self) {
+        let mut bm = self.download_budget.lock().await;
+        bm.clear_auto_paused();
+        if let Err(e) = download_budget::save_budget(&bm, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist download budget clear-pause");
+        }
+    }
+
+    /// Reset download budget usage manually.
+    pub async fn reset_download_budget(&self) {
+        let mut bm = self.download_budget.lock().await;
+        bm.reset();
+        if let Err(e) = download_budget::save_budget(&bm, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist download budget reset");
         }
     }
 
@@ -8231,7 +8352,8 @@ impl DownloadManager {
         drop(proxy_config);
 
         // Get storage status
-        let disk_available_bytes = disk_monitor::get_available_space(&self.get_save_path().await).unwrap_or_default();
+        let disk_available_bytes =
+            disk_monitor::get_available_space(&self.get_save_path().await).unwrap_or_default();
         let disk_low = disk_available_bytes < config.low_disk_threshold_bytes;
 
         // Get integrity issues
@@ -11375,7 +11497,8 @@ impl DownloadManager {
         let is_monitoring = monitor.is_running().await;
         let auto_paused_count = monitor.auto_paused_count().await;
         let auto_resumed_count = monitor.auto_resumed_count().await;
-        let available_bytes = disk_monitor::get_available_space(monitor.monitor_path()).unwrap_or_default();
+        let available_bytes =
+            disk_monitor::get_available_space(monitor.monitor_path()).unwrap_or_default();
         disk_monitor::DiskMonitorSummary {
             enabled: config.enabled,
             status,
@@ -12039,6 +12162,134 @@ impl DownloadManager {
     pub async fn get_resume_policy_config(&self) -> resume_policy::ResumePolicyConfig {
         let policy = self.resume_policy.read().await;
         policy.clone()
+    }
+
+    // ===== Source Benchmark Management (Phase 120) =====
+
+    /// Set source benchmark configuration.
+    pub async fn set_source_benchmark_config(
+        &self,
+        config: source_benchmark::BenchmarkConfig,
+    ) -> std::io::Result<()> {
+        let mut mgr = self.source_benchmark.lock().await;
+        mgr.set_config(config.clone());
+        source_benchmark::save_benchmark_config(&config, &self.data_dir).await?;
+        Ok(())
+    }
+
+    /// Get source benchmark configuration.
+    pub async fn get_source_benchmark_config(&self) -> source_benchmark::BenchmarkConfig {
+        let mgr = self.source_benchmark.lock().await;
+        mgr.config().clone()
+    }
+
+    /// Benchmark a list of source URLs and return results sorted by speed.
+    pub async fn benchmark_sources(
+        &self,
+        urls: &[String],
+    ) -> Result<source_benchmark::BenchmarkSummary, source_benchmark::SourceBenchmarkError> {
+        let mgr = self.source_benchmark.lock().await;
+        mgr.benchmark_sources(urls).await
+    }
+
+    /// Select the best source URL from a list based on benchmark results.
+    pub async fn select_best_source(
+        &self,
+        urls: &[String],
+    ) -> Result<String, source_benchmark::SourceBenchmarkError> {
+        let mut mgr = self.source_benchmark.lock().await;
+        mgr.select_best_source(urls).await
+    }
+
+    /// Get source benchmark cache summary.
+    pub async fn get_source_benchmark_cache_summary(
+        &self,
+    ) -> source_benchmark::BenchmarkCacheSummary {
+        let mgr = self.source_benchmark.lock().await;
+        mgr.cache_summary()
+    }
+
+    /// Get cached benchmark result for a specific domain.
+    pub async fn get_cached_domain_benchmark(
+        &self,
+        domain: &str,
+    ) -> Option<source_benchmark::CachedDomainBenchmark> {
+        let mgr = self.source_benchmark.lock().await;
+        mgr.get_cached_domain(domain).cloned()
+    }
+
+    /// Clear all cached source benchmark results.
+    pub async fn clear_source_benchmark_cache(&self) {
+        let mut mgr = self.source_benchmark.lock().await;
+        mgr.clear_cache();
+    }
+
+    /// Save source benchmark cache to disk.
+    pub async fn save_source_benchmark_cache(&self) -> std::io::Result<()> {
+        let mgr = self.source_benchmark.lock().await;
+        mgr.save_cache().await
+    }
+
+    // ── Global Download Budget ──────────────────────────────────────────
+
+    /// Set the global download budget configuration
+    pub async fn set_global_budget_config(&self, config: global_budget::GlobalBudgetConfig) {
+        let mut gb = self.global_budget.write().await;
+        gb.set_config(config);
+        let _ = global_budget::save_global_budget_config(
+            &gb,
+            &self.data_dir.join("global_budget.json"),
+        );
+    }
+
+    /// Get the global download budget configuration
+    pub async fn get_global_budget_config(&self) -> global_budget::GlobalBudgetConfig {
+        let gb = self.global_budget.read().await;
+        gb.config.clone()
+    }
+
+    /// Get the global budget usage summary
+    pub async fn get_global_budget_summary(&self) -> global_budget::GlobalBudgetSummary {
+        let gb = self.global_budget.read().await;
+        gb.get_summary()
+    }
+
+    /// Record downloaded bytes in the global budget tracker
+    pub async fn record_global_budget_download(&self, bytes: u64) -> bool {
+        let mut gb = self.global_budget.write().await;
+        gb.record_download(bytes)
+    }
+
+    /// Record a task contributing to the global budget
+    pub async fn record_global_budget_task(&self) {
+        let mut gb = self.global_budget.write().await;
+        gb.record_task();
+    }
+
+    /// Reset global budget usage data
+    pub async fn reset_global_budget_usage(&self) {
+        let mut gb = self.global_budget.write().await;
+        gb.reset_usage();
+        let _ = global_budget::save_global_budget_config(
+            &gb,
+            &self.data_dir.join("global_budget.json"),
+        );
+    }
+
+    /// Resume downloads after budget was exceeded (manual override)
+    pub async fn resume_global_budget_downloads(&self) {
+        let mut gb = self.global_budget.write().await;
+        gb.resume_downloads();
+        let _ = global_budget::save_global_budget_config(
+            &gb,
+            &self.data_dir.join("global_budget.json"),
+        );
+    }
+
+    /// Check if downloads should be paused due to global budget
+    pub async fn should_pause_global_budget(&self) -> bool {
+        let gb = self.global_budget.read().await;
+        gb.should_pause_downloads()
     }
 }
 

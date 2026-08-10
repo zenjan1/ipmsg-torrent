@@ -156,6 +156,11 @@ enum Command {
         /// "status", "set <limit>", "enable", "disable", "reset"
         args: Vec<String>,
     },
+    /// Configure weekly/monthly download budget with auto-pause
+    DlBudget {
+        /// "status", "set <weekly> [monthly]", "enable", "disable", "reset"
+        args: Vec<String>,
+    },
     /// View and manage download statistics
     DlStats2 {
         /// "show", "reset"
@@ -530,6 +535,11 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    DlGlobalBudget {
+        /// Subcommand: status|set|reset|resume|summary
+        subcommand: String,
+        args: Vec<String>,
+    },
     DlRetryQuota {
         /// Subcommand: status|enable|disable|set|reset
         subcommand: String,
@@ -844,6 +854,10 @@ fn parse_command(input: &str) -> Command {
         "dldcap" | "dl-dcap" | "dldc" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlDataCap { args }
+        }
+        "dlwkbudget" | "dl-wk-budget" | "dlwkb" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlBudget { args }
         }
         "dlstats2" | "dl-stats2" => {
             if parts.len() >= 2 {
@@ -1710,6 +1724,23 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlbudget" | "dl-budget" | "dlgb" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlbudget <status|set|reset|resume|summary>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlGlobalBudget {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlretryquota" | "dl-retryquota" | "dlrq" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
@@ -2133,6 +2164,7 @@ fn command_help() -> String {
         "/dldedup [cmd]     - URL dedup policy (status|set <mode>|enable|disable)",
         "/dlrewrite [cmd]   - URL rewrite rules (status|add|del|preview|enable|disable)",
         "/dldcap [cmd]      - Daily data cap (status|set <limit>|enable|disable|reset)",
+        "/dlwkbudget [cmd]  - Weekly/monthly budget (status|set <weekly> <monthly>|enable|disable|reset)",
         "/dlstats2 [cmd]    - Download statistics (show|reset)",
         "/dlreport [period]  - Generate download report (daily|weekly|monthly)",
         "/dlurlx [cmd]       - URL expansion & validation (status|enable|disable|expand|validate)",
@@ -2193,6 +2225,7 @@ fn command_help() -> String {
         "/dlretryquota [cmd] - Retry quota (status|enable|disable|set <max> [window_secs]|reset)",
         "/dlintegrity [cmd] - File integrity verification (status|verify <id>|verify-all|summary|clear|config)",
         "/dldisk [cmd]     - Disk space monitor (status|config|check|start|stop)",
+        "/dlbudget [cmd]   - Global download budget (status|set <weekly_mb> <monthly_mb> [pct]|reset|resume)",
         "/dldup [cmd]     - Duplicate detection (status|detect|groups|summary|clear|config)",
         "/dlresumepolicy [cmd] - Resume policy (status|set|preview)",
         "/dlanomaly [cmd] - Speed anomaly detection (status|list|summary|remove|clear|config)",
@@ -3909,6 +3942,95 @@ async fn handle_command(
                         s.add_system_message(
                             "main",
                             "Usage: /dldcap [status|set <limit>|enable|disable|reset]".to_string(),
+                        );
+                    }
+                }
+            }
+        }
+        Command::DlBudget { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if args.is_empty() || args[0] == "status" {
+                let summary = download_manager.get_download_budget_summary().await;
+                let mut s = state.lock().await;
+                s.add_system_message("main", summary.format_display());
+            } else {
+                match args[0].as_str() {
+                    "enable" => {
+                        download_manager.set_download_budget_enabled(true).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Download budget enabled".to_string());
+                    }
+                    "disable" => {
+                        download_manager.set_download_budget_enabled(false).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Download budget disabled".to_string());
+                    }
+                    "set" => {
+                        if args.len() >= 3 {
+                            match ipmsg_download::download_budget::parse_size(&args[1]) {
+                                Some(weekly_bytes) => {
+                                    match ipmsg_download::download_budget::parse_size(&args[2]) {
+                                        Some(monthly_bytes) => {
+                                            download_manager
+                                                .set_download_budget_weekly_limit(weekly_bytes)
+                                                .await;
+                                            download_manager
+                                                .set_download_budget_monthly_limit(monthly_bytes)
+                                                .await;
+                                            let mut s = state.lock().await;
+                                            s.add_system_message(
+                                                "main",
+                                                format!(
+                                                    "✅ Budget set: weekly={}, monthly={}",
+                                                    ipmsg_download::download_budget::format_bytes(
+                                                        weekly_bytes
+                                                    ),
+                                                    ipmsg_download::download_budget::format_bytes(
+                                                        monthly_bytes
+                                                    )
+                                                ),
+                                            );
+                                        }
+                                        None => {
+                                            let mut s = state.lock().await;
+                                            s.add_system_message(
+                                                "main",
+                                                "❌ Invalid monthly size. Use: 10GB, 50GB, 1TB"
+                                                    .to_string(),
+                                            );
+                                        }
+                                    }
+                                }
+                                None => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "❌ Invalid weekly size. Use: 5GB, 10GB, 50GB".to_string(),
+                                    );
+                                }
+                            }
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "Usage: /dlwkbudget set <weekly_limit> <monthly_limit>".to_string(),
+                            );
+                        }
+                    }
+                    "reset" => {
+                        download_manager.reset_download_budget().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Download budget usage reset".to_string());
+                    }
+                    _ => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlwkbudget [status|set <weekly> <monthly>|enable|disable|reset]"
+                                .to_string(),
                         );
                     }
                 }
@@ -11859,6 +11981,69 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dldisk <status|config|check|start|stop>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlGlobalBudget { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" | "summary" => {
+                    let summary = download_manager.get_global_budget_summary().await;
+                    let msg = summary.format_summary();
+                    s.add_system_message("main", msg);
+                }
+                "set" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlwkbudget set <weekly_mb> <monthly_mb> [warning_pct]"
+                                .to_string(),
+                        );
+                    } else {
+                        let weekly_mb: u64 = args[0].parse().unwrap_or(0);
+                        let monthly_mb: u64 = args[1].parse().unwrap_or(0);
+                        let warning_pct: f64 = if args.len() > 2 {
+                            args[2].parse().unwrap_or(0.8)
+                        } else {
+                            0.8
+                        };
+                        let config = ipmsg_download::global_budget::GlobalBudgetConfig::new(
+                            weekly_mb * 1024 * 1024,
+                            monthly_mb * 1024 * 1024,
+                        )
+                        .with_warning_threshold(warning_pct);
+                        download_manager.set_global_budget_config(config).await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "Global budget set: weekly={} MB, monthly={} MB, warning={:.0}%",
+                                weekly_mb,
+                                monthly_mb,
+                                warning_pct * 100.0
+                            ),
+                        );
+                    }
+                }
+                "reset" => {
+                    download_manager.reset_global_budget_usage().await;
+                    s.add_system_message("main", "Global budget usage reset".to_string());
+                }
+                "resume" => {
+                    download_manager.resume_global_budget_downloads().await;
+                    s.add_system_message(
+                        "main",
+                        "Downloads resumed after budget limit".to_string(),
+                    );
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlbudget <status|set|reset|resume|summary>".to_string(),
                     );
                 }
             }

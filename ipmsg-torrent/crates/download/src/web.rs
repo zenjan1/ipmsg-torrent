@@ -335,6 +335,13 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/data-cap", post(set_data_cap_config))
         .route("/api/data-cap/enable", post(set_data_cap_enabled))
         .route("/api/data-cap/reset", post(reset_data_cap_today))
+        .route("/api/download-budget", get(get_download_budget_summary))
+        .route("/api/download-budget", post(set_download_budget_config))
+        .route(
+            "/api/download-budget/enable",
+            post(set_download_budget_enabled),
+        )
+        .route("/api/download-budget/reset", post(reset_download_budget))
         .route("/api/stats/download", get(get_download_stats))
         .route("/api/stats/download/reset", post(reset_download_stats))
         .route("/api/report/download", get(get_download_report))
@@ -753,6 +760,38 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/disk-monitor/check", post(check_disk_space_handler))
         .route("/api/disk-monitor/start", post(start_disk_monitor_handler))
         .route("/api/disk-monitor/stop", post(stop_disk_monitor_handler))
+        .route("/api/global-budget", get(get_global_budget_handler))
+        .route("/api/global-budget", post(set_global_budget_handler))
+        .route(
+            "/api/global-budget/summary",
+            get(global_budget_summary_handler),
+        )
+        .route(
+            "/api/global-budget/reset",
+            post(reset_global_budget_handler),
+        )
+        .route(
+            "/api/global-budget/resume",
+            post(resume_global_budget_handler),
+        )
+        .route("/api/source-benchmark", get(get_source_benchmark_handler))
+        .route("/api/source-benchmark", post(set_source_benchmark_handler))
+        .route(
+            "/api/source-benchmark/run",
+            post(run_source_benchmark_handler),
+        )
+        .route(
+            "/api/source-benchmark/select",
+            post(select_best_source_handler),
+        )
+        .route(
+            "/api/source-benchmark/cache",
+            get(get_source_benchmark_cache_handler),
+        )
+        .route(
+            "/api/source-benchmark/cache",
+            post(clear_source_benchmark_cache_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -1055,6 +1094,60 @@ async fn set_data_cap_enabled(
 /// Reset today's data cap usage
 async fn reset_data_cap_today(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     state.manager.reset_data_cap_today().await;
+    Json(serde_json::json!({"success": true}))
+}
+
+/// Get download budget summary (weekly/monthly)
+async fn get_download_budget_summary(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::download_budget::BudgetSummary> {
+    let summary = state.manager.get_download_budget_summary().await;
+    Json(summary)
+}
+
+/// Set download budget configuration
+#[derive(Deserialize)]
+struct SetDownloadBudgetRequest {
+    weekly_limit_bytes: Option<u64>,
+    monthly_limit_bytes: Option<u64>,
+    auto_pause: Option<bool>,
+}
+
+async fn set_download_budget_config(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SetDownloadBudgetRequest>,
+) -> Json<serde_json::Value> {
+    let current = state.manager.get_download_budget_config().await;
+    let config = crate::download_budget::BudgetConfig {
+        enabled: true,
+        weekly_limit_bytes: req.weekly_limit_bytes.unwrap_or(current.weekly_limit_bytes),
+        monthly_limit_bytes: req
+            .monthly_limit_bytes
+            .unwrap_or(current.monthly_limit_bytes),
+        auto_pause: req.auto_pause.unwrap_or(current.auto_pause),
+        ..current
+    };
+    state.manager.set_download_budget_config(config).await;
+    Json(serde_json::json!({"success": true}))
+}
+
+/// Enable or disable download budget
+#[derive(Deserialize)]
+struct DownloadBudgetEnabledRequest {
+    enabled: bool,
+}
+
+async fn set_download_budget_enabled(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<DownloadBudgetEnabledRequest>,
+) -> Json<serde_json::Value> {
+    state.manager.set_download_budget_enabled(req.enabled).await;
+    Json(serde_json::json!({"success": true}))
+}
+
+/// Reset download budget usage
+async fn reset_download_budget(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    state.manager.reset_download_budget().await;
     Json(serde_json::json!({"success": true}))
 }
 
@@ -3210,6 +3303,91 @@ async fn stop_disk_monitor_handler(
     State(state): State<Arc<WebState>>,
 ) -> impl axum::response::IntoResponse {
     state.manager.stop_disk_monitoring().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get global budget configuration and summary
+async fn get_global_budget_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_global_budget_config().await;
+    let summary = state.manager.get_global_budget_summary().await;
+    Json(serde_json::json!({
+        "config": config,
+        "summary": {
+            "status": format!("{}", summary.status),
+            "downloads_paused": summary.downloads_paused,
+            "weekly": {
+                "bytes_downloaded": summary.weekly.bytes_downloaded,
+                "limit_bytes": summary.weekly.limit_bytes,
+                "usage_percent": summary.weekly.usage_percent,
+                "remaining": summary.weekly.remaining,
+                "period_start": summary.weekly.period_start.to_string(),
+                "period_end": summary.weekly.period_end.to_string(),
+                "status": format!("{}", summary.weekly.status)
+            },
+            "monthly": {
+                "bytes_downloaded": summary.monthly.bytes_downloaded,
+                "limit_bytes": summary.monthly.limit_bytes,
+                "usage_percent": summary.monthly.usage_percent,
+                "remaining": summary.monthly.remaining,
+                "period_start": summary.monthly.period_start.to_string(),
+                "period_end": summary.monthly.period_end.to_string(),
+                "status": format!("{}", summary.monthly.status)
+            }
+        }
+    }))
+}
+
+/// Set global budget configuration
+async fn set_global_budget_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::global_budget::GlobalBudgetConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_global_budget_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get global budget usage summary
+async fn global_budget_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_global_budget_summary().await;
+    Json(serde_json::json!({
+        "status": format!("{}", summary.status),
+        "downloads_paused": summary.downloads_paused,
+        "weekly": {
+            "bytes_downloaded": summary.weekly.bytes_downloaded,
+            "limit_bytes": summary.weekly.limit_bytes,
+            "usage_percent": summary.weekly.usage_percent,
+            "remaining": summary.weekly.remaining,
+            "period_start": summary.weekly.period_start.to_string(),
+            "period_end": summary.weekly.period_end.to_string()
+        },
+        "monthly": {
+            "bytes_downloaded": summary.monthly.bytes_downloaded,
+            "limit_bytes": summary.monthly.limit_bytes,
+            "usage_percent": summary.monthly.usage_percent,
+            "remaining": summary.monthly.remaining,
+            "period_start": summary.monthly.period_start.to_string(),
+            "period_end": summary.monthly.period_end.to_string()
+        }
+    }))
+}
+
+/// Reset global budget usage data
+async fn reset_global_budget_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.reset_global_budget_usage().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Resume downloads after budget was exceeded
+async fn resume_global_budget_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.resume_global_budget_downloads().await;
     Json(serde_json::json!({"status": "ok"}))
 }
 
@@ -7390,4 +7568,118 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
     }
+}
+
+// ===== Source Benchmark Handlers (Phase 120) =====
+
+/// Get source benchmark configuration
+async fn get_source_benchmark_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_source_benchmark_config().await;
+    Json(serde_json::json!({
+        "config": config
+    }))
+}
+
+/// Set source benchmark configuration
+async fn set_source_benchmark_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::source_benchmark::BenchmarkConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_source_benchmark_config(config).await {
+        Ok(_) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Run source benchmark on a list of URLs
+async fn run_source_benchmark_handler(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let urls = match request.get("urls").and_then(|v| v.as_array()) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect::<Vec<_>>(),
+        None => return Json(serde_json::json!({"error": "missing 'urls' array"})),
+    };
+
+    if urls.is_empty() {
+        return Json(serde_json::json!({"error": "urls array is empty"}));
+    }
+
+    match state.manager.benchmark_sources(&urls).await {
+        Ok(summary) => Json(serde_json::json!({
+            "status": "ok",
+            "summary": {
+                "total_sources": summary.total_sources,
+                "successful": summary.successful,
+                "failed": summary.failed,
+                "fastest_url": summary.fastest_url,
+                "fastest_speed_bps": summary.fastest_speed_bps,
+                "slowest_speed_bps": summary.slowest_speed_bps,
+                "avg_speed_bps": summary.avg_speed_bps,
+                "total_duration_ms": summary.total_duration_ms,
+                "results": summary.results.iter().map(|r| serde_json::json!({
+                    "url": r.url,
+                    "success": r.success,
+                    "speed_bps": r.speed_bps,
+                    "latency_ms": r.latency_ms,
+                    "http_status": r.http_status,
+                    "bytes_downloaded": r.bytes_downloaded,
+                    "duration_ms": r.duration_ms,
+                    "error": r.error
+                })).collect::<Vec<_>>()
+            }
+        })),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Select the best source from a list of URLs
+async fn select_best_source_handler(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let urls = match request.get("urls").and_then(|v| v.as_array()) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect::<Vec<_>>(),
+        None => return Json(serde_json::json!({"error": "missing 'urls' array"})),
+    };
+
+    if urls.is_empty() {
+        return Json(serde_json::json!({"error": "urls array is empty"}));
+    }
+
+    match state.manager.select_best_source(&urls).await {
+        Ok(best_url) => Json(serde_json::json!({
+            "status": "ok",
+            "best_url": best_url
+        })),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Get source benchmark cache summary
+async fn get_source_benchmark_cache_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_source_benchmark_cache_summary().await;
+    Json(serde_json::json!({
+        "total_domains": summary.total_domains,
+        "fast_domains": summary.fast_domains,
+        "slow_domains": summary.slow_domains
+    }))
+}
+
+/// Clear source benchmark cache
+async fn clear_source_benchmark_cache_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_source_benchmark_cache().await;
+    Json(serde_json::json!({"status": "ok"}))
 }
