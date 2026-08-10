@@ -824,6 +824,9 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/backup", post(create_backup_handler))
         .route("/api/backup/:id", get(get_backup_handler))
         .route("/api/backup/:id", delete(delete_backup_handler))
+        .route("/api/preflight", get(get_preflight_handler))
+        .route("/api/preflight", post(set_preflight_handler))
+        .route("/api/preflight/run", post(run_preflight_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -7869,4 +7872,34 @@ async fn delete_backup_handler(
         Ok(_) => Json(serde_json::json!({"status": "ok"})),
         Err(e) => Json(serde_json::json!({"error": e.to_string()})),
     }
+}
+
+// ── Preflight Check Handlers ─────────────────────────────────────
+
+/// GET /api/preflight - Get preflight check configuration
+async fn get_preflight_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_preflight_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/preflight - Set preflight check configuration
+async fn set_preflight_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::preflight_check::PreflightConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_preflight_config(config).await {
+        Ok(_) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// POST /api/preflight/run - Run preflight checks for a URL
+async fn run_preflight_handler(
+    State(state): State<Arc<WebState>>,
+    Json(input): Json<crate::preflight_check::PreflightInput>,
+) -> impl axum::response::IntoResponse {
+    let report = state.manager.run_preflight_check(input).await;
+    Json(serde_json::to_value(report).unwrap_or_default())
 }

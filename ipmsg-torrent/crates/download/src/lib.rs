@@ -60,6 +60,7 @@ pub mod path_rules;
 pub mod path_template;
 pub mod path_validator;
 pub mod post_hooks;
+pub mod preflight_check;
 pub mod priority_aging;
 pub mod progress;
 pub mod progress_milestone;
@@ -155,6 +156,10 @@ pub use integrity_verification::{
 pub use mirror_health::{MirrorHealth, MirrorHealthConfig, MirrorSummary};
 pub use notification::{
     NotificationChannel, NotificationConfig, NotificationError, NotificationEvent,
+};
+pub use preflight_check::{
+    PreflightCheckError, PreflightChecker, PreflightConfig, PreflightInput, PreflightProtocol,
+    PreflightReport, PreflightStatus,
 };
 pub use queue_completion::{
     QueueCompletionConfig, QueueCompletionPrediction, QueueCompletionPredictor,
@@ -958,6 +963,8 @@ pub struct DownloadManager {
     backup_manager: Arc<download_backup::BackupManager>,
     /// Smart queue optimizer for automatic queue reordering
     smart_queue: Arc<tokio::sync::RwLock<smart_queue::SmartQueueOptimizer>>,
+    /// Preflight checker for pre-download validation
+    preflight_checker: Arc<tokio::sync::RwLock<preflight_check::PreflightChecker>>,
 }
 
 impl DownloadManager {
@@ -1140,6 +1147,9 @@ impl DownloadManager {
             backup_manager: Arc::new(download_backup::BackupManager::new(data_dir.clone())),
             smart_queue: Arc::new(tokio::sync::RwLock::new(
                 smart_queue::SmartQueueOptimizer::new(),
+            )),
+            preflight_checker: Arc::new(tokio::sync::RwLock::new(
+                preflight_check::PreflightChecker::new(&data_dir),
             )),
         };
         dm.start_scheduler();
@@ -1455,6 +1465,9 @@ impl DownloadManager {
             backup_manager: Arc::new(download_backup::BackupManager::new(data_dir.clone())),
             smart_queue: Arc::new(tokio::sync::RwLock::new(
                 smart_queue::SmartQueueOptimizer::new(),
+            )),
+            preflight_checker: Arc::new(tokio::sync::RwLock::new(
+                preflight_check::PreflightChecker::new(&data_dir),
             )),
         };
         // Restore download budget from disk
@@ -5006,6 +5019,32 @@ impl DownloadManager {
     pub async fn get_smart_queue_last_result(&self) -> Option<smart_queue::OptimizationResult> {
         let sq = self.smart_queue.read().await;
         sq.get_last_result().cloned()
+    }
+
+    // ── Preflight Check ─────────────────────────────────────────────
+
+    /// Get preflight check configuration
+    pub async fn get_preflight_config(&self) -> preflight_check::PreflightConfig {
+        let pc = self.preflight_checker.read().await;
+        pc.config().clone()
+    }
+
+    /// Set preflight check configuration
+    pub async fn set_preflight_config(
+        &self,
+        config: preflight_check::PreflightConfig,
+    ) -> Result<(), preflight_check::PreflightCheckError> {
+        let mut pc = self.preflight_checker.write().await;
+        pc.set_config(config)
+    }
+
+    /// Run preflight checks for a given URL and save directory
+    pub async fn run_preflight_check(
+        &self,
+        input: preflight_check::PreflightInput,
+    ) -> preflight_check::PreflightReport {
+        let pc = self.preflight_checker.read().await;
+        pc.run_checks(&input).await
     }
 
     // ── Download Statistics ──────────────────────────────────────────

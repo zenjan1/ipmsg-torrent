@@ -171,6 +171,11 @@ enum Command {
         /// "list", "create [description]", "show <path>", "delete <path>"
         args: Vec<String>,
     },
+    /// Preflight check configuration and execution
+    DlPreflight {
+        /// "status", "config", "run <url> [save_dir]"
+        args: Vec<String>,
+    },
     /// View and manage download statistics
     DlStats2 {
         /// "show", "reset"
@@ -876,6 +881,10 @@ fn parse_command(input: &str) -> Command {
         "dlbackup" | "dl-backup" | "dlbk" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlBackup { args }
+        }
+        "dlpreflight" | "dl-preflight" | "dlpf" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlPreflight { args }
         }
         "dlstats2" | "dl-stats2" => {
             if parts.len() >= 2 {
@@ -2185,6 +2194,7 @@ fn command_help() -> String {
         "/dlwkbudget [cmd]  - Weekly/monthly budget (status|set <weekly> <monthly>|enable|disable|reset)",
         "/dlanalytics [cmd] - Download analytics (summary [days]|trend [days]|today|records|config|prune|clear)",
         "/dlbackup [cmd]    - Download backup (list|create [desc]|show <path>|delete <path>)",
+        "/dlpreflight [cmd] - Preflight check (status|enable|disable|run <url> [dir])",
         "/dlstats2 [cmd]    - Download statistics (show|reset)",
         "/dlreport [period]  - Generate download report (daily|weekly|monthly)",
         "/dlurlx [cmd]       - URL expansion & validation (status|enable|disable|expand|validate)",
@@ -4287,6 +4297,68 @@ async fn handle_command(
                 }
                 _ => {
                     eprintln!("Unknown subcommand: {}. Use list|create|show|delete", sub);
+                }
+            }
+        }
+        Command::DlPreflight { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+            match sub {
+                "status" | "config" => {
+                    let config = download_manager.get_preflight_config().await;
+                    println!("Preflight Check Configuration:");
+                    println!("  Enabled: {}", config.enabled);
+                    println!("  Check DNS: {}", config.check_dns);
+                    println!("  Check Disk Space: {}", config.check_disk_space);
+                    println!("  Check URL Reachability: {}", config.check_url_reachable);
+                    println!("  Check Proxy: {}", config.check_proxy);
+                    println!("  Min Free Disk: {} bytes", config.min_free_disk_bytes);
+                    println!("  Timeout: {}s", config.check_timeout_secs);
+                    println!("  Block on Fail: {}", config.block_on_fail);
+                }
+                "enable" => {
+                    let mut config = download_manager.get_preflight_config().await;
+                    config.enabled = true;
+                    if let Err(e) = download_manager.set_preflight_config(config).await {
+                        eprintln!("Failed to enable: {}", e);
+                    } else {
+                        println!("Preflight checks enabled.");
+                    }
+                }
+                "disable" => {
+                    let mut config = download_manager.get_preflight_config().await;
+                    config.enabled = false;
+                    if let Err(e) = download_manager.set_preflight_config(config).await {
+                        eprintln!("Failed to disable: {}", e);
+                    } else {
+                        println!("Preflight checks disabled.");
+                    }
+                }
+                "run" => {
+                    if args.len() < 2 {
+                        eprintln!("Usage: /dlpreflight run <url> [save_dir]");
+                    } else {
+                        let url = &args[1];
+                        let save_dir = args
+                            .get(2)
+                            .map(|s| std::path::PathBuf::from(s))
+                            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+                        let input = ipmsg_download::PreflightInput {
+                            url: url.clone(),
+                            save_dir,
+                            expected_size: None,
+                            proxy_url: None,
+                            protocol: ipmsg_download::PreflightProtocol::Http,
+                        };
+                        let report = download_manager.run_preflight_check(input).await;
+                        println!("{}", report.format_report());
+                    }
+                }
+                _ => {
+                    eprintln!("Unknown subcommand: {}. Use status|enable|disable|run", sub);
                 }
             }
         }
