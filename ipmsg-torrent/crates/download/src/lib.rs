@@ -13,6 +13,7 @@ pub mod auto_categorize;
 pub mod auto_cleanup;
 pub mod auto_pause;
 pub mod auto_shutdown;
+pub mod automation_rules;
 pub mod bandwidth_allocation;
 pub mod bandwidth_monitor;
 pub mod bandwidth_schedule;
@@ -929,6 +930,8 @@ pub struct DownloadManager {
     /// Advanced search query cache (not persisted, in-memory only)
     #[allow(dead_code)]
     advanced_search_config: Arc<tokio::sync::RwLock<advanced_search::AdvancedSearchQuery>>,
+    /// Automation rules engine for IFTTT-style download workflows
+    automation_rules: Arc<tokio::sync::RwLock<automation_rules::AutomationRuleManager>>,
 }
 
 impl DownloadManager {
@@ -1085,6 +1088,9 @@ impl DownloadManager {
             download_quota: Arc::new(Mutex::new(download_quota::DownloadQuotaManager::new())),
             advanced_search_config: Arc::new(tokio::sync::RwLock::new(
                 advanced_search::AdvancedSearchQuery::default(),
+            )),
+            automation_rules: Arc::new(tokio::sync::RwLock::new(
+                automation_rules::AutomationRuleManager::new_with_dir(&data_dir),
             )),
         };
         dm.start_scheduler();
@@ -1374,6 +1380,9 @@ impl DownloadManager {
             download_quota: Arc::new(Mutex::new(download_quota::DownloadQuotaManager::new())),
             advanced_search_config: Arc::new(tokio::sync::RwLock::new(
                 advanced_search::AdvancedSearchQuery::default(),
+            )),
+            automation_rules: Arc::new(tokio::sync::RwLock::new(
+                automation_rules::AutomationRuleManager::new_with_dir(&data_dir),
             )),
         };
         // Restore download quota config from disk
@@ -9255,6 +9264,134 @@ impl DownloadManager {
             "with_deadline": with_deadline,
             "with_checksum": with_checksum
         })
+    }
+
+    // ─── Automation Rules Engine API ────────────────────────────────────
+
+    /// Get the automation rules engine configuration.
+    pub async fn get_automation_config(&self) -> automation_rules::AutomationConfig {
+        self.automation_rules.read().await.get_config().clone()
+    }
+
+    /// Set the automation rules engine configuration.
+    pub async fn set_automation_config(&self, config: automation_rules::AutomationConfig) {
+        self.automation_rules.write().await.set_config(config);
+    }
+
+    /// Add a new automation rule. Returns the rule ID.
+    pub async fn add_automation_rule(
+        &self,
+        rule: automation_rules::AutomationRule,
+    ) -> Result<String, String> {
+        let mut mgr = self.automation_rules.write().await;
+        let id = mgr.add_rule(rule)?;
+        let _ = mgr.save(&self.data_dir);
+        Ok(id)
+    }
+
+    /// Remove an automation rule by ID.
+    pub async fn remove_automation_rule(&self, rule_id: &str) -> bool {
+        let mut mgr = self.automation_rules.write().await;
+        let removed = mgr.remove_rule(rule_id);
+        if removed {
+            let _ = mgr.save(&self.data_dir);
+        }
+        removed
+    }
+
+    /// Get an automation rule by ID.
+    pub async fn get_automation_rule(
+        &self,
+        rule_id: &str,
+    ) -> Option<automation_rules::AutomationRule> {
+        self.automation_rules
+            .read()
+            .await
+            .get_rule(rule_id)
+            .cloned()
+    }
+
+    /// List all automation rules.
+    pub async fn list_automation_rules(&self) -> Vec<automation_rules::AutomationRule> {
+        self.automation_rules.read().await.list_rules().to_vec()
+    }
+
+    /// Enable or disable an automation rule.
+    pub async fn set_automation_rule_enabled(&self, rule_id: &str, enabled: bool) -> bool {
+        let mut mgr = self.automation_rules.write().await;
+        let updated = mgr.set_rule_enabled(rule_id, enabled);
+        if updated {
+            let _ = mgr.save(&self.data_dir);
+        }
+        updated
+    }
+
+    /// Update an automation rule.
+    pub async fn update_automation_rule(&self, rule: automation_rules::AutomationRule) -> bool {
+        let mut mgr = self.automation_rules.write().await;
+        let updated = mgr.update_rule(rule);
+        if updated {
+            let _ = mgr.save(&self.data_dir);
+        }
+        updated
+    }
+
+    /// Get a summary of the automation rules engine.
+    pub async fn get_automation_summary(&self) -> automation_rules::AutomationSummary {
+        self.automation_rules.read().await.summary()
+    }
+
+    /// Clear automation rule fire history.
+    pub async fn clear_automation_history(&self) {
+        self.automation_rules.write().await.clear_history();
+    }
+
+    /// Reset all automation rule fire counts.
+    pub async fn reset_automation_counts(&self) {
+        let mut mgr = self.automation_rules.write().await;
+        mgr.reset_fire_counts();
+        let _ = mgr.save(&self.data_dir);
+    }
+
+    /// Evaluate automation rules for a given trigger and task context.
+    /// Returns the list of rule fire results for rules that matched.
+    pub async fn evaluate_automation_rules(
+        &self,
+        trigger: automation_rules::RuleTrigger,
+        context: automation_rules::RuleEvalContext,
+    ) -> Vec<automation_rules::RuleFireResult> {
+        let mut mgr = self.automation_rules.write().await;
+        let results = mgr.evaluate(trigger, &context);
+        if !results.is_empty() {
+            let _ = mgr.save(&self.data_dir);
+        }
+        results
+    }
+
+    /// Build a RuleEvalContext from a DownloadTask.
+    pub async fn build_rule_context(task: &DownloadTask) -> automation_rules::RuleEvalContext {
+        automation_rules::RuleEvalContext {
+            task_id: task.id.clone(),
+            name: task.name.clone(),
+            url: task.source_url.clone().unwrap_or_default(),
+            size_bytes: task.size,
+            downloaded_bytes: task.downloaded,
+            state: format!("{:?}", task.state),
+            tags: task.tags.clone(),
+            group: task.group.clone(),
+            priority: task.priority as i32,
+            speed_bps: task.speed_bps as u64,
+            protocol: format!("{:?}", task.protocol),
+            has_mirrors: !task.mirror_urls.is_empty(),
+            has_checksum: task.expected_checksum.is_some(),
+            has_deadline: task.deadline.is_some(),
+            queued_since: if task.state == DownloadState::Queued {
+                Some(task.updated_at.timestamp() as u64)
+            } else {
+                None
+            },
+            save_path: Some(task.save_path.to_string_lossy().to_string()),
+        }
     }
 
     /// Rename a download task.

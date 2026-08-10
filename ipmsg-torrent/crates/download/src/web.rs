@@ -185,6 +185,18 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/search/quick/:query", get(quick_search_handler))
         .route("/api/search/stats", get(search_stats_handler))
         .route("/api/search/last", post(rerun_last_search_handler))
+        // Phase 118: Automation Rules API
+        .route("/api/automation", get(get_automation_summary))
+        .route("/api/automation/config", get(get_automation_config))
+        .route("/api/automation/config", post(set_automation_config))
+        .route("/api/automation/rules", get(list_automation_rules))
+        .route("/api/automation/rules", post(add_automation_rule))
+        .route("/api/automation/rules/:id", get(get_automation_rule))
+        .route("/api/automation/rules/:id", put(update_automation_rule))
+        .route("/api/automation/rules/:id", delete(delete_automation_rule))
+        .route("/api/automation/rules/:id/enable", post(enable_automation_rule))
+        .route("/api/automation/history/clear", post(clear_automation_history))
+        .route("/api/automation/counts/reset", post(reset_automation_counts))
         .route("/api/auto-rules", get(list_auto_rules))
         .route("/api/auto-rules", post(add_auto_rule))
         .route("/api/auto-rules/:id/remove", post(remove_auto_rule))
@@ -5828,6 +5840,140 @@ async fn clear_auto_actions_history_handler(
 ) -> impl IntoResponse {
     state.manager.clear_auto_actions_history().await;
     Json(serde_json::json!({"status": "cleared"}))
+}
+
+// ─── Phase 118: Automation Rules Engine API ─────────────────────────────
+
+/// GET /api/automation — Get automation rules summary
+async fn get_automation_summary(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.manager.get_automation_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/automation/config — Get automation config
+async fn get_automation_config(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_automation_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/automation/config — Update automation config
+async fn set_automation_config(
+    State(state): State<Arc<WebState>>,
+    body: bytes::Bytes,
+) -> impl IntoResponse {
+    match serde_json::from_slice::<crate::automation_rules::AutomationConfig>(&body) {
+        Ok(config) => {
+            state.manager.set_automation_config(config).await;
+            Json(serde_json::json!({"status": "ok"}))
+        }
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/automation/rules — List all automation rules
+async fn list_automation_rules(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let rules = state.manager.list_automation_rules().await;
+    Json(serde_json::to_value(rules).unwrap_or_default())
+}
+
+/// POST /api/automation/rules — Add a new automation rule
+async fn add_automation_rule(
+    State(state): State<Arc<WebState>>,
+    body: bytes::Bytes,
+) -> impl IntoResponse {
+    match serde_json::from_slice::<crate::automation_rules::AutomationRule>(&body) {
+        Ok(rule) => match state.manager.add_automation_rule(rule).await {
+            Ok(id) => Json(serde_json::json!({"id": id, "status": "created"})),
+            Err(e) => Json(serde_json::json!({"error": e})),
+        },
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/automation/rules/:id — Get a specific automation rule
+async fn get_automation_rule(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    match state.manager.get_automation_rule(&id).await {
+        Some(rule) => Json(serde_json::to_value(rule).unwrap_or_default()),
+        None => Json(serde_json::json!({"error": "rule not found"})),
+    }
+}
+
+/// PUT /api/automation/rules/:id — Update an automation rule
+async fn update_automation_rule(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: bytes::Bytes,
+) -> impl IntoResponse {
+    match serde_json::from_slice::<crate::automation_rules::AutomationRule>(&body) {
+        Ok(mut rule) => {
+            rule.id = id;
+            let updated = state.manager.update_automation_rule(rule).await;
+            if updated {
+                Json(serde_json::json!({"status": "updated"}))
+            } else {
+                Json(serde_json::json!({"error": "rule not found"}))
+            }
+        }
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// DELETE /api/automation/rules/:id — Delete an automation rule
+async fn delete_automation_rule(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let removed = state.manager.remove_automation_rule(&id).await;
+    if removed {
+        Json(serde_json::json!({"status": "deleted"}))
+    } else {
+        Json(serde_json::json!({"error": "rule not found"}))
+    }
+}
+
+/// POST /api/automation/rules/:id/enable — Enable/disable a rule
+async fn enable_automation_rule(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: bytes::Bytes,
+) -> impl IntoResponse {
+    match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(json) => {
+            let enabled = json.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let updated = state.manager.set_automation_rule_enabled(&id, enabled).await;
+            if updated {
+                Json(serde_json::json!({"status": "updated", "enabled": enabled}))
+            } else {
+                Json(serde_json::json!({"error": "rule not found"}))
+            }
+        }
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// POST /api/automation/history/clear — Clear fire history
+async fn clear_automation_history(
+    State(state): State<Arc<WebState>>,
+) -> impl IntoResponse {
+    state.manager.clear_automation_history().await;
+    Json(serde_json::json!({"status": "cleared"}))
+}
+
+/// POST /api/automation/counts/reset — Reset all fire counts
+async fn reset_automation_counts(
+    State(state): State<Arc<WebState>>,
+) -> impl IntoResponse {
+    state.manager.reset_automation_counts().await;
+    Json(serde_json::json!({"status": "reset"}))
 }
 
 #[cfg(test)]
