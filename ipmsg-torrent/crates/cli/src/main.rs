@@ -605,6 +605,12 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Per-task schedule windows (status|add|remove|list|check|config)
+    DlScheduleWindows {
+        /// Subcommand: status|add|remove|list|check|config
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -1928,6 +1934,23 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlsw" | "dl-schedule-windows" | "dlschedulewindows" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown("/dlsw <status|add|remove|list|check|config>".to_string())
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlScheduleWindows {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -2150,6 +2173,7 @@ fn command_help() -> String {
         "/dldup [cmd]     - Duplicate detection (status|detect|groups|summary|clear|config)",
         "/dlresumepolicy [cmd] - Resume policy (status|set|preview)",
         "/dlanomaly [cmd] - Speed anomaly detection (status|list|summary|remove|clear|config)",
+        "/dlsw [cmd]      - Task schedule windows (status|config|list|add|remove|check)",
         "/dlttl [cmd]      - Task TTL management (status|enable|disable|set <duration> [interval]|task <id> <duration>|summary)",
         "/dlerrrec [cmd]   - Error recovery (status|enable|disable|set <category> <strategy>|reset|test <error>)",
         "/dlchain [cmd]    - Task chains (list|create|delete|add|remove|enable|disable|summary)",
@@ -9204,6 +9228,258 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlanomaly <status|list|summary|remove|clear|config>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlScheduleWindows { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let summary = download_manager.get_task_schedule_windows_summary().await;
+                    let mut output = String::new();
+                    output.push_str("📅 Task Schedule Windows Status:\n");
+                    output.push_str(&format!("  Enabled: {}\n", summary["enabled"]));
+                    output.push_str(&format!(
+                        "  Priority bypass: {}\n",
+                        summary["priority_bypass"]
+                    ));
+                    output.push_str(&format!(
+                        "  Tasks with windows: {}\n",
+                        summary["total_tasks_with_windows"]
+                    ));
+                    output.push_str(&format!("  Total windows: {}\n", summary["total_windows"]));
+                    output.push_str(&format!(
+                        "  Enabled windows: {}\n",
+                        summary["enabled_windows"]
+                    ));
+                    s.add_system_message("main", output);
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_task_schedule_windows_config().await;
+                        let mut output = String::new();
+                        output.push_str("📅 Task Schedule Windows Config:\n");
+                        output.push_str(&format!("  Enabled: {}\n", config.enabled));
+                        output
+                            .push_str(&format!("  Priority bypass: {}\n", config.priority_bypass));
+                        output.push_str(&format!(
+                            "  Tasks configured: {}\n",
+                            config.task_windows.len()
+                        ));
+                        s.add_system_message("main", output);
+                    } else {
+                        let mut config = download_manager.get_task_schedule_windows_config().await;
+                        match args[0].as_str() {
+                            "enabled" => config.enabled = true,
+                            "disabled" => config.enabled = false,
+                            "bypass" => {
+                                if args.len() > 1 {
+                                    match args[1].as_str() {
+                                        "true" | "yes" | "1" => config.priority_bypass = true,
+                                        "false" | "no" | "0" => config.priority_bypass = false,
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => {
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dlsw config [enabled|disabled|bypass <true|false>]"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                        }
+                        download_manager
+                            .set_task_schedule_windows_config(config)
+                            .await;
+                        s.add_system_message(
+                            "main",
+                            "Task schedule windows config updated.".to_string(),
+                        );
+                    }
+                }
+                "list" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlsw list <task_id>".to_string());
+                        return;
+                    }
+                    let task_id = &args[0];
+                    match download_manager.get_task_schedule_windows(task_id).await {
+                        Some(windows) => {
+                            let mut output = String::new();
+                            output
+                                .push_str(&format!("📅 Schedule windows for task {}:\n", task_id));
+                            for w in windows {
+                                output.push_str(&format!(
+                                    "  [{}] {} {:02}:{:02}-{:02}:{:02} {}\n",
+                                    w.id,
+                                    if w.enabled { "✓" } else { "✗" },
+                                    w.start_hour,
+                                    w.start_minute,
+                                    w.end_hour,
+                                    w.end_minute,
+                                    if w.days_of_week.is_empty() {
+                                        "every day".to_string()
+                                    } else {
+                                        format!("{:?}", w.days_of_week)
+                                    }
+                                ));
+                            }
+                            s.add_system_message("main", output);
+                        }
+                        None => {
+                            s.add_system_message(
+                                "main",
+                                format!("No schedule windows for task {}", task_id),
+                            );
+                        }
+                    }
+                }
+                "add" => {
+                    if args.len() < 4 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlsw add <task_id> <window_id> <HH:MM-HH:MM> [days]"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    let task_id = &args[0];
+                    let window_id = &args[1];
+                    let time_range = &args[2];
+
+                    // Parse time range HH:MM-HH:MM
+                    let times: Vec<&str> = time_range.split('-').collect();
+                    if times.len() != 2 {
+                        s.add_system_message(
+                            "main",
+                            "Invalid time range format. Use HH:MM-HH:MM".to_string(),
+                        );
+                        return;
+                    }
+
+                    let start_parts: Vec<&str> = times[0].split(':').collect();
+                    let end_parts: Vec<&str> = times[1].split(':').collect();
+
+                    if start_parts.len() != 2 || end_parts.len() != 2 {
+                        s.add_system_message("main", "Invalid time format. Use HH:MM".to_string());
+                        return;
+                    }
+
+                    let start_hour = match start_parts[0].parse::<u32>() {
+                        Ok(h) => h,
+                        Err(_) => {
+                            s.add_system_message("main", "Invalid start hour".to_string());
+                            return;
+                        }
+                    };
+                    let start_minute = match start_parts[1].parse::<u32>() {
+                        Ok(m) => m,
+                        Err(_) => {
+                            s.add_system_message("main", "Invalid start minute".to_string());
+                            return;
+                        }
+                    };
+                    let end_hour = match end_parts[0].parse::<u32>() {
+                        Ok(h) => h,
+                        Err(_) => {
+                            s.add_system_message("main", "Invalid end hour".to_string());
+                            return;
+                        }
+                    };
+                    let end_minute = match end_parts[1].parse::<u32>() {
+                        Ok(m) => m,
+                        Err(_) => {
+                            s.add_system_message("main", "Invalid end minute".to_string());
+                            return;
+                        }
+                    };
+
+                    let window = ipmsg_download::task_schedule_windows::ScheduleWindow::new(
+                        window_id,
+                        window_id,
+                        start_hour,
+                        start_minute,
+                        end_hour,
+                        end_minute,
+                    );
+
+                    download_manager
+                        .add_task_schedule_window(task_id, window)
+                        .await;
+                    s.add_system_message(
+                        "main",
+                        format!("Added schedule window {} to task {}", window_id, task_id),
+                    );
+                }
+                "remove" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlsw remove <task_id> <window_id>".to_string(),
+                        );
+                        return;
+                    }
+                    let task_id = &args[0];
+                    let window_id = &args[1];
+                    let removed = download_manager
+                        .remove_task_schedule_window(task_id, window_id)
+                        .await;
+                    if removed {
+                        s.add_system_message(
+                            "main",
+                            format!("Removed window {} from task {}", window_id, task_id),
+                        );
+                    } else {
+                        s.add_system_message(
+                            "main",
+                            format!("Window {} not found for task {}", window_id, task_id),
+                        );
+                    }
+                }
+                "check" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlsw check <task_id>".to_string());
+                        return;
+                    }
+                    let task_id = &args[0];
+                    // Get task priority
+                    let priority = {
+                        let task = download_manager.get_task(task_id).await;
+                        task.map(|t| t.priority as i32).unwrap_or(0)
+                    };
+
+                    let allowed = download_manager
+                        .is_task_allowed_by_schedule(task_id, priority)
+                        .await;
+                    let next_time = download_manager
+                        .next_task_allowed_time(task_id, priority)
+                        .await;
+
+                    let mut output = String::new();
+                    output.push_str(&format!("📅 Schedule check for task {}:\n", task_id));
+                    output.push_str(&format!(
+                        "  Allowed now: {}\n",
+                        if allowed { "✓ Yes" } else { "✗ No" }
+                    ));
+                    if let Some(next) = next_time {
+                        output.push_str(&format!(
+                            "  Next allowed: {}\n",
+                            next.format("%Y-%m-%d %H:%M:%S")
+                        ));
+                    }
+                    s.add_system_message("main", output);
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlsw <status|config|list|add|remove|check>".to_string(),
                     );
                 }
             }

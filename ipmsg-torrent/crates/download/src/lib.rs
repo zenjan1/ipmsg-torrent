@@ -87,6 +87,7 @@ pub mod task_favorites;
 pub mod task_profiler;
 pub mod task_proxy;
 pub mod task_queue;
+pub mod task_schedule_windows;
 pub mod task_scheduler;
 pub mod task_snooze;
 pub mod torrent;
@@ -932,6 +933,9 @@ pub struct DownloadManager {
     advanced_search_config: Arc<tokio::sync::RwLock<advanced_search::AdvancedSearchQuery>>,
     /// Automation rules engine for IFTTT-style download workflows
     automation_rules: Arc<tokio::sync::RwLock<automation_rules::AutomationRuleManager>>,
+    /// Per-task schedule windows for controlling when tasks are allowed to run
+    task_schedule_windows:
+        Arc<tokio::sync::RwLock<task_schedule_windows::TaskScheduleWindowsManager>>,
 }
 
 impl DownloadManager {
@@ -1091,6 +1095,9 @@ impl DownloadManager {
             )),
             automation_rules: Arc::new(tokio::sync::RwLock::new(
                 automation_rules::AutomationRuleManager::new_with_dir(&data_dir),
+            )),
+            task_schedule_windows: Arc::new(tokio::sync::RwLock::new(
+                task_schedule_windows::TaskScheduleWindowsManager::new(),
             )),
         };
         dm.start_scheduler();
@@ -1384,6 +1391,9 @@ impl DownloadManager {
             automation_rules: Arc::new(tokio::sync::RwLock::new(
                 automation_rules::AutomationRuleManager::new_with_dir(&data_dir),
             )),
+            task_schedule_windows: Arc::new(tokio::sync::RwLock::new(
+                task_schedule_windows::TaskScheduleWindowsManager::new(),
+            )),
         };
         // Restore download quota config from disk
         if let Some(quota_mgr) = download_quota::load_download_quota(&dm.data_dir) {
@@ -1641,6 +1651,14 @@ impl DownloadManager {
         {
             let mut mgr = dm.speed_profiles.write().await;
             let _ = mgr.load().await;
+        }
+        // Restore task schedule windows from disk
+        {
+            let schedule_path = dm.data_dir.join("task_schedule_windows.json");
+            let mut mgr = dm.task_schedule_windows.write().await;
+            if let Err(e) = mgr.load_from_file(&schedule_path).await {
+                tracing::warn!(error = %e, "Failed to load task schedule windows");
+            }
         }
         dm.start_scheduler();
         dm.start_bandwidth_scheduler();
@@ -9394,6 +9412,125 @@ impl DownloadManager {
         }
     }
 
+    // ─── Task Schedule Windows API ──────────────────────────────────────
+
+    /// Get the task schedule windows configuration.
+    pub async fn get_task_schedule_windows_config(
+        &self,
+    ) -> task_schedule_windows::TaskScheduleWindowsConfig {
+        self.task_schedule_windows.read().await.config().clone()
+    }
+
+    /// Set the task schedule windows configuration.
+    pub async fn set_task_schedule_windows_config(
+        &self,
+        config: task_schedule_windows::TaskScheduleWindowsConfig,
+    ) {
+        let mut mgr = self.task_schedule_windows.write().await;
+        mgr.set_config(config);
+        let path = self.data_dir.join("task_schedule_windows.json");
+        if let Err(e) = mgr.save_to_file(&path).await {
+            tracing::warn!(error = %e, "Failed to save task schedule windows config");
+        }
+    }
+
+    /// Add a schedule window to a task.
+    pub async fn add_task_schedule_window(
+        &self,
+        task_id: &str,
+        window: task_schedule_windows::ScheduleWindow,
+    ) {
+        let mut mgr = self.task_schedule_windows.write().await;
+        mgr.add_window(task_id, window);
+        let path = self.data_dir.join("task_schedule_windows.json");
+        if let Err(e) = mgr.save_to_file(&path).await {
+            tracing::warn!(error = %e, "Failed to save task schedule windows");
+        }
+    }
+
+    /// Remove a schedule window from a task.
+    pub async fn remove_task_schedule_window(&self, task_id: &str, window_id: &str) -> bool {
+        let mut mgr = self.task_schedule_windows.write().await;
+        let removed = mgr.remove_window(task_id, window_id);
+        if removed {
+            let path = self.data_dir.join("task_schedule_windows.json");
+            if let Err(e) = mgr.save_to_file(&path).await {
+                tracing::warn!(error = %e, "Failed to save task schedule windows");
+            }
+        }
+        removed
+    }
+
+    /// Get all schedule windows for a task.
+    pub async fn get_task_schedule_windows(
+        &self,
+        task_id: &str,
+    ) -> Option<Vec<task_schedule_windows::ScheduleWindow>> {
+        self.task_schedule_windows
+            .read()
+            .await
+            .get_windows(task_id)
+            .cloned()
+    }
+
+    /// Clear all schedule windows for a task.
+    pub async fn clear_task_schedule_windows(&self, task_id: &str) {
+        let mut mgr = self.task_schedule_windows.write().await;
+        mgr.clear_task_windows(task_id);
+        let path = self.data_dir.join("task_schedule_windows.json");
+        if let Err(e) = mgr.save_to_file(&path).await {
+            tracing::warn!(error = %e, "Failed to save task schedule windows");
+        }
+    }
+
+    /// Check if a task is allowed to download right now based on its schedule windows.
+    pub async fn is_task_allowed_by_schedule(&self, task_id: &str, priority: i32) -> bool {
+        self.task_schedule_windows
+            .read()
+            .await
+            .is_allowed_now(task_id, priority)
+    }
+
+    /// Get the next time a task will be allowed to download.
+    pub async fn next_task_allowed_time(
+        &self,
+        task_id: &str,
+        priority: i32,
+    ) -> Option<chrono::DateTime<chrono::Local>> {
+        self.task_schedule_windows
+            .read()
+            .await
+            .next_allowed_time(task_id, priority)
+    }
+
+    /// Get a summary of task schedule windows.
+    pub async fn get_task_schedule_windows_summary(&self) -> serde_json::Value {
+        let mgr = self.task_schedule_windows.read().await;
+        let config = mgr.config();
+        let total_tasks_with_windows = config.task_windows.len();
+        let total_windows: usize = config
+            .task_windows
+            .values()
+            .map(|v| v.len())
+            .collect::<Vec<_>>()
+            .iter()
+            .sum();
+        let enabled_windows: usize = config
+            .task_windows
+            .values()
+            .flat_map(|v| v.iter())
+            .filter(|w| w.enabled)
+            .count();
+
+        serde_json::json!({
+            "enabled": config.enabled,
+            "priority_bypass": config.priority_bypass,
+            "total_tasks_with_windows": total_tasks_with_windows,
+            "total_windows": total_windows,
+            "enabled_windows": enabled_windows
+        })
+    }
+
     /// Rename a download task.
     /// Returns true if the task was found and renamed.
     pub async fn rename_task(&self, task_id: &str, new_name: String) -> bool {
@@ -10691,6 +10828,9 @@ impl DownloadManager {
         // Get favorite task IDs for priority scheduling
         let favorite_ids = self.get_favorite_ids_internal().await;
 
+        // Read schedule windows config (avoid holding tasks lock while acquiring rwlock)
+        let schedule_cfg = self.task_schedule_windows.read().await.config().clone();
+
         // Find the highest-priority queued task with all dependencies satisfied
         let tasks = self.tasks.lock().await;
         let completed_ids: std::collections::HashSet<&str> = tasks
@@ -10699,6 +10839,7 @@ impl DownloadManager {
             .map(|t| t.id.as_str())
             .collect();
 
+        let now = chrono::Local::now();
         let next = tasks
             .iter()
             .filter(|t| {
@@ -10706,6 +10847,18 @@ impl DownloadManager {
                     && t.depends_on
                         .iter()
                         .all(|dep| completed_ids.contains(dep.as_str()))
+                    && {
+                        // Check schedule windows
+                        if !schedule_cfg.enabled {
+                            true
+                        } else if schedule_cfg.priority_bypass && t.priority as i32 > 0 {
+                            true
+                        } else if let Some(windows) = schedule_cfg.task_windows.get(&t.id) {
+                            windows.iter().any(|w| w.applies_at(now))
+                        } else {
+                            true
+                        }
+                    }
             })
             .max_by(|a, b| {
                 // Favorites always come first

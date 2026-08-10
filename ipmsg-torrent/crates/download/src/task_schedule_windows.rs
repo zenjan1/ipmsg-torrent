@@ -185,15 +185,22 @@ impl TaskScheduleWindowsManager {
 
     /// Remove a schedule window from a task.
     pub fn remove_window(&mut self, task_id: &str, window_id: &str) -> bool {
+        let mut removed = false;
         if let Some(windows) = self.config.task_windows.get_mut(task_id) {
             let initial_len = windows.len();
             windows.retain(|w| w.id != window_id);
-            if windows.is_empty() {
-                self.config.task_windows.remove(task_id);
-            }
-            return windows.len() < initial_len;
+            removed = windows.len() < initial_len;
         }
-        false
+        if removed
+            && self
+                .config
+                .task_windows
+                .get(task_id)
+                .map_or(false, |w| w.is_empty())
+        {
+            self.config.task_windows.remove(task_id);
+        }
+        removed
     }
 
     /// Get all schedule windows for a task.
@@ -222,12 +229,7 @@ impl TaskScheduleWindowsManager {
     /// - Task has no schedule windows configured
     /// - Task has priority and priority_bypass is enabled
     /// - Current time falls within at least one enabled schedule window
-    pub fn is_allowed_at(
-        &self,
-        task_id: &str,
-        task_priority: i32,
-        time: DateTime<Local>,
-    ) -> bool {
+    pub fn is_allowed_at(&self, task_id: &str, task_priority: i32, time: DateTime<Local>) -> bool {
         // Global disable check
         if !self.config.enabled {
             return true;
@@ -296,8 +298,6 @@ impl TaskScheduleWindowsManager {
         window: &ScheduleWindow,
         from: DateTime<Local>,
     ) -> Option<DateTime<Local>> {
-        let start_minutes = window.start_hour * 60 + window.start_minute;
-
         // Try next 7 days to find a matching day
         for day_offset in 0..7 {
             let candidate_date = from.date_naive() + chrono::Duration::days(day_offset as i64);
@@ -312,7 +312,8 @@ impl TaskScheduleWindowsManager {
             }
 
             // Check day of week filter
-            if !window.days_of_week.is_empty() && !window.days_of_week.contains(&candidate.weekday())
+            if !window.days_of_week.is_empty()
+                && !window.days_of_week.contains(&candidate.weekday())
             {
                 continue;
             }
@@ -324,7 +325,10 @@ impl TaskScheduleWindowsManager {
     }
 
     /// Load configuration from a file.
-    pub async fn load_from_file(&mut self, path: impl AsRef<Path>) -> Result<(), TaskScheduleWindowError> {
+    pub async fn load_from_file(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<(), TaskScheduleWindowError> {
         let content = match fs::read_to_string(path.as_ref()).await {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -338,7 +342,10 @@ impl TaskScheduleWindowsManager {
     }
 
     /// Save configuration to a file atomically.
-    pub async fn save_to_file(&self, path: impl AsRef<Path>) -> Result<(), TaskScheduleWindowError> {
+    pub async fn save_to_file(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<(), TaskScheduleWindowError> {
         let content = serde_json::to_string_pretty(&self.config)?;
         let temp_path = path.as_ref().with_extension("tmp");
         fs::write(&temp_path, &content).await?;
@@ -359,7 +366,12 @@ mod tests {
     use chrono::TimeZone;
 
     fn make_time(hour: u32, minute: u32) -> DateTime<Local> {
-        Local::now().date_naive().and_hms_opt(hour, minute, 0).unwrap().and_local_timezone(Local).unwrap()
+        Local::now()
+            .date_naive()
+            .and_hms_opt(hour, minute, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap()
     }
 
     #[test]
@@ -374,27 +386,32 @@ mod tests {
 
     #[test]
     fn test_schedule_window_with_days() {
-        let window = ScheduleWindow::new("weekday", "Weekday Only", 9, 0, 17, 0)
-            .with_days(vec![Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri]);
+        let window = ScheduleWindow::new("weekday", "Weekday Only", 9, 0, 17, 0).with_days(vec![
+            Weekday::Mon,
+            Weekday::Tue,
+            Weekday::Wed,
+            Weekday::Thu,
+            Weekday::Fri,
+        ]);
         assert_eq!(window.days_of_week.len(), 5);
     }
 
     #[test]
     fn test_normal_window_applies() {
         let window = ScheduleWindow::new("day", "Daytime", 8, 0, 18, 0);
-        
+
         // Before window
         assert!(!window.applies_at(make_time(7, 59)));
-        
+
         // At start
         assert!(window.applies_at(make_time(8, 0)));
-        
+
         // During window
         assert!(window.applies_at(make_time(12, 30)));
-        
+
         // At end
         assert!(!window.applies_at(make_time(18, 0)));
-        
+
         // After window
         assert!(!window.applies_at(make_time(19, 0)));
     }
@@ -402,22 +419,22 @@ mod tests {
     #[test]
     fn test_overnight_window_applies() {
         let window = ScheduleWindow::new("night", "Nighttime", 22, 0, 8, 0);
-        
+
         // Before window
         assert!(!window.applies_at(make_time(21, 59)));
-        
+
         // At start
         assert!(window.applies_at(make_time(22, 0)));
-        
+
         // During window (late night)
         assert!(window.applies_at(make_time(23, 30)));
-        
+
         // During window (early morning)
         assert!(window.applies_at(make_time(2, 0)));
-        
+
         // At end
         assert!(!window.applies_at(make_time(8, 0)));
-        
+
         // After window
         assert!(!window.applies_at(make_time(10, 0)));
     }
@@ -426,26 +443,26 @@ mod tests {
     fn test_disabled_window() {
         let mut window = ScheduleWindow::new("day", "Daytime", 8, 0, 18, 0);
         window.enabled = false;
-        
+
         assert!(!window.applies_at(make_time(12, 0)));
     }
 
     #[test]
     fn test_manager_add_remove_windows() {
         let mut manager = TaskScheduleWindowsManager::new();
-        
+
         let window1 = ScheduleWindow::new("night1", "Night 1", 22, 0, 8, 0);
         let window2 = ScheduleWindow::new("night2", "Night 2", 23, 0, 7, 0);
-        
+
         manager.add_window("task1", window1.clone());
         manager.add_window("task1", window2.clone());
-        
+
         assert_eq!(manager.get_windows("task1").unwrap().len(), 2);
-        
+
         manager.remove_window("task1", "night1");
         assert_eq!(manager.get_windows("task1").unwrap().len(), 1);
         assert_eq!(manager.get_windows("task1").unwrap()[0].id, "night2");
-        
+
         manager.remove_window("task1", "night2");
         assert!(manager.get_windows("task1").is_none());
     }
@@ -453,7 +470,7 @@ mod tests {
     #[test]
     fn test_manager_is_allowed_no_windows() {
         let manager = TaskScheduleWindowsManager::new();
-        
+
         // No windows = always allowed
         assert!(manager.is_allowed_at("task1", 0, make_time(12, 0)));
         assert!(manager.is_allowed_at("task1", 0, make_time(3, 0)));
@@ -462,14 +479,14 @@ mod tests {
     #[test]
     fn test_manager_is_allowed_with_windows() {
         let mut manager = TaskScheduleWindowsManager::new();
-        
+
         let window = ScheduleWindow::new("night", "Night Only", 22, 0, 8, 0);
         manager.add_window("task1", window);
-        
+
         // During allowed time
         assert!(manager.is_allowed_at("task1", 0, make_time(23, 0)));
         assert!(manager.is_allowed_at("task1", 0, make_time(3, 0)));
-        
+
         // Outside allowed time
         assert!(!manager.is_allowed_at("task1", 0, make_time(12, 0)));
         assert!(!manager.is_allowed_at("task1", 0, make_time(15, 0)));
@@ -478,14 +495,14 @@ mod tests {
     #[test]
     fn test_manager_priority_bypass() {
         let mut manager = TaskScheduleWindowsManager::new();
-        
+
         let window = ScheduleWindow::new("night", "Night Only", 22, 0, 8, 0);
         manager.add_window("task1", window);
-        
+
         // High priority task (priority > 0) bypasses windows
         assert!(manager.is_allowed_at("task1", 1, make_time(12, 0)));
         assert!(manager.is_allowed_at("task1", 5, make_time(15, 0)));
-        
+
         // Normal priority task (priority = 0) respects windows
         assert!(!manager.is_allowed_at("task1", 0, make_time(12, 0)));
     }
@@ -494,10 +511,10 @@ mod tests {
     fn test_manager_priority_bypass_disabled() {
         let mut manager = TaskScheduleWindowsManager::new();
         manager.set_priority_bypass(false);
-        
+
         let window = ScheduleWindow::new("night", "Night Only", 22, 0, 8, 0);
         manager.add_window("task1", window);
-        
+
         // High priority task still respects windows when bypass is disabled
         assert!(!manager.is_allowed_at("task1", 1, make_time(12, 0)));
     }
@@ -506,10 +523,10 @@ mod tests {
     fn test_manager_global_disable() {
         let mut manager = TaskScheduleWindowsManager::new();
         manager.set_enabled(false);
-        
+
         let window = ScheduleWindow::new("night", "Night Only", 22, 0, 8, 0);
         manager.add_window("task1", window);
-        
+
         // All tasks allowed when globally disabled
         assert!(manager.is_allowed_at("task1", 0, make_time(12, 0)));
         assert!(manager.is_allowed_at("task1", 0, make_time(23, 0)));
@@ -518,15 +535,15 @@ mod tests {
     #[test]
     fn test_manager_clear_windows() {
         let mut manager = TaskScheduleWindowsManager::new();
-        
+
         manager.add_window("task1", ScheduleWindow::new("w1", "Window 1", 8, 0, 12, 0));
         manager.add_window("task1", ScheduleWindow::new("w2", "Window 2", 14, 0, 18, 0));
         manager.add_window("task2", ScheduleWindow::new("w3", "Window 3", 20, 0, 22, 0));
-        
+
         manager.clear_task_windows("task1");
         assert!(manager.get_windows("task1").is_none());
         assert!(manager.get_windows("task2").is_some());
-        
+
         manager.clear_all();
         assert!(manager.get_windows("task2").is_none());
     }
@@ -540,10 +557,10 @@ mod tests {
     #[test]
     fn test_next_allowed_time_currently_in_window() {
         let mut manager = TaskScheduleWindowsManager::new();
-        
+
         let window = ScheduleWindow::new("day", "Daytime", 8, 0, 18, 0);
         manager.add_window("task1", window);
-        
+
         // Currently in window (assume test runs during daytime)
         let now = Local::now();
         if now.hour() >= 8 && now.hour() < 18 {
@@ -557,27 +574,27 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let mut manager = TaskScheduleWindowsManager::new();
-            
+
             let mut window = ScheduleWindow::new("night", "Night Downloads", 22, 0, 8, 0);
             window.days_of_week = vec![Weekday::Mon, Weekday::Fri];
             manager.add_window("task1", window);
             manager.set_priority_bypass(false);
-            
+
             let temp_dir = std::env::temp_dir();
             let path = temp_dir.join("test_schedule_windows.json");
-            
+
             manager.save_to_file(&path).await.unwrap();
-            
+
             let mut loaded = TaskScheduleWindowsManager::new();
             loaded.load_from_file(&path).await.unwrap();
-            
+
             assert_eq!(loaded.config().priority_bypass, false);
             assert!(loaded.get_windows("task1").is_some());
             let windows = loaded.get_windows("task1").unwrap();
             assert_eq!(windows.len(), 1);
             assert_eq!(windows[0].id, "night");
             assert_eq!(windows[0].days_of_week.len(), 2);
-            
+
             // Cleanup
             let _ = tokio::fs::remove_file(&path).await;
         });
@@ -589,7 +606,7 @@ mod tests {
         rt.block_on(async {
             let mut manager = TaskScheduleWindowsManager::new();
             let path = std::env::temp_dir().join("nonexistent_schedule_windows.json");
-            
+
             // Should succeed with default config
             assert!(manager.load_from_file(&path).await.is_ok());
             assert!(manager.get_all_windows().is_empty());

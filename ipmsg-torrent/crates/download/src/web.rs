@@ -11,7 +11,7 @@ use axum::{
     },
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -194,9 +194,48 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/automation/rules/:id", get(get_automation_rule))
         .route("/api/automation/rules/:id", put(update_automation_rule))
         .route("/api/automation/rules/:id", delete(delete_automation_rule))
-        .route("/api/automation/rules/:id/enable", post(enable_automation_rule))
-        .route("/api/automation/history/clear", post(clear_automation_history))
-        .route("/api/automation/counts/reset", post(reset_automation_counts))
+        .route(
+            "/api/automation/rules/:id/enable",
+            post(enable_automation_rule),
+        )
+        .route(
+            "/api/automation/history/clear",
+            post(clear_automation_history),
+        )
+        .route(
+            "/api/automation/counts/reset",
+            post(reset_automation_counts),
+        )
+        // Phase 119: Task Schedule Windows API
+        .route("/api/schedule-windows", get(get_schedule_windows_summary))
+        .route(
+            "/api/schedule-windows/config",
+            get(get_schedule_windows_config),
+        )
+        .route(
+            "/api/schedule-windows/config",
+            post(set_schedule_windows_config),
+        )
+        .route(
+            "/api/schedule-windows/:task_id",
+            get(get_task_schedule_windows),
+        )
+        .route(
+            "/api/schedule-windows/:task_id",
+            post(add_task_schedule_window),
+        )
+        .route(
+            "/api/schedule-windows/:task_id/clear",
+            post(clear_task_schedule_windows),
+        )
+        .route(
+            "/api/schedule-windows/:task_id/:window_id",
+            delete(remove_task_schedule_window),
+        )
+        .route(
+            "/api/schedule-windows/:task_id/check",
+            get(check_task_schedule_allowed),
+        )
         .route("/api/auto-rules", get(list_auto_rules))
         .route("/api/auto-rules", post(add_auto_rule))
         .route("/api/auto-rules/:id/remove", post(remove_auto_rule))
@@ -5845,17 +5884,13 @@ async fn clear_auto_actions_history_handler(
 // ─── Phase 118: Automation Rules Engine API ─────────────────────────────
 
 /// GET /api/automation — Get automation rules summary
-async fn get_automation_summary(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn get_automation_summary(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let summary = state.manager.get_automation_summary().await;
     Json(serde_json::to_value(summary).unwrap_or_default())
 }
 
 /// GET /api/automation/config — Get automation config
-async fn get_automation_config(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn get_automation_config(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let config = state.manager.get_automation_config().await;
     Json(serde_json::to_value(config).unwrap_or_default())
 }
@@ -5875,9 +5910,7 @@ async fn set_automation_config(
 }
 
 /// GET /api/automation/rules — List all automation rules
-async fn list_automation_rules(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn list_automation_rules(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let rules = state.manager.list_automation_rules().await;
     Json(serde_json::to_value(rules).unwrap_or_default())
 }
@@ -5948,8 +5981,14 @@ async fn enable_automation_rule(
 ) -> impl IntoResponse {
     match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(json) => {
-            let enabled = json.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-            let updated = state.manager.set_automation_rule_enabled(&id, enabled).await;
+            let enabled = json
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let updated = state
+                .manager
+                .set_automation_rule_enabled(&id, enabled)
+                .await;
             if updated {
                 Json(serde_json::json!({"status": "updated", "enabled": enabled}))
             } else {
@@ -5961,19 +6000,130 @@ async fn enable_automation_rule(
 }
 
 /// POST /api/automation/history/clear — Clear fire history
-async fn clear_automation_history(
-    State(state): State<Arc<WebState>>,
-) -> impl IntoResponse {
+async fn clear_automation_history(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     state.manager.clear_automation_history().await;
     Json(serde_json::json!({"status": "cleared"}))
 }
 
 /// POST /api/automation/counts/reset — Reset all fire counts
-async fn reset_automation_counts(
-    State(state): State<Arc<WebState>>,
-) -> impl IntoResponse {
+async fn reset_automation_counts(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     state.manager.reset_automation_counts().await;
     Json(serde_json::json!({"status": "reset"}))
+}
+
+// ─── Phase 119: Task Schedule Windows API ─────────────────────────────
+
+/// GET /api/schedule-windows — Get summary of task schedule windows
+async fn get_schedule_windows_summary(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    Json(state.manager.get_task_schedule_windows_summary().await)
+}
+
+/// GET /api/schedule-windows/config — Get task schedule windows configuration
+async fn get_schedule_windows_config(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_task_schedule_windows_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/schedule-windows/config — Update task schedule windows configuration
+async fn set_schedule_windows_config(
+    State(state): State<Arc<WebState>>,
+    body: bytes::Bytes,
+) -> impl IntoResponse {
+    match serde_json::from_slice::<crate::task_schedule_windows::TaskScheduleWindowsConfig>(&body) {
+        Ok(config) => {
+            state.manager.set_task_schedule_windows_config(config).await;
+            Json(serde_json::json!({"status": "ok"}))
+        }
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/schedule-windows/:task_id — Get schedule windows for a task
+async fn get_task_schedule_windows(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    match state.manager.get_task_schedule_windows(&task_id).await {
+        Some(windows) => Json(serde_json::to_value(windows).unwrap_or_default()),
+        None => Json(serde_json::json!({"error": "no schedule windows for this task"})),
+    }
+}
+
+/// POST /api/schedule-windows/:task_id — Add a schedule window to a task
+async fn add_task_schedule_window(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    body: bytes::Bytes,
+) -> impl IntoResponse {
+    match serde_json::from_slice::<crate::task_schedule_windows::ScheduleWindow>(&body) {
+        Ok(window) => {
+            state
+                .manager
+                .add_task_schedule_window(&task_id, window)
+                .await;
+            Json(serde_json::json!({"status": "added"}))
+        }
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// POST /api/schedule-windows/:task_id/clear — Clear all schedule windows for a task
+async fn clear_task_schedule_windows(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    state.manager.clear_task_schedule_windows(&task_id).await;
+    Json(serde_json::json!({"status": "cleared"}))
+}
+
+/// DELETE /api/schedule-windows/:task_id/:window_id — Remove a schedule window
+async fn remove_task_schedule_window(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path((task_id, window_id)): axum::extract::Path<(String, String)>,
+) -> impl IntoResponse {
+    let removed = state
+        .manager
+        .remove_task_schedule_window(&task_id, &window_id)
+        .await;
+    if removed {
+        Json(serde_json::json!({"status": "removed"}))
+    } else {
+        Json(serde_json::json!({"error": "window not found"}))
+    }
+}
+
+/// GET /api/schedule-windows/:task_id/check — Check if task is allowed now
+async fn check_task_schedule_allowed(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    // Get task priority from tasks list
+    let priority = {
+        let tasks = state.manager.tasks.lock().await;
+        tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .map(|t| t.priority as i32)
+            .unwrap_or(0)
+    };
+
+    let allowed = state
+        .manager
+        .is_task_allowed_by_schedule(&task_id, priority)
+        .await;
+    let next_time = state
+        .manager
+        .next_task_allowed_time(&task_id, priority)
+        .await;
+
+    Json(serde_json::json!({
+        "allowed": allowed,
+        "next_allowed": next_time.map(|t| t.to_rfc3339())
+    }))
 }
 
 #[cfg(test)]
