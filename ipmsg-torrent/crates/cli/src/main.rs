@@ -166,6 +166,11 @@ enum Command {
         /// "summary [days]", "trend [days]", "today", "records", "config", "prune", "clear"
         args: Vec<String>,
     },
+    /// Speed benchmark for testing download URLs before committing
+    DlSpeedBench {
+        /// "status", "config", "run <url1> [url2...]", "summary", "clear"
+        args: Vec<String>,
+    },
     /// Download backup management
     DlBackup {
         /// "list", "create [description]", "show <path>", "delete <path>"
@@ -889,6 +894,10 @@ fn parse_command(input: &str) -> Command {
         "dlanalytics" | "dl-analytics" | "dlaa" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlAnalytics { args }
+        }
+        "dlspeedbench" | "dl-speedbench" | "dlsbench" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlSpeedBench { args }
         }
         "dlbackup" | "dl-backup" | "dlbk" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
@@ -4255,6 +4264,87 @@ async fn handle_command(
                                 .to_string(),
                         );
                     }
+                }
+            }
+        }
+        Command::DlSpeedBench { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+            match sub {
+                "status" => {
+                    let config = download_manager.get_speed_benchmark_config().await;
+                    println!("Speed Benchmark Status:");
+                    println!("  Enabled: {}", config.enabled);
+                    println!("  Test Duration: {}s", config.test_duration_secs);
+                    println!("  Max Concurrent: {}", config.max_concurrent);
+                    println!("  Sample Size: {} bytes", config.sample_size_bytes);
+                    println!("  Auto-select Fastest: {}", config.auto_select_fastest);
+                }
+                "config" => {
+                    if args.len() < 3 {
+                        println!("Usage: /dlspeedbench config <key> <value>");
+                        println!("Keys: enabled, duration, concurrent, sample_size, auto_select");
+                    } else {
+                        let mut config = download_manager.get_speed_benchmark_config().await;
+                        match args[1].as_str() {
+                            "enabled" => {
+                                config.enabled = args[2].parse().unwrap_or(true);
+                            }
+                            "duration" => {
+                                config.test_duration_secs = args[2].parse().unwrap_or(10);
+                            }
+                            "concurrent" => {
+                                config.max_concurrent = args[2].parse().unwrap_or(3);
+                            }
+                            "sample_size" => {
+                                config.sample_size_bytes = args[2].parse().unwrap_or(1_048_576);
+                            }
+                            "auto_select" => {
+                                config.auto_select_fastest = args[2].parse().unwrap_or(true);
+                            }
+                            _ => {
+                                println!(
+                                    "Unknown config key. Use: enabled, duration, concurrent, sample_size, auto_select"
+                                );
+                            }
+                        }
+                        download_manager.set_speed_benchmark_config(config).await;
+                        println!("Speed benchmark config updated.");
+                    }
+                }
+                "run" => {
+                    if args.len() < 2 {
+                        println!("Usage: /dlspeedbench run <url1> [url2...] ");
+                    } else {
+                        let urls: Vec<String> = args[1..].to_vec();
+                        println!("Benchmarking {} URL(s)...", urls.len());
+                        let _summary = download_manager.benchmark_urls(&urls).await;
+                        println!("{}", download_manager.format_benchmark_summary().await);
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_benchmark_summary().await;
+                    println!("Benchmark Summary:");
+                    println!("  Total Tested: {}", summary.total_tested);
+                    println!("  Successful: {}", summary.successful);
+                    println!("  Failed: {}", summary.failed);
+                    if let Some((url, speed)) = &summary.fastest {
+                        println!("  Fastest: {} ({:.2} MB/s)", url, speed / 1_048_576.0);
+                    }
+                    if let Some((url, speed)) = &summary.slowest {
+                        println!("  Slowest: {} ({:.2} MB/s)", url, speed / 1_048_576.0);
+                    }
+                    println!("  Average: {:.2} MB/s", summary.avg_speed_bps / 1_048_576.0);
+                }
+                "clear" => {
+                    download_manager.clear_benchmarks().await;
+                    println!("Speed benchmark results cleared.");
+                }
+                _ => {
+                    println!("Unknown subcommand. Use: status, config, run, summary, clear");
                 }
             }
         }

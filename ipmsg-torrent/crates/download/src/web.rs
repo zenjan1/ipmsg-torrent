@@ -370,6 +370,14 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/download-analytics/clear",
             post(clear_download_analytics),
         )
+        .route("/api/speed-benchmark", get(get_speed_benchmark_config))
+        .route("/api/speed-benchmark", post(set_speed_benchmark_config))
+        .route("/api/speed-benchmark/run", post(run_speed_benchmark))
+        .route(
+            "/api/speed-benchmark/summary",
+            get(get_speed_benchmark_summary),
+        )
+        .route("/api/speed-benchmark/clear", post(clear_speed_benchmark))
         .route("/api/stats/download", get(get_download_stats))
         .route("/api/stats/download/reset", post(reset_download_stats))
         .route("/api/report/download", get(get_download_report))
@@ -1285,6 +1293,58 @@ async fn prune_download_analytics(State(state): State<Arc<WebState>>) -> Json<se
 /// Clear all analytics data
 async fn clear_download_analytics(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     state.manager.clear_download_analytics().await;
+    Json(serde_json::json!({"success": true}))
+}
+
+/// Get speed benchmark configuration
+async fn get_speed_benchmark_config(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::speed_benchmark::BenchmarkConfig> {
+    let config = state.manager.get_speed_benchmark_config().await;
+    Json(config)
+}
+
+/// Set speed benchmark configuration
+async fn set_speed_benchmark_config(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::speed_benchmark::BenchmarkConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_speed_benchmark_config(config).await;
+    Json(serde_json::json!({"success": true}))
+}
+
+/// Run speed benchmark on URLs
+async fn run_speed_benchmark(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let urls: Vec<String> = request
+        .get("urls")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if urls.is_empty() {
+        return Json(serde_json::json!({"error": "No URLs provided"}));
+    }
+    let summary = state.manager.benchmark_urls(&urls).await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// Get speed benchmark summary
+async fn get_speed_benchmark_summary(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::speed_benchmark::BenchmarkSummary> {
+    let summary = state.manager.get_benchmark_summary().await;
+    Json(summary)
+}
+
+/// Clear speed benchmark results
+async fn clear_speed_benchmark(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    state.manager.clear_benchmarks().await;
     Json(serde_json::json!({"success": true}))
 }
 

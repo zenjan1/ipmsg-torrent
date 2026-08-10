@@ -83,6 +83,7 @@ pub mod source_benchmark;
 pub mod source_rotation;
 pub mod speed_alert;
 pub mod speed_anomaly;
+pub mod speed_benchmark;
 pub mod speed_boost;
 pub mod speed_burst;
 pub mod speed_history;
@@ -983,6 +984,8 @@ pub struct DownloadManager {
     cost_tracker: Arc<Mutex<download_cost::CostTracker>>,
     /// Download history analytics for insights and statistics
     history_analytics: Arc<Mutex<download_history_analytics::HistoryAnalyticsManager>>,
+    /// Speed benchmark manager for pre-download URL speed testing
+    speed_benchmark: Arc<Mutex<speed_benchmark::SpeedBenchmarkManager>>,
 }
 
 impl DownloadManager {
@@ -1176,6 +1179,7 @@ impl DownloadManager {
             history_analytics: Arc::new(Mutex::new(
                 download_history_analytics::HistoryAnalyticsManager::new(),
             )),
+            speed_benchmark: Arc::new(Mutex::new(speed_benchmark::SpeedBenchmarkManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1501,6 +1505,7 @@ impl DownloadManager {
             history_analytics: Arc::new(Mutex::new(
                 download_history_analytics::HistoryAnalyticsManager::new(),
             )),
+            speed_benchmark: Arc::new(Mutex::new(speed_benchmark::SpeedBenchmarkManager::new())),
         };
         // Restore tag manager from disk
         dm.tag_manager.restore().await;
@@ -9637,6 +9642,71 @@ impl DownloadManager {
     pub async fn clear_history_analytics(&self) {
         let mgr = self.history_analytics.lock().await;
         let _ = download_history_analytics::save_analytics_config(&mgr.config, &self.data_dir);
+    }
+
+    // ========== Speed Benchmark API (Phase 129) ==========
+
+    /// Get speed benchmark configuration
+    pub async fn get_speed_benchmark_config(&self) -> speed_benchmark::BenchmarkConfig {
+        self.speed_benchmark.lock().await.get_config().clone()
+    }
+
+    /// Set speed benchmark configuration
+    pub async fn set_speed_benchmark_config(&self, config: speed_benchmark::BenchmarkConfig) {
+        self.speed_benchmark.lock().await.set_config(config);
+    }
+
+    /// Benchmark a single URL
+    pub async fn benchmark_url(&self, url: &str) -> speed_benchmark::BenchmarkResult {
+        self.speed_benchmark.lock().await.benchmark_url(url).await
+    }
+
+    /// Benchmark multiple URLs concurrently
+    pub async fn benchmark_urls(&self, urls: &[String]) -> speed_benchmark::BenchmarkSummary {
+        self.speed_benchmark.lock().await.benchmark_urls(urls).await
+    }
+
+    /// Get cached benchmark result for a URL
+    pub async fn get_cached_benchmark(
+        &self,
+        url: &str,
+    ) -> Option<speed_benchmark::BenchmarkResult> {
+        self.speed_benchmark
+            .lock()
+            .await
+            .get_cached_result(url)
+            .cloned()
+    }
+
+    /// Get all benchmark results
+    pub async fn get_all_benchmarks(&self) -> Vec<speed_benchmark::BenchmarkResult> {
+        self.speed_benchmark
+            .lock()
+            .await
+            .get_all_results()
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Get benchmark summary
+    pub async fn get_benchmark_summary(&self) -> speed_benchmark::BenchmarkSummary {
+        self.speed_benchmark.lock().await.get_summary()
+    }
+
+    /// Clear all benchmark results
+    pub async fn clear_benchmarks(&self) {
+        self.speed_benchmark.lock().await.clear_results();
+    }
+
+    /// Clear benchmark result for a specific URL
+    pub async fn clear_benchmark(&self, url: &str) {
+        self.speed_benchmark.lock().await.clear_result(url);
+    }
+
+    /// Format benchmark summary for display
+    pub async fn format_benchmark_summary(&self) -> String {
+        self.speed_benchmark.lock().await.format_summary()
     }
 
     /// Set the priority of a download task.
