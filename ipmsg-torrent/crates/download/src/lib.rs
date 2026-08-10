@@ -85,6 +85,7 @@ pub mod speed_burst;
 pub mod speed_history;
 pub mod speed_prediction;
 pub mod speed_profiles;
+pub mod tag_management;
 pub mod task_activity;
 pub mod task_archive;
 pub mod task_chain;
@@ -169,6 +170,9 @@ pub use rate_limiter::{DownloadRateController, RateLimiter};
 pub use save_path_manager::{
     FileCategory, SavePathConfig, SavePathError, SavePathManager, SavePathPersistenceError,
     load_save_path_config, save_save_path_config,
+};
+pub use tag_management::{
+    TagAction, TagAliasMap, TagInfo, TagManagementConfig, TagManagementSummary, TagManager,
 };
 
 /// Download statistics snapshot.
@@ -965,6 +969,8 @@ pub struct DownloadManager {
     smart_queue: Arc<tokio::sync::RwLock<smart_queue::SmartQueueOptimizer>>,
     /// Preflight checker for pre-download validation
     preflight_checker: Arc<tokio::sync::RwLock<preflight_check::PreflightChecker>>,
+    /// Tag management system for cross-task tag operations
+    tag_manager: Arc<tag_management::TagManager>,
 }
 
 impl DownloadManager {
@@ -1151,6 +1157,7 @@ impl DownloadManager {
             preflight_checker: Arc::new(tokio::sync::RwLock::new(
                 preflight_check::PreflightChecker::new(&data_dir),
             )),
+            tag_manager: Arc::new(tag_management::TagManager::new(&data_dir)),
         };
         dm.start_scheduler();
         dm
@@ -1469,7 +1476,10 @@ impl DownloadManager {
             preflight_checker: Arc::new(tokio::sync::RwLock::new(
                 preflight_check::PreflightChecker::new(&data_dir),
             )),
+            tag_manager: Arc::new(tag_management::TagManager::new(&data_dir)),
         };
+        // Restore tag manager from disk
+        dm.tag_manager.restore().await;
         // Restore download budget from disk
         if let Some(budget_mgr) = download_budget::load_budget(&dm.data_dir) {
             *dm.download_budget.lock().await = budget_mgr;
@@ -9127,6 +9137,135 @@ impl DownloadManager {
         tags.sort();
         tags.dedup();
         tags
+    }
+
+    /// Rename a tag across all tasks (Phase 125)
+    pub async fn rename_tag(&self, old_name: &str, new_name: &str) -> Option<TagAction> {
+        let mut tasks = self.tasks.lock().await;
+        let mut affected = 0usize;
+        for task in tasks.iter_mut() {
+            if let Some(pos) = task.tags.iter().position(|t| t == old_name) {
+                task.tags[pos] = new_name.to_string();
+                affected += 1;
+            }
+        }
+        drop(tasks);
+
+        if affected > 0 {
+            self.tag_manager.rename_tag(old_name, new_name).await;
+            self.persist_tasks().await;
+            Some(TagAction::Renamed {
+                old: old_name.to_string(),
+                new: new_name.to_string(),
+                affected_tasks: affected,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Merge source tag into target tag across all tasks (Phase 125)
+    pub async fn merge_tags(&self, source: &str, target: &str) -> Option<TagAction> {
+        if source == target {
+            return None;
+        }
+
+        let mut tasks = self.tasks.lock().await;
+        let mut affected = 0usize;
+        for task in tasks.iter_mut() {
+            let has_source = task.tags.iter().any(|t| t == source);
+            let has_target = task.tags.iter().any(|t| t == target);
+
+            if has_source {
+                // Remove source tag
+                task.tags.retain(|t| t != source);
+                // Add target tag if not already present
+                if !has_target {
+                    task.tags.push(target.to_string());
+                }
+                affected += 1;
+            }
+        }
+        drop(tasks);
+
+        if affected > 0 {
+            self.tag_manager.merge_tags(source, target).await;
+            self.persist_tasks().await;
+            Some(TagAction::Merged {
+                source: source.to_string(),
+                target: target.to_string(),
+                affected_tasks: affected,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Clean up orphan tags (tags with 0 usage) (Phase 125)
+    pub async fn cleanup_orphan_tags(&self) -> TagAction {
+        // Sync tag manager with actual task data first
+        self.sync_tag_manager().await;
+        let removed = self.tag_manager.cleanup_orphans().await;
+        TagAction::OrphansCleaned { removed }
+    }
+
+    /// Sync tag manager with actual task data (Phase 125)
+    pub async fn sync_tag_manager(&self) {
+        let tasks = self.tasks.lock().await;
+        let task_tags: Vec<Vec<String>> = tasks.iter().map(|t| t.tags.clone()).collect();
+        drop(tasks);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.tag_manager.sync_from_tasks(&task_tags, now).await;
+    }
+
+    /// Add a tag alias (Phase 125)
+    pub async fn add_tag_alias(&self, alias: &str, canonical: &str) -> bool {
+        self.tag_manager.add_alias(alias, canonical).await
+    }
+
+    /// Remove a tag alias (Phase 125)
+    pub async fn remove_tag_alias(&self, alias: &str) -> bool {
+        self.tag_manager.remove_alias(alias).await
+    }
+
+    /// Get all tag aliases (Phase 125)
+    pub async fn get_tag_aliases(&self) -> std::collections::HashMap<String, String> {
+        self.tag_manager.get_aliases().await
+    }
+
+    /// Get tag management summary (Phase 125)
+    pub async fn get_tag_management_summary(&self) -> tag_management::TagManagementSummary {
+        self.sync_tag_manager().await;
+        self.tag_manager.get_summary().await
+    }
+
+    /// Get tag management config (Phase 125)
+    pub async fn get_tag_management_config(&self) -> tag_management::TagManagementConfig {
+        self.tag_manager.get_config().await
+    }
+
+    /// Set tag management config (Phase 125)
+    pub async fn set_tag_management_config(&self, config: tag_management::TagManagementConfig) {
+        self.tag_manager.set_config(config).await;
+    }
+
+    /// Set a label (emoji/color) for a tag (Phase 125)
+    pub async fn set_tag_label(&self, tag: &str, label: Option<String>) -> bool {
+        self.tag_manager.set_tag_label(tag, label).await
+    }
+
+    /// Delete a tag from tag manager (does not affect tasks) (Phase 125)
+    pub async fn delete_tag(&self, tag: &str) -> bool {
+        self.tag_manager.delete_tag(tag).await
+    }
+
+    /// Get all tags with usage info (Phase 125)
+    pub async fn get_all_tag_info(&self) -> Vec<tag_management::TagInfo> {
+        self.sync_tag_manager().await;
+        self.tag_manager.get_all_tags().await
     }
 
     /// Set the priority of a download task.
