@@ -30,6 +30,7 @@ pub mod download_cooldown;
 pub mod download_deadline;
 pub mod download_history;
 pub mod download_presets;
+pub mod download_quota;
 pub mod download_report;
 pub mod download_session;
 pub mod download_snapshot;
@@ -72,6 +73,7 @@ pub mod source_rotation;
 pub mod speed_alert;
 pub mod speed_anomaly;
 pub mod speed_burst;
+pub mod speed_profiles;
 pub mod speed_history;
 pub mod speed_prediction;
 pub mod task_activity;
@@ -83,6 +85,7 @@ pub mod task_favorites;
 pub mod task_profiler;
 pub mod task_proxy;
 pub mod task_queue;
+pub mod task_scheduler;
 pub mod task_snooze;
 pub mod torrent;
 pub mod ttl;
@@ -807,6 +810,8 @@ pub struct DownloadManager {
     speed_anomaly: Arc<Mutex<speed_anomaly::SpeedAnomalyDetector>>,
     /// Speed prediction manager for domain-based speed forecasting
     speed_prediction: Arc<Mutex<speed_prediction::SpeedPredictionManager>>,
+    /// Speed profiles manager for named speed limit presets
+    speed_profiles: Arc<tokio::sync::RwLock<speed_profiles::SpeedProfileManager>>,
     /// Per-task download session tracking
     download_sessions: Arc<Mutex<download_session::DownloadSessionManager>>,
     /// Auto-cleanup configuration for completed/failed tasks
@@ -865,6 +870,7 @@ pub struct DownloadManager {
     url_allowlist: Arc<tokio::sync::RwLock<url_allowlist::AllowlistConfig>>,
     /// Task snooze manager for pausing downloads until a specific time
     task_snooze: Arc<Mutex<task_snooze::TaskSnoozeManager>>,
+    task_scheduler: Arc<Mutex<task_scheduler::TaskSchedulerManager>>,
     /// Progress milestone tracker for sending notifications at download thresholds
     progress_milestone: Arc<Mutex<progress_milestone::ProgressMilestoneTracker>>,
     /// Download time limit manager for auto-pausing tasks that exceed time limits
@@ -917,6 +923,8 @@ pub struct DownloadManager {
     duplicate_detection: Arc<Mutex<duplicate_detection::DuplicateDetectionManager>>,
     /// Dependency graph validator for checking task dependency integrity
     dependency_graph: Arc<tokio::sync::RwLock<dependency_graph::DependencyGraphValidator>>,
+    /// Download quota manager for per-tag/group data limits
+    download_quota: Arc<Mutex<download_quota::DownloadQuotaManager>>,
 }
 
 impl DownloadManager {
@@ -931,6 +939,9 @@ impl DownloadManager {
             speed_prediction: Arc::new(Mutex::new(speed_prediction::SpeedPredictionManager::new(
                 speed_prediction::SpeedPredictionConfig::default(),
             ))),
+            speed_profiles: Arc::new(tokio::sync::RwLock::new(
+                speed_profiles::SpeedProfileManager::new(&data_dir),
+            )),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
@@ -1011,6 +1022,7 @@ impl DownloadManager {
                 url_allowlist::AllowlistConfig::default(),
             )),
             task_snooze: Arc::new(Mutex::new(task_snooze::TaskSnoozeManager::new())),
+            task_scheduler: Arc::new(Mutex::new(task_scheduler::TaskSchedulerManager::new())),
             progress_milestone: Arc::new(Mutex::new(
                 progress_milestone::ProgressMilestoneTracker::new(),
             )),
@@ -1066,6 +1078,7 @@ impl DownloadManager {
             dependency_graph: Arc::new(tokio::sync::RwLock::new(
                 dependency_graph::DependencyGraphValidator::new(),
             )),
+            download_quota: Arc::new(Mutex::new(download_quota::DownloadQuotaManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1212,6 +1225,9 @@ impl DownloadManager {
             speed_prediction: Arc::new(Mutex::new(speed_prediction::SpeedPredictionManager::new(
                 speed_prediction::SpeedPredictionConfig::default(),
             ))),
+            speed_profiles: Arc::new(tokio::sync::RwLock::new(
+                speed_profiles::SpeedProfileManager::new(&data_dir),
+            )),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
@@ -1292,6 +1308,7 @@ impl DownloadManager {
                 url_allowlist::AllowlistConfig::default(),
             )),
             task_snooze: Arc::new(Mutex::new(task_snooze::TaskSnoozeManager::new())),
+            task_scheduler: Arc::new(Mutex::new(task_scheduler::TaskSchedulerManager::new())),
             progress_milestone: Arc::new(Mutex::new(
                 progress_milestone::ProgressMilestoneTracker::new(),
             )),
@@ -1347,7 +1364,12 @@ impl DownloadManager {
             dependency_graph: Arc::new(tokio::sync::RwLock::new(
                 dependency_graph::DependencyGraphValidator::new(),
             )),
+            download_quota: Arc::new(Mutex::new(download_quota::DownloadQuotaManager::new())),
         };
+        // Restore download quota config from disk
+        if let Some(quota_mgr) = download_quota::load_download_quota(&dm.data_dir) {
+            *dm.download_quota.lock().await = quota_mgr;
+        }
         // Restore resume policy config from disk
         if let Some(policy_cfg) = resume_policy::load_resume_policy_config(&dm.data_dir) {
             *dm.resume_policy.write().await = policy_cfg;
@@ -1595,6 +1617,11 @@ impl DownloadManager {
                 let mut mgr = dm.auto_actions.lock().await;
                 mgr.set_config(config);
             }
+        }
+        // Restore speed profiles from disk
+        {
+            let mut mgr = dm.speed_profiles.write().await;
+            let _ = mgr.load().await;
         }
         dm.start_scheduler();
         dm.start_bandwidth_scheduler();
@@ -8400,6 +8427,114 @@ impl DownloadManager {
         detector.clear_all_anomalies();
     }
 
+    // --- Speed Profiles (Phase 116) ---
+
+    /// Create a new speed profile.
+    pub async fn create_speed_profile(
+        &self,
+        name: &str,
+        speed_limit_bps: u64,
+        description: Option<&str>,
+    ) -> Result<String, speed_profiles::SpeedProfileError> {
+        let mut mgr = self.speed_profiles.write().await;
+        mgr.create_profile(name, speed_limit_bps, description).await
+    }
+
+    /// Delete a speed profile.
+    pub async fn delete_speed_profile(
+        &self,
+        id: &str,
+    ) -> Result<(), speed_profiles::SpeedProfileError> {
+        let mut mgr = self.speed_profiles.write().await;
+        mgr.delete_profile(id).await
+    }
+
+    /// Activate a speed profile, applying its speed limit and max concurrent settings.
+    pub async fn activate_speed_profile(
+        &self,
+        id: &str,
+    ) -> Result<speed_profiles::SpeedProfileInfo, speed_profiles::SpeedProfileError> {
+        let (speed_limit, _upload_limit, max_concurrent) = {
+            let mut mgr = self.speed_profiles.write().await;
+            mgr.activate_profile(id).await?
+        };
+
+        // Apply the profile's speed limit to the global rate limiter
+        self.rate_limiter.set_global_limit(speed_limit).await;
+
+        // Apply max concurrent if specified (> 0)
+        if max_concurrent > 0 {
+            self.max_concurrent
+                .store(max_concurrent as usize, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // Return the profile info
+        let mgr = self.speed_profiles.read().await;
+        let profile = mgr
+            .get_profile(id)
+            .ok_or_else(|| speed_profiles::SpeedProfileError::NotFound(id.to_string()))?;
+        Ok(profile.to_info(true))
+    }
+
+    /// Deactivate the current speed profile (restore unlimited speed).
+    pub async fn deactivate_speed_profile(&self) -> Result<(), speed_profiles::SpeedProfileError> {
+        let mut mgr = self.speed_profiles.write().await;
+        mgr.deactivate_profile().await?;
+        drop(mgr);
+
+        // Restore unlimited speed
+        self.rate_limiter.set_global_limit(0).await;
+        Ok(())
+    }
+
+    /// Get the speed profiles summary.
+    pub async fn get_speed_profiles_summary(&self) -> speed_profiles::SpeedProfilesSummary {
+        let mgr = self.speed_profiles.read().await;
+        mgr.summary()
+    }
+
+    /// Get a specific speed profile by ID.
+    pub async fn get_speed_profile(
+        &self,
+        id: &str,
+    ) -> Option<speed_profiles::SpeedProfileInfo> {
+        let mgr = self.speed_profiles.read().await;
+        let profile = mgr.get_profile(id)?;
+        let is_active = mgr.config().active_profile_id.as_deref() == Some(id);
+        Some(profile.to_info(is_active))
+    }
+
+    /// List all speed profiles.
+    pub async fn list_speed_profiles(&self) -> Vec<speed_profiles::SpeedProfileInfo> {
+        let mgr = self.speed_profiles.read().await;
+        let active_id = mgr.config().active_profile_id.clone();
+        mgr.list_profiles()
+            .into_iter()
+            .map(|p| p.to_info(active_id.as_deref() == Some(p.id.as_str())))
+            .collect()
+    }
+
+    /// Update a speed profile's settings.
+    pub async fn update_speed_profile(
+        &self,
+        id: &str,
+        speed_limit_bps: Option<u64>,
+        upload_limit_bps: Option<u64>,
+        max_concurrent: Option<u32>,
+        description: Option<&str>,
+    ) -> Result<(), speed_profiles::SpeedProfileError> {
+        let mut mgr = self.speed_profiles.write().await;
+        mgr.update_profile(id, speed_limit_bps, upload_limit_bps, max_concurrent, description)
+            .await
+    }
+
+    /// Get the currently active speed profile (if any).
+    pub async fn get_active_speed_profile(&self) -> Option<speed_profiles::SpeedProfileInfo> {
+        let mgr = self.speed_profiles.read().await;
+        let profile = mgr.active_profile()?;
+        Some(profile.to_info(true))
+    }
+
     // --- Download Session Tracking (Phase 84) ---
 
     /// Start a new download session for a task.
@@ -8802,6 +8937,170 @@ impl DownloadManager {
             .collect();
         let validator = self.dependency_graph.read().await;
         Some(validator.get_dependents(task_id, &task_data))
+    }
+
+    // ── Download Quota System (Phase 115) ──
+
+    /// Set the download quota system configuration.
+    pub async fn set_download_quota_config(&self, config: download_quota::QuotaSystemConfig) {
+        let mut mgr = self.download_quota.lock().await;
+        mgr.set_config(config);
+        let _ = download_quota::save_download_quota(&mgr, &self.data_dir);
+    }
+
+    /// Get the download quota system configuration.
+    pub async fn get_download_quota_config(&self) -> download_quota::QuotaSystemConfig {
+        let mgr = self.download_quota.lock().await;
+        mgr.get_config().clone()
+    }
+
+    /// Add a new quota rule.
+    pub async fn add_download_quota_rule(
+        &self,
+        rule: download_quota::QuotaRule,
+    ) -> Result<String, download_quota::QuotaError> {
+        let mut mgr = self.download_quota.lock().await;
+        let result = mgr.add_rule(rule);
+        let _ = download_quota::save_download_quota(&mgr, &self.data_dir);
+        result
+    }
+
+    /// Remove a quota rule by ID.
+    pub async fn remove_download_quota_rule(&self, rule_id: &str) -> bool {
+        let mut mgr = self.download_quota.lock().await;
+        let removed = mgr.remove_rule(rule_id);
+        if removed {
+            let _ = download_quota::save_download_quota(&mgr, &self.data_dir);
+        }
+        removed
+    }
+
+    /// List all quota rules.
+    pub async fn list_download_quota_rules(&self) -> Vec<download_quota::QuotaRule> {
+        let mgr = self.download_quota.lock().await;
+        mgr.list_rules().into_iter().cloned().collect()
+    }
+
+    /// Enable or disable a quota rule.
+    pub async fn set_download_quota_rule_enabled(&self, rule_id: &str, enabled: bool) -> bool {
+        let mut mgr = self.download_quota.lock().await;
+        let result = mgr.set_rule_enabled(rule_id, enabled);
+        if result {
+            let _ = download_quota::save_download_quota(&mgr, &self.data_dir);
+        }
+        result
+    }
+
+    /// Update the daily limit of a quota rule.
+    pub async fn set_download_quota_rule_limit(
+        &self,
+        rule_id: &str,
+        daily_limit_bytes: u64,
+    ) -> bool {
+        let mut mgr = self.download_quota.lock().await;
+        let result = mgr.set_rule_limit(rule_id, daily_limit_bytes);
+        if result {
+            let _ = download_quota::save_download_quota(&mgr, &self.data_dir);
+        }
+        result
+    }
+
+    /// Get the quota summary (all rules with usage stats).
+    pub async fn get_download_quota_summary(&self) -> download_quota::QuotaSummary {
+        let mgr = self.download_quota.lock().await;
+        let tasks = self.tasks.lock().await;
+        mgr.get_summary(|scope| {
+            tasks
+                .iter()
+                .filter(|t| match scope {
+                    download_quota::QuotaScope::Tag(tag) => t.tags.iter().any(|tt| tt == tag),
+                    download_quota::QuotaScope::Group(group) => {
+                        t.group.as_deref() == Some(group.as_str())
+                    }
+                })
+                .count()
+        })
+    }
+
+    /// Record quota usage for a completed download (bytes downloaded).
+    pub async fn record_download_quota_usage(&self, task_id: &str, bytes: u64) {
+        let tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter().find(|t| t.id == task_id) {
+            let mut mgr = self.download_quota.lock().await;
+            let newly_exceeded = mgr.record_usage(&task.tags, task.group.as_deref(), bytes);
+            if !newly_exceeded.is_empty() {
+                // Auto-pause tasks matching exceeded scopes
+                drop(mgr);
+                drop(tasks);
+                self.pause_tasks_for_exceeded_quotas(&newly_exceeded).await;
+            } else {
+                let _ = download_quota::save_download_quota(&mgr, &self.data_dir);
+            }
+        }
+    }
+
+    /// Check if a task should be paused based on quota limits.
+    pub async fn should_pause_for_quota(&self, task_id: &str) -> bool {
+        let mgr = self.download_quota.lock().await;
+        if !mgr.config.enabled {
+            return false;
+        }
+        let tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.iter().find(|t| t.id == task_id) {
+            mgr.should_pause_task(&task.tags, task.group.as_deref())
+        } else {
+            false
+        }
+    }
+
+    /// Internal: pause all active tasks that match the exceeded quota scopes.
+    async fn pause_tasks_for_exceeded_quotas(&self, exceeded_rule_ids: &[String]) {
+        let mgr = self.download_quota.lock().await;
+        let exceeded_scopes: Vec<download_quota::QuotaScope> = exceeded_rule_ids
+            .iter()
+            .filter_map(|id| mgr.get_rule(id).map(|r| r.scope.clone()))
+            .collect();
+        drop(mgr);
+
+        if exceeded_scopes.is_empty() {
+            return;
+        }
+
+        let mut tasks = self.tasks.lock().await;
+        for task in tasks.iter_mut() {
+            if task.state != DownloadState::Downloading {
+                continue;
+            }
+            let should_pause = exceeded_scopes.iter().any(|scope| match scope {
+                download_quota::QuotaScope::Tag(tag) => task.tags.iter().any(|t| t == tag),
+                download_quota::QuotaScope::Group(group) => {
+                    task.group.as_deref() == Some(group.as_str())
+                }
+            });
+            if should_pause {
+                task.state = DownloadState::Paused;
+                task.speed_bps = 0.0;
+                let _ = self.event_tx.send(TaskEvent::Updated {
+                    task: TaskInfoEvent::from_task(task),
+                });
+            }
+        }
+        let mgr = self.download_quota.lock().await;
+        let _ = download_quota::save_download_quota(&mgr, &self.data_dir);
+    }
+
+    /// Refresh all quota usage records (reset for new day).
+    pub async fn refresh_download_quota(&self) {
+        let mut mgr = self.download_quota.lock().await;
+        mgr.refresh_all();
+        let _ = download_quota::save_download_quota(&mgr, &self.data_dir);
+    }
+
+    /// Clear all quota usage data.
+    pub async fn clear_download_quota_usage(&self) {
+        let mut mgr = self.download_quota.lock().await;
+        mgr.clear_usage();
+        let _ = download_quota::save_download_quota(&mgr, &self.data_dir);
     }
 
     /// Rename a download task.
@@ -10465,6 +10764,70 @@ impl DownloadManager {
         mgr.remove_task(task_id);
         let data = mgr.to_data();
         let _ = task_snooze::save_task_snooze_data(&data, &self.data_dir).await;
+    }
+
+    // ─── Phase 115: Task Scheduler ───
+
+    /// Set task scheduler configuration.
+    pub async fn set_task_scheduler_config(
+        &self,
+        config: task_scheduler::TaskSchedulerConfig,
+    ) -> Result<(), task_scheduler::TaskSchedulerError> {
+        let mut mgr = self.task_scheduler.lock().await;
+        mgr.set_config(config);
+        mgr.save_to_file(self.data_dir.join("task_scheduler_config.json"))
+            .await
+    }
+
+    /// Get current task scheduler configuration.
+    pub async fn get_task_scheduler_config(&self) -> task_scheduler::TaskSchedulerConfig {
+        self.task_scheduler.lock().await.get_config().clone()
+    }
+
+    /// Add a schedule rule.
+    pub async fn add_schedule_rule(
+        &self,
+        rule: task_scheduler::ScheduleRule,
+    ) -> Result<(), task_scheduler::TaskSchedulerError> {
+        let mut mgr = self.task_scheduler.lock().await;
+        mgr.add_rule(rule);
+        mgr.save_to_file(self.data_dir.join("task_scheduler_config.json"))
+            .await
+    }
+
+    /// Remove a schedule rule by ID.
+    pub async fn remove_schedule_rule(
+        &self,
+        rule_id: &str,
+    ) -> Result<bool, task_scheduler::TaskSchedulerError> {
+        let mut mgr = self.task_scheduler.lock().await;
+        let removed = mgr.remove_rule(rule_id);
+        mgr.save_to_file(self.data_dir.join("task_scheduler_config.json"))
+            .await?;
+        Ok(removed)
+    }
+
+    /// Get all schedule rules.
+    pub async fn get_schedule_rules(&self) -> Vec<task_scheduler::ScheduleRule> {
+        self.task_scheduler.lock().await.get_rules().to_vec()
+    }
+
+    /// Enable or disable a schedule rule.
+    pub async fn set_schedule_rule_enabled(
+        &self,
+        rule_id: &str,
+        enabled: bool,
+    ) -> Result<bool, task_scheduler::TaskSchedulerError> {
+        let mut mgr = self.task_scheduler.lock().await;
+        let updated = mgr.set_rule_enabled(rule_id, enabled);
+        mgr.save_to_file(self.data_dir.join("task_scheduler_config.json"))
+            .await?;
+        Ok(updated)
+    }
+
+    /// Evaluate schedules at the current time.
+    pub async fn evaluate_schedule_now(&self) -> task_scheduler::ScheduleEvaluation {
+        self.task_scheduler.lock().await.evaluate_now()
     }
 
     // ─── Phase 98: Download Queue Snapshot & Restore ───

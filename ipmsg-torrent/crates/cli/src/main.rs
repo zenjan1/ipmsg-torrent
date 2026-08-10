@@ -385,6 +385,11 @@ enum Command {
     DlQueueCompletion {
         subcommand: Option<String>,
     },
+    /// Manage download quota system (per-tag/group data limits)
+    DlDownloadQuota {
+        subcommand: Option<String>,
+        args: Vec<String>,
+    },
     /// Manage auto-categorization rules
     DlAutoRule {
         subcommand: String,
@@ -544,6 +549,12 @@ enum Command {
     /// Task performance profiler (status|summary|profile|refresh|clear|config)
     DlProfiler {
         /// Subcommand: status|summary|profile|refresh|clear|config
+        subcommand: String,
+        args: Vec<String>,
+    },
+    /// Speed profiles manager (list|create|delete|activate|deactivate|show)
+    DlSpeedProfile {
+        /// Subcommand: list|create|delete|activate|deactivate|show
         subcommand: String,
         args: Vec<String>,
     },
@@ -1779,6 +1790,25 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlspeedprofile" | "dl-speed-profile" | "dlspf" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlsp <list|create|delete|activate|deactivate|show>".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlSpeedProfile {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dltemplate" | "dl-template" | "dltmpl" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
@@ -1983,6 +2013,10 @@ fn parse_command(input: &str) -> Command {
         "dlqc" | "dl-queuecompletion" => Command::DlQueueCompletion {
             subcommand: parts.get(1).map(|s| s.to_string()),
         },
+        "dlquota" | "dl-downloadquota" | "dldq" => Command::DlDownloadQuota {
+            subcommand: parts.get(1).map(|s| s.to_string()),
+            args: parts[2..].iter().map(|s| s.to_string()).collect(),
+        },
         "block" => {
             if parts.len() >= 2 {
                 Command::Block {
@@ -2092,6 +2126,7 @@ fn command_help() -> String {
         "/dlrss <list|add|remove|enable|disable|poll> - Manage RSS/Atom feed subscriptions",
         "/dleta [task_id]   - Show ETA estimates for active downloads",
         "/dlqc [status|config] - Predict queue completion time",
+        "/dlquota [status|enable|disable|add|del|list|summary|refresh|clear] - Manage download quotas",
         "/dlaudit [cmd]     - Audit log (status|recent [n]|task <id>|clear)",
         "/dlbwsched [cmd]   - Bandwidth schedule (status|list|add|del)",
         "/dlpreset [cmd]    - Download presets (list|show|add|del|apply)",
@@ -8144,6 +8179,160 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlDownloadQuota { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+
+            match subcommand.as_deref() {
+                Some("status") => {
+                    let config = download_manager.get_download_quota_config().await;
+                    let summary = download_manager.get_download_quota_summary().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "Download Quota System:\n  Enabled: {}\n  Max rules: {}\n  Active rules: {}\n  Exceeded: {}\n  Total usage today: {} B",
+                            config.enabled,
+                            config.max_rules,
+                            summary.total_rules,
+                            summary.exceeded_rules,
+                            summary.total_bytes_today
+                        ),
+                    );
+                }
+                Some("enable") => {
+                    let mut config = download_manager.get_download_quota_config().await;
+                    config.enabled = true;
+                    download_manager.set_download_quota_config(config).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Download quota system enabled.".to_string());
+                }
+                Some("disable") => {
+                    let mut config = download_manager.get_download_quota_config().await;
+                    config.enabled = false;
+                    download_manager.set_download_quota_config(config).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Download quota system disabled.".to_string());
+                }
+                Some("add") => {
+                    // Usage: /dlquota add <tag|group> <name> <limit_mb>
+                    if args.len() < 3 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlquota add <tag|group> <name> <limit_mb>".to_string(),
+                        );
+                    } else {
+                        let scope_type = &args[0];
+                        let scope_name = &args[1];
+                        let limit_mb: u64 = args[2].parse().unwrap_or(0);
+                        let scope = if scope_type == "tag" {
+                            ipmsg_download::download_quota::QuotaScope::Tag(scope_name.clone())
+                        } else if scope_type == "group" {
+                            ipmsg_download::download_quota::QuotaScope::Group(scope_name.clone())
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "Scope must be 'tag' or 'group'.".to_string(),
+                            );
+                            return;
+                        };
+                        let rule_id = format!("{}_{}", scope_type, scope_name);
+                        let rule = ipmsg_download::download_quota::QuotaRule::new(
+                            rule_id,
+                            scope,
+                            limit_mb * 1024 * 1024,
+                        );
+                        match download_manager.add_download_quota_rule(rule).await {
+                            Ok(id) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "Quota rule added: {} (limit: {} MB/day)",
+                                        id, limit_mb
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Failed to add quota rule: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                Some("del") | Some("remove") => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlquota del <rule_id>".to_string());
+                    } else {
+                        let removed = download_manager.remove_download_quota_rule(&args[0]).await;
+                        let mut s = state.lock().await;
+                        if removed {
+                            s.add_system_message(
+                                "main",
+                                format!("Quota rule '{}' removed.", args[0]),
+                            );
+                        } else {
+                            s.add_system_message(
+                                "main",
+                                format!("Quota rule '{}' not found.", args[0]),
+                            );
+                        }
+                    }
+                }
+                Some("list") => {
+                    let rules = download_manager.list_download_quota_rules().await;
+                    let mut s = state.lock().await;
+                    if rules.is_empty() {
+                        s.add_system_message("main", "No quota rules configured.".to_string());
+                    } else {
+                        let mut lines = "Quota Rules:\n".to_string();
+                        for rule in &rules {
+                            let limit_mb = rule.daily_limit_bytes / 1024 / 1024;
+                            lines.push_str(&format!(
+                                "  [{}] {}:{} - {} MB/day ({})\n",
+                                rule.id,
+                                rule.scope.type_label(),
+                                rule.scope.name(),
+                                limit_mb,
+                                if rule.enabled { "enabled" } else { "disabled" }
+                            ));
+                        }
+                        s.add_system_message("main", lines);
+                    }
+                }
+                Some("summary") => {
+                    let summary = download_manager.get_download_quota_summary().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", summary.format_report());
+                }
+                Some("refresh") => {
+                    download_manager.refresh_download_quota().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Quota usage refreshed.".to_string());
+                }
+                Some("clear") => {
+                    download_manager.clear_download_quota_usage().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Quota usage cleared.".to_string());
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlquota <status|enable|disable|add|del|list|summary|refresh|clear>"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         Command::DlTemplate { subcommand, args } => {
             let download_manager = {
                 let s = state.lock().await;
@@ -11966,6 +12155,151 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlprofiler <status|summary|profile|refresh|clear|config>"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlSpeedProfile { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "list" => {
+                    let profiles = download_manager.list_speed_profiles().await;
+                    if profiles.is_empty() {
+                        s.add_system_message("main", "No speed profiles defined. Create one with /dlsp create <name> <speed_limit>".to_string());
+                    } else {
+                        let mut msg = format!("Speed Profiles ({} total):\n", profiles.len());
+                        for p in &profiles {
+                            let active_marker = if p.is_active { " ✓" } else { "" };
+                            let speed = ipmsg_download::speed_profiles::format_speed_bps(p.speed_limit_bps);
+                            msg.push_str(&format!(
+                                "  {}{} - {} (use_count: {})\n",
+                                p.name, active_marker, speed, p.use_count
+                            ));
+                        }
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "create" => {
+                    if args.len() < 2 {
+                        s.add_system_message("main", "Usage: /dlsp create <name> <speed_limit> [description]".to_string());
+                    } else {
+                        let name = args[0].clone();
+                        let speed_str = args[1].clone();
+                        let desc_str = if args.len() > 2 {
+                            Some(args[2..].join(" "))
+                        } else {
+                            None
+                        };
+                        let description = desc_str.as_deref();
+
+
+
+
+
+                        match ipmsg_download::speed_profiles::parse_speed_bps(&speed_str) {
+                            Ok(speed_limit) => {
+                                match download_manager.create_speed_profile(&name, speed_limit, description).await {
+                                    Ok(id) => {
+                                        let speed = ipmsg_download::speed_profiles::format_speed_bps(speed_limit);
+                                        s.add_system_message("main", format!("Created speed profile '{}' (id: {}) with limit {}", name, id, speed));
+                                    }
+                                    Err(e) => {
+                                        s.add_system_message("main", format!("Failed to create profile: {}", e));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                s.add_system_message("main", format!("Invalid speed limit: {}", e));
+                            }
+                        }
+                    }
+                }
+                "delete" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlsp delete <profile_id>".to_string());
+                    } else {
+                        match download_manager.delete_speed_profile(&args[0]).await {
+                            Ok(()) => {
+                                s.add_system_message("main", format!("Deleted speed profile '{}'", args[0]));
+                            }
+                            Err(e) => {
+                                s.add_system_message("main", format!("Failed to delete profile: {}", e));
+                            }
+                        }
+                    }
+                }
+                "activate" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlsp activate <profile_id>".to_string());
+                    } else {
+                        match download_manager.activate_speed_profile(&args[0]).await {
+                            Ok(profile) => {
+                                let speed = ipmsg_download::speed_profiles::format_speed_bps(profile.speed_limit_bps);
+                                s.add_system_message("main", format!("Activated speed profile '{}' with limit {}", profile.name, speed));
+                            }
+                            Err(e) => {
+                                s.add_system_message("main", format!("Failed to activate profile: {}", e));
+                            }
+                        }
+                    }
+                }
+                "deactivate" => {
+                    match download_manager.deactivate_speed_profile().await {
+                        Ok(()) => {
+                            s.add_system_message("main", "Deactivated speed profile (unlimited speed)".to_string());
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Failed to deactivate profile: {}", e));
+                        }
+                    }
+                }
+                "show" => {
+                    if args.is_empty() {
+                        match download_manager.get_active_speed_profile().await {
+                            Some(profile) => {
+                                let speed = ipmsg_download::speed_profiles::format_speed_bps(profile.speed_limit_bps);
+                                let mut msg = format!("Active Speed Profile:\n");
+                                msg.push_str(&format!("  Name: {}\n", profile.name));
+                                msg.push_str(&format!("  Speed Limit: {}\n", speed));
+                                msg.push_str(&format!("  Use Count: {}\n", profile.use_count));
+                                if let Some(desc) = &profile.description {
+                                    msg.push_str(&format!("  Description: {}\n", desc));
+                                }
+                                s.add_system_message("main", msg);
+                            }
+                            None => {
+                                s.add_system_message("main", "No speed profile is currently active".to_string());
+                            }
+                        }
+                    } else {
+                        match download_manager.get_speed_profile(&args[0]).await {
+                            Some(profile) => {
+                                let speed = ipmsg_download::speed_profiles::format_speed_bps(profile.speed_limit_bps);
+                                let mut msg = format!("Speed Profile '{}':\n", profile.name);
+                                msg.push_str(&format!("  ID: {}\n", profile.id));
+                                msg.push_str(&format!("  Speed Limit: {}\n", speed));
+                                msg.push_str(&format!("  Use Count: {}\n", profile.use_count));
+                                msg.push_str(&format!("  Active: {}\n", profile.is_active));
+                                if let Some(desc) = &profile.description {
+                                    msg.push_str(&format!("  Description: {}\n", desc));
+                                }
+                                s.add_system_message("main", msg);
+                            }
+                            None => {
+                                s.add_system_message("main", format!("Speed profile '{}' not found", args[0]));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlsp <list|create|delete|activate|deactivate|show>"
                             .to_string(),
                     );
                 }

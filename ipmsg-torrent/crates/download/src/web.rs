@@ -159,6 +159,27 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/queue-completion",
             post(set_queue_completion_config_handler),
         )
+        .route("/api/download-quota", get(get_download_quota_config))
+        .route("/api/download-quota", post(set_download_quota_config))
+        .route(
+            "/api/download-quota/summary",
+            get(get_download_quota_summary),
+        )
+        .route("/api/download-quota/rules", get(list_download_quota_rules))
+        .route("/api/download-quota/rules", post(add_download_quota_rule))
+        .route(
+            "/api/download-quota/rules/:id/remove",
+            post(remove_download_quota_rule),
+        )
+        .route(
+            "/api/download-quota/rules/:id/enable",
+            post(set_download_quota_rule_enabled),
+        )
+        .route("/api/download-quota/refresh", post(refresh_download_quota))
+        .route(
+            "/api/download-quota/clear",
+            post(clear_download_quota_usage),
+        )
         .route("/api/auto-rules", get(list_auto_rules))
         .route("/api/auto-rules", post(add_auto_rule))
         .route("/api/auto-rules/:id/remove", post(remove_auto_rule))
@@ -495,6 +516,20 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/task-snooze", post(set_snooze_handler))
         .route("/api/task-snooze/config", get(get_snooze_config_handler))
         .route("/api/task-snooze/config", post(set_snooze_config_handler))
+        .route("/api/task-scheduler", get(get_task_scheduler_handler))
+        .route(
+            "/api/task-scheduler",
+            post(set_task_scheduler_config_handler),
+        )
+        .route("/api/task-scheduler/rules", post(add_schedule_rule_handler))
+        .route(
+            "/api/task-scheduler/rules/:id",
+            axum::routing::delete(remove_schedule_rule_handler),
+        )
+        .route(
+            "/api/task-scheduler/rules/:id",
+            post(set_schedule_rule_enabled_handler),
+        )
         .route(
             "/api/progress-milestone",
             get(get_progress_milestone_handler),
@@ -2723,6 +2758,77 @@ async fn set_snooze_config_handler(
     }
 }
 
+// ─── Phase 115: Task Scheduler API ───
+
+/// Get task scheduler evaluation (current schedule state)
+async fn get_task_scheduler_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let evaluation = state.manager.evaluate_schedule_now().await;
+    let rules = state.manager.get_schedule_rules().await;
+    let config = state.manager.get_task_scheduler_config().await;
+    Json(serde_json::json!({
+        "evaluation": evaluation,
+        "rules": rules,
+        "config": config
+    }))
+}
+
+/// Set task scheduler configuration
+async fn set_task_scheduler_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::task_scheduler::TaskSchedulerConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_task_scheduler_config(config).await {
+        Ok(_) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Add a schedule rule
+async fn add_schedule_rule_handler(
+    State(state): State<Arc<WebState>>,
+    Json(rule): Json<crate::task_scheduler::ScheduleRule>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.add_schedule_rule(rule).await {
+        Ok(_) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Remove a schedule rule
+async fn remove_schedule_rule_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(rule_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.remove_schedule_rule(&rule_id).await {
+        Ok(true) => Json(serde_json::json!({"status": "ok"})),
+        Ok(false) => Json(serde_json::json!({"error": "rule not found"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// Enable/disable a schedule rule
+async fn set_schedule_rule_enabled_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(rule_id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let enabled = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    match state
+        .manager
+        .set_schedule_rule_enabled(&rule_id, enabled)
+        .await
+    {
+        Ok(true) => Json(serde_json::json!({"status": "ok"})),
+        Ok(false) => Json(serde_json::json!({"error": "rule not found"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
 /// Get progress milestone configuration
 async fn get_progress_milestone_handler(
     State(state): State<Arc<WebState>>,
@@ -4612,6 +4718,104 @@ async fn set_queue_completion_config_handler(
         .set_queue_completion_config(config.clone())
         .await;
     Json(serde_json::json!({"status": "ok", "config": config}))
+}
+
+// ── Download Quota API Handlers (Phase 115) ──
+
+/// GET /api/download-quota — Get quota system configuration
+async fn get_download_quota_config(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let config = state.manager.get_download_quota_config().await;
+    Json(
+        serde_json::to_value(config)
+            .unwrap_or(serde_json::json!({"error": "Failed to serialize config"})),
+    )
+}
+
+/// POST /api/download-quota — Update quota system configuration
+async fn set_download_quota_config(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::download_quota::QuotaSystemConfig>,
+) -> Json<serde_json::Value> {
+    state
+        .manager
+        .set_download_quota_config(config.clone())
+        .await;
+    Json(serde_json::json!({"status": "ok", "config": config}))
+}
+
+/// GET /api/download-quota/summary — Get quota summary with usage statistics
+async fn get_download_quota_summary(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let summary = state.manager.get_download_quota_summary().await;
+    Json(
+        serde_json::to_value(summary)
+            .unwrap_or(serde_json::json!({"error": "Failed to serialize summary"})),
+    )
+}
+
+/// GET /api/download-quota/rules — List all quota rules
+async fn list_download_quota_rules(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let rules = state.manager.list_download_quota_rules().await;
+    Json(
+        serde_json::to_value(rules)
+            .unwrap_or(serde_json::json!({"error": "Failed to serialize rules"})),
+    )
+}
+
+/// POST /api/download-quota/rules — Add a new quota rule
+async fn add_download_quota_rule(
+    State(state): State<Arc<WebState>>,
+    Json(rule): Json<crate::download_quota::QuotaRule>,
+) -> Json<serde_json::Value> {
+    match state.manager.add_download_quota_rule(rule).await {
+        Ok(rule_id) => Json(serde_json::json!({"status": "ok", "rule_id": rule_id})),
+        Err(e) => Json(serde_json::json!({"status": "error", "message": e.to_string()})),
+    }
+}
+
+/// POST /api/download-quota/rules/:id/remove — Remove a quota rule
+async fn remove_download_quota_rule(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let removed = state.manager.remove_download_quota_rule(&id).await;
+    if removed {
+        Json(serde_json::json!({"status": "ok", "removed": true}))
+    } else {
+        Json(serde_json::json!({"status": "error", "message": "Rule not found"}))
+    }
+}
+
+/// POST /api/download-quota/rules/:id/enable — Enable or disable a quota rule
+async fn set_download_quota_rule_enabled(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let enabled = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let updated = state
+        .manager
+        .set_download_quota_rule_enabled(&id, enabled)
+        .await;
+    if updated {
+        Json(serde_json::json!({"status": "ok", "enabled": enabled}))
+    } else {
+        Json(serde_json::json!({"status": "error", "message": "Rule not found"}))
+    }
+}
+
+/// POST /api/download-quota/refresh — Refresh all quota usage (reset for new day)
+async fn refresh_download_quota(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    state.manager.refresh_download_quota().await;
+    Json(serde_json::json!({"status": "ok", "message": "Quota usage refreshed"}))
+}
+
+/// POST /api/download-quota/clear — Clear all quota usage data
+async fn clear_download_quota_usage(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    state.manager.clear_download_quota_usage().await;
+    Json(serde_json::json!({"status": "ok", "message": "Quota usage cleared"}))
 }
 
 /// Request to add an auto-categorization rule
