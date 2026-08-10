@@ -180,6 +180,11 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/download-quota/clear",
             post(clear_download_quota_usage),
         )
+        // Phase 117: Advanced Search API
+        .route("/api/search", post(advanced_search_handler))
+        .route("/api/search/quick/:query", get(quick_search_handler))
+        .route("/api/search/stats", get(search_stats_handler))
+        .route("/api/search/last", post(rerun_last_search_handler))
         .route("/api/auto-rules", get(list_auto_rules))
         .route("/api/auto-rules", post(add_auto_rule))
         .route("/api/auto-rules/:id/remove", post(remove_auto_rule))
@@ -4816,6 +4821,208 @@ async fn refresh_download_quota(State(state): State<Arc<WebState>>) -> Json<serd
 async fn clear_download_quota_usage(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     state.manager.clear_download_quota_usage().await;
     Json(serde_json::json!({"status": "ok", "message": "Quota usage cleared"}))
+}
+
+// ========== Phase 117: Advanced Search API ==========
+
+/// POST /api/search — Execute an advanced search query
+async fn advanced_search_handler(
+    State(state): State<Arc<WebState>>,
+    body: axum::body::Bytes,
+) -> Json<serde_json::Value> {
+    // Parse query from JSON manually (AdvancedSearchQuery doesn't derive Deserialize)
+    let json: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return Json(serde_json::json!({"error": format!("Invalid JSON: {}", e)}));
+        }
+    };
+
+    let query = parse_search_query(&json);
+
+    // Save as last query
+    state.manager.set_last_search_query(query.clone()).await;
+
+    // Execute search
+    let result = state
+        .manager
+        .advanced_search(&query, None, Some(100), None)
+        .await;
+
+    Json(task_result_to_json(&result))
+}
+
+/// GET /api/search/quick/:query — Quick name substring search
+async fn quick_search_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(query): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let tasks = state.manager.quick_search(&query).await;
+    Json(serde_json::json!({
+        "total": tasks.len(),
+        "tasks": tasks.iter().map(|t| task_to_brief_json(t)).collect::<Vec<_>>()
+    }))
+}
+
+/// GET /api/search/stats — Get search statistics
+async fn search_stats_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let stats = state.manager.get_search_stats().await;
+    Json(stats)
+}
+
+/// POST /api/search/last — Re-run the last search query
+async fn rerun_last_search_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let result = state.manager.rerun_last_search(None, Some(100), None).await;
+    Json(task_result_to_json(&result))
+}
+
+/// Helper: convert a task to a brief JSON representation
+fn task_to_brief_json(t: &crate::DownloadTask) -> serde_json::Value {
+    serde_json::json!({
+        "id": t.id,
+        "name": t.name,
+        "state": format!("{:?}", t.state),
+        "protocol": format!("{:?}", t.protocol),
+        "size": t.size,
+        "downloaded": t.downloaded,
+        "speed_bps": t.speed_bps,
+        "tags": t.tags,
+        "group": t.group,
+        "priority": format!("{:?}", t.priority),
+        "created_at": t.created_at.to_rfc3339(),
+        "updated_at": t.updated_at.to_rfc3339(),
+        "has_notes": t.notes.is_some(),
+        "has_error": t.error.is_some(),
+        "has_mirrors": !t.mirror_urls.is_empty(),
+        "has_deadline": t.deadline.is_some(),
+        "has_checksum": t.expected_checksum.is_some()
+    })
+}
+
+/// Helper: convert SearchResult to JSON
+fn task_result_to_json(result: &crate::advanced_search::SearchResult) -> serde_json::Value {
+    serde_json::json!({
+        "total": result.total,
+        "execution_time_us": result.execution_time_us,
+        "query_summary": result.query_summary,
+        "tasks": result.tasks.iter().map(|t| task_to_brief_json(t)).collect::<Vec<_>>()
+    })
+}
+
+/// Helper: parse a JSON value into an AdvancedSearchQuery
+fn parse_search_query(json: &serde_json::Value) -> crate::advanced_search::AdvancedSearchQuery {
+    let mut query = crate::advanced_search::AdvancedSearchQuery::new();
+
+    if let Some(s) = json.get("name_contains").and_then(|v| v.as_str()) {
+        query.name_contains = Some(s.to_string());
+    }
+    if let Some(s) = json.get("name_regex").and_then(|v| v.as_str()) {
+        query.name_regex = Some(s.to_string());
+    }
+    if let Some(s) = json.get("group").and_then(|v| v.as_str()) {
+        query.group = Some(s.to_string());
+    }
+    if let Some(s) = json.get("tag").and_then(|v| v.as_str()) {
+        query.tag = Some(s.to_string());
+    }
+    if let Some(arr) = json.get("tags_any").and_then(|v| v.as_array()) {
+        query.tags_any = Some(
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+        );
+    }
+    if let Some(arr) = json.get("tags_all").and_then(|v| v.as_array()) {
+        query.tags_all = Some(
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+        );
+    }
+    if let Some(n) = json.get("min_size").and_then(|v| v.as_u64()) {
+        query.min_size = Some(n);
+    }
+    if let Some(n) = json.get("max_size").and_then(|v| v.as_u64()) {
+        query.max_size = Some(n);
+    }
+    if let Some(n) = json.get("min_progress").and_then(|v| v.as_f64()) {
+        query.min_progress = Some(n);
+    }
+    if let Some(n) = json.get("max_progress").and_then(|v| v.as_f64()) {
+        query.max_progress = Some(n);
+    }
+    if let Some(n) = json.get("min_speed").and_then(|v| v.as_f64()) {
+        query.min_speed = Some(n);
+    }
+    if let Some(n) = json.get("max_speed").and_then(|v| v.as_f64()) {
+        query.max_speed = Some(n);
+    }
+    if let Some(b) = json.get("has_tags").and_then(|v| v.as_bool()) {
+        query.has_tags = Some(b);
+    }
+    if let Some(b) = json.get("has_notes").and_then(|v| v.as_bool()) {
+        query.has_notes = Some(b);
+    }
+    if let Some(b) = json.get("has_error").and_then(|v| v.as_bool()) {
+        query.has_error = Some(b);
+    }
+    if let Some(b) = json.get("has_mirrors").and_then(|v| v.as_bool()) {
+        query.has_mirrors = Some(b);
+    }
+    if let Some(b) = json.get("has_deadline").and_then(|v| v.as_bool()) {
+        query.has_deadline = Some(b);
+    }
+    if let Some(b) = json.get("has_checksum").and_then(|v| v.as_bool()) {
+        query.has_checksum = Some(b);
+    }
+    if let Some(b) = json.get("has_speed_limit").and_then(|v| v.as_bool()) {
+        query.has_speed_limit = Some(b);
+    }
+    if let Some(b) = json.get("in_queue").and_then(|v| v.as_bool()) {
+        query.in_queue = Some(b);
+    }
+    if let Some(b) = json.get("is_active").and_then(|v| v.as_bool()) {
+        query.is_active = Some(b);
+    }
+    if let Some(b) = json.get("is_complete").and_then(|v| v.as_bool()) {
+        query.is_complete = Some(b);
+    }
+    if let Some(b) = json.get("is_failed").and_then(|v| v.as_bool()) {
+        query.is_failed = Some(b);
+    }
+    if let Some(b) = json.get("is_paused").and_then(|v| v.as_bool()) {
+        query.is_paused = Some(b);
+    }
+    // State filter
+    if let Some(s) = json.get("state").and_then(|v| v.as_str()) {
+        query.state = match s.to_lowercase().as_str() {
+            "queued" => Some(crate::DownloadState::Queued),
+            "downloading" => Some(crate::DownloadState::Downloading),
+            "paused" => Some(crate::DownloadState::Paused),
+            "complete" | "completed" => Some(crate::DownloadState::Complete),
+            "error" | "failed" => Some(crate::DownloadState::Error),
+            _ => None,
+        };
+    }
+    // Priority filter
+    if let Some(s) = json.get("priority").and_then(|v| v.as_str()) {
+        query.priority = match s.to_lowercase().as_str() {
+            "low" => Some(crate::DownloadPriority::Low),
+            "normal" => Some(crate::DownloadPriority::Normal),
+            "high" => Some(crate::DownloadPriority::High),
+            _ => None,
+        };
+    }
+    if let Some(s) = json.get("min_priority").and_then(|v| v.as_str()) {
+        query.min_priority = match s.to_lowercase().as_str() {
+            "low" => Some(crate::DownloadPriority::Low),
+            "normal" => Some(crate::DownloadPriority::Normal),
+            "high" => Some(crate::DownloadPriority::High),
+            _ => None,
+        };
+    }
+
+    query
 }
 
 /// Request to add an auto-categorization rule

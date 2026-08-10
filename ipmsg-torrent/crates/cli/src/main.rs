@@ -1793,9 +1793,7 @@ fn parse_command(input: &str) -> Command {
         "dlspeedprofile" | "dl-speed-profile" | "dlspf" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
-                Command::Unknown(
-                    "/dlsp <list|create|delete|activate|deactivate|show>".to_string(),
-                )
+                Command::Unknown("/dlsp <list|create|delete|activate|deactivate|show>".to_string())
             } else {
                 let subcommand = args[0].clone();
                 let cmd_args = if args.len() > 1 {
@@ -12175,7 +12173,8 @@ async fn handle_command(
                         let mut msg = format!("Speed Profiles ({} total):\n", profiles.len());
                         for p in &profiles {
                             let active_marker = if p.is_active { " ✓" } else { "" };
-                            let speed = ipmsg_download::speed_profiles::format_speed_bps(p.speed_limit_bps);
+                            let speed =
+                                ipmsg_download::speed_profiles::format_speed_bps(p.speed_limit_bps);
                             msg.push_str(&format!(
                                 "  {}{} - {} (use_count: {})\n",
                                 p.name, active_marker, speed, p.use_count
@@ -12186,7 +12185,10 @@ async fn handle_command(
                 }
                 "create" => {
                     if args.len() < 2 {
-                        s.add_system_message("main", "Usage: /dlsp create <name> <speed_limit> [description]".to_string());
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlsp create <name> <speed_limit> [description]".to_string(),
+                        );
                     } else {
                         let name = args[0].clone();
                         let speed_str = args[1].clone();
@@ -12197,19 +12199,30 @@ async fn handle_command(
                         };
                         let description = desc_str.as_deref();
 
-
-
-
-
                         match ipmsg_download::speed_profiles::parse_speed_bps(&speed_str) {
                             Ok(speed_limit) => {
-                                match download_manager.create_speed_profile(&name, speed_limit, description).await {
+                                match download_manager
+                                    .create_speed_profile(&name, speed_limit, description)
+                                    .await
+                                {
                                     Ok(id) => {
-                                        let speed = ipmsg_download::speed_profiles::format_speed_bps(speed_limit);
-                                        s.add_system_message("main", format!("Created speed profile '{}' (id: {}) with limit {}", name, id, speed));
+                                        let speed =
+                                            ipmsg_download::speed_profiles::format_speed_bps(
+                                                speed_limit,
+                                            );
+                                        s.add_system_message(
+                                            "main",
+                                            format!(
+                                                "Created speed profile '{}' (id: {}) with limit {}",
+                                                name, id, speed
+                                            ),
+                                        );
                                     }
                                     Err(e) => {
-                                        s.add_system_message("main", format!("Failed to create profile: {}", e));
+                                        s.add_system_message(
+                                            "main",
+                                            format!("Failed to create profile: {}", e),
+                                        );
                                     }
                                 }
                             }
@@ -12221,48 +12234,77 @@ async fn handle_command(
                 }
                 "delete" => {
                     if args.is_empty() {
-                        s.add_system_message("main", "Usage: /dlsp delete <profile_id>".to_string());
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlsp delete <profile_id>".to_string(),
+                        );
                     } else {
                         match download_manager.delete_speed_profile(&args[0]).await {
                             Ok(()) => {
-                                s.add_system_message("main", format!("Deleted speed profile '{}'", args[0]));
+                                s.add_system_message(
+                                    "main",
+                                    format!("Deleted speed profile '{}'", args[0]),
+                                );
                             }
                             Err(e) => {
-                                s.add_system_message("main", format!("Failed to delete profile: {}", e));
+                                s.add_system_message(
+                                    "main",
+                                    format!("Failed to delete profile: {}", e),
+                                );
                             }
                         }
                     }
                 }
                 "activate" => {
                     if args.is_empty() {
-                        s.add_system_message("main", "Usage: /dlsp activate <profile_id>".to_string());
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlsp activate <profile_id>".to_string(),
+                        );
                     } else {
                         match download_manager.activate_speed_profile(&args[0]).await {
                             Ok(profile) => {
-                                let speed = ipmsg_download::speed_profiles::format_speed_bps(profile.speed_limit_bps);
-                                s.add_system_message("main", format!("Activated speed profile '{}' with limit {}", profile.name, speed));
+                                let speed = ipmsg_download::speed_profiles::format_speed_bps(
+                                    profile.speed_limit_bps,
+                                );
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "Activated speed profile '{}' with limit {}",
+                                        profile.name, speed
+                                    ),
+                                );
                             }
                             Err(e) => {
-                                s.add_system_message("main", format!("Failed to activate profile: {}", e));
+                                s.add_system_message(
+                                    "main",
+                                    format!("Failed to activate profile: {}", e),
+                                );
                             }
                         }
                     }
                 }
-                "deactivate" => {
-                    match download_manager.deactivate_speed_profile().await {
-                        Ok(()) => {
-                            s.add_system_message("main", "Deactivated speed profile (unlimited speed)".to_string());
-                        }
-                        Err(e) => {
-                            s.add_system_message("main", format!("Failed to deactivate profile: {}", e));
-                        }
+                "deactivate" => match download_manager.deactivate_speed_profile().await {
+                    Ok(()) => {
+                        s.add_system_message(
+                            "main",
+                            "Deactivated speed profile (unlimited speed)".to_string(),
+                        );
                     }
-                }
+                    Err(e) => {
+                        s.add_system_message(
+                            "main",
+                            format!("Failed to deactivate profile: {}", e),
+                        );
+                    }
+                },
                 "show" => {
                     if args.is_empty() {
                         match download_manager.get_active_speed_profile().await {
                             Some(profile) => {
-                                let speed = ipmsg_download::speed_profiles::format_speed_bps(profile.speed_limit_bps);
+                                let speed = ipmsg_download::speed_profiles::format_speed_bps(
+                                    profile.speed_limit_bps,
+                                );
                                 let mut msg = format!("Active Speed Profile:\n");
                                 msg.push_str(&format!("  Name: {}\n", profile.name));
                                 msg.push_str(&format!("  Speed Limit: {}\n", speed));
@@ -12273,13 +12315,18 @@ async fn handle_command(
                                 s.add_system_message("main", msg);
                             }
                             None => {
-                                s.add_system_message("main", "No speed profile is currently active".to_string());
+                                s.add_system_message(
+                                    "main",
+                                    "No speed profile is currently active".to_string(),
+                                );
                             }
                         }
                     } else {
                         match download_manager.get_speed_profile(&args[0]).await {
                             Some(profile) => {
-                                let speed = ipmsg_download::speed_profiles::format_speed_bps(profile.speed_limit_bps);
+                                let speed = ipmsg_download::speed_profiles::format_speed_bps(
+                                    profile.speed_limit_bps,
+                                );
                                 let mut msg = format!("Speed Profile '{}':\n", profile.name);
                                 msg.push_str(&format!("  ID: {}\n", profile.id));
                                 msg.push_str(&format!("  Speed Limit: {}\n", speed));
@@ -12291,7 +12338,10 @@ async fn handle_command(
                                 s.add_system_message("main", msg);
                             }
                             None => {
-                                s.add_system_message("main", format!("Speed profile '{}' not found", args[0]));
+                                s.add_system_message(
+                                    "main",
+                                    format!("Speed profile '{}' not found", args[0]),
+                                );
                             }
                         }
                     }
@@ -12299,8 +12349,7 @@ async fn handle_command(
                 _ => {
                     s.add_system_message(
                         "main",
-                        "Usage: /dlsp <list|create|delete|activate|deactivate|show>"
-                            .to_string(),
+                        "Usage: /dlsp <list|create|delete|activate|deactivate|show>".to_string(),
                     );
                 }
             }

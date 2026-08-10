@@ -248,12 +248,18 @@ impl SpeedProfileManager {
         let active_id = self.config.active_profile_id.as_deref();
         SpeedProfilesSummary {
             total_profiles: self.config.profiles.len(),
-            active_profile: self.config.profiles.iter().find(|p| {
-                active_id == Some(p.id.as_str())
-            }).map(|p| p.to_info(true)),
-            profiles: self.config.profiles.iter().map(|p| {
-                p.to_info(active_id == Some(p.id.as_str()))
-            }).collect(),
+            active_profile: self
+                .config
+                .profiles
+                .iter()
+                .find(|p| active_id == Some(p.id.as_str()))
+                .map(|p| p.to_info(true)),
+            profiles: self
+                .config
+                .profiles
+                .iter()
+                .map(|p| p.to_info(active_id == Some(p.id.as_str())))
+                .collect(),
         }
     }
 
@@ -582,10 +588,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut mgr = SpeedProfileManager::new(tmp.path());
 
-        let id = mgr
-            .create_profile("Work", 1_000_000, None)
-            .await
-            .unwrap();
+        let id = mgr.create_profile("Work", 1_000_000, None).await.unwrap();
         let (speed, upload, max_c) = mgr.activate_profile(&id).await.unwrap();
         assert_eq!(speed, 1_000_000);
         assert_eq!(upload, 0);
@@ -626,9 +629,15 @@ mod tests {
         let mut mgr = SpeedProfileManager::new(tmp.path());
 
         let id = mgr.create_profile("Test", 1000, None).await.unwrap();
-        mgr.update_profile(&id, Some(2_000_000), Some(500_000), Some(5), Some("Updated"))
-            .await
-            .unwrap();
+        mgr.update_profile(
+            &id,
+            Some(2_000_000),
+            Some(500_000),
+            Some(5),
+            Some("Updated"),
+        )
+        .await
+        .unwrap();
 
         let profile = mgr.get_profile(&id).unwrap();
         assert_eq!(profile.speed_limit_bps, 2_000_000);
@@ -642,7 +651,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut mgr = SpeedProfileManager::new(tmp.path());
 
-        let id = mgr.create_profile("Test", 1000, Some("Original")).await.unwrap();
+        let id = mgr
+            .create_profile("Test", 1000, Some("Original"))
+            .await
+            .unwrap();
         // Only update speed limit
         mgr.update_profile(&id, Some(5_000_000), None, None, None)
             .await

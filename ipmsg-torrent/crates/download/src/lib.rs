@@ -6,6 +6,7 @@
 //! - Xunlei P2SP (HTTP/FTP + P2P hybrid)
 
 pub mod adaptive_concurrency;
+pub mod advanced_search;
 pub mod audit_log;
 pub mod auto_actions;
 pub mod auto_categorize;
@@ -73,9 +74,9 @@ pub mod source_rotation;
 pub mod speed_alert;
 pub mod speed_anomaly;
 pub mod speed_burst;
-pub mod speed_profiles;
 pub mod speed_history;
 pub mod speed_prediction;
+pub mod speed_profiles;
 pub mod task_activity;
 pub mod task_archive;
 pub mod task_chain;
@@ -925,6 +926,9 @@ pub struct DownloadManager {
     dependency_graph: Arc<tokio::sync::RwLock<dependency_graph::DependencyGraphValidator>>,
     /// Download quota manager for per-tag/group data limits
     download_quota: Arc<Mutex<download_quota::DownloadQuotaManager>>,
+    /// Advanced search query cache (not persisted, in-memory only)
+    #[allow(dead_code)]
+    advanced_search_config: Arc<tokio::sync::RwLock<advanced_search::AdvancedSearchQuery>>,
 }
 
 impl DownloadManager {
@@ -1079,6 +1083,9 @@ impl DownloadManager {
                 dependency_graph::DependencyGraphValidator::new(),
             )),
             download_quota: Arc::new(Mutex::new(download_quota::DownloadQuotaManager::new())),
+            advanced_search_config: Arc::new(tokio::sync::RwLock::new(
+                advanced_search::AdvancedSearchQuery::default(),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -1365,6 +1372,9 @@ impl DownloadManager {
                 dependency_graph::DependencyGraphValidator::new(),
             )),
             download_quota: Arc::new(Mutex::new(download_quota::DownloadQuotaManager::new())),
+            advanced_search_config: Arc::new(tokio::sync::RwLock::new(
+                advanced_search::AdvancedSearchQuery::default(),
+            )),
         };
         // Restore download quota config from disk
         if let Some(quota_mgr) = download_quota::load_download_quota(&dm.data_dir) {
@@ -8464,8 +8474,10 @@ impl DownloadManager {
 
         // Apply max concurrent if specified (> 0)
         if max_concurrent > 0 {
-            self.max_concurrent
-                .store(max_concurrent as usize, std::sync::atomic::Ordering::Relaxed);
+            self.max_concurrent.store(
+                max_concurrent as usize,
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
 
         // Return the profile info
@@ -8494,10 +8506,7 @@ impl DownloadManager {
     }
 
     /// Get a specific speed profile by ID.
-    pub async fn get_speed_profile(
-        &self,
-        id: &str,
-    ) -> Option<speed_profiles::SpeedProfileInfo> {
+    pub async fn get_speed_profile(&self, id: &str) -> Option<speed_profiles::SpeedProfileInfo> {
         let mgr = self.speed_profiles.read().await;
         let profile = mgr.get_profile(id)?;
         let is_active = mgr.config().active_profile_id.as_deref() == Some(id);
@@ -8524,8 +8533,14 @@ impl DownloadManager {
         description: Option<&str>,
     ) -> Result<(), speed_profiles::SpeedProfileError> {
         let mut mgr = self.speed_profiles.write().await;
-        mgr.update_profile(id, speed_limit_bps, upload_limit_bps, max_concurrent, description)
-            .await
+        mgr.update_profile(
+            id,
+            speed_limit_bps,
+            upload_limit_bps,
+            max_concurrent,
+            description,
+        )
+        .await
     }
 
     /// Get the currently active speed profile (if any).
@@ -9101,6 +9116,145 @@ impl DownloadManager {
         let mut mgr = self.download_quota.lock().await;
         mgr.clear_usage();
         let _ = download_quota::save_download_quota(&mgr, &self.data_dir);
+    }
+
+    // ========== Advanced Search (Phase 117) ==========
+
+    /// Execute an advanced search query across all tasks.
+    /// Returns a SearchResult with matching tasks and metadata.
+    pub async fn advanced_search(
+        &self,
+        query: &advanced_search::AdvancedSearchQuery,
+        sort_by: Option<advanced_search::SearchSortBy>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> advanced_search::SearchResult {
+        let start = std::time::Instant::now();
+        let tasks = self.tasks.lock().await;
+
+        let mut matched: Vec<DownloadTask> =
+            tasks.iter().filter(|t| query.matches(t)).cloned().collect();
+
+        let total = matched.len();
+
+        // Sort if requested
+        if let Some(sort_by) = sort_by {
+            advanced_search::sort_search_results(&mut matched, sort_by);
+        }
+
+        // Apply offset and limit for pagination
+        let offset = offset.unwrap_or(0);
+        let matched = if offset >= matched.len() {
+            vec![]
+        } else {
+            let end = limit
+                .map(|l| (offset + l).min(matched.len()))
+                .unwrap_or(matched.len());
+            matched[offset..end].to_vec()
+        };
+
+        let execution_time_us = start.elapsed().as_micros() as u64;
+
+        advanced_search::SearchResult {
+            tasks: matched,
+            total,
+            execution_time_us,
+            query_summary: query.summarize(),
+        }
+    }
+
+    /// Set the last used advanced search query (for quick re-execution).
+    pub async fn set_last_search_query(&self, query: advanced_search::AdvancedSearchQuery) {
+        let mut cfg = self.advanced_search_config.write().await;
+        *cfg = query;
+    }
+
+    /// Get the last used advanced search query.
+    pub async fn get_last_search_query(&self) -> advanced_search::AdvancedSearchQuery {
+        self.advanced_search_config.read().await.clone()
+    }
+
+    /// Re-execute the last used search query.
+    pub async fn rerun_last_search(
+        &self,
+        sort_by: Option<advanced_search::SearchSortBy>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> advanced_search::SearchResult {
+        let query = self.get_last_search_query().await;
+        self.advanced_search(&query, sort_by, limit, offset).await
+    }
+
+    /// Quick search by name substring across all tasks.
+    pub async fn quick_search(&self, query: &str) -> Vec<DownloadTask> {
+        let search_query = advanced_search::AdvancedSearchQuery {
+            name_contains: Some(query.to_string()),
+            ..Default::default()
+        };
+        self.advanced_search(&search_query, None, None, None)
+            .await
+            .tasks
+    }
+
+    /// Search tasks by multiple tags (OR logic).
+    pub async fn search_by_tags_any(&self, tags: Vec<String>) -> Vec<DownloadTask> {
+        let search_query = advanced_search::AdvancedSearchQuery {
+            tags_any: Some(tags),
+            ..Default::default()
+        };
+        self.advanced_search(&search_query, None, None, None)
+            .await
+            .tasks
+    }
+
+    /// Search tasks by multiple tags (AND logic).
+    pub async fn search_by_tags_all(&self, tags: Vec<String>) -> Vec<DownloadTask> {
+        let search_query = advanced_search::AdvancedSearchQuery {
+            tags_all: Some(tags),
+            ..Default::default()
+        };
+        self.advanced_search(&search_query, None, None, None)
+            .await
+            .tasks
+    }
+
+    /// Get search statistics: count of tasks by state, protocol, etc.
+    pub async fn get_search_stats(&self) -> serde_json::Value {
+        let tasks = self.tasks.lock().await;
+        let total = tasks.len();
+        let by_state = tasks
+            .iter()
+            .fold(std::collections::HashMap::new(), |mut acc, t| {
+                *acc.entry(format!("{:?}", t.state)).or_insert(0) += 1;
+                acc
+            });
+        let by_protocol = tasks
+            .iter()
+            .fold(std::collections::HashMap::new(), |mut acc, t| {
+                *acc.entry(format!("{:?}", t.protocol)).or_insert(0) += 1;
+                acc
+            });
+        let with_tags = tasks.iter().filter(|t| !t.tags.is_empty()).count();
+        let with_notes = tasks.iter().filter(|t| t.notes.is_some()).count();
+        let with_errors = tasks.iter().filter(|t| t.error.is_some()).count();
+        let with_mirrors = tasks.iter().filter(|t| !t.mirror_urls.is_empty()).count();
+        let with_deadline = tasks.iter().filter(|t| t.deadline.is_some()).count();
+        let with_checksum = tasks
+            .iter()
+            .filter(|t| t.expected_checksum.is_some())
+            .count();
+
+        serde_json::json!({
+            "total": total,
+            "by_state": by_state,
+            "by_protocol": by_protocol,
+            "with_tags": with_tags,
+            "with_notes": with_notes,
+            "with_errors": with_errors,
+            "with_mirrors": with_mirrors,
+            "with_deadline": with_deadline,
+            "with_checksum": with_checksum
+        })
     }
 
     /// Rename a download task.
