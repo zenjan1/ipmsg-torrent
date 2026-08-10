@@ -28,6 +28,7 @@ pub mod dependency_graph;
 pub mod dht;
 pub mod disk_monitor;
 pub mod domain_limit;
+pub mod download_analytics;
 pub mod download_budget;
 pub mod download_cooldown;
 pub mod download_deadline;
@@ -949,6 +950,8 @@ pub struct DownloadManager {
     global_budget: Arc<tokio::sync::RwLock<global_budget::GlobalBudgetManager>>,
     /// Weekly/monthly download budget manager
     download_budget: Arc<Mutex<download_budget::BudgetManager>>,
+    /// Download analytics for historical trend tracking
+    download_analytics: Arc<Mutex<download_analytics::AnalyticsManager>>,
 }
 
 impl DownloadManager {
@@ -1127,6 +1130,7 @@ impl DownloadManager {
                 global_budget::GlobalBudgetManager::new(),
             )),
             download_budget: Arc::new(Mutex::new(download_budget::BudgetManager::new())),
+            download_analytics: Arc::new(Mutex::new(download_analytics::AnalyticsManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1437,10 +1441,21 @@ impl DownloadManager {
                 global_budget::GlobalBudgetManager::new(),
             )),
             download_budget: Arc::new(Mutex::new(download_budget::BudgetManager::new())),
+            download_analytics: Arc::new(Mutex::new(download_analytics::AnalyticsManager::new())),
         };
         // Restore download budget from disk
         if let Some(budget_mgr) = download_budget::load_budget(&dm.data_dir) {
             *dm.download_budget.lock().await = budget_mgr;
+        }
+        // Restore download analytics from disk
+        if let Ok(analytics_records) = download_analytics::load_analytics_records(&dm.data_dir) {
+            let mut analytics = dm.download_analytics.lock().await;
+            for (date, metrics) in analytics_records {
+                analytics.insert_record(date, metrics);
+            }
+        }
+        if let Some(analytics_cfg) = download_analytics::load_analytics_config(&dm.data_dir) {
+            dm.download_analytics.lock().await.set_config(analytics_cfg);
         }
         // Restore disk monitor config from disk
         if let Some(disk_cfg) = disk_monitor::load_disk_monitor_config(&dm.data_dir).await {
@@ -4827,6 +4842,92 @@ impl DownloadManager {
         bm.reset();
         if let Err(e) = download_budget::save_budget(&bm, &self.data_dir) {
             tracing::warn!(error = %e, "Failed to persist download budget reset");
+        }
+    }
+
+    // ── Download Analytics ──────────────────────────────────────────
+
+    /// Set download analytics configuration.
+    pub async fn set_download_analytics_config(&self, config: download_analytics::AnalyticsConfig) {
+        let mut am = self.download_analytics.lock().await;
+        am.set_config(config);
+        if let Err(e) = download_analytics::save_analytics_config(&self.data_dir, am.config()) {
+            tracing::warn!(error = %e, "Failed to persist analytics config");
+        }
+    }
+
+    /// Get download analytics configuration.
+    pub async fn get_download_analytics_config(&self) -> download_analytics::AnalyticsConfig {
+        let am = self.download_analytics.lock().await;
+        am.config().clone()
+    }
+
+    /// Get analytics summary for the last N days.
+    pub async fn get_download_analytics_summary(
+        &self,
+        days: u32,
+    ) -> Option<download_analytics::AnalyticsSummary> {
+        let am = self.download_analytics.lock().await;
+        am.summary_last_n_days(days)
+    }
+
+    /// Get analytics summary for a specific date range.
+    pub async fn get_download_analytics_range(
+        &self,
+        start: chrono::NaiveDate,
+        end: chrono::NaiveDate,
+    ) -> Option<download_analytics::AnalyticsSummary> {
+        let am = self.download_analytics.lock().await;
+        am.summary_range(start, end)
+    }
+
+    /// Get trend comparison between current and previous N-day periods.
+    pub async fn get_download_analytics_trend(
+        &self,
+        days: u32,
+    ) -> Option<download_analytics::TrendComparison> {
+        let am = self.download_analytics.lock().await;
+        am.compare_periods(days)
+    }
+
+    /// Get today's analytics metrics.
+    pub async fn get_download_analytics_today(&self) -> Option<download_analytics::DailyMetrics> {
+        let am = self.download_analytics.lock().await;
+        am.today().cloned()
+    }
+
+    /// Get all analytics records (newest first).
+    pub async fn get_download_analytics_records(&self) -> Vec<download_analytics::DailyMetrics> {
+        let am = self.download_analytics.lock().await;
+        am.all_records().into_iter().cloned().collect()
+    }
+
+    /// Prune old analytics records beyond retention period.
+    pub async fn prune_download_analytics(&self) {
+        let mut am = self.download_analytics.lock().await;
+        am.prune_old_records();
+        if let Err(e) = download_analytics::save_analytics_records(&self.data_dir, am.records_mut())
+        {
+            tracing::warn!(error = %e, "Failed to persist analytics records after prune");
+        }
+    }
+
+    /// Clear all download analytics data.
+    pub async fn clear_download_analytics(&self) {
+        let mut am = self.download_analytics.lock().await;
+        am.clear();
+        if let Err(e) = download_analytics::save_analytics_records(&self.data_dir, am.records_mut())
+        {
+            tracing::warn!(error = %e, "Failed to persist analytics records after clear");
+        }
+    }
+
+    /// Persist current analytics records to disk.
+    pub async fn save_download_analytics(&self) {
+        let mut am = self.download_analytics.lock().await;
+        if let Err(e) = download_analytics::save_analytics_records(&self.data_dir, am.records_mut())
+        {
+            tracing::warn!(error = %e, "Failed to persist analytics records");
         }
     }
 

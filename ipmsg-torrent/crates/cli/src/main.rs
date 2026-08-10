@@ -161,6 +161,11 @@ enum Command {
         /// "status", "set <weekly> [monthly]", "enable", "disable", "reset"
         args: Vec<String>,
     },
+    /// View and manage download analytics
+    DlAnalytics {
+        /// "summary [days]", "trend [days]", "today", "records", "config", "prune", "clear"
+        args: Vec<String>,
+    },
     /// View and manage download statistics
     DlStats2 {
         /// "show", "reset"
@@ -858,6 +863,10 @@ fn parse_command(input: &str) -> Command {
         "dlwkbudget" | "dl-wk-budget" | "dlwkb" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlBudget { args }
+        }
+        "dlanalytics" | "dl-analytics" | "dlaa" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlAnalytics { args }
         }
         "dlstats2" | "dl-stats2" => {
             if parts.len() >= 2 {
@@ -2165,6 +2174,7 @@ fn command_help() -> String {
         "/dlrewrite [cmd]   - URL rewrite rules (status|add|del|preview|enable|disable)",
         "/dldcap [cmd]      - Daily data cap (status|set <limit>|enable|disable|reset)",
         "/dlwkbudget [cmd]  - Weekly/monthly budget (status|set <weekly> <monthly>|enable|disable|reset)",
+        "/dlanalytics [cmd] - Download analytics (summary [days]|trend [days]|today|records|config|prune|clear)",
         "/dlstats2 [cmd]    - Download statistics (show|reset)",
         "/dlreport [period]  - Generate download report (daily|weekly|monthly)",
         "/dlurlx [cmd]       - URL expansion & validation (status|enable|disable|expand|validate)",
@@ -4030,6 +4040,161 @@ async fn handle_command(
                         s.add_system_message(
                             "main",
                             "Usage: /dlwkbudget [status|set <weekly> <monthly>|enable|disable|reset]"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
+        Command::DlAnalytics { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            if args.is_empty() || args[0] == "summary" {
+                let days = if args.len() >= 2 {
+                    args[1].parse::<u32>().unwrap_or(7)
+                } else {
+                    7
+                };
+                match download_manager.get_download_analytics_summary(days).await {
+                    Some(summary) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", summary.format_report());
+                    }
+                    None => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("❌ No analytics data for the last {} days", days),
+                        );
+                    }
+                }
+            } else {
+                match args[0].as_str() {
+                    "trend" => {
+                        let days = if args.len() >= 2 {
+                            args[1].parse::<u32>().unwrap_or(7)
+                        } else {
+                            7
+                        };
+                        match download_manager.get_download_analytics_trend(days).await {
+                            Some(trend) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", trend.format_report());
+                            }
+                            None => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "❌ Insufficient data for {}-day trend comparison",
+                                        days
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    "today" => match download_manager.get_download_analytics_today().await {
+                        Some(today) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!(
+                                    "📊 Today's Analytics ({}):\n\
+                                         📥 Downloaded: {}\n\
+                                         📤 Uploaded: {}\n\
+                                         ✅ Completed: {}\n\
+                                         ❌ Failed: {}\n\
+                                         ⚡ Peak Speed: {}/s\n\
+                                         🔄 Errors: {}\n\
+                                         🔁 Retries: {}",
+                                    today.date,
+                                    ipmsg_download::download_budget::format_bytes(
+                                        today.bytes_downloaded
+                                    ),
+                                    ipmsg_download::download_budget::format_bytes(
+                                        today.bytes_uploaded
+                                    ),
+                                    today.tasks_completed,
+                                    today.tasks_failed,
+                                    ipmsg_download::download_budget::format_bytes(
+                                        today.peak_speed_bps
+                                    ),
+                                    today.error_count,
+                                    today.retry_count
+                                ),
+                            );
+                        }
+                        None => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "📊 No analytics data recorded today".to_string(),
+                            );
+                        }
+                    },
+                    "records" => {
+                        let records = download_manager.get_download_analytics_records().await;
+                        if records.is_empty() {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "📊 No analytics records found".to_string(),
+                            );
+                        } else {
+                            let mut output = String::from("📊 Analytics Records (newest first):\n");
+                            for record in records.iter().take(10) {
+                                output.push_str(&format!(
+                                    "  {} - {} downloaded, {} completed\n",
+                                    record.date,
+                                    ipmsg_download::download_budget::format_bytes(
+                                        record.bytes_downloaded
+                                    ),
+                                    record.tasks_completed
+                                ));
+                            }
+                            if records.len() > 10 {
+                                output
+                                    .push_str(&format!("  ... and {} more\n", records.len() - 10));
+                            }
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", output);
+                        }
+                    }
+                    "config" => {
+                        let config = download_manager.get_download_analytics_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "⚙️  Analytics Config:\n\
+                                 Enabled: {}\n\
+                                 Retention: {} days\n\
+                                 Track Protocol Breakdown: {}\n\
+                                 Track Hourly Distribution: {}",
+                                config.enabled,
+                                config.retention_days,
+                                config.track_protocol_breakdown,
+                                config.track_hourly_distribution
+                            ),
+                        );
+                    }
+                    "prune" => {
+                        download_manager.prune_download_analytics().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Old analytics records pruned".to_string());
+                    }
+                    "clear" => {
+                        download_manager.clear_download_analytics().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ All analytics data cleared".to_string());
+                    }
+                    _ => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlanalytics [summary [days]|trend [days]|today|records|config|prune|clear]"
                                 .to_string(),
                         );
                     }

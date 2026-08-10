@@ -342,6 +342,34 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             post(set_download_budget_enabled),
         )
         .route("/api/download-budget/reset", post(reset_download_budget))
+        .route(
+            "/api/download-analytics",
+            get(get_download_analytics_summary),
+        )
+        .route(
+            "/api/download-analytics",
+            post(set_download_analytics_config),
+        )
+        .route(
+            "/api/download-analytics/trend",
+            get(get_download_analytics_trend),
+        )
+        .route(
+            "/api/download-analytics/today",
+            get(get_download_analytics_today),
+        )
+        .route(
+            "/api/download-analytics/records",
+            get(get_download_analytics_records),
+        )
+        .route(
+            "/api/download-analytics/prune",
+            post(prune_download_analytics),
+        )
+        .route(
+            "/api/download-analytics/clear",
+            post(clear_download_analytics),
+        )
         .route("/api/stats/download", get(get_download_stats))
         .route("/api/stats/download/reset", post(reset_download_stats))
         .route("/api/report/download", get(get_download_report))
@@ -1148,6 +1176,87 @@ async fn set_download_budget_enabled(
 /// Reset download budget usage
 async fn reset_download_budget(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     state.manager.reset_download_budget().await;
+    Json(serde_json::json!({"success": true}))
+}
+
+/// Get download analytics summary (last N days)
+#[derive(Deserialize)]
+struct AnalyticsSummaryQuery {
+    #[serde(default = "default_analytics_days")]
+    days: u32,
+}
+
+fn default_analytics_days() -> u32 {
+    7
+}
+
+async fn get_download_analytics_summary(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(query): axum::extract::Query<AnalyticsSummaryQuery>,
+) -> Json<serde_json::Value> {
+    match state
+        .manager
+        .get_download_analytics_summary(query.days)
+        .await
+    {
+        Some(summary) => Json(serde_json::to_value(summary).unwrap_or_default()),
+        None => Json(serde_json::json!({"error": "No analytics data for the requested period"})),
+    }
+}
+
+/// Set download analytics configuration
+async fn set_download_analytics_config(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::download_analytics::AnalyticsConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_download_analytics_config(config).await;
+    Json(serde_json::json!({"success": true}))
+}
+
+/// Get analytics trend comparison
+#[derive(Deserialize)]
+struct AnalyticsTrendQuery {
+    #[serde(default = "default_analytics_days")]
+    days: u32,
+}
+
+async fn get_download_analytics_trend(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(query): axum::extract::Query<AnalyticsTrendQuery>,
+) -> Json<serde_json::Value> {
+    match state.manager.get_download_analytics_trend(query.days).await {
+        Some(trend) => Json(serde_json::to_value(trend).unwrap_or_default()),
+        None => Json(serde_json::json!({"error": "Insufficient data for trend comparison"})),
+    }
+}
+
+/// Get today's analytics metrics
+async fn get_download_analytics_today(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    match state.manager.get_download_analytics_today().await {
+        Some(today) => Json(serde_json::to_value(today).unwrap_or_default()),
+        None => Json(serde_json::json!({"message": "No analytics data recorded today"})),
+    }
+}
+
+/// Get all analytics records
+async fn get_download_analytics_records(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::download_analytics::DailyMetrics>> {
+    let records = state.manager.get_download_analytics_records().await;
+    Json(records)
+}
+
+/// Prune old analytics records
+async fn prune_download_analytics(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    state.manager.prune_download_analytics().await;
+    Json(serde_json::json!({"success": true}))
+}
+
+/// Clear all analytics data
+async fn clear_download_analytics(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    state.manager.clear_download_analytics().await;
     Json(serde_json::json!({"success": true}))
 }
 
