@@ -567,8 +567,7 @@ impl DuplicateDetectionManager {
 
     /// Save configuration to file
     pub fn save_config(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
-        let json = serde_json::to_string_pretty(&self.config)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(&self.config).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 
