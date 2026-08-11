@@ -81,7 +81,7 @@ impl DomainRetryState {
     /// Record a retry attempt
     pub fn record_retry(&mut self, max_retries: u32, window_secs: u64) {
         let now = SystemTime::now();
-        
+
         // Reset if window expired
         if let Some(first_failure) = self.first_failure_at {
             if let Ok(elapsed) = first_failure.elapsed() {
@@ -242,7 +242,8 @@ impl RetryBudgetManager {
             if state.is_in_cooldown(self.config.cooldown_secs) {
                 domains_in_cooldown += 1;
                 blocked_domains.push(domain.clone());
-            } else if state.is_exhausted(self.config.max_retries_per_domain, self.config.window_secs)
+            } else if state
+                .is_exhausted(self.config.max_retries_per_domain, self.config.window_secs)
             {
                 domains_with_exhausted_budget += 1;
                 blocked_domains.push(domain.clone());

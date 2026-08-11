@@ -38,6 +38,7 @@ pub mod download_budget;
 pub mod download_cooldown;
 pub mod download_cost;
 pub mod download_deadline;
+pub mod download_file_stats;
 pub mod download_history;
 pub mod download_history_analytics;
 pub mod download_presets;
@@ -83,6 +84,7 @@ pub mod queue_staleness;
 pub mod rate_limiter;
 pub mod recycle_bin;
 pub mod resume_policy;
+pub mod retry_budget;
 pub mod retry_quota;
 pub mod rss_feed;
 pub mod save_path_manager;
@@ -90,7 +92,6 @@ pub mod segment_download;
 pub mod smart_queue;
 pub mod source_benchmark;
 pub mod source_quality;
-pub mod retry_budget;
 pub mod source_reliability;
 pub mod source_rotation;
 pub mod speed_alert;
@@ -98,11 +99,13 @@ pub mod speed_anomaly;
 pub mod speed_benchmark;
 pub mod speed_boost;
 pub mod speed_burst;
+pub mod speed_heatmap;
 pub mod speed_history;
 pub mod speed_prediction;
 pub mod speed_profiles;
 pub mod speed_test;
 pub mod speed_trend;
+pub mod system_uptime;
 pub mod tag_management;
 pub mod task_activity;
 pub mod task_archive;
@@ -860,6 +863,8 @@ pub struct DownloadManager {
     speed_test: Arc<Mutex<speed_test::SpeedTestManager>>,
     /// Speed trend manager for per-domain trend analysis
     speed_trend: Arc<Mutex<speed_trend::SpeedTrendManager>>,
+    /// Speed heatmap for tracking download speeds by hour/day-of-week
+    speed_heatmap: Arc<tokio::sync::RwLock<speed_heatmap::SpeedHeatmap>>,
     /// Per-task download session tracking
     download_sessions: Arc<Mutex<download_session::DownloadSessionManager>>,
     /// Auto-cleanup configuration for completed/failed tasks
@@ -1036,6 +1041,10 @@ pub struct DownloadManager {
     intelligent_source_selector: Arc<Mutex<intelligent_source_selector::IntelligentSourceSelector>>,
     /// Retry budget manager for per-domain retry tracking and blocking (Phase 142)
     retry_budget: Arc<Mutex<retry_budget::RetryBudgetManager>>,
+    /// System uptime tracker for dashboard monitoring
+    system_uptime: Arc<system_uptime::SystemUptimeTracker>,
+    /// File type statistics tracker for download categorization by extension (Phase 143)
+    file_stats: Arc<tokio::sync::RwLock<download_file_stats::FileTypeStatsTracker>>,
 }
 
 impl DownloadManager {
@@ -1055,6 +1064,7 @@ impl DownloadManager {
             )),
             speed_test: Arc::new(Mutex::new(speed_test::SpeedTestManager::new())),
             speed_trend: Arc::new(Mutex::new(speed_trend::SpeedTrendManager::new())),
+            speed_heatmap: Arc::new(tokio::sync::RwLock::new(speed_heatmap::SpeedHeatmap::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
@@ -1263,6 +1273,12 @@ impl DownloadManager {
                 intelligent_source_selector::IntelligentSourceSelector::new(),
             )),
             retry_budget: Arc::new(Mutex::new(retry_budget::RetryBudgetManager::new())),
+            system_uptime: Arc::new(system_uptime::SystemUptimeTracker::new()),
+            file_stats: Arc::new(tokio::sync::RwLock::new(
+                download_file_stats::FileTypeStatsTracker::new(
+                    download_file_stats::FileStatsConfig::default(),
+                ),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -1414,6 +1430,7 @@ impl DownloadManager {
             )),
             speed_test: Arc::new(Mutex::new(speed_test::SpeedTestManager::new())),
             speed_trend: Arc::new(Mutex::new(speed_trend::SpeedTrendManager::new())),
+            speed_heatmap: Arc::new(tokio::sync::RwLock::new(speed_heatmap::SpeedHeatmap::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
@@ -1622,6 +1639,12 @@ impl DownloadManager {
                 intelligent_source_selector::IntelligentSourceSelector::new(),
             )),
             retry_budget: Arc::new(Mutex::new(retry_budget::RetryBudgetManager::new())),
+            system_uptime: Arc::new(system_uptime::SystemUptimeTracker::new()),
+            file_stats: Arc::new(tokio::sync::RwLock::new(
+                download_file_stats::FileTypeStatsTracker::new(
+                    download_file_stats::FileStatsConfig::default(),
+                ),
+            )),
         };
         // Restore tag manager from disk
         dm.tag_manager.restore().await;
@@ -9447,6 +9470,106 @@ impl DownloadManager {
         Ok(())
     }
 
+    // --- Speed Heatmap (Phase 143) ---
+
+    /// Get speed heatmap configuration.
+    pub async fn get_speed_heatmap_config(&self) -> speed_heatmap::SpeedHeatmapConfig {
+        let heatmap = self.speed_heatmap.read().await;
+        heatmap.config.clone()
+    }
+
+    /// Update speed heatmap configuration.
+    pub async fn set_speed_heatmap_config(&self, config: speed_heatmap::SpeedHeatmapConfig) {
+        let mut heatmap = self.speed_heatmap.write().await;
+        heatmap.config = config;
+    }
+
+    /// Record a speed sample in the heatmap.
+    pub async fn record_speed_heatmap(&self, speed_bps: f64) {
+        let mut heatmap = self.speed_heatmap.write().await;
+        heatmap.record(speed_bps);
+    }
+
+    /// Get speed heatmap summary.
+    pub async fn get_speed_heatmap_summary(&self) -> speed_heatmap::SpeedHeatmapSummary {
+        let heatmap = self.speed_heatmap.read().await;
+        heatmap.summary()
+    }
+
+    /// Get quality rating for a specific time slot.
+    pub async fn get_speed_heatmap_quality(
+        &self,
+        day_of_week: u8,
+        hour: u8,
+    ) -> speed_heatmap::SlotQuality {
+        let heatmap = self.speed_heatmap.read().await;
+        heatmap.cell_quality(day_of_week, hour)
+    }
+
+    /// Get hourly average speed.
+    pub async fn get_speed_heatmap_hourly_speed(&self, hour: u8) -> f64 {
+        let heatmap = self.speed_heatmap.read().await;
+        heatmap.hourly_speed(hour)
+    }
+
+    /// Get daily average speed.
+    pub async fn get_speed_heatmap_daily_speed(&self, day_of_week: u8) -> f64 {
+        let heatmap = self.speed_heatmap.read().await;
+        heatmap.daily_speed(day_of_week)
+    }
+
+    /// Get formatted heatmap report.
+    pub async fn format_speed_heatmap_report(&self) -> String {
+        let heatmap = self.speed_heatmap.read().await;
+        heatmap.format_report()
+    }
+
+    /// Reset all heatmap data.
+    pub async fn reset_speed_heatmap(&self) {
+        let mut heatmap = self.speed_heatmap.write().await;
+        heatmap.reset();
+    }
+
+    /// Prune old heatmap data.
+    pub async fn prune_speed_heatmap(&self) {
+        let mut heatmap = self.speed_heatmap.write().await;
+        heatmap.prune_old_data();
+    }
+
+    /// Save speed heatmap data to disk.
+    pub async fn save_speed_heatmap_data(&self) -> Result<(), String> {
+        let heatmap = self.speed_heatmap.read().await;
+        let config_path = format!("{}/speed_heatmap_config.json", self.data_dir.display());
+        let data_path = format!("{}/speed_heatmap_data.json", self.data_dir.display());
+        heatmap
+            .save_config(std::path::Path::new(&config_path))
+            .await
+            .map_err(|e| e.to_string())?;
+        heatmap
+            .save_data(std::path::Path::new(&data_path))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Load speed heatmap data from disk.
+    pub async fn load_speed_heatmap_data(&self) -> Result<(), String> {
+        let mut heatmap = self.speed_heatmap.write().await;
+        let config_path = format!("{}/speed_heatmap_config.json", self.data_dir.display());
+        let data_path = format!("{}/speed_heatmap_data.json", self.data_dir.display());
+        if let Ok(config) =
+            speed_heatmap::SpeedHeatmap::load_config(std::path::Path::new(&config_path)).await
+        {
+            heatmap.config = config;
+        }
+        if let Ok(loaded) =
+            speed_heatmap::SpeedHeatmap::load_data(std::path::Path::new(&data_path)).await
+        {
+            *heatmap = loaded;
+        }
+        Ok(())
+    }
+
     // --- Task Scorecard (Phase 139) ---
 
     /// Get task scorecard configuration.
@@ -10718,7 +10841,7 @@ impl DownloadManager {
                 disk_status: None,
                 total_downloaded_bytes: 0,
                 total_uploaded_bytes: 0,
-                uptime_seconds: 0,
+                uptime_seconds: self.system_uptime.uptime_seconds(),
             };
         }
 
@@ -10854,7 +10977,7 @@ impl DownloadManager {
             disk_status,
             total_downloaded_bytes,
             total_uploaded_bytes,
-            uptime_seconds: 0, // TODO: track actual uptime
+            uptime_seconds: self.system_uptime.uptime_seconds(),
         }
     }
 
@@ -14866,10 +14989,7 @@ impl DownloadManager {
     }
 
     /// Set retry budget configuration
-    pub async fn set_retry_budget_config(
-        &self,
-        config: retry_budget::RetryBudgetConfig,
-    ) {
+    pub async fn set_retry_budget_config(&self, config: retry_budget::RetryBudgetConfig) {
         self.retry_budget.lock().await.set_config(config);
     }
 
@@ -14903,7 +15023,11 @@ impl DownloadManager {
         &self,
         domain: &str,
     ) -> Option<retry_budget::DomainRetryState> {
-        self.retry_budget.lock().await.get_domain_state(domain).cloned()
+        self.retry_budget
+            .lock()
+            .await
+            .get_domain_state(domain)
+            .cloned()
     }
 
     /// Clear retry state for a specific domain
@@ -14932,6 +15056,89 @@ impl DownloadManager {
         retry_budget::save_retry_budget_state(&path, &manager)
             .await
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    }
+
+    // ── System Uptime API ──────────────────────────────────────────────
+
+    /// Get system uptime summary
+    pub async fn get_uptime_summary(&self) -> system_uptime::UptimeSummary {
+        self.system_uptime.summary()
+    }
+
+    /// Get uptime in seconds
+    pub async fn get_uptime_seconds(&self) -> u64 {
+        self.system_uptime.uptime_seconds()
+    }
+
+    /// Get formatted uptime string (e.g., "2h 34m 56s")
+    pub async fn get_uptime_formatted(&self) -> String {
+        self.system_uptime.format_uptime()
+    }
+
+    // ── File Type Statistics API (Phase 143) ───────────────────────────
+
+    /// Get file type statistics summary
+    pub async fn get_file_stats_summary(&self) -> download_file_stats::FileStatsSummary {
+        self.file_stats.read().await.get_summary().await
+    }
+
+    /// Get file type statistics configuration
+    pub async fn get_file_stats_config(&self) -> download_file_stats::FileStatsConfig {
+        self.file_stats.read().await.get_config().await
+    }
+
+    /// Set file type statistics configuration
+    pub async fn set_file_stats_config(
+        &self,
+        config: download_file_stats::FileStatsConfig,
+    ) -> std::io::Result<()> {
+        self.file_stats.read().await.set_config(config).await
+    }
+
+    /// Record a download for file statistics tracking
+    pub async fn record_file_stat_download(
+        &self,
+        url_or_filename: &str,
+        bytes: u64,
+        duration_secs: u64,
+    ) -> std::io::Result<()> {
+        self.file_stats
+            .read()
+            .await
+            .record_download(url_or_filename, bytes, duration_secs)
+            .await
+    }
+
+    /// Get statistics for a specific file extension
+    pub async fn get_extension_file_stats(
+        &self,
+        extension: &str,
+    ) -> Option<download_file_stats::ExtensionStats> {
+        self.file_stats
+            .read()
+            .await
+            .get_extension_stats(extension)
+            .await
+    }
+
+    /// Clear all file type statistics
+    pub async fn clear_file_stats(&self) -> std::io::Result<()> {
+        self.file_stats.read().await.clear().await
+    }
+
+    /// Format file statistics as human-readable string
+    pub async fn format_file_stats_summary(&self) -> String {
+        self.file_stats.read().await.format_summary().await
+    }
+
+    /// Load file statistics from disk
+    pub async fn load_file_stats(&self) -> std::io::Result<()> {
+        self.file_stats.read().await.load_data().await
+    }
+
+    /// Save file statistics to disk
+    pub async fn save_file_stats(&self) -> std::io::Result<()> {
+        self.file_stats.read().await.save_data().await
     }
 }
 

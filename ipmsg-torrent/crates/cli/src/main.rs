@@ -279,9 +279,11 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
-    /// Retry budget - per-domain retry tracking and blocking (Phase 142)
-    DlRetryBudget {
-        /// "status", "config", "check", "clear", "summary"
+    /// System uptime - view how long the system has been running (Phase 143)
+    DlUptime,
+    /// File type statistics - track downloads by extension and category (Phase 143)
+    DlFileStats {
+        /// "status", "summary", "extension <ext>", "clear", "config"
         action: String,
         args: Vec<String>,
     },
@@ -1174,6 +1176,19 @@ fn parse_command(input: &str) -> Command {
                 Command::DlRetryBudget { action, args }
             }
         }
+        "dluptime" | "dl-uptime" | "dlupt" => Command::DlUptime,
+        "dlfilestats" | "dl-filestats" | "dlfs" => {
+            if parts.len() < 2 {
+                Command::DlFileStats {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlFileStats { action, args }
+            }
+        }
         "dlpathorg" | "dl-pathorg" | "dlpo" => {
             if parts.len() < 2 {
                 Command::DlPathOrganizer {
@@ -1810,7 +1825,7 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
-        "dlrecycle" | "dl-recycle" | "dlrb" => {
+        "dlrecycle" | "dl-recycle" => {
             // /dlrecycle <list|restore|purge|empty|config|summary> [args...]
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
@@ -2572,6 +2587,7 @@ fn command_help() -> String {
         "/dlautoaction [cmd] - Auto-actions on completion (status|enable|disable|add|del|list|rule-enable|task|task-remove|summary|clear)",
         "/dlspeedtest [cmd] - Speed test (status|run <url>|summary|history|latest|clear|config)",
         "/dlspdtrend [cmd] - Speed trend analysis (status|summary|trends|degrading|improving|clear|config)",
+        "/dluptime       - Show system uptime (how long since startup)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -3827,6 +3843,24 @@ async fn handle_command(
             let config = ipmsg_download::queue_health::HealthMonitorConfig::default();
             let report = download_manager.get_queue_health_report(&config).await;
             let msg = report.format_report();
+            let mut s = state.lock().await;
+            s.add_system_message("main", msg);
+        }
+        Command::DlUptime => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            let summary = download_manager.get_uptime_summary().await;
+            let msg = format!(
+                "⏱️ System Uptime\n\
+                 ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                 🕐 Uptime: {}\n\
+                 📊 Seconds: {}\n\
+                 🚀 Started: {}",
+                summary.uptime_formatted,
+                summary.uptime_seconds,
+                summary.started_at.format("%Y-%m-%d %H:%M:%S UTC")
+            );
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
         }
@@ -16192,6 +16226,141 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlRetryBudget { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match action.as_str() {
+                "status" => {
+                    let config = download_manager.get_retry_budget_config().await;
+                    let summary = download_manager.get_retry_budget_summary().await;
+                    let msg = format!(
+                        "🔁 Retry Budget Status\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         Enabled: {}\n\
+                         Max Retries: {}\n\
+                         Cooldown: {}s\n\
+                         Window: {}s\n\
+                         Tracked Domains: {}\n\
+                         Exhausted: {}",
+                        config.enabled,
+                        config.max_retries_per_domain,
+                        config.cooldown_secs,
+                        config.window_secs,
+                        summary.total_tracked_domains,
+                        summary.domains_with_exhausted_budget
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_retry_budget_config().await;
+                        let msg = format!(
+                            "Retry Budget Config: enabled={} max_retries={} cooldown={}s window={}s",
+                            config.enabled,
+                            config.max_retries_per_domain,
+                            config.cooldown_secs,
+                            config.window_secs
+                        );
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    } else if args.len() >= 2 {
+                        let mut config = download_manager.get_retry_budget_config().await;
+                        match args[0].as_str() {
+                            "enabled" => {
+                                config.enabled = args[1].parse().unwrap_or(true);
+                            }
+                            "max_retries" => {
+                                config.max_retries_per_domain = args[1].parse().unwrap_or(3);
+                            }
+                            "cooldown" => {
+                                config.cooldown_secs = args[1].parse().unwrap_or(60);
+                            }
+                            "window" => {
+                                config.window_secs = args[1].parse().unwrap_or(3600);
+                            }
+                            _ => {}
+                        }
+                        download_manager.set_retry_budget_config(config).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Retry budget config updated".to_string());
+                    }
+                }
+                "check" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlrb check <domain>".to_string());
+                    } else {
+                        let domain = &args[0];
+                        let domain_state = download_manager.get_domain_retry_state(domain).await;
+                        let msg = match domain_state {
+                            Some(ds) => format!(
+                                "Domain: {}\nRetry Count: {}\nConsecutive Failures: {}\nBudget Exhausted: {}\nLast Failure: {:?}",
+                                domain,
+                                ds.retry_count,
+                                ds.consecutive_failures,
+                                ds.budget_exhausted,
+                                ds.first_failure_at
+                            ),
+                            None => format!("No retry state for domain: {}", domain),
+                        };
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "clear" => {
+                    if args.is_empty() {
+                        download_manager.clear_all_retry_budget_state().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "✅ Cleared all retry budget state".to_string(),
+                        );
+                    } else {
+                        download_manager.clear_domain_retry_state(&args[0]).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Cleared retry state for {}", args[0]),
+                        );
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_retry_budget_summary().await;
+                    let msg = format!(
+                        "Retry Budget Summary:\n\
+                         Total Tracked Domains: {}\n\
+                         Domains With Budget Remaining: {}\n\
+                         Domains With Exhausted Budget: {}\n\
+                         Domains In Cooldown: {}\n\
+                         Total Retries In Window: {}\n\
+                         Blocked Domains: {:?}",
+                        summary.total_tracked_domains,
+                        summary.domains_with_budget_remaining,
+                        summary.domains_with_exhausted_budget,
+                        summary.domains_in_cooldown,
+                        summary.total_retries_in_window,
+                        summary.blocked_domains
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlrb <status|config|check|clear|summary>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlFileStats { action, args } => {
+            // TODO: Implement file stats command handler
+            let mut s = state.lock().await;
+            s.add_system_message("main", format!("File stats command: {} {:?}", action, args));
+        }
     }
 }
 
@@ -16238,6 +16407,18 @@ async fn handle_command_headless(
         }
         Command::Ping => {
             println!("[pong] Local OK");
+        }
+        Command::DlUptime => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            let summary = download_manager.get_uptime_summary().await;
+            println!(
+                "[uptime] {} ({} seconds, started {})",
+                summary.uptime_formatted,
+                summary.uptime_seconds,
+                summary.started_at.format("%Y-%m-%d %H:%M:%S UTC")
+            );
         }
         Command::Quit => {
             println!("[quit] Shutting down...");

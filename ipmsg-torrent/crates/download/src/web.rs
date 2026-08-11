@@ -1186,6 +1186,20 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/retry-budget/clear",
             post(clear_all_retry_budget_handler),
         )
+        .route("/api/uptime", get(get_uptime_handler))
+        .route(
+            "/api/file-stats",
+            get(get_file_stats_handler).post(set_file_stats_handler),
+        )
+        .route(
+            "/api/file-stats/summary",
+            get(get_file_stats_summary_handler),
+        )
+        .route("/api/file-stats/clear", post(clear_file_stats_handler))
+        .route(
+            "/api/file-stats/extension/:ext",
+            get(get_extension_stats_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -9471,4 +9485,73 @@ async fn clear_all_retry_budget_handler(
 ) -> impl axum::response::IntoResponse {
     state.manager.clear_all_retry_budget_state().await;
     Json(serde_json::json!({"status": "cleared"}))
+}
+
+/// GET /api/uptime - Get system uptime information
+async fn get_uptime_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_uptime_summary().await;
+    Json(serde_json::json!({
+        "uptime_seconds": summary.uptime_seconds,
+        "uptime_formatted": summary.uptime_formatted,
+        "started_at": summary.started_at
+    }))
+}
+
+// ── File Type Statistics Handlers (Phase 143) ─────────────────────────
+
+/// GET /api/file-stats - Get file statistics configuration
+async fn get_file_stats_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_file_stats_config().await;
+    Json(serde_json::json!({
+        "enabled": config.enabled,
+        "max_extensions": config.max_extensions,
+        "track_extensions": config.track_extensions,
+        "track_categories": config.track_categories
+    }))
+}
+
+/// POST /api/file-stats - Update file statistics configuration
+async fn set_file_stats_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::download_file_stats::FileStatsConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_file_stats_config(config).await {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// GET /api/file-stats/summary - Get file statistics summary
+async fn get_file_stats_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_file_stats_summary().await;
+    Json(summary)
+}
+
+/// POST /api/file-stats/clear - Clear all file statistics
+async fn clear_file_stats_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.clear_file_stats().await {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// GET /api/file-stats/extension/:ext - Get stats for a specific extension
+async fn get_extension_stats_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(ext): axum::extract::Path<String>,
+) -> Result<Json<crate::download_file_stats::ExtensionStats>, StatusCode> {
+    state
+        .manager
+        .get_extension_file_stats(&ext)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
