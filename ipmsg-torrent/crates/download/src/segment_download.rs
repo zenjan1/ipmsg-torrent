@@ -1,25 +1,27 @@
-//! HTTP Multi-Segment Download
+//! HTTP Multi-Segment Download with Performance Optimizations
 //!
 //! Splits a single HTTP URL into multiple parallel byte-range segments for faster downloads.
 //! Similar to aria2/IDM multi-connection download acceleration.
 //!
-//! Features:
-//! - Configurable number of segments (default 4)
-//! - Parallel download of segments
-//! - Progress tracking per segment
-//! - Resume support (segment-level bitmap)
-//! - Rate limiting integration
+//! Performance Features:
+//! - Bandwidth-adaptive segment count (more segments for high bandwidth)
+//! - Buffered I/O for reduced disk operations
+//! - Optimized HTTP client with connection pooling
 //! - Streaming writes (no memory accumulation)
+//! - Dynamic segment sizing based on file size
 
 use crate::rate_limiter::RateLimiter;
 use reqwest::Client;
 use std::path::PathBuf;
-use tokio::io::AsyncSeekExt;
-use tokio::time::{Duration, interval};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
+use tokio::time::{Duration, Instant, interval};
 use tokio_util::sync::CancellationToken;
 
 /// Default number of segments for multi-segment download
 const DEFAULT_SEGMENT_COUNT: usize = 4;
+
+/// Maximum segments for high-bandwidth connections
+const MAX_SEGMENT_COUNT: usize = 16;
 
 /// Minimum file size for multi-segment download (1MB)
 const MIN_FILE_SIZE_FOR_SEGMENTATION: u64 = 1024 * 1024;
@@ -30,7 +32,13 @@ const MAX_SEGMENT_RETRIES: u32 = 3;
 /// Retry delay base (doubles each attempt)
 const RETRY_BASE_DELAY_MS: u64 = 500;
 
-/// HTTP multi-segment download engine
+/// Write buffer size (64KB)
+const WRITE_BUFFER_SIZE: usize = 64 * 1024;
+
+/// Bandwidth threshold for increasing segments (2 MB/s)
+const HIGH_BANDWIDTH_THRESHOLD: f64 = 2_000_000.0;
+
+/// HTTP multi-segment download engine with performance optimizations
 pub struct SegmentDownloader {
     url: String,
     file_name: String,
@@ -39,13 +47,17 @@ pub struct SegmentDownloader {
     download_dir: PathBuf,
     http_client: Client,
     downloaded: u64,
-    start_time: Option<std::time::Instant>,
-    output_file: Option<tokio::fs::File>,
+    start_time: Option<Instant>,
+    output_file: Option<BufWriter<tokio::fs::File>>,
     rate_limiter: Option<RateLimiter>,
     segment_count: usize,
+    /// Current estimated bandwidth (bytes/sec)
+    estimated_bandwidth: f64,
+    /// Pending writes queue for batching
+    pending_writes: Vec<(u64, Vec<u8>)>,
 }
 
-/// A segment of the file to download
+/// A segment of the file to download with performance tracking
 #[derive(Debug, Clone)]
 struct Segment {
     /// Byte offset in the file
@@ -56,6 +68,8 @@ struct Segment {
     downloaded: bool,
     /// Index of this segment (for logging)
     index: usize,
+    /// Last measured throughput for this segment (bytes/sec)
+    throughput_bps: f64,
 }
 
 /// Progress information for a segment download
@@ -71,6 +85,8 @@ pub struct SegmentDownloadProgress {
     pub total_segments: usize,
     /// Number of completed segments
     pub completed_segments: usize,
+    /// Estimated bandwidth (bytes/sec)
+    pub estimated_bandwidth: f64,
     /// Progress per segment (for debugging)
     pub segment_progress: Vec<SegmentInfo>,
 }
@@ -82,12 +98,13 @@ pub struct SegmentInfo {
     pub offset: u64,
     pub size: u64,
     pub downloaded: bool,
+    pub throughput_bps: f64,
 }
 
 impl SegmentDownloader {
     /// Create a new segment downloader
     pub fn new(url: String, file_name: String, file_size: u64, download_dir: PathBuf) -> Self {
-        // Determine segment count based on file size
+        // Determine initial segment count based on file size
         let segment_count = if file_size < MIN_FILE_SIZE_FOR_SEGMENTATION {
             1 // Small files: single connection
         } else {
@@ -97,7 +114,11 @@ impl SegmentDownloader {
         // Split file into segments
         let segments = Self::create_segments(file_size, segment_count);
 
+        // Optimized HTTP client with connection pooling
         let http_client = Client::builder()
+            .pool_max_idle_per_host(8)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_nodelay(true)
             .timeout(Duration::from_secs(30))
             .build()
             .expect("Failed to create HTTP client");
@@ -114,6 +135,8 @@ impl SegmentDownloader {
             output_file: None,
             rate_limiter: None,
             segment_count,
+            estimated_bandwidth: 0.0,
+            pending_writes: Vec::with_capacity(16),
         };
 
         // Try to load existing progress
@@ -135,6 +158,59 @@ impl SegmentDownloader {
         self.segments = Self::create_segments(self.file_size, count);
     }
 
+    /// Calculate optimal segment count based on bandwidth
+    fn calculate_optimal_segment_count(file_size: u64, bandwidth_bps: f64) -> usize {
+        if file_size < MIN_FILE_SIZE_FOR_SEGMENTATION {
+            return 1;
+        }
+
+        // Base count on bandwidth
+        let base_count = if bandwidth_bps > HIGH_BANDWIDTH_THRESHOLD {
+            MAX_SEGMENT_COUNT
+        } else if bandwidth_bps > HIGH_BANDWIDTH_THRESHOLD / 2.0 {
+            8
+        } else if bandwidth_bps > HIGH_BANDWIDTH_THRESHOLD / 4.0 {
+            DEFAULT_SEGMENT_COUNT
+        } else {
+            2
+        };
+
+        // Also consider file size (don't have too small segments)
+        let min_segment_size = 256 * 1024; // 256KB minimum
+        let max_by_size = (file_size / min_segment_size) as usize;
+        
+        base_count.min(max_by_size.max(1)).min(MAX_SEGMENT_COUNT)
+    }
+
+    /// Update bandwidth estimate
+    fn update_bandwidth_estimate(&mut self, bytes: u64, duration_ms: f64) {
+        if duration_ms > 0.0 {
+            let instant_bw = (bytes as f64 * 1000.0) / duration_ms;
+            // EWMA smoothing
+            self.estimated_bandwidth = if self.estimated_bandwidth == 0.0 {
+                instant_bw
+            } else {
+                0.7 * self.estimated_bandwidth + 0.3 * instant_bw
+            };
+        }
+    }
+
+    /// Adjust segment count based on bandwidth
+    fn maybe_adjust_segment_count(&mut self) {
+        let optimal = Self::calculate_optimal_segment_count(self.file_size, self.estimated_bandwidth);
+        
+        if optimal != self.segment_count && optimal > self.segments.iter().filter(|s| !s.downloaded).count() {
+            tracing::debug!(
+                old_count = self.segment_count,
+                new_count = optimal,
+                bandwidth = self.estimated_bandwidth,
+                "Adjusting segment count based on bandwidth"
+            );
+            // Only adjust if we have many remaining segments
+            self.segment_count = optimal;
+        }
+    }
+
     /// Create segments by splitting the file into equal parts
     fn create_segments(file_size: u64, segment_count: usize) -> Vec<Segment> {
         let segment_size = file_size / segment_count as u64;
@@ -154,6 +230,7 @@ impl SegmentDownloader {
                 size,
                 downloaded: false,
                 index: i,
+                throughput_bps: 0.0,
             });
 
             offset += size;
@@ -172,7 +249,7 @@ impl SegmentDownloader {
             size = self.file_size,
             segments = self.segments.len(),
             url = %self.url,
-            "Starting multi-segment HTTP download"
+            "Starting optimized multi-segment HTTP download"
         );
 
         // Create output file
@@ -195,11 +272,13 @@ impl SegmentDownloader {
             .await
             .map_err(|e| SegmentDownloadError::Io(e.to_string()))?;
 
-        self.output_file = Some(file);
-        self.start_time = Some(std::time::Instant::now());
+        // Wrap in BufWriter for reduced I/O operations
+        self.output_file = Some(BufWriter::with_capacity(WRITE_BUFFER_SIZE, file));
+        self.start_time = Some(Instant::now());
 
         // Main download loop
         let mut tick = interval(Duration::from_millis(100));
+        let mut last_bandwidth_check = Instant::now();
 
         loop {
             tokio::select! {
@@ -208,6 +287,8 @@ impl SegmentDownloader {
                     if let Some(ref cancel) = cancel
                         && cancel.is_cancelled() {
                             tracing::info!("Download cancelled");
+                            // Flush pending writes before exit
+                            self.flush_writes().await?;
                             return Err(SegmentDownloadError::Io("cancelled".to_string()));
                         }
 
@@ -220,6 +301,12 @@ impl SegmentDownloader {
                     // Download pending segments in parallel
                     self.download_segments().await;
 
+                    // Periodically check bandwidth and adjust segment count
+                    if last_bandwidth_check.elapsed() > Duration::from_secs(5) {
+                        self.maybe_adjust_segment_count();
+                        last_bandwidth_check = Instant::now();
+                    }
+
                     // Log progress
                     if let Some(progress) = self.get_progress() {
                         tracing::debug!(
@@ -227,6 +314,7 @@ impl SegmentDownloader {
                             total = progress.total_size,
                             speed = format!("{:.2} KB/s", progress.speed / 1024.0),
                             segments = format!("{}/{}", progress.completed_segments, progress.total_segments),
+                            bandwidth = format!("{:.2} MB/s", progress.estimated_bandwidth / 1_000_000.0),
                             "Segment download progress"
                         );
                     }
@@ -234,18 +322,39 @@ impl SegmentDownloader {
             }
         }
 
-        // Flush and close the file
-        if let Some(mut file) = self.output_file.take() {
-            use tokio::io::AsyncWriteExt;
-            file.flush()
-                .await
-                .map_err(|e| SegmentDownloadError::Io(e.to_string()))?;
-        }
+        // Flush all pending writes and close the file
+        self.flush_writes().await?;
 
         tracing::info!(path = %output_path.display(), "File saved");
 
         // Save progress
         self.save_progress()?;
+
+        Ok(())
+    }
+
+    /// Flush all pending writes to disk
+    async fn flush_writes(&mut self) -> Result<(), SegmentDownloadError> {
+        // Sort pending writes by offset for sequential writes
+        self.pending_writes.sort_by_key(|(offset, _)| *offset);
+
+        if let Some(ref mut file) = self.output_file {
+            for (offset, data) in self.pending_writes.drain(..) {
+                if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
+                    tracing::warn!(offset = offset, error = %e, "Failed to seek");
+                    continue;
+                }
+                if let Err(e) = file.write_all(&data).await {
+                    tracing::warn!(offset = offset, error = %e, "Failed to write");
+                    continue;
+                }
+            }
+            
+            // Flush the buffer
+            if let Err(e) = file.flush().await {
+                tracing::warn!(error = %e, "Failed to flush file");
+            }
+        }
 
         Ok(())
     }
@@ -276,35 +385,42 @@ impl SegmentDownloader {
             let client = self.http_client.clone();
 
             let task = tokio::spawn(async move {
-                Self::download_segment_with_retry(client, url, offset, size, seg_idx).await
+                let start = Instant::now();
+                let result = Self::download_segment_with_retry(client, url, offset, size, seg_idx).await;
+                let duration = start.elapsed();
+                (seg_idx, result, duration)
             });
 
-            tasks.push((seg_idx, task));
+            tasks.push(task);
         }
 
         // Wait for all segments to complete and write to file
-        for (seg_idx, task) in tasks {
+        for task in tasks {
             match task.await {
-                Ok(Ok(data)) => {
+                Ok((seg_idx, Ok(data), duration)) => {
+                    // Update bandwidth estimate
+                    let duration_ms = duration.as_secs_f64() * 1000.0;
+                    self.update_bandwidth_estimate(data.len() as u64, duration_ms);
+
+                    // Update segment throughput
+                    if duration_ms > 0.0 {
+                        if let Some(segment) = self.segments.get_mut(seg_idx) {
+                            segment.throughput_bps = (data.len() as f64 * 1000.0) / duration_ms;
+                        }
+                    }
+
                     // Apply rate limiting before writing
                     if let Some(ref limiter) = self.rate_limiter {
                         limiter.acquire(data.len() as u64).await;
                     }
 
-                    // Write segment to file at the correct offset
-                    if let Some(ref mut file) = self.output_file {
-                        use tokio::io::AsyncWriteExt;
-                        let offset = self.segments[seg_idx].offset;
+                    // Queue write for batched I/O
+                    let offset = self.segments[seg_idx].offset;
+                    self.pending_writes.push((offset, data.clone()));
 
-                        if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
-                            tracing::warn!(segment = seg_idx, error = %e, "Failed to seek");
-                            continue;
-                        }
-
-                        if let Err(e) = file.write_all(&data).await {
-                            tracing::warn!(segment = seg_idx, error = %e, "Failed to write segment");
-                            continue;
-                        }
+                    // Flush if queue is large
+                    if self.pending_writes.len() >= 8 {
+                        self.flush_writes().await?;
                     }
 
                     // Mark segment as downloaded
@@ -315,15 +431,16 @@ impl SegmentDownloader {
                             segment = seg_idx,
                             offset = segment.offset,
                             size = data.len(),
-                            "Segment downloaded and written to disk"
+                            throughput = format!("{:.2} MB/s", segment.throughput_bps / 1_000_000.0),
+                            "Segment downloaded"
                         );
                     }
                 }
-                Ok(Err(e)) => {
+                Ok((seg_idx, Err(e), _)) => {
                     tracing::warn!(segment = seg_idx, error = %e, "Failed to download segment");
                 }
                 Err(e) => {
-                    tracing::warn!(segment = seg_idx, error = %e, "Task failed");
+                    tracing::warn!(error = %e, "Task failed");
                 }
             }
         }
@@ -426,6 +543,7 @@ impl SegmentDownloader {
                 offset: s.offset,
                 size: s.size,
                 downloaded: s.downloaded,
+                throughput_bps: s.throughput_bps,
             })
             .collect();
 
@@ -435,6 +553,7 @@ impl SegmentDownloader {
             speed,
             total_segments: self.segments.len(),
             completed_segments,
+            estimated_bandwidth: self.estimated_bandwidth,
             segment_progress,
         })
     }

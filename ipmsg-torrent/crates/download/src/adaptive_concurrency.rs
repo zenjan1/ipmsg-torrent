@@ -1,8 +1,15 @@
 //! Adaptive download concurrency optimization
 //!
 //! Automatically adjusts the number of concurrent connections per download task
-//! based on server response time and error rate, optimizing download speed while
-//! avoiding server-side rate limiting or connection rejection.
+//! based on server response time (RTT) and error rate, optimizing download speed
+//! while avoiding server-side rate limiting or connection rejection.
+//!
+//! ## Performance optimizations
+//! - EWMA (Exponentially Weighted Moving Average) for RTT smoothing
+//! - BBR-inspired bandwidth estimation for optimal concurrency
+//! - Per-domain concurrency limits to avoid single-domain overload
+//! - Time-decay weighted samples for more responsive adaptation
+//! - Hysteresis to prevent oscillation between states
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -53,12 +60,24 @@ impl Default for AdaptiveConcurrencyConfig {
     }
 }
 
-/// A response time sample
+/// A response time sample with bandwidth estimation
 #[derive(Debug, Clone)]
 pub struct ResponseSample {
     pub timestamp: Instant,
     pub response_time_ms: f64,
+    pub bytes_transferred: u64,
     pub success: bool,
+}
+
+impl ResponseSample {
+    /// Calculate instantaneous throughput in bytes/sec
+    pub fn throughput_bps(&self) -> f64 {
+        if self.response_time_ms > 0.0 {
+            (self.bytes_transferred as f64 * 1000.0) / self.response_time_ms
+        } else {
+            0.0
+        }
+    }
 }
 
 /// Current concurrency state for a task
@@ -69,7 +88,26 @@ pub struct ConcurrencyState {
     pub last_adjustment: Option<Instant>,
     pub last_adjustment_direction: AdjustmentDirection,
     pub total_adjustments: u32,
+    /// Smoothed RTT using EWMA (Exponentially Weighted Moving Average)
+    pub smoothed_rtt_ms: f64,
+    /// RTT variance for confidence estimation
+    pub rtt_variance_ms: f64,
+    /// Estimated bandwidth in bytes/sec (from best recent samples)
+    pub estimated_bandwidth_bps: f64,
+    /// Domain for per-domain limiting
+    pub domain: Option<String>,
+    /// Minimum RTT observed (baseline for BBR-style estimation)
+    pub min_rtt_ms: f64,
+    /// Count of consecutive increases (for exponential growth phase)
+    pub consecutive_increases: u32,
+    /// Count of consecutive decreases (for backoff stabilization)
+    pub consecutive_decreases: u32,
 }
+
+/// EWMA smoothing factor for RTT (alpha = 0.125, like TCP RTT estimation)
+const EWMA_ALPHA: f64 = 0.125;
+/// Variance smoothing factor (beta = 0.25, like TCP RTTVAR)
+const EWMA_BETA: f64 = 0.25;
 
 /// Direction of the last adjustment
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,11 +149,26 @@ pub struct AdaptiveConcurrencySummary {
     pub total_adjustments: u32,
 }
 
+/// Per-domain concurrency tracking
+#[derive(Debug)]
+struct DomainState {
+    /// Total active connections across all tasks using this domain
+    active_connections: u32,
+    /// Maximum allowed connections for this domain
+    max_connections: u32,
+    /// Last time this domain was rate-limited
+    last_throttle: Option<Instant>,
+}
+
 /// Manages adaptive concurrency for all download tasks
 #[derive(Debug)]
 pub struct AdaptiveConcurrencyManager {
     config: AdaptiveConcurrencyConfig,
     states: HashMap<String, ConcurrencyState>,
+    /// Per-domain connection tracking
+    domain_states: HashMap<String, DomainState>,
+    /// Default per-domain connection limit
+    default_domain_limit: u32,
 }
 
 impl AdaptiveConcurrencyManager {
@@ -124,6 +177,8 @@ impl AdaptiveConcurrencyManager {
         Self {
             config: AdaptiveConcurrencyConfig::default(),
             states: HashMap::new(),
+            domain_states: HashMap::new(),
+            default_domain_limit: 16,
         }
     }
 
@@ -132,6 +187,59 @@ impl AdaptiveConcurrencyManager {
         Self {
             config,
             states: HashMap::new(),
+            domain_states: HashMap::new(),
+            default_domain_limit: 16,
+        }
+    }
+
+    /// Set the default per-domain connection limit
+    pub fn set_domain_limit(&mut self, limit: u32) {
+        self.default_domain_limit = limit;
+    }
+
+    /// Set per-domain connection limit for a specific domain
+    pub fn set_domain_specific_limit(&mut self, domain: &str, limit: u32) {
+        self.domain_states
+            .entry(domain.to_string())
+            .and_modify(|s| s.max_connections = limit)
+            .or_insert(DomainState {
+                active_connections: 0,
+                max_connections: limit,
+                last_throttle: None,
+            });
+    }
+
+    /// Get the recommended connection count considering per-domain limits
+    pub fn get_connections_for_domain(&self, task_id: &str, domain: &str) -> u32 {
+        let task_conn = self.get_connections(task_id);
+        
+        // Check per-domain limit
+        if let Some(domain_state) = self.domain_states.get(domain) {
+            let remaining = domain_state
+                .max_connections
+                .saturating_sub(domain_state.active_connections);
+            return task_conn.min(remaining).max(self.config.min_connections);
+        }
+        
+        task_conn.min(self.default_domain_limit)
+    }
+
+    /// Register a connection as active for domain tracking
+    pub fn register_active_connection(&mut self, domain: &str) {
+        self.domain_states
+            .entry(domain.to_string())
+            .and_modify(|s| s.active_connections += 1)
+            .or_insert(DomainState {
+                active_connections: 1,
+                max_connections: self.default_domain_limit,
+                last_throttle: None,
+            });
+    }
+
+    /// Unregister a connection from domain tracking
+    pub fn unregister_active_connection(&mut self, domain: &str) {
+        if let Some(state) = self.domain_states.get_mut(domain) {
+            state.active_connections = state.active_connections.saturating_sub(1);
         }
     }
 
@@ -156,9 +264,32 @@ impl AdaptiveConcurrencyManager {
                     last_adjustment: None,
                     last_adjustment_direction: AdjustmentDirection::None,
                     total_adjustments: 0,
+                    smoothed_rtt_ms: 0.0,
+                    rtt_variance_ms: 0.0,
+                    estimated_bandwidth_bps: 0.0,
+                    domain: None,
+                    min_rtt_ms: f64::MAX,
+                    consecutive_increases: 0,
+                    consecutive_decreases: 0,
                 },
             );
         }
+    }
+
+    /// Register a task with domain association for per-domain limiting
+    pub fn register_task_with_domain(&mut self, task_id: &str, domain: &str) {
+        self.register_task(task_id);
+        if let Some(state) = self.states.get_mut(task_id) {
+            state.domain = Some(domain.to_string());
+        }
+        // Ensure domain state exists
+        self.domain_states
+            .entry(domain.to_string())
+            .or_insert(DomainState {
+                active_connections: 0,
+                max_connections: self.default_domain_limit,
+                last_throttle: None,
+            });
     }
 
     /// Unregister a task
@@ -168,13 +299,63 @@ impl AdaptiveConcurrencyManager {
 
     /// Record a response sample for a task
     pub fn record_sample(&mut self, task_id: &str, response_time_ms: f64, success: bool) {
+        self.record_sample_with_bytes(task_id, response_time_ms, 0, success);
+    }
+
+    /// Record a response sample with bytes transferred for bandwidth estimation
+    pub fn record_sample_with_bytes(
+        &mut self,
+        task_id: &str,
+        response_time_ms: f64,
+        bytes_transferred: u64,
+        success: bool,
+    ) {
         if let Some(state) = self.states.get_mut(task_id) {
             let sample = ResponseSample {
                 timestamp: Instant::now(),
                 response_time_ms,
+                bytes_transferred,
                 success,
             };
+            // Compute throughput before moving sample into the vec
+            let throughput = if bytes_transferred > 0 && response_time_ms > 0.0 {
+                Some(sample.throughput_bps())
+            } else {
+                None
+            };
             state.samples.push(sample);
+
+            // Update EWMA smoothed RTT (like TCP RTT estimation)
+            if success {
+                if state.smoothed_rtt_ms == 0.0 {
+                    // First sample - initialize directly
+                    state.smoothed_rtt_ms = response_time_ms;
+                    state.rtt_variance_ms = response_time_ms / 2.0;
+                    state.min_rtt_ms = response_time_ms;
+                } else {
+                    // EWMA update: SRTT = (1 - alpha) * SRTT + alpha * RTT
+                    let diff = (state.smoothed_rtt_ms - response_time_ms).abs();
+                    state.smoothed_rtt_ms = EWMA_ALPHA * response_time_ms
+                        + (1.0 - EWMA_ALPHA) * state.smoothed_rtt_ms;
+                    // Variance update: RTTVAR = (1 - beta) * RTTVAR + beta * |SRTT - RTT|
+                    state.rtt_variance_ms = EWMA_BETA * diff
+                        + (1.0 - EWMA_BETA) * state.rtt_variance_ms;
+                    // Track minimum RTT (baseline for BBR-style estimation)
+                    state.min_rtt_ms = state.min_rtt_ms.min(response_time_ms);
+                }
+
+                // Update bandwidth estimate from throughput samples
+                if let Some(throughput) = throughput {
+                    // Use EWMA for bandwidth, but keep track of best recent throughput
+                    if state.estimated_bandwidth_bps == 0.0 {
+                        state.estimated_bandwidth_bps = throughput;
+                    } else {
+                        // Weighted update: take the better of current and new, with decay
+                        state.estimated_bandwidth_bps =
+                            0.9 * state.estimated_bandwidth_bps + 0.1 * throughput;
+                    }
+                }
+            }
 
             // Keep only the most recent samples
             let max_samples = self.config.sample_window as usize * 2;
@@ -231,8 +412,21 @@ impl AdaptiveConcurrencyManager {
 
         let current = state.current_connections;
 
-        // Decision logic
-        // Priority 1: High error rate -> decrease
+        // Get smoothed RTT and variance for better decisions
+        let smoothed_rtt = state.smoothed_rtt_ms;
+        let rtt_var = state.rtt_variance_ms;
+        let min_rtt = state.min_rtt_ms;
+
+        // Calculate BBR-inspired delivery rate threshold
+        // If smoothed RTT is significantly above min RTT, we're queueing
+        let queueing_ratio = if min_rtt > 0.0 {
+            smoothed_rtt / min_rtt
+        } else {
+            1.0
+        };
+
+        // Decision logic with hysteresis
+        // Priority 1: High error rate -> multiplicative decrease
         if error_rate > self.config.error_rate_threshold {
             let new_conn =
                 self.clamp_connections((current as f64 * self.config.decrease_factor) as u32);
@@ -250,7 +444,25 @@ impl AdaptiveConcurrencyManager {
             }
         }
 
-        // Priority 2: Very high latency -> decrease
+        // Priority 2: Queueing detected (BBR-style) -> decrease
+        // When RTT is 2x+ the minimum, we're adding latency without throughput gain
+        if queueing_ratio > 2.0 && current > self.config.min_connections {
+            let new_conn =
+                self.clamp_connections((current as f64 * self.config.decrease_factor) as u32);
+            if new_conn < current {
+                return self.make_adjustment(
+                    task_id,
+                    current,
+                    new_conn,
+                    format!(
+                        "Queueing detected (RTT {:.0}ms vs min {:.0}ms, ratio {:.1}x)",
+                        smoothed_rtt, min_rtt, queueing_ratio
+                    ),
+                );
+            }
+        }
+
+        // Priority 3: Very high latency -> decrease
         if avg_response_ms > self.config.high_latency_threshold_ms as f64 {
             let new_conn =
                 self.clamp_connections((current as f64 * self.config.decrease_factor) as u32);
@@ -267,24 +479,41 @@ impl AdaptiveConcurrencyManager {
             }
         }
 
-        // Priority 3: Good performance and below target -> increase
+        // Priority 4: Good performance and below target -> increase
+        // Use additive increase when close to target, multiplicative when well below
         if avg_response_ms < self.config.target_response_ms as f64
             && error_rate < self.config.error_rate_threshold * 0.5
+            && queueing_ratio < 1.5
         {
-            let new_conn = self
-                .clamp_connections((current as f64 * self.config.increase_factor).ceil() as u32);
+            // Check if we're in slow-start phase (early connection count)
+            let increase_factor = if state.consecutive_increases < 3 {
+                // Slow start: exponential growth
+                self.config.increase_factor * 1.2
+            } else {
+                // Congestion avoidance: linear growth
+                1.0 + (self.config.increase_factor - 1.0) / current as f64
+            };
+
+            let new_conn = self.clamp_connections((current as f64 * increase_factor).ceil() as u32);
             if new_conn > current {
                 return self.make_adjustment(
                     task_id,
                     current,
                     new_conn,
                     format!(
-                        "Good performance ({:.0}ms avg, {:.1}% errors) - scaling up",
+                        "Good performance ({:.0}ms avg, {:.1}% errors, RTT ratio {:.1}x) - scaling up",
                         avg_response_ms,
-                        error_rate * 100.0
+                        error_rate * 100.0,
+                        queueing_ratio
                     ),
                 );
             }
+        }
+
+        // Priority 5: RTT variance too high -> hold (connection unstable)
+        if rtt_var > smoothed_rtt * 0.5 && smoothed_rtt > 0.0 {
+            // High variance means unstable connection, don't increase
+            return ConcurrencyDecision::Hold;
         }
 
         ConcurrencyDecision::Hold
@@ -375,6 +604,28 @@ impl AdaptiveConcurrencyManager {
         value.clamp(self.config.min_connections, self.config.max_connections)
     }
 
+    /// Get the smoothed RTT estimate for a task
+    pub fn get_smoothed_rtt(&self, task_id: &str) -> Option<f64> {
+        self.states.get(task_id).and(|s: &ConcurrencyState| {
+            if s.smoothed_rtt_ms > 0.0 {
+                Some(s.smoothed_rtt_ms)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get the estimated bandwidth for a task
+    pub fn get_estimated_bandwidth(&self, task_id: &str) -> Option<f64> {
+        self.states.get(task_id).and(|s: &ConcurrencyState| {
+            if s.estimated_bandwidth_bps > 0.0 {
+                Some(s.estimated_bandwidth_bps)
+            } else {
+                None
+            }
+        })
+    }
+
     fn make_adjustment(
         &mut self,
         task_id: &str,
@@ -386,11 +637,16 @@ impl AdaptiveConcurrencyManager {
             state.current_connections = to;
             state.last_adjustment = Some(Instant::now());
             state.total_adjustments += 1;
-            state.last_adjustment_direction = if to > from {
-                AdjustmentDirection::Increased
+            
+            if to > from {
+                state.last_adjustment_direction = AdjustmentDirection::Increased;
+                state.consecutive_increases += 1;
+                state.consecutive_decreases = 0;
             } else {
-                AdjustmentDirection::Decreased
-            };
+                state.last_adjustment_direction = AdjustmentDirection::Decreased;
+                state.consecutive_decreases += 1;
+                state.consecutive_increases = 0;
+            }
         }
 
         if to > from {

@@ -688,6 +688,22 @@ enum Command {
     Unblock {
         peer: String,
     },
+    /// Show detailed info for a single download task
+    DlDetail {
+        task_id: String,
+    },
+    /// Show real-time log for a download task
+    DlLog {
+        task_id: String,
+        /// Number of lines to show (default 20)
+        lines: Option<usize>,
+    },
+    /// Search downloads by name, URL, or tag
+    DlSearch {
+        keyword: String,
+    },
+    /// Show help for all download-related commands
+    DlHelp,
     Fingerprint,
     /// Send message to legacy IPMSG peer by IP address
     IpMsg {
@@ -2265,6 +2281,39 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "ipmsg-peers" | "legacy-peers" => Command::IpMsgPeers,
+        "dldetail" | "dl-detail" => {
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                Command::DlDetail {
+                    task_id: args[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dldetail <task_id>".to_string())
+            }
+        }
+        "dllog" | "dl-log" => {
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                let lines = args.get(2).and_then(|s| s.parse::<usize>().ok());
+                Command::DlLog {
+                    task_id: args[1].to_string(),
+                    lines,
+                }
+            } else {
+                Command::Unknown("/dllog <task_id> [lines]".to_string())
+            }
+        }
+        "dlsearch" | "dl-search" => {
+            let args: Vec<&str> = input.splitn(2, ' ').collect();
+            if args.len() >= 2 {
+                Command::DlSearch {
+                    keyword: args[1].to_string(),
+                }
+            } else {
+                Command::Unknown("/dlsearch <keyword>".to_string())
+            }
+        }
+        "dlhelp" | "dl-help" => Command::DlHelp,
         "clear" | "cls" => Command::Clear,
         "quit" | "exit" | "q" => Command::Quit,
         _ => Command::Unknown(input.to_string()),
@@ -3134,32 +3183,257 @@ async fn handle_command(
             if tasks.is_empty() {
                 s.add_system_message("main", "No download tasks".to_string());
             } else {
-                let mut lines = vec![format!("Download tasks ({}):", tasks.len())];
+                // Calculate column widths for alignment
+                let max_name_len = tasks.iter().map(|t| t.name.len()).min().unwrap_or(20).min(30);
+                let mut lines = vec![format!("\n📥 Download tasks ({})\n", tasks.len())];
+                
                 for task in tasks {
                     let progress = task.progress();
-                    let state_str = task.state_label();
+                    let icon = state_icon(task.state);
+                    let color = state_color(task.state);
+                    let bar = format_progress_bar(progress, 20);
+                    
+                    // Speed and ETA
                     let speed_str = if task.speed_bps > 0.0 {
-                        format!(" {:.1} KB/s", task.speed_bps / 1024.0)
+                        format_speed(task.speed_bps)
                     } else {
-                        String::new()
+                        "—".to_string()
                     };
+                    let eta_str = format_eta(task.eta_seconds());
+                    
+                    // Size info
+                    let size_str = format!(
+                        "{}/{}",
+                        format_size(task.downloaded),
+                        format_size(task.size)
+                    );
+                    
+                    // Error message if any
                     let error_str = task
                         .error
                         .as_ref()
-                        .map(|e| format!(" [{}]", e))
+                        .map(|e| format!(" ❌ {}", e))
                         .unwrap_or_default();
-                    lines.push(format!(
-                        "  {} - {} [{:.1}%] ({}){}{}",
-                        &task.id[..8.min(task.id.len())],
-                        task.name,
-                        progress,
-                        state_str,
+                    
+                    let line = format!(
+                        "{} {} {:<width$} {} {:>6} {:>8} ETA:{:<6}{}",
+                        icon,
+                        bar,
+                        truncate_name(&task.name, max_name_len),
+                        size_str,
+                        format!("{:.0}%", progress),
                         speed_str,
-                        error_str
-                    ));
+                        eta_str,
+                        error_str,
+                        width = max_name_len
+                    );
+                    
+                    lines.push(line);
                 }
+                
+                // Summary
+                let active = tasks.iter().filter(|t| t.state == ipmsg_download::DownloadState::Downloading).count();
+                let completed = tasks.iter().filter(|t| t.state == ipmsg_download::DownloadState::Complete).count();
+                let total_speed: f64 = tasks.iter().map(|t| t.speed_bps).sum();
+                
+                lines.push(format!(
+                    "\n📊 Active: {} | Completed: {} | Total: {}",
+                    active,
+                    completed,
+                    format_speed(total_speed)
+                ));
+                
                 s.add_system_message("main", lines.join("\n"));
             }
+        }
+        Command::DlDetail { task_id } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let task = download_manager.get_task(&task_id).await;
+            let mut s = state.lock().await;
+            
+            match task {
+                Some(task) => {
+                    let mut lines = vec![
+                        format!("\n📋 Task Details: {}\n", task.name),
+                        format!("ID:          {}", task.id),
+                        format!("Protocol:    {:?}", task.protocol),
+                        format!("State:       {} {}", state_icon(task.state), task.state_label()),
+                        format!("Progress:    {:.1}%", task.progress()),
+                        format!("Size:        {} / {}", format_size(task.downloaded), format_size(task.size)),
+                        format!("Speed:       {}", format_speed(task.speed_bps)),
+                        format!("ETA:         {}", format_eta(task.eta_seconds())),
+                        format!("Save Path:   {}", task.save_path.display()),
+                        format!("Created:     {}", task.created_at.format("%Y-%m-%d %H:%M:%S")),
+                        format!("Updated:     {}", task.updated_at.format("%Y-%m-%d %H:%M:%S")),
+                    ];
+                    
+                    if !task.tags.is_empty() {
+                        lines.push(format!("Tags:        {}", task.tags.join(", ")));
+                    }
+                    
+                    if let Some(err) = &task.error {
+                        lines.push(format!("\n❌ Error: {}", err));
+                    }
+                    
+                    if let Some(url) = &task.source_url {
+                        lines.push(format!("\n🔗 Source: {}", url));
+                    }
+                    
+                    // Get sources info
+                    let sources = download_manager.get_task_sources(&task_id).await;
+                    if !sources.is_empty() {
+                        lines.push(format!("\n🌐 Sources ({}):", sources.len()));
+                        for source in sources.iter().take(5) {
+                            let health = if source.health_score > 0.8 {
+                                "🟢"
+                            } else if source.health_score > 0.5 {
+                                "🟡"
+                            } else {
+                                "🔴"
+                            };
+                            lines.push(format!(
+                                "  {} {} ({:.0}% health, {} downloaded)",
+                                health,
+                                source.address,
+                                source.health_score * 100.0,
+                                format_size(source.bytes_downloaded)
+                            ));
+                        }
+                        if sources.len() > 5 {
+                            lines.push(format!("  ... and {} more", sources.len() - 5));
+                        }
+                    }
+                    
+                    s.add_system_message("main", lines.join("\n"));
+                }
+                None => {
+                    s.add_system_message("main", format!("❌ Task not found: {}", task_id));
+                }
+            }
+        }
+        Command::DlLog { task_id, lines: num_lines } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let task = download_manager.get_task(&task_id).await;
+            let activity = download_manager.get_task_activity(&task_id).await;
+            let mut s = state.lock().await;
+            
+            match task {
+                Some(task) => {
+                    let max_lines = num_lines.unwrap_or(20);
+                    let mut lines = vec![format!("\n📜 Activity Log: {} (last {} events)\n", task.name, max_lines)];
+                    
+                    if let Some(log) = activity {
+                        let events: Vec<_> = log.recent(max_lines).into_iter().collect();
+                        if events.is_empty() {
+                            lines.push("  (no activity recorded)".to_string());
+                        } else {
+                            for event in events {
+                                lines.push(format!(
+                                    "  [{}] {} {}",
+                                    event.timestamp.format("%H:%M:%S"),
+                                    event.event_type.icon(),
+                                    event.message
+                                ));
+                            }
+                        }
+                    } else {
+                        lines.push("  (no activity log available)".to_string());
+                    }
+                    
+                    s.add_system_message("main", lines.join("\n"));
+                }
+                None => {
+                    s.add_system_message("main", format!("❌ Task not found: {}", task_id));
+                }
+            }
+        }
+        Command::DlSearch { keyword } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let tasks = download_manager.list_tasks().await;
+            let keyword_lower = keyword.to_lowercase();
+            
+            let matches: Vec<_> = tasks
+                .iter()
+                .filter(|t| {
+                    t.name.to_lowercase().contains(&keyword_lower)
+                        || t.source_url
+                            .as_ref()
+                            .map(|u| u.to_lowercase().contains(&keyword_lower))
+                            .unwrap_or(false)
+                        || t.tags.iter().any(|tag| tag.to_lowercase().contains(&keyword_lower))
+                })
+                .collect();
+
+            let mut s = state.lock().await;
+            
+            if matches.is_empty() {
+                s.add_system_message("main", format!("🔍 No tasks matching '{}'", keyword));
+            } else {
+                let mut lines = vec![format!("\n🔍 Search Results: '{}' ({} found)\n", keyword, matches.len())];
+                
+                for task in matches {
+                    let icon = state_icon(task.state);
+                    let bar = format_progress_bar(task.progress(), 15);
+                    lines.push(format!(
+                        "{} {} {:<30} {:.0}%",
+                        icon,
+                        bar,
+                        truncate_name(&task.name, 30),
+                        task.progress()
+                    ));
+                }
+                
+                s.add_system_message("main", lines.join("\n"));
+            }
+        }
+        Command::DlHelp => {
+            let help_text = vec![
+                "\n📥 Download Commands\n".to_string(),
+                "Basic Commands:".to_string(),
+                "  /dl <url>           - Download from URL (torrent/ed2k/http)".to_string(),
+                "  /dls                - List all download tasks with progress bars".to_string(),
+                "  /dlp <task_id>      - Pause a download".to_string(),
+                "  /dlr <task_id>      - Resume a paused download".to_string(),
+                "  /dldetail <task_id> - Show detailed task information".to_string(),
+                "  /dllog <task_id> [n] - Show task activity log (last n events)".to_string(),
+                "  /dlsearch <keyword> - Search tasks by name, URL, or tag".to_string(),
+                "".to_string(),
+                "Speed & Limits:".to_string(),
+                "  /dlspeed <limit>    - Set global speed limit (e.g., 100KB/s, 1MB/s)".to_string(),
+                "  /dltaskspeed <id> <limit> - Set per-task speed limit".to_string(),
+                "  /dlconcurrent <n>   - Set max concurrent downloads".to_string(),
+                "  /dltimeout <secs>   - Set download timeout".to_string(),
+                "".to_string(),
+                "Batch Operations:".to_string(),
+                "  /dlpauseall         - Pause all active downloads".to_string(),
+                "  /dlresumeall        - Resume all paused downloads".to_string(),
+                "  /dlrmcompleted      - Remove completed downloads".to_string(),
+                "  /dlrmfailed         - Remove failed downloads".to_string(),
+                "".to_string(),
+                "Import/Export:".to_string(),
+                "  /dlexport <path>    - Export tasks to JSON file".to_string(),
+                "  /dlimport <path>    - Import tasks from JSON file".to_string(),
+                "".to_string(),
+                "Advanced:".to_string(),
+                "  /dlstats            - Show download statistics".to_string(),
+                "  /dlhealth           - Show queue health report".to_string(),
+                "  /dltag <id> <tags>  - Add tags to a task".to_string(),
+                "  /dlfind [query]     - Advanced search/filter".to_string(),
+                "".to_string(),
+                "Use /help for general commands".to_string(),
+            ];
+            
+            let mut s = state.lock().await;
+            s.add_system_message("main", help_text.join("\n"));
         }
         Command::Dlp { task_id } => {
             let s = state.lock().await;
@@ -14910,6 +15184,52 @@ fn format_size(bytes: u64) -> String {
         idx += 1;
     }
     format!("{:.1} {}", val, units[idx])
+}
+
+/// Generate a Unicode progress bar using block characters
+fn format_progress_bar(progress: f32, width: usize) -> String {
+    let filled = (progress / 100.0 * width as f32) as usize;
+    let empty = width.saturating_sub(filled);
+    
+    // Use block characters: █▓▒░
+    let bar: String = std::iter::repeat('█')
+        .take(filled)
+        .chain(std::iter::repeat('░').take(empty))
+        .collect();
+    
+    format!("[{}]", bar)
+}
+
+/// Format ETA in human-readable form
+fn format_eta(eta_seconds: Option<f64>) -> String {
+    match eta_seconds {
+        None | Some(f64::INFINITY) | Some(f64::NEG_INFINITY) => "?".to_string(),
+        Some(secs) if secs.is_nan() => "?".to_string(),
+        Some(secs) if secs <= 0.0 => "now".to_string(),
+        Some(secs) => format_duration(secs),
+    }
+}
+
+/// Get color for download state
+fn state_color(state: ipmsg_download::DownloadState) -> Color {
+    match state {
+        ipmsg_download::DownloadState::Downloading => Color::Green,
+        ipmsg_download::DownloadState::Paused => Color::Yellow,
+        ipmsg_download::DownloadState::Complete => Color::DarkGray,
+        ipmsg_download::DownloadState::Error => Color::Red,
+        ipmsg_download::DownloadState::Queued => Color::Blue,
+    }
+}
+
+/// Get icon for download state
+fn state_icon(state: ipmsg_download::DownloadState) -> &'static str {
+    match state {
+        ipmsg_download::DownloadState::Downloading => "⬇",
+        ipmsg_download::DownloadState::Paused => "⏸",
+        ipmsg_download::DownloadState::Complete => "✓",
+        ipmsg_download::DownloadState::Error => "✗",
+        ipmsg_download::DownloadState::Queued => "⏳",
+    }
 }
 
 /// Truncate a name to max_len, adding "..." if truncated

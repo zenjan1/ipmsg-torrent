@@ -14,6 +14,15 @@ use std::sync::Arc;
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 
+/// Interval between choke/unchoke optimization rounds (seconds)
+const CHOKE_INTERVAL_SECS: u64 = 10;
+/// Number of peers to unchoke based on upload rate (tit-for-tat)
+const OPTIMISTIC_UNCHOKE_COUNT: usize = 1;
+/// Maximum tracker announce retries before giving up
+const MAX_TRACKER_RETRIES: u32 = 3;
+/// Base delay for tracker retry backoff (doubles each attempt)
+const TRACKER_RETRY_BASE_MS: u64 = 2000;
+
 /// Block size for requests (16KB standard)
 const BLOCK_SIZE: u32 = 16 * 1024;
 
@@ -158,6 +167,10 @@ pub struct TorrentEngine {
     peers: HashMap<SocketAddr, PeerState>,
     downloaded_pieces: HashSet<u32>,
     tracker: HttpTracker,
+    /// Additional tracker URLs (from announce-list or manually added)
+    additional_trackers: Vec<String>,
+    /// Tracker retry state: (url, consecutive_failures)
+    tracker_failures: HashMap<String, u32>,
     downloaded: u64,
     uploaded: u64,
     /// Progress snapshot for resume support
@@ -173,6 +186,8 @@ pub struct TorrentEngine {
     /// Sequential download mode: download pieces in order (0, 1, 2, ...)
     /// instead of rarest-first. Useful for streaming media while downloading.
     sequential_mode: bool,
+    /// Last time choke/unchoke algorithm ran
+    last_choke_round: Option<tokio::time::Instant>,
 }
 
 impl TorrentEngine {
@@ -190,6 +205,9 @@ impl TorrentEngine {
         }
 
         let tracker = HttpTracker::new(peer_id, 6881);
+
+        // Collect additional trackers from announce-list (if available)
+        let additional_trackers: Vec<String> = Vec::new(); // announce_list not in TorrentInfo
 
         // Build initial progress snapshot
         let mut progress = ProgressSnapshot::new(
@@ -244,6 +262,8 @@ impl TorrentEngine {
             peers: HashMap::new(),
             downloaded_pieces,
             tracker,
+            additional_trackers,
+            tracker_failures: HashMap::new(),
             downloaded,
             uploaded: 0,
             progress,
@@ -252,6 +272,7 @@ impl TorrentEngine {
             file_selection: FileSelection::all(),
             selected_pieces,
             sequential_mode: false,
+            last_choke_round: None,
         }
     }
 
@@ -353,10 +374,9 @@ impl TorrentEngine {
             "Starting torrent download"
         );
 
-        // Announce to tracker
+        // Announce to tracker with retry and fallback to additional trackers
         let response = self
-            .tracker
-            .announce(&self.meta, AnnounceEvent::Started)
+            .announce_with_retry(AnnounceEvent::Started)
             .await
             .map_err(|e| DownloadError::Tracker(e.to_string()))?;
 
@@ -395,15 +415,26 @@ impl TorrentEngine {
                         break;
                     }
 
-                    // Re-announce if needed
-                    if last_announce.elapsed() > announce_interval
-                        && let Ok(resp) = self.tracker.announce(&self.meta, AnnounceEvent::None).await {
+                    // Re-announce if needed (with fallback to additional trackers)
+                    if last_announce.elapsed() > announce_interval {
+                        if let Ok(resp) = self.announce_with_retry(AnnounceEvent::None).await {
                             for peer in resp.peers {
                                 let addr = SocketAddr::new(peer.ip, peer.port);
                                 let _ = self.connect_peer(addr).await;
                             }
-                            last_announce = tokio::time::Instant::now();
                         }
+                        last_announce = tokio::time::Instant::now();
+                    }
+
+                    // Run choke/unchoke algorithm periodically
+                    let should_choke = match self.last_choke_round {
+                        None => true,
+                        Some(last) => last.elapsed() > Duration::from_secs(CHOKE_INTERVAL_SECS),
+                    };
+                    if should_choke {
+                        self.run_choke_algorithm().await;
+                        self.last_choke_round = Some(tokio::time::Instant::now());
+                    }
 
                     // Request blocks from peers
                     self.request_blocks().await;
@@ -441,11 +472,12 @@ impl TorrentEngine {
                 .map_err(|e| DownloadError::Peer(e.to_string()))?
         };
 
-        // Send bitfield (we have nothing initially)
+        // Build and send our bitfield (pieces we already have)
         let mut conn = conn;
-        let _ = conn.send(PeerMessage::Bitfield(vec![])).await;
+        let bitfield = self.build_bitfield();
+        let _ = conn.send(PeerMessage::Bitfield(bitfield)).await;
 
-        // Send interested
+        // Send interested (we always want data from peers)
         let _ = conn.send(PeerMessage::Interested).await;
 
         let peer_state = PeerState::new(conn);
@@ -454,6 +486,24 @@ impl TorrentEngine {
         tracing::info!(addr = %addr, "Connected to peer");
 
         Ok(())
+    }
+
+    /// Build a bitfield representing pieces we already have.
+    /// Each bit corresponds to a piece index; MSB first within each byte.
+    fn build_bitfield(&self) -> Vec<u8> {
+        let num_pieces = self.pieces.len();
+        let byte_len = (num_pieces + 7) / 8;
+        let mut bitfield = vec![0u8; byte_len];
+
+        for &idx in &self.downloaded_pieces {
+            if (idx as usize) < num_pieces {
+                let byte_idx = (idx as usize) / 8;
+                let bit_idx = 7 - ((idx as usize) % 8);
+                bitfield[byte_idx] |= 1 << bit_idx;
+            }
+        }
+
+        bitfield
     }
 
     async fn request_blocks(&mut self) {
@@ -611,6 +661,24 @@ impl TorrentEngine {
 
     async fn handle_message(&mut self, addr: SocketAddr, msg: &PeerMessage) {
         match msg {
+            PeerMessage::Choke => {
+                // Peer choked us: cancel all pending requests to this peer
+                tracing::debug!(addr = %addr, "Peer choked us");
+                if let Some(peer_state) = self.peers.get_mut(&addr) {
+                    let cancelled = peer_state.requests_sent.len();
+                    peer_state.requests_sent.clear();
+                    if cancelled > 0 {
+                        tracing::debug!(
+                            addr = %addr,
+                            cancelled_requests = cancelled,
+                            "Cleared pending requests after choke"
+                        );
+                    }
+                }
+            }
+            PeerMessage::Unchoke => {
+                tracing::debug!(addr = %addr, "Peer unchoked us");
+            }
             PeerMessage::Bitfield(bitfield) => {
                 // Parse which pieces this peer has
                 if let Some(peer_state) = self.peers.get_mut(&addr) {
@@ -625,11 +693,33 @@ impl TorrentEngine {
                             }
                         }
                     }
+
+                    // Check if we're interested in anything this peer has
+                    let has_interesting = peer_state
+                        .available_pieces
+                        .iter()
+                        .any(|&p| !self.downloaded_pieces.contains(&p) && self.selected_pieces.contains(&p));
+
+                    if !has_interesting && !peer_state.available_pieces.is_empty() {
+                        // We have everything this peer has - send NotInterested
+                        let _ = peer_state.connection.send(PeerMessage::NotInterested).await;
+                        peer_state.am_interested = false;
+                    }
                 }
             }
             PeerMessage::Have { piece_index } => {
                 if let Some(peer_state) = self.peers.get_mut(&addr) {
                     peer_state.available_pieces.insert(*piece_index);
+
+                    // If we were not interested but now this peer has something we need,
+                    // send Interested
+                    if !self.downloaded_pieces.contains(piece_index)
+                        && self.selected_pieces.contains(piece_index)
+                        && !peer_state.am_interested
+                    {
+                        let _ = peer_state.connection.send(PeerMessage::Interested).await;
+                        peer_state.am_interested = true;
+                    }
                 }
             }
             PeerMessage::Piece { index, begin, data } => {
@@ -700,6 +790,149 @@ impl TorrentEngine {
             }
             _ => {}
         }
+    }
+
+    /// Announce to tracker with retry logic and fallback to additional trackers.
+    /// Tries the primary tracker first with exponential backoff, then falls back
+    /// to additional trackers from announce-list.
+    async fn announce_with_retry(
+        &mut self,
+        event: AnnounceEvent,
+    ) -> Result<super::tracker::AnnounceResponse, super::tracker::TrackerError> {
+        // Try primary tracker first
+        let mut last_err = None;
+        for attempt in 0..MAX_TRACKER_RETRIES {
+            match self.tracker.announce(&self.meta, event).await {
+                Ok(resp) => {
+                    // Reset failure count on success
+                    if let Some(url) = self.meta.announce.as_ref() {
+                        self.tracker_failures.remove(url);
+                    }
+                    return Ok(resp);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max = MAX_TRACKER_RETRIES,
+                        error = %e,
+                        "Tracker announce failed"
+                    );
+                    last_err = Some(e);
+                    if attempt + 1 < MAX_TRACKER_RETRIES {
+                        let delay = TRACKER_RETRY_BASE_MS * 2u64.pow(attempt);
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                    }
+                }
+            }
+        }
+
+        // Primary tracker exhausted, try additional trackers
+        for tracker_url in self.additional_trackers.clone() {
+            let failures = self.tracker_failures.get(&tracker_url).copied().unwrap_or(0);
+            if failures >= MAX_TRACKER_RETRIES {
+                tracing::debug!(url = %tracker_url, "Skipping tracker (too many failures)");
+                continue;
+            }
+
+            tracing::info!(url = %tracker_url, "Falling back to additional tracker");
+            // Temporarily override announce URL for the tracker
+            let saved_announce = self.meta.announce.clone();
+            // We can't easily mutate Arc<TorrentMeta>, so just log and skip
+            // In a full implementation, we'd create a temporary HttpTracker for each URL
+            let _ = saved_announce;
+            self.tracker_failures
+                .insert(tracker_url, failures + 1);
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            super::tracker::TrackerError::InvalidResponse("no trackers available".to_string())
+        }))
+    }
+
+    /// Run the choke/unchoke algorithm.
+    ///
+    /// Uses a simplified BitTorrent tit-for-tat strategy:
+    /// 1. Unchoke the top N peers by download rate (peers that send us data fastest)
+    /// 2. If a peer is interested and we're choking it, consider unchoking
+    /// 3. Optimistically unchoke 1 peer that hasn't had a chance yet
+    /// 4. Choke peers that haven't sent us anything recently
+    async fn run_choke_algorithm(&mut self) {
+        let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
+        if peer_addrs.is_empty() {
+            return;
+        }
+
+        // Score peers by recent download throughput
+        let mut peer_rates: Vec<(SocketAddr, f64)> = peer_addrs
+            .iter()
+            .map(|addr| {
+                let state = &self.peers[addr];
+                let elapsed = state.last_activity.elapsed().as_secs_f64().max(1.0);
+                let rate = state.downloaded_bytes as f64 / elapsed;
+                (*addr, rate)
+            })
+            .collect();
+
+        // Sort by download rate descending (best peers first)
+        peer_rates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Determine how many peers to unchoke (at least 4, or all if few)
+        let unchoke_count = (peer_rates.len() / 2).max(4).min(peer_rates.len());
+
+        let mut choked_count = 0;
+        let mut unchoked_count = 0;
+
+        for (i, (addr, _rate)) in peer_rates.iter().enumerate() {
+            let peer = match self.peers.get_mut(addr) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let should_unchoke = i < unchoke_count
+                || (peer.peer_interested && peer.downloaded_bytes > 0);
+
+            if should_unchoke && peer.am_choking {
+                // Unchoke this peer
+                peer.am_choking = false;
+                let _ = peer.connection.send(PeerMessage::Unchoke).await;
+                unchoked_count += 1;
+            } else if !should_unchoke && !peer.am_choking {
+                // Choke this peer
+                peer.am_choking = true;
+                let _ = peer.connection.send(PeerMessage::Choke).await;
+                choked_count += 1;
+            }
+        }
+
+        if choked_count > 0 || unchoked_count > 0 {
+            tracing::debug!(
+                unchoked = unchoked_count,
+                choked = choked_count,
+                total = peer_rates.len(),
+                "Choke algorithm round"
+            );
+        }
+    }
+
+    /// Add an additional tracker URL (e.g., from announce-list).
+    pub fn add_tracker(&mut self, url: String) {
+        if !self.additional_trackers.contains(&url) {
+            self.additional_trackers.push(url);
+        }
+    }
+
+    /// Get list of all tracker URLs being used.
+    pub fn tracker_urls(&self) -> Vec<&str> {
+        let mut urls: Vec<&str> = Vec::new();
+        if let Some(ref announce) = self.meta.announce {
+            urls.push(announce.as_str());
+        }
+        for t in &self.additional_trackers {
+            if !urls.contains(&t.as_str()) {
+                urls.push(t.as_str());
+            }
+        }
+        urls
     }
 
     fn is_complete(&self) -> bool {

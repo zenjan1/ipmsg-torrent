@@ -14,6 +14,15 @@ use std::path::PathBuf;
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 
+/// Maximum server connection retries
+const MAX_SERVER_RETRIES: u32 = 2;
+/// Base delay for server retry backoff
+const SERVER_RETRY_BASE_MS: u64 = 3000;
+/// Interval between peer cache saves (seconds)
+const PEER_CACHE_SAVE_INTERVAL_SECS: u64 = 60;
+/// Maximum peers to exchange with each peer per round
+const MAX_PEER_EXCHANGE_PER_PEER: usize = 5;
+
 /// ed2k chunk state
 #[derive(Debug, Clone)]
 struct ChunkState {
@@ -95,6 +104,12 @@ pub struct Ed2kEngine {
     rate_limiter: Option<RateLimiter>,
     /// Optional proxy configuration for server/peer connections
     proxy_config: Option<ProxyConfig>,
+    /// Known peer addresses discovered through peer exchange
+    discovered_peers: HashSet<SocketAddr>,
+    /// Last time peer cache was saved to disk
+    last_peer_cache_save: Option<tokio::time::Instant>,
+    /// Server connection failure counts
+    server_failures: HashMap<SocketAddr, u32>,
 }
 
 impl Ed2kEngine {
@@ -186,6 +201,9 @@ impl Ed2kEngine {
             cached_servers,
             rate_limiter: None,
             proxy_config: None,
+            discovered_peers: HashSet::new(),
+            last_peer_cache_save: None,
+            server_failures: HashMap::new(),
         }
     }
 
@@ -250,10 +268,11 @@ impl Ed2kEngine {
             }
         }
 
-        // Connect to servers and request sources
+        // Connect to servers and request sources (with retry)
         for server_addr in all_servers {
-            if let Err(e) = self.connect_server(server_addr).await {
+            if let Err(e) = self.connect_server_with_retry(server_addr).await {
                 tracing::warn!(addr = %server_addr, error = %e, "Failed to connect to server");
+                *self.server_failures.entry(server_addr).or_insert(0) += 1;
             }
         }
 
@@ -284,8 +303,14 @@ impl Ed2kEngine {
                     // Request blocks from peers
                     self.request_blocks().await;
 
-                    // Handle peer messages
+                    // Handle peer messages (includes HashSet for chunk verification)
                     self.handle_peer_messages().await;
+
+                    // Periodic peer exchange and cache save
+                    self.maybe_save_peer_cache();
+
+                    // Request peer sources from connected peers (P2P source exchange)
+                    self.request_peer_sources().await;
                 }
             }
         }
@@ -293,7 +318,75 @@ impl Ed2kEngine {
         // Save file
         self.save_file().await?;
 
+        // Final peer cache save
+        self.save_peer_cache();
+
         Ok(())
+    }
+
+    /// Connect to a server with retry logic
+    async fn connect_server_with_retry(
+        &mut self,
+        addr: SocketAddr,
+    ) -> Result<(), Ed2kDownloadError> {
+        let failures = self.server_failures.get(&addr).copied().unwrap_or(0);
+        let max_retries = MAX_SERVER_RETRIES.saturating_sub(failures);
+
+        for attempt in 0..=max_retries {
+            match self.connect_server(addr).await {
+                Ok(()) => {
+                    // Reset failure count on success
+                    self.server_failures.remove(&addr);
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        addr = %addr,
+                        attempt = attempt + 1,
+                        max = max_retries + 1,
+                        error = %e,
+                        "Server connection attempt failed"
+                    );
+                    if attempt < max_retries {
+                        let delay = SERVER_RETRY_BASE_MS * 2u64.pow(attempt);
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                    }
+                    if attempt == max_retries {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Err(Ed2kDownloadError::Server("max retries exceeded".to_string()))
+    }
+
+    /// Request peer sources from connected peers (P2P source exchange).
+    /// Each peer may share additional peer addresses that have the file.
+    async fn request_peer_sources(&mut self) {
+        let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
+        let file_hash = self.file_hash.clone();
+
+        for addr in peer_addrs {
+            if let Some(peer) = self.peers.get_mut(&addr) {
+                // Send GetSources request to peer (opcode 0x19)
+                if let Err(e) = peer.request_sources(&file_hash).await {
+                    tracing::debug!(addr = %addr, error = %e, "Failed to request sources from peer");
+                }
+            }
+        }
+    }
+
+    /// Periodically save peer cache to disk
+    fn maybe_save_peer_cache(&mut self) {
+        let should_save = match self.last_peer_cache_save {
+            None => true,
+            Some(last) => last.elapsed() > Duration::from_secs(PEER_CACHE_SAVE_INTERVAL_SECS),
+        };
+
+        if should_save {
+            self.save_peer_cache();
+            self.last_peer_cache_save = Some(tokio::time::Instant::now());
+        }
     }
 
     async fn connect_server(&mut self, addr: SocketAddr) -> Result<(), Ed2kDownloadError> {
@@ -480,16 +573,26 @@ impl Ed2kEngine {
 
     async fn handle_peer_messages(&mut self) {
         let mut disconnected = Vec::new();
+        let mut new_peers: Vec<SocketAddr> = Vec::new();
 
         for (addr, peer) in &mut self.peers {
             // Try to receive data (non-blocking)
             match tokio::time::timeout(Duration::from_millis(100), peer.receive_block()).await {
-                Ok(Ok((_hash, offset, data))) => {
+                Ok(Ok((hash, offset, data))) => {
                     let block_size = data.len() as u64;
 
                     // Apply rate limiting before processing
                     if let Some(ref limiter) = self.rate_limiter {
                         limiter.acquire(block_size).await;
+                    }
+
+                    // Verify the block hash matches the file hash
+                    if hash != self.file_hash.0 {
+                        tracing::warn!(
+                            addr = %addr,
+                            "Block received with mismatched file hash, discarding"
+                        );
+                        continue;
                     }
 
                     // Determine which chunk this block belongs to
@@ -504,7 +607,7 @@ impl Ed2kEngine {
                             && let Some(assembled) = chunk.assemble()
                         {
                             if chunk.verify(&assembled) {
-                                tracing::info!(chunk = chunk_idx, "Chunk verified");
+                                tracing::info!(chunk = chunk_idx, "Chunk verified (MD4)");
                                 self.downloaded_chunks.insert(chunk_idx);
                                 self.progress.mark_complete(chunk_idx);
                                 self.progress.downloaded = self.downloaded;
@@ -517,7 +620,7 @@ impl Ed2kEngine {
                                     tracing::warn!(error = %e, "Failed to save ed2k progress");
                                 }
                             } else {
-                                tracing::warn!(chunk = chunk_idx, "Chunk verification failed");
+                                tracing::warn!(chunk = chunk_idx, "Chunk verification failed, resetting");
                                 // Reset chunk state
                                 let hash = chunk.hash;
                                 let size = chunk.size;
@@ -534,11 +637,125 @@ impl Ed2kEngine {
                 }
                 Err(_) => {} // Timeout, no data
             }
+
+            // Try to receive HashSet messages (chunk hashes for verification)
+            // and peer source exchange messages
+            if let Some(peer) = self.peers.get_mut(addr) {
+                match tokio::time::timeout(Duration::from_millis(50), peer.recv()).await {
+                    Ok(Ok((protocol, payload))) => {
+                        match protocol {
+                            0x51 => {
+                                // HashSet: chunk hashes for file verification
+                                self.handle_hash_set(*addr, &payload);
+                            }
+                            0x42 => {
+                                // Peer source exchange: other peers that have this file
+                                self.handle_peer_sources(&payload, &mut new_peers);
+                            }
+                            _ => {
+                                tracing::trace!(
+                                    addr = %addr,
+                                    protocol = format!("0x{:02x}", protocol),
+                                    "Unhandled peer message"
+                                );
+                            }
+                        }
+                    }
+                    Ok(Err(_)) => {
+                        // Peer disconnected or error
+                    }
+                    Err(_) => {
+                        // Timeout, no control messages
+                    }
+                }
+            }
+        }
+
+        // Process newly discovered peers
+        for peer_addr in new_peers {
+            if !self.peers.contains_key(&peer_addr)
+                && !self.discovered_peers.contains(&peer_addr)
+            {
+                self.discovered_peers.insert(peer_addr);
+                if let Err(e) = self.add_peer(peer_addr).await {
+                    tracing::debug!(addr = %peer_addr, error = %e, "Discovered peer unavailable");
+                } else {
+                    tracing::info!(addr = %peer_addr, "Connected to discovered peer");
+                }
+            }
         }
 
         // Remove disconnected peers
         for addr in disconnected {
             self.peers.remove(&addr);
+        }
+    }
+
+    /// Handle HashSet message from peer (chunk hashes for verification).
+    /// Format: [16 bytes file hash][2 bytes chunk count][count * 16 bytes MD4 hashes]
+    fn handle_hash_set(&mut self, addr: SocketAddr, payload: &[u8]) {
+        if payload.len() < 18 {
+            tracing::debug!(addr = %addr, "HashSet too short");
+            return;
+        }
+
+        // Verify file hash matches
+        let received_hash = &payload[..16];
+        if received_hash != self.file_hash.0 {
+            tracing::warn!(addr = %addr, "HashSet for wrong file");
+            return;
+        }
+
+        let chunk_count = u16::from_le_bytes([payload[16], payload[17]]) as usize;
+        let mut offset = 18;
+
+        for chunk_idx in 0..chunk_count {
+            if offset + 16 > payload.len() {
+                break;
+            }
+            let mut chunk_hash = [0u8; 16];
+            chunk_hash.copy_from_slice(&payload[offset..offset + 16]);
+            self.update_chunk_hash(chunk_idx as u32, chunk_hash);
+            offset += 16;
+        }
+
+        tracing::debug!(
+            addr = %addr,
+            chunks = chunk_count,
+            "Received chunk hashes from peer"
+        );
+    }
+
+    /// Handle peer source exchange message.
+    /// Format: [1 byte count][count * (4 bytes IP + 2 bytes port)]
+    fn handle_peer_sources(&self, payload: &[u8], new_peers: &mut Vec<SocketAddr>) {
+        if payload.is_empty() {
+            return;
+        }
+
+        let peer_count = payload[0] as usize;
+        let mut offset = 1;
+
+        for _ in 0..peer_count.min(MAX_PEER_EXCHANGE_PER_PEER) {
+            if offset + 6 > payload.len() {
+                break;
+            }
+
+            let ip = std::net::Ipv4Addr::new(
+                payload[offset],
+                payload[offset + 1],
+                payload[offset + 2],
+                payload[offset + 3],
+            );
+            let port = u16::from_le_bytes([payload[offset + 4], payload[offset + 5]]);
+            let peer_addr = SocketAddr::new(std::net::IpAddr::V4(ip), port);
+
+            // Skip private/loopback addresses from peer exchange
+            if !ip.is_loopback() && !ip.is_private() {
+                new_peers.push(peer_addr);
+            }
+
+            offset += 6;
         }
     }
 

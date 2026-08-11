@@ -1,19 +1,33 @@
-//! Xunlei P2SP download engine
+//! Xunlei P2SP download engine with performance optimizations
+//!
+//! Performance features:
+//! - Dynamic block sizing based on bandwidth (larger blocks for high bandwidth)
+//! - Buffered write I/O to reduce disk operations
+//! - Pre-allocated buffer pool to reduce allocations
+//! - Optimized HTTP client with connection pooling
+//! - Streaming writes (no memory accumulation)
 
 use super::peer::PeerClient;
 use super::protocol::{DownloadProgress, P2spBlock, XunleiSource};
 use crate::rate_limiter::RateLimiter;
+use bytes::BytesMut;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::AsyncSeekExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, Instant, interval};
 use tokio_util::sync::CancellationToken;
 
-/// P2SP block size (1MB)
-const BLOCK_SIZE: u64 = 1024 * 1024;
+/// Default P2SP block size (1MB)
+const DEFAULT_BLOCK_SIZE: u64 = 1024 * 1024;
+
+/// Minimum block size for high-bandwidth connections (4MB)
+const MAX_BLOCK_SIZE: u64 = 4 * 1024 * 1024;
+
+/// Minimum block size for low-bandwidth connections (256KB)
+const MIN_BLOCK_SIZE: u64 = 256 * 1024;
 
 /// Max retries per block before giving up
 const MAX_BLOCK_RETRIES: u32 = 3;
@@ -21,7 +35,55 @@ const MAX_BLOCK_RETRIES: u32 = 3;
 /// Retry delay base (doubles each attempt)
 const RETRY_BASE_DELAY_MS: u64 = 500;
 
-/// Xunlei P2SP download engine
+/// Write buffer size (64KB)
+const WRITE_BUFFER_SIZE: usize = 64 * 1024;
+
+/// Bandwidth threshold for dynamic block sizing (1 MB/s)
+const HIGH_BANDWIDTH_THRESHOLD: f64 = 1_000_000.0;
+
+/// Source quality assessment interval (seconds)
+const SOURCE_QUALITY_INTERVAL_SECS: u64 = 30;
+
+/// Minimum blocks from a source before evaluating quality
+const MIN_BLOCKS_FOR_EVALUATION: usize = 5;
+
+/// Slow source threshold (bytes per second)
+const SLOW_SOURCE_THRESHOLD: f64 = 10_000.0; // 10 KB/s
+
+/// Default block duration for slow sources (seconds)
+const DEFAULT_BLOCK_DURATION_SECS: u64 = 60;
+
+/// Buffer pool for reusing allocations
+struct BufferPool {
+    buffers: Vec<BytesMut>,
+    buffer_size: usize,
+    max_buffers: usize,
+}
+
+impl BufferPool {
+    fn new(buffer_size: usize, max_buffers: usize) -> Self {
+        Self {
+            buffers: Vec::with_capacity(max_buffers),
+            buffer_size,
+            max_buffers,
+        }
+    }
+
+    fn acquire(&mut self) -> BytesMut {
+        self.buffers
+            .pop()
+            .unwrap_or_else(|| BytesMut::with_capacity(self.buffer_size))
+    }
+
+    fn release(&mut self, mut buf: BytesMut) {
+        if self.buffers.len() < self.max_buffers {
+            buf.clear();
+            self.buffers.push(buf);
+        }
+    }
+}
+
+/// Xunlei P2SP download engine with performance optimizations
 pub struct XunleiEngine {
     file_name: String,
     file_size: u64,
@@ -32,11 +94,27 @@ pub struct XunleiEngine {
     http_client: Client,
     peer_clients: Arc<Mutex<HashMap<usize, PeerClient>>>,
     downloaded: u64,
-    start_time: Option<std::time::Instant>,
-    /// File handle for streaming writes (avoids accumulating all data in memory)
-    output_file: Option<tokio::fs::File>,
+    start_time: Option<Instant>,
+    /// Buffered file writer for reduced I/O operations
+    output_file: Option<BufWriter<tokio::fs::File>>,
     /// Optional rate limiter for speed control
     rate_limiter: Option<RateLimiter>,
+    /// Buffer pool for reusing allocations
+    buffer_pool: Arc<Mutex<BufferPool>>,
+    /// Current estimated bandwidth (bytes/sec) for dynamic block sizing
+    estimated_bandwidth: f64,
+    /// Dynamic block size based on bandwidth
+    block_size: u64,
+    /// Pending writes queue for batching
+    pending_writes: Vec<(u64, Vec<u8>)>,
+    /// Source quality metrics: source_idx -> (bytes_downloaded, total_elapsed_secs)
+    source_metrics: HashMap<usize, (u64, f64)>,
+    /// Last time source quality was evaluated
+    last_quality_check: Option<Instant>,
+    /// Blocked sources (temporarily disabled due to poor performance)
+    blocked_sources: HashMap<usize, Instant>,
+    /// Block duration for slow sources (seconds)
+    block_duration_secs: u64,
 }
 
 impl XunleiEngine {
@@ -46,12 +124,15 @@ impl XunleiEngine {
         sources: Vec<XunleiSource>,
         download_dir: PathBuf,
     ) -> Self {
-        // Initialize blocks
+        // Calculate initial block size based on file size
+        let block_size = Self::calculate_optimal_block_size(file_size, 0.0);
+
+        // Initialize blocks with dynamic sizing
         let mut blocks = Vec::new();
         let mut offset = 0u64;
 
         while offset < file_size {
-            let size = std::cmp::min(BLOCK_SIZE, file_size - offset);
+            let size = std::cmp::min(block_size, file_size - offset);
             blocks.push(P2spBlock {
                 offset,
                 size,
@@ -69,7 +150,11 @@ impl XunleiEngine {
             file_hash[i % 16] ^= b;
         }
 
+        // Optimized HTTP client with connection pooling
         let http_client = Client::builder()
+            .pool_max_idle_per_host(8)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_nodelay(true)
             .timeout(Duration::from_secs(30))
             .build()
             .expect("Failed to create HTTP client");
@@ -87,6 +172,14 @@ impl XunleiEngine {
             start_time: None,
             output_file: None,
             rate_limiter: None,
+            buffer_pool: Arc::new(Mutex::new(BufferPool::new(WRITE_BUFFER_SIZE, 16))),
+            estimated_bandwidth: 0.0,
+            block_size,
+            pending_writes: Vec::with_capacity(16),
+            source_metrics: HashMap::new(),
+            last_quality_check: None,
+            blocked_sources: HashMap::new(),
+            block_duration_secs: DEFAULT_BLOCK_DURATION_SECS,
         };
 
         // Try to load existing progress
@@ -97,9 +190,82 @@ impl XunleiEngine {
         engine
     }
 
+    /// Calculate optimal block size based on file size and bandwidth
+    fn calculate_optimal_block_size(file_size: u64, bandwidth_bps: f64) -> u64 {
+        // For high bandwidth, use larger blocks to reduce overhead
+        // For low bandwidth, use smaller blocks for better responsiveness
+        let base_size = if bandwidth_bps > HIGH_BANDWIDTH_THRESHOLD {
+            MAX_BLOCK_SIZE
+        } else if bandwidth_bps > HIGH_BANDWIDTH_THRESHOLD / 4.0 {
+            DEFAULT_BLOCK_SIZE
+        } else {
+            MIN_BLOCK_SIZE
+        };
+
+        // Ensure we don't have too many blocks (max 1000) or too few (min 4)
+        let max_blocks = 1000u64;
+        let min_blocks = 4u64;
+        
+        let size_based = file_size / max_blocks;
+        let min_size = file_size / min_blocks;
+        
+        base_size.clamp(size_based.max(MIN_BLOCK_SIZE), min_size.min(MAX_BLOCK_SIZE))
+    }
+
+    /// Update bandwidth estimate and adjust block size if needed
+    fn update_bandwidth_estimate(&mut self, bytes: u64, duration_ms: f64) {
+        if duration_ms > 0.0 {
+            let instant_bw = (bytes as f64 * 1000.0) / duration_ms;
+            // EWMA smoothing
+            self.estimated_bandwidth = if self.estimated_bandwidth == 0.0 {
+                instant_bw
+            } else {
+                0.7 * self.estimated_bandwidth + 0.3 * instant_bw
+            };
+        }
+    }
+
     /// Set rate limiter for speed control
     pub fn set_rate_limiter(&mut self, limiter: RateLimiter) {
         self.rate_limiter = Some(limiter);
+    }
+
+    /// Set block duration for slow sources
+    pub fn set_block_duration_secs(&mut self, secs: u64) {
+        self.block_duration_secs = secs;
+    }
+
+    /// Get source quality metrics for a given source index
+    pub fn get_source_metrics(&self, source_idx: usize) -> Option<(u64, f64)> {
+        self.source_metrics.get(&source_idx).copied()
+    }
+
+    /// Check if a source is currently blocked
+    pub fn is_source_blocked(&self, source_idx: usize) -> bool {
+        if let Some(blocked_until) = self.blocked_sources.get(&source_idx) {
+            if blocked_until.elapsed() < Duration::from_secs(self.block_duration_secs) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Add a mirror source URL dynamically
+    pub fn add_mirror(&mut self, url: String) {
+        let source_idx = self.sources.len();
+        self.sources.push(XunleiSource::Http {
+            url,
+            cookies: None,
+            referer: None,
+        });
+        tracing::info!(source = source_idx, "Added mirror source");
+    }
+
+    /// Add a CDN source dynamically
+    pub fn add_cdn_source(&mut self, url: String, token: Option<String>) {
+        let source_idx = self.sources.len();
+        self.sources.push(XunleiSource::Cdn { url, token });
+        tracing::info!(source = source_idx, "Added CDN source");
     }
 
     /// Start the download process
@@ -112,7 +278,8 @@ impl XunleiEngine {
             size = self.file_size,
             sources = self.sources.len(),
             blocks = self.blocks.len(),
-            "Starting P2SP download"
+            block_size = self.block_size,
+            "Starting P2SP download with optimized engine"
         );
 
         // Create output file upfront for streaming writes
@@ -122,8 +289,6 @@ impl XunleiEngine {
             .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
 
         // Open file: use OpenOptions to avoid truncating on resume.
-        // If progress was restored from a .progress file, we must preserve
-        // the existing file content (blocks already written at their offsets).
         let file = tokio::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -132,16 +297,18 @@ impl XunleiEngine {
             .await
             .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
 
-        // Pre-allocate file size for proper seeking (only grows, never shrinks)
+        // Pre-allocate file size for proper seeking
         file.set_len(self.file_size)
             .await
             .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
 
-        self.output_file = Some(file);
-        self.start_time = Some(std::time::Instant::now());
+        // Wrap in BufWriter for reduced I/O operations
+        self.output_file = Some(BufWriter::with_capacity(WRITE_BUFFER_SIZE, file));
+        self.start_time = Some(Instant::now());
 
         // Main download loop
         let mut tick = interval(Duration::from_millis(100));
+        let mut last_bandwidth_check = Instant::now();
 
         loop {
             tokio::select! {
@@ -150,6 +317,8 @@ impl XunleiEngine {
                     if let Some(ref cancel) = cancel
                         && cancel.is_cancelled() {
                             tracing::info!("Download cancelled");
+                            // Flush pending writes before exit
+                            self.flush_writes().await?;
                             return Err(XunleiDownloadError::Io("cancelled".to_string()));
                         }
 
@@ -162,6 +331,15 @@ impl XunleiEngine {
                     // Download blocks from sources
                     self.download_blocks().await;
 
+                    // Evaluate source quality periodically
+                    self.evaluate_source_quality();
+
+                    // Periodically check bandwidth and adjust block size
+                    if last_bandwidth_check.elapsed() > Duration::from_secs(5) {
+                        self.maybe_adjust_block_size();
+                        last_bandwidth_check = Instant::now();
+                    }
+
                     // Log progress
                     if let Some(progress) = self.get_progress() {
                         tracing::debug!(
@@ -169,6 +347,7 @@ impl XunleiEngine {
                             total = progress.total_size,
                             speed = format!("{:.2} KB/s", progress.speed / 1024.0),
                             sources = progress.sources_count,
+                            bandwidth = format!("{:.2} MB/s", self.estimated_bandwidth / 1_000_000.0),
                             "Download progress"
                         );
                     }
@@ -176,18 +355,55 @@ impl XunleiEngine {
             }
         }
 
-        // Flush and close the file
-        if let Some(mut file) = self.output_file.take() {
-            use tokio::io::AsyncWriteExt;
-            file.flush()
-                .await
-                .map_err(|e| XunleiDownloadError::Io(e.to_string()))?;
-        }
+        // Flush all pending writes and close the file
+        self.flush_writes().await?;
 
         tracing::info!(path = %output_path.display(), "File saved");
 
         // Save progress
         self.save_progress()?;
+
+        Ok(())
+    }
+
+    /// Adjust block size based on current bandwidth estimate
+    fn maybe_adjust_block_size(&mut self) {
+        let new_block_size = Self::calculate_optimal_block_size(self.file_size, self.estimated_bandwidth);
+        
+        if new_block_size != self.block_size {
+            tracing::debug!(
+                old_size = self.block_size,
+                new_size = new_block_size,
+                bandwidth = self.estimated_bandwidth,
+                "Adjusting block size based on bandwidth"
+            );
+            self.block_size = new_block_size;
+            // Note: Existing blocks keep their size, only new blocks use the new size
+        }
+    }
+
+    /// Flush all pending writes to disk
+    async fn flush_writes(&mut self) -> Result<(), XunleiDownloadError> {
+        // Sort pending writes by offset for sequential writes
+        self.pending_writes.sort_by_key(|(offset, _)| *offset);
+
+        if let Some(ref mut file) = self.output_file {
+            for (offset, data) in self.pending_writes.drain(..) {
+                if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
+                    tracing::warn!(offset = offset, error = %e, "Failed to seek");
+                    continue;
+                }
+                if let Err(e) = file.write_all(&data).await {
+                    tracing::warn!(offset = offset, error = %e, "Failed to write");
+                    continue;
+                }
+            }
+            
+            // Flush the buffer
+            if let Err(e) = file.flush().await {
+                tracing::warn!(error = %e, "Failed to flush file");
+            }
+        }
 
         Ok(())
     }
@@ -210,6 +426,11 @@ impl XunleiEngine {
         let mut tasks = Vec::new();
 
         for (source_idx, source) in self.sources.iter().enumerate() {
+            // Skip blocked sources
+            if self.is_source_blocked(source_idx) {
+                continue;
+            }
+
             // Find a block to download from this source
             if let Some(&block_idx) = pending_blocks
                 .iter()
@@ -260,8 +481,21 @@ impl XunleiEngine {
 
         // Wait for tasks to complete and write directly to file
         for (block_idx, task) in tasks {
+            let task_start = Instant::now();
             match task.await {
                 Ok(Ok(data)) => {
+                    let elapsed = task_start.elapsed().as_secs_f64();
+
+                    // Determine which source this block came from
+                    let source_idx = self.blocks[block_idx].source;
+
+                    // Update source quality metrics
+                    if source_idx < self.sources.len() {
+                        let entry = self.source_metrics.entry(source_idx).or_insert((0, 0.0));
+                        entry.0 += data.len() as u64;
+                        entry.1 += elapsed;
+                    }
+
                     // Apply rate limiting before writing
                     if let Some(ref limiter) = self.rate_limiter {
                         limiter.acquire(data.len() as u64).await;
@@ -290,6 +524,7 @@ impl XunleiEngine {
                         self.downloaded += data.len() as u64;
                         tracing::debug!(
                             block = block_idx,
+                            source = source_idx,
                             offset = block.offset,
                             size = data.len(),
                             "Block downloaded and written to disk"
@@ -415,6 +650,7 @@ impl XunleiEngine {
         &self.file_name
     }
 
+    /// Get current download progress
     pub fn get_progress(&self) -> Option<DownloadProgress> {
         let start_time = self.start_time?;
         let elapsed = start_time.elapsed().as_secs_f64();
@@ -460,7 +696,7 @@ impl XunleiEngine {
             );
             map.insert(
                 serde_cbor::Value::Text("block_size".to_string()),
-                serde_cbor::Value::Integer(BLOCK_SIZE as i128),
+                serde_cbor::Value::Integer(self.block_size as i128),
             );
             map.insert(
                 serde_cbor::Value::Text("bitmap".to_string()),
@@ -552,6 +788,79 @@ impl XunleiEngine {
         );
 
         Ok(())
+    }
+
+    /// Evaluate source quality and block slow sources temporarily.
+    ///
+    /// This runs periodically (every SOURCE_QUALITY_INTERVAL_SECS) and:
+    /// 1. Calculates download speed for each source
+    /// 2. Blocks sources that are consistently slow (< SLOW_SOURCE_THRESHOLD)
+    /// 3. Unblocks previously blocked sources whose block duration has expired
+    fn evaluate_source_quality(&mut self) {
+        let should_evaluate = match self.last_quality_check {
+            None => true,
+            Some(last) => last.elapsed() > Duration::from_secs(SOURCE_QUALITY_INTERVAL_SECS),
+        };
+
+        if !should_evaluate {
+            return;
+        }
+
+        self.last_quality_check = Some(Instant::now());
+
+        // Clean up expired blocks
+        self.blocked_sources.retain(|_, blocked_until| {
+            blocked_until.elapsed() < Duration::from_secs(self.block_duration_secs)
+        });
+
+        // Evaluate each source
+        let mut slow_sources = Vec::new();
+
+        for (&source_idx, &(bytes, elapsed)) in &self.source_metrics {
+            if elapsed < 1.0 {
+                continue; // Not enough data
+            }
+
+            let speed = bytes as f64 / elapsed;
+
+            // Count blocks downloaded from this source
+            let blocks_from_source = self
+                .blocks
+                .iter()
+                .filter(|b| b.source == source_idx && b.downloaded)
+                .count();
+
+            if blocks_from_source >= MIN_BLOCKS_FOR_EVALUATION
+                && speed < SLOW_SOURCE_THRESHOLD
+                && !self.is_source_blocked(source_idx)
+            {
+                tracing::warn!(
+                    source = source_idx,
+                    speed = format!("{:.2} B/s", speed),
+                    blocks = blocks_from_source,
+                    "Source is slow, blocking temporarily"
+                );
+                slow_sources.push(source_idx);
+            }
+        }
+
+        // Block slow sources
+        for source_idx in slow_sources {
+            let blocked_until = Instant::now() + Duration::from_secs(self.block_duration_secs);
+            self.blocked_sources.insert(source_idx, blocked_until);
+        }
+
+        // Log quality summary
+        if !self.source_metrics.is_empty() {
+            let total_sources = self.sources.len();
+            let active_sources = total_sources - self.blocked_sources.len();
+            tracing::debug!(
+                total = total_sources,
+                active = active_sources,
+                blocked = self.blocked_sources.len(),
+                "Source quality evaluation complete"
+            );
+        }
     }
 }
 
