@@ -360,6 +360,11 @@ impl SourceLatencyMonitor {
         &self.domain_stats
     }
 
+    /// Get mutable statistics for all domains (for loading from disk).
+    pub fn get_all_stats_mut(&mut self) -> &mut HashMap<String, DomainLatencyStats> {
+        &mut self.domain_stats
+    }
+
     /// Get a summary of source latency monitoring.
     pub fn get_summary(&self) -> SourceLatencySummary {
         let mut excellent = 0;
@@ -468,8 +473,7 @@ impl SourceLatencyMonitor {
 
     /// Save configuration to disk.
     pub async fn save_config(&self, path: &Path) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(&self.config)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(&self.config).map_err(std::io::Error::other)?;
         tokio::fs::write(path, json).await
     }
 
@@ -482,8 +486,8 @@ impl SourceLatencyMonitor {
 
     /// Save domain statistics to disk.
     pub async fn save_stats(&self, path: &Path) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(&self.domain_stats)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json =
+            serde_json::to_string_pretty(&self.domain_stats).map_err(std::io::Error::other)?;
         tokio::fs::write(path, json).await
     }
 
@@ -764,9 +768,9 @@ mod tests {
 
         let summary = monitor.get_summary();
         assert_eq!(summary.total_domains, 3);
-        assert_eq!(summary.excellent_count, 1);
-        assert_eq!(summary.good_count, 1);
-        assert_eq!(summary.poor_count, 1);
+        assert_eq!(summary.excellent_count, 1); // 30ms < 50ms
+        assert_eq!(summary.fair_count, 1); // 200ms in [150, 500)
+        assert_eq!(summary.poor_count, 1); // 800ms in [500, 1000)
         assert_eq!(summary.total_samples, 3);
     }
 

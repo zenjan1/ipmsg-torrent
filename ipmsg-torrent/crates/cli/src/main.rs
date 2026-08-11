@@ -364,6 +364,27 @@ enum Command {
         /// Arguments for the subcommand
         args: Vec<String>,
     },
+    /// Task cron scheduler management (Phase 149)
+    DlCronSched {
+        /// Subcommand: status, add, remove, list, enable, disable, config
+        subcmd: String,
+        /// Arguments for the subcommand
+        args: Vec<String>,
+    },
+    /// Source latency monitor (Phase 150)
+    DlSourceLatency {
+        /// Subcommand: status, config, domain, all, best, rank, clear, decay
+        subcmd: String,
+        /// Arguments for the subcommand
+        args: Vec<String>,
+    },
+    /// Bandwidth QoS classification management
+    DlBandwidthQos {
+        /// Subcommand: status, config, assign, remove, tier, rules, add-rule, remove-rule, clear
+        subcmd: String,
+        /// Arguments for the subcommand
+        args: Vec<String>,
+    },
     /// Set download schedule time window (e.g., "09:00-17:00" or "none" to disable)
     DlSchedule {
         task_id: String,
@@ -378,6 +399,13 @@ enum Command {
     },
     /// Show bandwidth monitoring dashboard
     DlBandwidthMon,
+    /// Bandwidth usage tracker management (Phase 149)
+    DlBwUsage {
+        /// Subcommand: status, config, summary, peak, clear
+        subcmd: String,
+        /// Arguments for the subcommand
+        args: Vec<String>,
+    },
     /// Show speed trend chart (sparkline)
     DlChart {
         /// Time window in seconds (default: 300 = 5 min)
@@ -1395,6 +1423,55 @@ fn parse_command(input: &str) -> Command {
                 )
             }
         }
+        "dlcron" | "dl-cron" | "dlcronsched" => {
+            // /dlcron <subcommand> [args...]
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                let subcmd = args[1].to_string();
+                let sub_args: Vec<String> = args[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlCronSched {
+                    subcmd,
+                    args: sub_args,
+                }
+            } else {
+                Command::Unknown(
+                    "/dlcron <status|add|remove|list|enable|disable|config>".to_string(),
+                )
+            }
+        }
+        "dlsrclat" | "dl-srclat" | "dl-source-latency" => {
+            // /dlsrclat <subcommand> [args...]
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                let subcmd = args[1].to_string();
+                let sub_args: Vec<String> = args[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlSourceLatency {
+                    subcmd,
+                    args: sub_args,
+                }
+            } else {
+                Command::Unknown(
+                    "/dlsrclat <status|config|domain|all|best|rank|clear|decay>".to_string(),
+                )
+            }
+        }
+        "dlqos" | "dl-qos" | "dlbwqos" | "dl-bwqos" => {
+            // /dlqos <subcommand> [args...]
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                let subcmd = args[1].to_string();
+                let sub_args: Vec<String> = args[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlBandwidthQos {
+                    subcmd,
+                    args: sub_args,
+                }
+            } else {
+                Command::Unknown(
+                    "/dlqos <status|config|assign|remove|tier|rules|add-rule|remove-rule|clear>"
+                        .to_string(),
+                )
+            }
+        }
         "dlschedule" | "dl-schedule" | "dlsch" => {
             // /dlschedule <task_id> <HH:MM-HH:MM|none>
             let args: Vec<&str> = input.split_whitespace().collect();
@@ -1424,6 +1501,16 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dlbwmon" | "dl-bandwidth-mon" | "dlbwm" => Command::DlBandwidthMon,
+        "dlbwusage" | "dl-bwusage" | "dl-bw-usage" => {
+            // /dlbwusage <subcommand> [args...]
+            if parts.len() > 1 {
+                let subcmd = parts[1].to_lowercase();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlBwUsage { subcmd, args }
+            } else {
+                Command::Unknown("/dlbwusage <status|config|summary|peak|clear>".to_string())
+            }
+        }
         "dlchart" | "dl-chart" | "dlc" => {
             let window = if parts.len() > 1 {
                 parts[1].parse::<u64>().ok()
@@ -2629,6 +2716,7 @@ fn command_help() -> String {
         "/dlpriority <id> <high|normal|low> - Set download task priority",
         "/dlbw <id> <1-10>    - Set bandwidth weight (higher = more bandwidth)",
         "/dlbwmon           - Show bandwidth monitoring dashboard",
+        "/dlbwusage [cmd]   - Bandwidth usage tracker (status|config|summary|peak|clear)",
         "/dlproxy <url|test|none> - Configure download proxy (e.g., socks5://127.0.0.1:1080) or test connection",
         "/dlqmove <id> <up|down|top|bottom> - Move task in queue",
         "/dlddeps <id> <dep1,dep2,...|none> - Set task dependencies",
@@ -2644,6 +2732,8 @@ fn command_help() -> String {
         "/dlexpiry [cmd]     - Download expiry management (status|set|remove|refresh|cleanup|clear|report)",
         "/dlactivity [cmd]   - Task activity logs (list|show|clear)",
         "/dlhcl [cmd]         - Host connection limiter (status|config|summary|host|override|remove|clear|cleanup)",
+        "/dlcron [cmd]        - Task cron scheduler (status|add|remove|list|enable|disable|config)",
+        "/dlsrclat [cmd]      - Source latency monitor (status|config|domain|all|best|rank|clear|decay)",
         "/dlpath <path>       - Set download save path (absolute path)",
         "/dlorganize <on|off> - Enable/disable auto-organize by file type",
         "/dlrename <id> <name> - Rename a download task",
@@ -9811,6 +9901,821 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlCronSched { subcmd, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcmd.as_str() {
+                "status" => {
+                    let summary = download_manager.get_task_cron_scheduler_summary().await;
+                    let config = download_manager.get_task_cron_scheduler_config().await;
+                    let enabled_str = if config.enabled {
+                        "✅ Enabled"
+                    } else {
+                        "❌ Disabled"
+                    };
+                    let mut output = format!(
+                        "⏰ Task Cron Scheduler Status:\n\
+                         Enabled: {}\n\
+                         Check interval: {}s\n\
+                         Total schedules: {}\n\
+                         Enabled schedules: {}\n\
+                         Disabled schedules: {}\n",
+                        enabled_str,
+                        config.check_interval_secs,
+                        summary.total_schedules,
+                        summary.enabled_schedules,
+                        summary.disabled_schedules,
+                    );
+                    if !summary.upcoming_triggers.is_empty() {
+                        output.push_str("\nUpcoming triggers:\n");
+                        for (task_id, next_time) in summary.upcoming_triggers.iter().take(5) {
+                            output.push_str(&format!(
+                                "  {} → {}\n",
+                                task_id,
+                                next_time.format("%Y-%m-%d %H:%M")
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", output);
+                }
+                "config" => {
+                    if args.len() >= 2 {
+                        let key = args[0].as_str();
+                        let mut config = download_manager.get_task_cron_scheduler_config().await;
+                        match key {
+                            "enabled" => {
+                                config.enabled = args[1].parse::<bool>().unwrap_or(true);
+                            }
+                            "interval" => {
+                                config.check_interval_secs = args[1].parse::<u64>().unwrap_or(60);
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dlcron config <enabled|interval> <value>".to_string(),
+                                );
+                                return;
+                            }
+                        }
+                        download_manager
+                            .set_task_cron_scheduler_config(config.clone())
+                            .await;
+                        let _ = download_manager.save_task_cron_scheduler().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("✅ Cron scheduler config updated"));
+                    } else {
+                        let config = download_manager.get_task_cron_scheduler_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "⏰ Cron Scheduler Config:\n\
+                                 Enabled: {}\n\
+                                 Check interval: {}s",
+                                config.enabled, config.check_interval_secs,
+                            ),
+                        );
+                    }
+                }
+                "add" => {
+                    if args.len() >= 3 {
+                        let task_id = &args[0];
+                        let cron_expr = args[1..].join(" ");
+                        // Need at least 5 fields for cron
+                        let parts: Vec<&str> = cron_expr.split_whitespace().collect();
+                        if parts.len() < 5 {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "Usage: /dlcron add <task_id> <cron_expr>\n\
+                                 Example: /dlcron add abc123 0 2 * * *"
+                                    .to_string(),
+                            );
+                            return;
+                        }
+                        let cron_5 = parts[..5].join(" ");
+                        match ipmsg_download::task_cron_scheduler::TaskCronSchedule::new(
+                            format!("sched_{}", task_id),
+                            format!("Schedule for {}", task_id),
+                            cron_5.clone(),
+                        ) {
+                            Ok(schedule) => {
+                                match download_manager
+                                    .add_task_cron_schedule(task_id, schedule)
+                                    .await
+                                {
+                                    Ok(()) => {
+                                        let _ = download_manager.save_task_cron_scheduler().await;
+                                        let mut s = state.lock().await;
+                                        s.add_system_message(
+                                            "main",
+                                            format!(
+                                                "✅ Added cron schedule for task {}: {}",
+                                                task_id, cron_5
+                                            ),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        let mut s = state.lock().await;
+                                        s.add_system_message(
+                                            "main",
+                                            format!("❌ Failed to add schedule: {}", e),
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Invalid cron expression: {}", e),
+                                );
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlcron add <task_id> <cron_expr>\n\
+                             Example: /dlcron add abc123 0 2 * * *"
+                                .to_string(),
+                        );
+                    }
+                }
+                "remove" | "del" => {
+                    if args.len() >= 1 {
+                        let task_id = &args[0];
+                        match download_manager.remove_task_cron_schedule(task_id).await {
+                            Ok(_) => {
+                                let _ = download_manager.save_task_cron_scheduler().await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Removed cron schedule for task {}", task_id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to remove schedule: {}", e),
+                                );
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlcron remove <task_id>".to_string());
+                    }
+                }
+                "list" => {
+                    let schedules = download_manager.list_task_cron_schedules().await;
+                    if schedules.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No cron schedules configured.".to_string());
+                    } else {
+                        let mut output = format!("⏰ Cron Schedules ({}):\n", schedules.len());
+                        for (task_id, schedule) in &schedules {
+                            let enabled_str = if schedule.enabled { "✅" } else { "❌" };
+                            let next_str = schedule
+                                .next_trigger
+                                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                                .unwrap_or_else(|| "N/A".to_string());
+                            output.push_str(&format!(
+                                "  {} {} [{}] next: {}\n",
+                                enabled_str, task_id, schedule.cron_expr, next_str,
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", output);
+                    }
+                }
+                "enable" => {
+                    if args.len() >= 1 {
+                        let task_id = &args[0];
+                        match download_manager
+                            .set_task_cron_schedule_enabled(task_id, true)
+                            .await
+                        {
+                            Ok(()) => {
+                                let _ = download_manager.save_task_cron_scheduler().await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Enabled cron schedule for task {}", task_id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Failed: {}", e));
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlcron enable <task_id>".to_string());
+                    }
+                }
+                "disable" => {
+                    if args.len() >= 1 {
+                        let task_id = &args[0];
+                        match download_manager
+                            .set_task_cron_schedule_enabled(task_id, false)
+                            .await
+                        {
+                            Ok(()) => {
+                                let _ = download_manager.save_task_cron_scheduler().await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Disabled cron schedule for task {}", task_id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Failed: {}", e));
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlcron disable <task_id>".to_string(),
+                        );
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Unknown subcommand. Use: status, config, add, remove, list, enable, disable"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlSourceLatency { subcmd, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcmd.as_str() {
+                "status" => {
+                    let config = download_manager.get_source_latency_config().await;
+                    let summary = download_manager.get_source_latency_summary().await;
+                    let mut s = state.lock().await;
+                    let status = if config.enabled {
+                        "✅ Enabled"
+                    } else {
+                        "❌ Disabled"
+                    };
+                    let output = format!(
+                        "📡 Source Latency Monitor Status:\n\
+                         Enabled: {}\n\
+                         Total Domains: {}\n\
+                         Excellent: {} | Good: {} | Fair: {} | Poor: {} | Unreachable: {}\n\
+                         Avg Latency: {:.1}ms\n\
+                         Total Samples: {}",
+                        status,
+                        summary.total_domains,
+                        summary.excellent_count,
+                        summary.good_count,
+                        summary.fair_count,
+                        summary.poor_count,
+                        summary.unreachable_count,
+                        summary.overall_avg_latency_ms,
+                        summary.total_samples,
+                    );
+                    s.add_system_message("main", output);
+                }
+                "config" => {
+                    if args.len() >= 2 {
+                        let key = args[0].as_str();
+                        let mut config = download_manager.get_source_latency_config().await;
+                        match key {
+                            "enabled" => {
+                                config.enabled = args[1].parse::<bool>().unwrap_or(true);
+                            }
+                            "max_samples" => {
+                                config.max_samples_per_domain =
+                                    args[1].parse::<usize>().unwrap_or(50);
+                            }
+                            "ema_alpha" => {
+                                config.ema_alpha = args[1].parse::<f64>().unwrap_or(0.3);
+                            }
+                            "excellent_ms" => {
+                                config.excellent_threshold_ms =
+                                    args[1].parse::<f64>().unwrap_or(50.0);
+                            }
+                            "good_ms" => {
+                                config.good_threshold_ms = args[1].parse::<f64>().unwrap_or(150.0);
+                            }
+                            "fair_ms" => {
+                                config.fair_threshold_ms = args[1].parse::<f64>().unwrap_or(500.0);
+                            }
+                            "poor_ms" => {
+                                config.poor_threshold_ms = args[1].parse::<f64>().unwrap_or(1000.0);
+                            }
+                            "decay" => {
+                                config.hourly_decay_factor = args[1].parse::<f64>().unwrap_or(0.95);
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dlsrclat config <key> <value>\n\
+                                     Keys: enabled, max_samples, ema_alpha, excellent_ms, good_ms, fair_ms, poor_ms, decay".to_string(),
+                                );
+                                return;
+                            }
+                        }
+                        download_manager.set_source_latency_config(config).await;
+                        let _ = download_manager.save_source_latency_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "✅ Source latency config updated".to_string(),
+                        );
+                    } else {
+                        let config = download_manager.get_source_latency_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "📡 Source Latency Config:\n\
+                                 enabled: {}\n\
+                                 max_samples_per_domain: {}\n\
+                                 ema_alpha: {:.2}\n\
+                                 excellent_threshold_ms: {}\n\
+                                 good_threshold_ms: {}\n\
+                                 fair_threshold_ms: {}\n\
+                                 poor_threshold_ms: {}\n\
+                                 hourly_decay_factor: {:.2}",
+                                config.enabled,
+                                config.max_samples_per_domain,
+                                config.ema_alpha,
+                                config.excellent_threshold_ms,
+                                config.good_threshold_ms,
+                                config.fair_threshold_ms,
+                                config.poor_threshold_ms,
+                                config.hourly_decay_factor,
+                            ),
+                        );
+                    }
+                }
+                "domain" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlsrclat domain <domain>".to_string(),
+                        );
+                    } else {
+                        let domain = &args[0];
+                        match download_manager.get_source_latency_domain(domain).await {
+                            Some(stats) => {
+                                let mut s = state.lock().await;
+                                let msg = format!(
+                                    "📡 Domain: {}\n\
+                                     Health: {} {}\n\
+                                     EMA Latency: {:.1}ms\n\
+                                     Min: {:.1}ms | Max: {:.1}ms\n\
+                                     Samples: {} ({} success, {} failed)\n\
+                                     Consecutive Failures: {}\n\
+                                     p50: {:?}ms | p90: {:?}ms | p99: {:?}ms",
+                                    stats.domain,
+                                    stats.health.emoji(),
+                                    stats.health,
+                                    stats.ema_latency_ms,
+                                    stats.min_latency_ms,
+                                    stats.max_latency_ms,
+                                    stats.total_samples,
+                                    stats.successful_connections,
+                                    stats.failed_connections,
+                                    stats.consecutive_failures,
+                                    stats.p50_ms.map(|v| format!("{:.1}", v)),
+                                    stats.p90_ms.map(|v| format!("{:.1}", v)),
+                                    stats.p99_ms.map(|v| format!("{:.1}", v)),
+                                );
+                                s.add_system_message("main", msg);
+                            }
+                            None => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("No latency data for domain: {}", domain),
+                                );
+                            }
+                        }
+                    }
+                }
+                "all" => {
+                    let all = download_manager.get_source_latency_all().await;
+                    let mut s = state.lock().await;
+                    if all.is_empty() {
+                        s.add_system_message("main", "No latency data tracked yet.".to_string());
+                    } else {
+                        let mut msg = format!("📡 All Domains ({}):\n", all.len());
+                        for stats in &all {
+                            msg.push_str(&format!(
+                                "  {} {} - {:.1}ms ({} samples)\n",
+                                stats.health.emoji(),
+                                stats.domain,
+                                stats.ema_latency_ms,
+                                stats.total_samples,
+                            ));
+                        }
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "best" => match download_manager.get_best_latency_domain().await {
+                    Some(domain) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("🏆 Best domain: {}", domain));
+                    }
+                    None => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No domains tracked yet.".to_string());
+                    }
+                },
+                "rank" => {
+                    let ranked = download_manager.rank_domains_by_latency().await;
+                    let mut s = state.lock().await;
+                    if ranked.is_empty() {
+                        s.add_system_message("main", "No latency data tracked yet.".to_string());
+                    } else {
+                        let mut msg = format!("📡 Domain Ranking ({}):\n", ranked.len());
+                        for (i, (domain, latency, health)) in ranked.iter().enumerate() {
+                            msg.push_str(&format!(
+                                "  {}. {} {} - {:.1}ms\n",
+                                i + 1,
+                                domain,
+                                health.emoji(),
+                                latency,
+                            ));
+                        }
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "clear" => {
+                    if args.is_empty() {
+                        download_manager.clear_source_latency_all().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Cleared all latency data.".to_string());
+                    } else {
+                        download_manager.clear_source_latency_domain(&args[0]).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Cleared latency data for: {}", args[0]),
+                        );
+                    }
+                }
+                "decay" => {
+                    download_manager.apply_source_latency_decay().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "✅ Applied periodic decay.".to_string());
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlsrclat <status|config|domain|all|best|rank|clear|decay>"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlBandwidthQos { subcmd, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcmd.as_str() {
+                "status" => {
+                    let summary = download_manager.get_bandwidth_qos_summary().await;
+                    let mut s = state.lock().await;
+                    let status = if summary.enabled {
+                        "✅ Enabled"
+                    } else {
+                        "❌ Disabled"
+                    };
+                    let output = format!(
+                        "🌐 Bandwidth QoS Status:\n\
+                         Status: {}\n\
+                         Total Tasks: {}\n\
+                         Rules: {} ({} enabled)\n\
+                         \n\
+                         Tier Distribution:\n\
+                         {}",
+                        status,
+                        summary.total_tasks,
+                        summary.rule_count,
+                        summary.enabled_rule_count,
+                        summary
+                            .tier_stats
+                            .iter()
+                            .map(|(tier, stats)| format!(
+                                "  {} {} tasks, weight {:.1}",
+                                tier, stats.task_count, stats.total_weight
+                            ))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    );
+                    s.add_system_message("main", output);
+                }
+                "config" => {
+                    if args.len() >= 2 {
+                        let key = args[0].as_str();
+                        let mut config = download_manager.get_bandwidth_qos_config().await;
+                        match key {
+                            "enabled" => {
+                                config.enabled = args[1].parse::<bool>().unwrap_or(true);
+                            }
+                            "auto_classify" => {
+                                config.auto_classify = args[1].parse::<bool>().unwrap_or(true);
+                            }
+                            "default_tier" => {
+                                if let Some(tier) =
+                                    ipmsg_download::bandwidth_qos::QosTier::parse(&args[1])
+                                {
+                                    config.default_tier = tier;
+                                } else {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid tier. Use: critical, high, normal, low, background"
+                                            .to_string(),
+                                    );
+                                    return;
+                                }
+                            }
+                            "max_rules" => {
+                                config.max_rules = args[1].parse::<usize>().unwrap_or(100);
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dlqos config <key> <value>\n\
+                                     Keys: enabled, auto_classify, default_tier, max_rules"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                        }
+                        download_manager.set_bandwidth_qos_config(config).await;
+                        let _ = download_manager.save_bandwidth_qos_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Bandwidth QoS config updated".to_string());
+                    } else {
+                        let config = download_manager.get_bandwidth_qos_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "🌐 Bandwidth QoS Config:\n\
+                                 enabled: {}\n\
+                                 auto_classify: {}\n\
+                                 default_tier: {:?}\n\
+                                 max_rules: {}",
+                                config.enabled,
+                                config.auto_classify,
+                                config.default_tier,
+                                config.max_rules
+                            ),
+                        );
+                    }
+                }
+                "assign" => {
+                    if args.len() >= 2 {
+                        let task_id = &args[0];
+                        if let Some(tier) = ipmsg_download::bandwidth_qos::QosTier::parse(&args[1])
+                        {
+                            match download_manager.assign_qos_tier(task_id, tier).await {
+                                Ok(()) => {
+                                    let _ = download_manager.save_bandwidth_qos_config().await;
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("✅ Assigned tier {:?} to task {}", tier, task_id),
+                                    );
+                                }
+                                Err(e) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("❌ Failed to assign tier: {}", e),
+                                    );
+                                }
+                            }
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "Invalid tier. Use: critical, high, normal, low, background"
+                                    .to_string(),
+                            );
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlqos assign <task_id> <tier>".to_string(),
+                        );
+                    }
+                }
+                "remove" => {
+                    if args.len() >= 1 {
+                        let task_id = &args[0];
+                        match download_manager.remove_qos_assignment(task_id).await {
+                            Ok(()) => {
+                                let _ = download_manager.save_bandwidth_qos_config().await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Removed QoS assignment for task {}", task_id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to remove assignment: {}", e),
+                                );
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlqos remove <task_id>".to_string());
+                    }
+                }
+                "tier" => {
+                    if args.len() >= 1 {
+                        let task_id = &args[0];
+                        let tier = download_manager.get_task_qos_tier(task_id).await;
+                        let weight = download_manager.get_task_qos_weight(task_id).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "Task {} QoS:\n\
+                                 Tier: {:?}\n\
+                                 Weight: {:.1}",
+                                task_id, tier, weight
+                            ),
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlqos tier <task_id>".to_string());
+                    }
+                }
+                "rules" => {
+                    let rules = download_manager.list_qos_rules().await;
+                    let mut s = state.lock().await;
+                    if rules.is_empty() {
+                        s.add_system_message("main", "No QoS rules configured.".to_string());
+                    } else {
+                        let output = format!(
+                            "📋 QoS Auto-Classification Rules:\n\
+                             {}",
+                            rules
+                                .iter()
+                                .map(|r| {
+                                    let enabled = if r.enabled { "✅" } else { "❌" };
+                                    format!(
+                                        "{} {} (priority: {}, tier: {:?})",
+                                        enabled, r.id, r.priority, r.tier
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        );
+                        s.add_system_message("main", output);
+                    }
+                }
+                "add-rule" => {
+                    if args.len() >= 4 {
+                        let rule_id = &args[0];
+                        let pattern_type = &args[1];
+                        let pattern_value = &args[2];
+                        let tier_str = &args[3];
+
+                        if let Some(tier) = ipmsg_download::bandwidth_qos::QosTier::parse(tier_str)
+                        {
+                            let pattern = match pattern_type.as_str() {
+                                "url" => ipmsg_download::bandwidth_qos::QosPattern::UrlContains(
+                                    pattern_value.clone(),
+                                ),
+                                "domain" => ipmsg_download::bandwidth_qos::QosPattern::Domain(
+                                    pattern_value.clone(),
+                                ),
+                                "ext" => ipmsg_download::bandwidth_qos::QosPattern::FileExtension(
+                                    pattern_value.clone(),
+                                ),
+                                _ => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid pattern type. Use: url, domain, ext".to_string(),
+                                    );
+                                    return;
+                                }
+                            };
+
+                            let rule = ipmsg_download::bandwidth_qos::QosAutoRule::new(
+                                rule_id.clone(),
+                                format!("Rule for {}", pattern_value),
+                                pattern,
+                                tier,
+                            );
+
+                            match download_manager.add_qos_rule(rule).await {
+                                Ok(()) => {
+                                    let _ = download_manager.save_bandwidth_qos_config().await;
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("✅ Added QoS rule {}", rule_id),
+                                    );
+                                }
+                                Err(e) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("❌ Failed to add rule: {}", e),
+                                    );
+                                }
+                            }
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "Invalid tier. Use: critical, high, normal, low, background"
+                                    .to_string(),
+                            );
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlqos add-rule <id> <url|domain|ext> <pattern> <tier>"
+                                .to_string(),
+                        );
+                    }
+                }
+                "remove-rule" => {
+                    if args.len() >= 1 {
+                        let rule_id = &args[0];
+                        match download_manager.remove_qos_rule(rule_id).await {
+                            Ok(_) => {
+                                let _ = download_manager.save_bandwidth_qos_config().await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Removed QoS rule {}", rule_id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to remove rule: {}", e),
+                                );
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlqos remove-rule <rule_id>".to_string(),
+                        );
+                    }
+                }
+                "clear" => {
+                    if args.len() >= 1 && args[0] == "rules" {
+                        download_manager.clear_qos_rules().await;
+                        let _ = download_manager.save_bandwidth_qos_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Cleared all QoS rules".to_string());
+                    } else {
+                        download_manager.clear_qos_assignments().await;
+                        let _ = download_manager.save_bandwidth_qos_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Cleared all QoS assignments".to_string());
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlqos <status|config|assign|remove|tier|rules|add-rule|remove-rule|clear>".to_string(),
+                    );
+                }
+            }
+        }
         Command::DlSchedule { task_id, window } => {
             use ipmsg_download::TimeWindow;
             let s = state.lock().await;
@@ -9976,6 +10881,139 @@ async fn handle_command(
 
             let mut s = state.lock().await;
             s.add_system_message("main", lines.join("\n"));
+        }
+        Command::DlBwUsage { subcmd, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcmd.as_str() {
+                "status" => {
+                    let config = download_manager.get_bandwidth_usage_config().await;
+                    let summary = download_manager.get_bandwidth_usage_summary().await;
+                    let lines = vec![
+                        "📊 Bandwidth Usage Tracker".to_string(),
+                        "═".repeat(50),
+                        format!("Enabled: {}", config.enabled),
+                        format!("Max hourly samples: {}", config.max_hourly_samples),
+                        format!(
+                            "Peak threshold: {}/h",
+                            format_size(config.peak_threshold_bytes)
+                        ),
+                        format!(
+                            "Track protocol breakdown: {}",
+                            config.track_protocol_breakdown
+                        ),
+                        String::new(),
+                        format!("Total samples: {}", summary.total_samples),
+                        format!(
+                            "Total downloaded: {}",
+                            format_size(summary.total_download_bytes)
+                        ),
+                        format!(
+                            "Total uploaded: {}",
+                            format_size(summary.total_upload_bytes)
+                        ),
+                    ];
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", lines.join("\n"));
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_bandwidth_usage_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "Current config:\n  enabled: {}\n  max_hourly_samples: {}\n  peak_threshold_bytes: {}\n  track_protocol_breakdown: {}",
+                                config.enabled, config.max_hourly_samples, config.peak_threshold_bytes, config.track_protocol_breakdown
+                            ),
+                        );
+                    } else if args.len() >= 2 {
+                        let mut config = download_manager.get_bandwidth_usage_config().await;
+                        match args[0].as_str() {
+                            "enabled" => {
+                                config.enabled = args[1].parse().unwrap_or(true);
+                            }
+                            "max_hourly_samples" => {
+                                config.max_hourly_samples = args[1].parse().unwrap_or(720);
+                            }
+                            "peak_threshold_bytes" => {
+                                config.peak_threshold_bytes =
+                                    args[1].parse().unwrap_or(1_073_741_824);
+                            }
+                            "track_protocol_breakdown" => {
+                                config.track_protocol_breakdown = args[1].parse().unwrap_or(true);
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", "Usage: /dlbwusage config <enabled|max_hourly_samples|peak_threshold_bytes|track_protocol_breakdown> <value>".to_string());
+                                return;
+                            }
+                        }
+                        download_manager.set_bandwidth_usage_config(config).await;
+                        let _ = download_manager.save_bandwidth_usage().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "✅ Bandwidth usage config updated".to_string(),
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlbwusage config <key> <value>".to_string(),
+                        );
+                    }
+                }
+                "summary" => {
+                    let report = download_manager.format_bandwidth_usage().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", report);
+                }
+                "peak" => {
+                    let top_n = args.first().and_then(|s| s.parse().ok()).unwrap_or(5);
+                    let analysis = download_manager.get_bandwidth_usage_peak_hours(top_n).await;
+                    let mut lines = vec![
+                        format!("🔝 Top {} Peak Hours", analysis.top_hours.len()),
+                        "═".repeat(50),
+                    ];
+                    for peak in &analysis.top_hours {
+                        lines.push(format!(
+                            "  {} - {}/h (dow:{}, hod:{}:00)",
+                            peak.hour_ts,
+                            format_size(peak.download_bytes),
+                            peak.day_of_week,
+                            peak.hour_of_day
+                        ));
+                    }
+                    lines.push(format!(
+                        "\nAverage peak: {}/h",
+                        format_size(analysis.avg_peak_bytes)
+                    ));
+                    if let Some(day) = analysis.common_peak_day {
+                        lines.push(format!("Most common peak day: {}", day));
+                    }
+                    if let Some(hour) = analysis.common_peak_hour {
+                        lines.push(format!("Most common peak hour: {}:00", hour));
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", lines.join("\n"));
+                }
+                "clear" => {
+                    download_manager.clear_bandwidth_usage().await;
+                    let _ = download_manager.save_bandwidth_usage().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "✅ Bandwidth usage data cleared".to_string());
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlbwusage <status|config|summary|peak [n]|clear>".to_string(),
+                    );
+                }
+            }
         }
         Command::DlChart { window } => {
             let s = state.lock().await;
@@ -17432,6 +18470,197 @@ async fn handle_command_headless(
     _my_peer_id: &str,
 ) {
     match cmd {
+        Command::DlSourceLatency { subcmd, args } => {
+            let s = state.lock().await;
+            let dm = s.download_manager.clone();
+            drop(s);
+
+            match subcmd.as_str() {
+                "status" => {
+                    let config = dm.get_source_latency_config().await;
+                    let summary = dm.get_source_latency_summary().await;
+                    let msg = format!(
+                        "📡 Source Latency Monitor\n\
+                         Enabled: {}\n\
+                         Total Domains: {}\n\
+                         Excellent: {} | Good: {} | Fair: {} | Poor: {} | Unreachable: {}\n\
+                         Avg Latency: {:.1}ms\n\
+                         Total Samples: {}",
+                        config.enabled,
+                        summary.total_domains,
+                        summary.excellent_count,
+                        summary.good_count,
+                        summary.fair_count,
+                        summary.poor_count,
+                        summary.unreachable_count,
+                        summary.overall_avg_latency_ms,
+                        summary.total_samples,
+                    );
+                    state.lock().await.add_system_message("main", msg);
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = dm.get_source_latency_config().await;
+                        let msg = format!(
+                            "📡 Source Latency Config\n\
+                             enabled: {}\n\
+                             max_samples_per_domain: {}\n\
+                             ema_alpha: {:.2}\n\
+                             excellent_threshold_ms: {}\n\
+                             good_threshold_ms: {}\n\
+                             fair_threshold_ms: {}\n\
+                             poor_threshold_ms: {}\n\
+                             hourly_decay_factor: {:.2}\n\
+                             ignored_domains: {:?}",
+                            config.enabled,
+                            config.max_samples_per_domain,
+                            config.ema_alpha,
+                            config.excellent_threshold_ms,
+                            config.good_threshold_ms,
+                            config.fair_threshold_ms,
+                            config.poor_threshold_ms,
+                            config.hourly_decay_factor,
+                            config.ignored_domains,
+                        );
+                        state.lock().await.add_system_message("main", msg);
+                    } else {
+                        state.lock().await.add_system_message(
+                            "main",
+                            "Usage: /dlsrclat config <key> <value>\n\
+                             Keys: enabled, max_samples, ema_alpha, excellent_ms, good_ms, fair_ms, poor_ms, decay".to_string(),
+                        );
+                    }
+                }
+                "domain" => {
+                    if args.is_empty() {
+                        state.lock().await.add_system_message(
+                            "main",
+                            "Usage: /dlsrclat domain <domain>".to_string(),
+                        );
+                    } else {
+                        let domain = &args[0];
+                        match dm.get_source_latency_domain(domain).await {
+                            Some(stats) => {
+                                let msg = format!(
+                                    "📡 Domain: {}\n\
+                                     Health: {} {}\n\
+                                     EMA Latency: {:.1}ms\n\
+                                     Min: {:.1}ms | Max: {:.1}ms\n\
+                                     Samples: {} ({} success, {} failed)\n\
+                                     Consecutive Failures: {}\n\
+                                     p50: {:?}ms | p90: {:?}ms | p99: {:?}ms",
+                                    stats.domain,
+                                    stats.health.emoji(),
+                                    stats.health,
+                                    stats.ema_latency_ms,
+                                    stats.min_latency_ms,
+                                    stats.max_latency_ms,
+                                    stats.total_samples,
+                                    stats.successful_connections,
+                                    stats.failed_connections,
+                                    stats.consecutive_failures,
+                                    stats.p50_ms.map(|v| format!("{:.1}", v)),
+                                    stats.p90_ms.map(|v| format!("{:.1}", v)),
+                                    stats.p99_ms.map(|v| format!("{:.1}", v)),
+                                );
+                                state.lock().await.add_system_message("main", msg);
+                            }
+                            None => {
+                                state.lock().await.add_system_message(
+                                    "main",
+                                    format!("No latency data for domain: {}", domain),
+                                );
+                            }
+                        }
+                    }
+                }
+                "all" => {
+                    let all = dm.get_source_latency_all().await;
+                    if all.is_empty() {
+                        state
+                            .lock()
+                            .await
+                            .add_system_message("main", "No latency data tracked yet.".to_string());
+                    } else {
+                        let mut msg = format!("📡 All Domains ({}):\n", all.len());
+                        for stats in &all {
+                            msg.push_str(&format!(
+                                "  {} {} - {:.1}ms ({} samples)\n",
+                                stats.health.emoji(),
+                                stats.domain,
+                                stats.ema_latency_ms,
+                                stats.total_samples,
+                            ));
+                        }
+                        state.lock().await.add_system_message("main", msg);
+                    }
+                }
+                "best" => match dm.get_best_latency_domain().await {
+                    Some(domain) => {
+                        state
+                            .lock()
+                            .await
+                            .add_system_message("main", format!("🏆 Best domain: {}", domain));
+                    }
+                    None => {
+                        state
+                            .lock()
+                            .await
+                            .add_system_message("main", "No domains tracked yet.".to_string());
+                    }
+                },
+                "rank" => {
+                    let ranked = dm.rank_domains_by_latency().await;
+                    if ranked.is_empty() {
+                        state
+                            .lock()
+                            .await
+                            .add_system_message("main", "No latency data tracked yet.".to_string());
+                    } else {
+                        let mut msg = format!("📡 Domain Ranking ({}):\n", ranked.len());
+                        for (i, (domain, latency, health)) in ranked.iter().enumerate() {
+                            msg.push_str(&format!(
+                                "  {}. {} {} - {:.1}ms\n",
+                                i + 1,
+                                domain,
+                                health.emoji(),
+                                latency,
+                            ));
+                        }
+                        state.lock().await.add_system_message("main", msg);
+                    }
+                }
+                "clear" => {
+                    if args.is_empty() {
+                        dm.clear_source_latency_all().await;
+                        state
+                            .lock()
+                            .await
+                            .add_system_message("main", "✅ Cleared all latency data.".to_string());
+                    } else {
+                        dm.clear_source_latency_domain(&args[0]).await;
+                        state.lock().await.add_system_message(
+                            "main",
+                            format!("✅ Cleared latency data for: {}", args[0]),
+                        );
+                    }
+                }
+                "decay" => {
+                    dm.apply_source_latency_decay().await;
+                    state
+                        .lock()
+                        .await
+                        .add_system_message("main", "✅ Applied periodic decay.".to_string());
+                }
+                _ => {
+                    state.lock().await.add_system_message(
+                        "main",
+                        "Usage: /dlsrclat <status|config|domain|all|best|rank|clear|decay>"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         Command::Help => {
             println!("Commands: /msg <peer> <text>, /peers, /who, /ping, /quit");
         }

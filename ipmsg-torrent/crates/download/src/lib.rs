@@ -17,6 +17,7 @@ pub mod automation_rules;
 pub mod bandwidth_allocation;
 pub mod bandwidth_forecast;
 pub mod bandwidth_monitor;
+pub mod bandwidth_qos;
 pub mod bandwidth_schedule;
 pub mod bandwidth_usage;
 pub mod bulk_ops;
@@ -116,6 +117,7 @@ pub mod task_activity;
 pub mod task_archive;
 pub mod task_chain;
 pub mod task_comments;
+pub mod task_cron_scheduler;
 pub mod task_export;
 pub mod task_favorites;
 pub mod task_profiler;
@@ -1062,6 +1064,10 @@ pub struct DownloadManager {
     notification_preferences: Arc<Mutex<notification_preferences::NotificationPreferencesManager>>,
     /// Host connection limiter for per-host TCP connection tracking (Phase 148)
     host_conn_limit: Arc<Mutex<host_conn_limit::HostConnLimitManager>>,
+    /// Per-task cron-based scheduler for time-based download scheduling (Phase 149)
+    task_cron_scheduler: Arc<Mutex<task_cron_scheduler::TaskCronScheduler>>,
+    /// Bandwidth QoS classification manager (Phase 151)
+    bandwidth_qos: Arc<Mutex<bandwidth_qos::BandwidthQosManager>>,
 }
 
 impl DownloadManager {
@@ -1306,6 +1312,10 @@ impl DownloadManager {
                 notification_preferences::NotificationPreferencesManager::new(),
             )),
             host_conn_limit: Arc::new(Mutex::new(host_conn_limit::HostConnLimitManager::new())),
+            task_cron_scheduler: Arc::new(
+                Mutex::new(task_cron_scheduler::TaskCronScheduler::new()),
+            ),
+            bandwidth_qos: Arc::new(Mutex::new(bandwidth_qos::BandwidthQosManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1682,6 +1692,10 @@ impl DownloadManager {
                 notification_preferences::NotificationPreferencesManager::new(),
             )),
             host_conn_limit: Arc::new(Mutex::new(host_conn_limit::HostConnLimitManager::new())),
+            task_cron_scheduler: Arc::new(
+                Mutex::new(task_cron_scheduler::TaskCronScheduler::new()),
+            ),
+            bandwidth_qos: Arc::new(Mutex::new(bandwidth_qos::BandwidthQosManager::new())),
         };
         // Restore SLA compliance data from disk
         {
@@ -1743,6 +1757,10 @@ impl DownloadManager {
         // Restore source reliability data from disk
         let _ = dm.load_source_reliability_config().await;
         let _ = dm.load_source_reliability_data().await;
+        // Restore task cron scheduler from disk (Phase 149)
+        if let Ok(cron_mgr) = task_cron_scheduler::TaskCronScheduler::load(&dm.data_dir).await {
+            *dm.task_cron_scheduler.lock().await = cron_mgr;
+        }
         // Restore retry budget config and state from disk (Phase 142)
         let retry_budget_config_path = dm.data_dir.join("retry_budget_config.json");
         if let Ok(cfg) = retry_budget::load_retry_budget_config(&retry_budget_config_path).await {
@@ -16231,6 +16249,379 @@ impl DownloadManager {
         let config_path = self.data_dir.join("host_conn_limit_config.json");
         manager.load_config(&config_path)
     }
+
+    // ── Phase 149: Task Cron Scheduler ──────────────────────────────────────
+
+    /// Get the task cron scheduler configuration.
+    pub async fn get_task_cron_scheduler_config(
+        &self,
+    ) -> task_cron_scheduler::TaskCronSchedulerConfig {
+        self.task_cron_scheduler.lock().await.config().clone()
+    }
+
+    /// Set the task cron scheduler configuration.
+    pub async fn set_task_cron_scheduler_config(
+        &self,
+        config: task_cron_scheduler::TaskCronSchedulerConfig,
+    ) {
+        self.task_cron_scheduler.lock().await.set_config(config);
+    }
+
+    /// Add a cron schedule for a task.
+    pub async fn add_task_cron_schedule(
+        &self,
+        task_id: &str,
+        schedule: task_cron_scheduler::TaskCronSchedule,
+    ) -> Result<(), task_cron_scheduler::TaskCronSchedulerError> {
+        self.task_cron_scheduler
+            .lock()
+            .await
+            .add_schedule(task_id, schedule)
+    }
+
+    /// Remove a cron schedule for a task.
+    pub async fn remove_task_cron_schedule(
+        &self,
+        task_id: &str,
+    ) -> Result<task_cron_scheduler::TaskCronSchedule, task_cron_scheduler::TaskCronSchedulerError>
+    {
+        self.task_cron_scheduler
+            .lock()
+            .await
+            .remove_schedule(task_id)
+    }
+
+    /// Get the cron schedule for a task.
+    pub async fn get_task_cron_schedule(
+        &self,
+        task_id: &str,
+    ) -> Option<task_cron_scheduler::TaskCronSchedule> {
+        self.task_cron_scheduler
+            .lock()
+            .await
+            .get_schedule(task_id)
+            .cloned()
+    }
+
+    /// List all cron schedules.
+    pub async fn list_task_cron_schedules(
+        &self,
+    ) -> Vec<(String, task_cron_scheduler::TaskCronSchedule)> {
+        self.task_cron_scheduler
+            .lock()
+            .await
+            .list_schedules()
+            .into_iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Enable or disable a cron schedule.
+    pub async fn set_task_cron_schedule_enabled(
+        &self,
+        task_id: &str,
+        enabled: bool,
+    ) -> Result<(), task_cron_scheduler::TaskCronSchedulerError> {
+        self.task_cron_scheduler
+            .lock()
+            .await
+            .set_schedule_enabled(task_id, enabled)
+    }
+
+    /// Get the task cron scheduler summary.
+    pub async fn get_task_cron_scheduler_summary(
+        &self,
+    ) -> task_cron_scheduler::TaskCronSchedulerSummary {
+        self.task_cron_scheduler.lock().await.summary()
+    }
+
+    /// Save task cron scheduler to disk.
+    pub async fn save_task_cron_scheduler(
+        &self,
+    ) -> Result<(), task_cron_scheduler::TaskCronSchedulerError> {
+        self.task_cron_scheduler
+            .lock()
+            .await
+            .save(&self.data_dir)
+            .await
+    }
+
+    // ── Phase 150: Source Latency API ──────────────────────────────────────
+
+    /// Get source latency configuration.
+    pub async fn get_source_latency_config(&self) -> source_latency::SourceLatencyConfig {
+        let monitor = self.source_latency.lock().await;
+        monitor.config().clone()
+    }
+
+    /// Set source latency configuration.
+    pub async fn set_source_latency_config(&self, config: source_latency::SourceLatencyConfig) {
+        let mut monitor = self.source_latency.lock().await;
+        monitor.set_config(config);
+    }
+
+    /// Record a successful connection for latency tracking.
+    pub async fn record_latency_success(&self, domain: &str, latency_ms: f64) {
+        let mut monitor = self.source_latency.lock().await;
+        monitor.record_success(domain, latency_ms);
+    }
+
+    /// Record a failed connection for latency tracking.
+    pub async fn record_latency_failure(&self, domain: &str, error: String) {
+        let mut monitor = self.source_latency.lock().await;
+        monitor.record_failure(domain, error);
+    }
+
+    /// Get latency statistics for a specific domain.
+    pub async fn get_source_latency_domain(
+        &self,
+        domain: &str,
+    ) -> Option<source_latency::DomainLatencyStats> {
+        let monitor = self.source_latency.lock().await;
+        monitor.get_domain_stats(domain).cloned()
+    }
+
+    /// Get latency statistics for all tracked domains.
+    pub async fn get_source_latency_all(&self) -> Vec<source_latency::DomainLatencyStats> {
+        let monitor = self.source_latency.lock().await;
+        monitor.get_all_stats().values().cloned().collect()
+    }
+
+    /// Get source latency summary across all domains.
+    pub async fn get_source_latency_summary(&self) -> source_latency::SourceLatencySummary {
+        let monitor = self.source_latency.lock().await;
+        monitor.get_summary()
+    }
+
+    /// Get the best domain (lowest latency).
+    pub async fn get_best_latency_domain(&self) -> Option<String> {
+        let monitor = self.source_latency.lock().await;
+        monitor.get_best_domain().map(|s| s.to_string())
+    }
+
+    /// Rank all domains by latency (best to worst).
+    pub async fn rank_domains_by_latency(
+        &self,
+    ) -> Vec<(String, f64, source_latency::LatencyHealth)> {
+        let monitor = self.source_latency.lock().await;
+        monitor
+            .rank_domains()
+            .into_iter()
+            .map(|(d, l, h)| (d.to_string(), l, h))
+            .collect()
+    }
+
+    /// Clear latency data for a specific domain.
+    pub async fn clear_source_latency_domain(&self, domain: &str) {
+        let mut monitor = self.source_latency.lock().await;
+        monitor.clear_domain(domain);
+    }
+
+    /// Clear all source latency data.
+    pub async fn clear_source_latency_all(&self) {
+        let mut monitor = self.source_latency.lock().await;
+        monitor.clear_all();
+    }
+
+    /// Apply periodic decay to all domain latency data.
+    pub async fn apply_source_latency_decay(&self) {
+        let mut monitor = self.source_latency.lock().await;
+        monitor.apply_periodic_decay();
+    }
+
+    /// Format a human-readable latency summary.
+    pub async fn format_source_latency_summary(&self) -> String {
+        let monitor = self.source_latency.lock().await;
+        let summary = monitor.get_summary();
+        monitor.format_summary(&summary)
+    }
+
+    /// Save source latency config to disk.
+    pub async fn save_source_latency_config(&self) -> std::io::Result<()> {
+        let monitor = self.source_latency.lock().await;
+        let config_path = self.data_dir.join("source_latency_config.json");
+        monitor.save_config(&config_path).await
+    }
+
+    /// Load source latency config from disk.
+    pub async fn load_source_latency_config(&self) -> std::io::Result<()> {
+        let config_path = self.data_dir.join("source_latency_config.json");
+        if config_path.exists() {
+            let config = source_latency::SourceLatencyMonitor::load_config(&config_path).await?;
+            let mut monitor = self.source_latency.lock().await;
+            monitor.set_config(config);
+        }
+        Ok(())
+    }
+
+    /// Save source latency stats to disk.
+    pub async fn save_source_latency_stats(&self) -> std::io::Result<()> {
+        let monitor = self.source_latency.lock().await;
+        let stats_path = self.data_dir.join("source_latency_stats.json");
+        monitor.save_stats(&stats_path).await
+    }
+
+    /// Load source latency stats from disk.
+    pub async fn load_source_latency_stats(&self) -> std::io::Result<()> {
+        let stats_path = self.data_dir.join("source_latency_stats.json");
+        if stats_path.exists() {
+            let stats = source_latency::SourceLatencyMonitor::load_stats(&stats_path).await?;
+            let mut monitor = self.source_latency.lock().await;
+            for (domain, domain_stats) in stats {
+                monitor.get_all_stats_mut().insert(domain, domain_stats);
+            }
+        }
+        Ok(())
+    }
+
+    // ── Phase 151: Bandwidth QoS API ──────────────────────────────────────
+
+    /// Get bandwidth QoS configuration.
+    pub async fn get_bandwidth_qos_config(&self) -> bandwidth_qos::BandwidthQosConfig {
+        let mgr = self.bandwidth_qos.lock().await;
+        mgr.config().clone()
+    }
+
+    /// Set bandwidth QoS configuration.
+    pub async fn set_bandwidth_qos_config(&self, config: bandwidth_qos::BandwidthQosConfig) {
+        let mut mgr = self.bandwidth_qos.lock().await;
+        mgr.set_config(config);
+    }
+
+    /// Get bandwidth QoS summary.
+    pub async fn get_bandwidth_qos_summary(&self) -> bandwidth_qos::BandwidthQosSummary {
+        let mgr = self.bandwidth_qos.lock().await;
+        mgr.summary()
+    }
+
+    /// Assign QoS tier to a task.
+    pub async fn assign_qos_tier(
+        &self,
+        task_id: &str,
+        tier: bandwidth_qos::QosTier,
+    ) -> Result<(), bandwidth_qos::BandwidthQosError> {
+        let mut mgr = self.bandwidth_qos.lock().await;
+        mgr.assign_tier(task_id, tier)
+    }
+
+    /// Remove QoS assignment for a task.
+    pub async fn remove_qos_assignment(
+        &self,
+        task_id: &str,
+    ) -> Result<(), bandwidth_qos::BandwidthQosError> {
+        let mut mgr = self.bandwidth_qos.lock().await;
+        mgr.remove_assignment(task_id)
+    }
+
+    /// Get QoS tier for a task.
+    pub async fn get_task_qos_tier(&self, task_id: &str) -> bandwidth_qos::QosTier {
+        let mgr = self.bandwidth_qos.lock().await;
+        mgr.get_tier(task_id)
+    }
+
+    /// Get bandwidth weight for a task.
+    pub async fn get_task_qos_weight(&self, task_id: &str) -> f64 {
+        let mgr = self.bandwidth_qos.lock().await;
+        mgr.get_task_weight(task_id)
+    }
+
+    /// Auto-classify a task based on URL and name.
+    pub async fn auto_classify_qos(
+        &self,
+        task_id: &str,
+        url: &str,
+        name: &str,
+    ) -> Option<bandwidth_qos::QosTier> {
+        let mut mgr = self.bandwidth_qos.lock().await;
+        mgr.auto_classify(task_id, url, name)
+    }
+
+    /// Add QoS auto-classification rule.
+    pub async fn add_qos_rule(
+        &self,
+        rule: bandwidth_qos::QosAutoRule,
+    ) -> Result<(), bandwidth_qos::BandwidthQosError> {
+        let mut mgr = self.bandwidth_qos.lock().await;
+        mgr.add_rule(rule)
+    }
+
+    /// Remove QoS auto-classification rule.
+    pub async fn remove_qos_rule(
+        &self,
+        rule_id: &str,
+    ) -> Result<bandwidth_qos::QosAutoRule, bandwidth_qos::BandwidthQosError> {
+        let mut mgr = self.bandwidth_qos.lock().await;
+        mgr.remove_rule(rule_id)
+    }
+
+    /// List all QoS rules.
+    pub async fn list_qos_rules(&self) -> Vec<bandwidth_qos::QosAutoRule> {
+        let mgr = self.bandwidth_qos.lock().await;
+        mgr.list_rules().into_iter().cloned().collect()
+    }
+
+    /// Enable or disable QoS rule.
+    pub async fn set_qos_rule_enabled(
+        &self,
+        rule_id: &str,
+        enabled: bool,
+    ) -> Result<(), bandwidth_qos::BandwidthQosError> {
+        let mut mgr = self.bandwidth_qos.lock().await;
+        mgr.set_rule_enabled(rule_id, enabled)
+    }
+
+    /// Set QoS rule priority.
+    pub async fn set_qos_rule_priority(
+        &self,
+        rule_id: &str,
+        priority: i32,
+    ) -> Result<(), bandwidth_qos::BandwidthQosError> {
+        let mut mgr = self.bandwidth_qos.lock().await;
+        mgr.set_rule_priority(rule_id, priority)
+    }
+
+    /// Clear all QoS assignments.
+    pub async fn clear_qos_assignments(&self) {
+        let mut mgr = self.bandwidth_qos.lock().await;
+        mgr.clear_assignments();
+    }
+
+    /// Clear all QoS rules.
+    pub async fn clear_qos_rules(&self) {
+        let mut mgr = self.bandwidth_qos.lock().await;
+        mgr.clear_rules();
+    }
+
+    /// Format QoS summary report.
+    pub async fn format_bandwidth_qos_summary(&self) -> String {
+        let mgr = self.bandwidth_qos.lock().await;
+        mgr.format_summary()
+    }
+
+    /// Save bandwidth QoS config to disk.
+    pub async fn save_bandwidth_qos_config(&self) -> std::io::Result<()> {
+        let mgr = self.bandwidth_qos.lock().await;
+        mgr.save(&self.data_dir).await.map_err(|e| match e {
+            bandwidth_qos::BandwidthQosError::Io(io_err) => io_err,
+            _ => std::io::Error::other(e.to_string()),
+        })
+    }
+
+    /// Load bandwidth QoS config from disk.
+    pub async fn load_bandwidth_qos_config(&self) -> std::io::Result<()> {
+        let config_path = self.data_dir.join("bandwidth_qos_config.json");
+        if config_path.exists() {
+            let mgr = bandwidth_qos::BandwidthQosManager::load(&self.data_dir)
+                .await
+                .map_err(|e| match e {
+                    bandwidth_qos::BandwidthQosError::Io(io_err) => io_err,
+                    _ => std::io::Error::other(e.to_string()),
+                })?;
+            let mut current = self.bandwidth_qos.lock().await;
+            *current = mgr;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -22022,5 +22413,167 @@ mod url_allowlist_tests {
         dm2.load_notification_center_config().await.unwrap();
         let loaded = dm2.get_notification_center_config().await;
         assert_eq!(loaded.max_history_size, 999);
+    }
+}
+
+#[cfg(test)]
+mod source_latency_integration_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_source_latency_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        let config = dm.get_source_latency_config().await;
+        assert!(config.enabled);
+
+        let mut new_config = config;
+        new_config.enabled = false;
+        dm.set_source_latency_config(new_config).await;
+
+        let loaded = dm.get_source_latency_config().await;
+        assert!(!loaded.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_source_latency_record_success() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        dm.record_latency_success("example.com", 100.0).await;
+
+        let stats = dm.get_source_latency_domain("example.com").await;
+        assert!(stats.is_some());
+        let stats = stats.unwrap();
+        assert_eq!(stats.total_samples, 1);
+        assert_eq!(stats.successful_connections, 1);
+    }
+
+    #[tokio::test]
+    async fn test_source_latency_record_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        dm.record_latency_failure("example.com", "Timeout".to_string())
+            .await;
+
+        let stats = dm.get_source_latency_domain("example.com").await;
+        assert!(stats.is_some());
+        let stats = stats.unwrap();
+        assert_eq!(stats.failed_connections, 1);
+    }
+
+    #[tokio::test]
+    async fn test_source_latency_summary() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        // 30ms < 50ms threshold => Excellent
+        dm.record_latency_success("fast.com", 30.0).await;
+        // 500ms >= 500ms and < 1000ms => Poor
+        dm.record_latency_success("slow.com", 500.0).await;
+
+        let summary = dm.get_source_latency_summary().await;
+        assert_eq!(summary.total_domains, 2);
+        assert_eq!(summary.excellent_count, 1);
+        assert_eq!(summary.poor_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_source_latency_best_domain() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        dm.record_latency_success("fast.com", 50.0).await;
+        dm.record_latency_success("slow.com", 500.0).await;
+
+        let best = dm.get_best_latency_domain().await;
+        assert_eq!(best, Some("fast.com".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_source_latency_rank() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        dm.record_latency_success("fast.com", 50.0).await;
+        dm.record_latency_success("medium.com", 200.0).await;
+        dm.record_latency_success("slow.com", 500.0).await;
+
+        let ranked = dm.rank_domains_by_latency().await;
+        assert_eq!(ranked.len(), 3);
+        assert_eq!(ranked[0].0, "fast.com");
+        assert_eq!(ranked[1].0, "medium.com");
+        assert_eq!(ranked[2].0, "slow.com");
+    }
+
+    #[tokio::test]
+    async fn test_source_latency_clear_domain() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        dm.record_latency_success("example.com", 100.0).await;
+        assert!(dm.get_source_latency_domain("example.com").await.is_some());
+
+        dm.clear_source_latency_domain("example.com").await;
+        assert!(dm.get_source_latency_domain("example.com").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_source_latency_clear_all() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        dm.record_latency_success("a.com", 100.0).await;
+        dm.record_latency_success("b.com", 200.0).await;
+
+        dm.clear_source_latency_all().await;
+        let all = dm.get_source_latency_all().await;
+        assert_eq!(all.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_source_latency_decay() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        dm.record_latency_success("example.com", 100.0).await;
+        dm.apply_source_latency_decay().await;
+
+        // Decay should not panic
+    }
+
+    #[tokio::test]
+    async fn test_source_latency_save_load_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        let mut config = dm.get_source_latency_config().await;
+        config.enabled = false;
+        dm.set_source_latency_config(config).await;
+
+        dm.save_source_latency_config().await.unwrap();
+
+        let dm2 = DownloadManager::new(temp_dir.path().to_path_buf());
+        dm2.load_source_latency_config().await.unwrap();
+
+        let loaded = dm2.get_source_latency_config().await;
+        assert!(!loaded.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_source_latency_save_load_stats() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+
+        dm.record_latency_success("example.com", 100.0).await;
+        dm.save_source_latency_stats().await.unwrap();
+
+        let dm2 = DownloadManager::new(temp_dir.path().to_path_buf());
+        dm2.load_source_latency_stats().await.unwrap();
+
+        let stats = dm2.get_source_latency_domain("example.com").await;
+        assert!(stats.is_some());
     }
 }

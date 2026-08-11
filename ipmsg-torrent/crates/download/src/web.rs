@@ -1345,6 +1345,133 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/host-conn-limit/cleanup",
             post(cleanup_stale_hosts_handler),
         )
+        .route(
+            "/api/task-cron-scheduler",
+            get(get_task_cron_scheduler_config_handler)
+                .post(set_task_cron_scheduler_config_handler),
+        )
+        .route(
+            "/api/task-cron-scheduler/summary",
+            get(get_task_cron_scheduler_summary_handler),
+        )
+        .route(
+            "/api/task-cron-scheduler/schedules",
+            get(list_task_cron_schedules_handler),
+        )
+        .route(
+            "/api/task-cron-scheduler/schedules/:task_id",
+            post(add_task_cron_schedule_handler).delete(remove_task_cron_schedule_handler),
+        )
+        .route(
+            "/api/task-cron-scheduler/schedules/:task_id/enable",
+            post(set_task_cron_schedule_enabled_handler),
+        )
+        .route(
+            "/api/source-latency",
+            get(get_source_latency_config_handler).post(set_source_latency_config_handler),
+        )
+        .route(
+            "/api/source-latency/summary",
+            get(get_source_latency_summary_handler),
+        )
+        .route(
+            "/api/source-latency/domain/:domain",
+            get(get_source_latency_domain_handler),
+        )
+        .route(
+            "/api/source-latency/all",
+            get(get_source_latency_all_handler),
+        )
+        .route(
+            "/api/source-latency/best",
+            get(get_best_latency_domain_handler),
+        )
+        .route(
+            "/api/source-latency/rank",
+            get(rank_domains_by_latency_handler),
+        )
+        .route(
+            "/api/source-latency/clear/:domain",
+            post(clear_source_latency_domain_handler),
+        )
+        .route(
+            "/api/source-latency/clear",
+            post(clear_source_latency_all_handler),
+        )
+        .route(
+            "/api/source-latency/decay",
+            post(apply_source_latency_decay_handler),
+        )
+        // ── Phase 151: Bandwidth QoS REST API ─────────────────────────────
+        .route(
+            "/api/bandwidth-qos",
+            get(get_bandwidth_qos_config_handler).post(set_bandwidth_qos_config_handler),
+        )
+        .route(
+            "/api/bandwidth-qos/summary",
+            get(get_bandwidth_qos_summary_handler),
+        )
+        .route(
+            "/api/bandwidth-qos/assign/:task_id",
+            post(assign_qos_tier_handler),
+        )
+        .route(
+            "/api/bandwidth-qos/assign/:task_id/remove",
+            post(remove_qos_assignment_handler),
+        )
+        .route(
+            "/api/bandwidth-qos/task/:task_id",
+            get(get_task_qos_tier_handler),
+        )
+        .route(
+            "/api/bandwidth-qos/rules",
+            get(list_qos_rules_handler).post(add_qos_rule_handler),
+        )
+        .route(
+            "/api/bandwidth-qos/rules/:rule_id",
+            delete(remove_qos_rule_handler),
+        )
+        .route(
+            "/api/bandwidth-qos/rules/:rule_id/enable",
+            post(set_qos_rule_enabled_handler),
+        )
+        .route(
+            "/api/bandwidth-qos/rules/:rule_id/priority",
+            post(set_qos_rule_priority_handler),
+        )
+        .route(
+            "/api/bandwidth-qos/clear/assignments",
+            post(clear_qos_assignments_handler),
+        )
+        .route(
+            "/api/bandwidth-qos/clear/rules",
+            post(clear_qos_rules_handler),
+        )
+        // Phase 149: Bandwidth Usage Tracker REST API
+        .route(
+            "/api/bandwidth-usage",
+            get(get_bandwidth_usage_config_handler).post(set_bandwidth_usage_config_handler),
+        )
+        .route(
+            "/api/bandwidth-usage/summary",
+            get(get_bandwidth_usage_summary_handler),
+        )
+        .route(
+            "/api/bandwidth-usage/24h",
+            get(get_bandwidth_usage_24h_handler),
+        )
+        .route(
+            "/api/bandwidth-usage/peak-hours",
+            get(get_bandwidth_usage_peak_hours_handler),
+        )
+        .route(
+            "/api/bandwidth-usage/clear",
+            post(clear_bandwidth_usage_handler),
+        )
+        .route(
+            "/api/bandwidth-usage/format",
+            get(get_bandwidth_usage_format_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -10269,4 +10396,410 @@ async fn cleanup_stale_hosts_handler(
 struct SetHostOverrideRequest {
     hostname: String,
     max_connections: u32,
+}
+
+// ── Phase 149: Task Cron Scheduler REST API ─────────────────────────────────
+
+/// GET /api/task-cron-scheduler - Get task cron scheduler configuration
+async fn get_task_cron_scheduler_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_task_cron_scheduler_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/task-cron-scheduler - Update task cron scheduler configuration
+async fn set_task_cron_scheduler_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::task_cron_scheduler::TaskCronSchedulerConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_task_cron_scheduler_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/task-cron-scheduler/summary - Get task cron scheduler summary
+async fn get_task_cron_scheduler_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.manager.get_task_cron_scheduler_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/task-cron-scheduler/schedules - List all cron schedules
+async fn list_task_cron_schedules_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let schedules = state.manager.list_task_cron_schedules().await;
+    Json(serde_json::to_value(schedules).unwrap_or_default())
+}
+
+/// POST /api/task-cron-scheduler/schedules/:task_id - Add a cron schedule
+async fn add_task_cron_schedule_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(schedule): Json<crate::task_cron_scheduler::TaskCronSchedule>,
+) -> Json<serde_json::Value> {
+    match state
+        .manager
+        .add_task_cron_schedule(&task_id, schedule)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// DELETE /api/task-cron-scheduler/schedules/:task_id - Remove a cron schedule
+async fn remove_task_cron_schedule_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    match state.manager.remove_task_cron_schedule(&task_id).await {
+        Ok(_) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// POST /api/task-cron-scheduler/schedules/:task_id/enable - Enable/disable a cron schedule
+async fn set_task_cron_schedule_enabled_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(req): Json<SetTaskCronScheduleEnabledRequest>,
+) -> Json<serde_json::Value> {
+    match state
+        .manager
+        .set_task_cron_schedule_enabled(&task_id, req.enabled)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SetTaskCronScheduleEnabledRequest {
+    enabled: bool,
+}
+
+// ── Phase 150: Source Latency REST API ──────────────────────────────────────
+
+/// GET /api/source-latency - Get source latency configuration
+async fn get_source_latency_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_source_latency_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/source-latency - Update source latency configuration
+async fn set_source_latency_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::source_latency::SourceLatencyConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_source_latency_config(config).await;
+    let _ = state.manager.save_source_latency_config().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/source-latency/summary - Get source latency summary
+async fn get_source_latency_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.manager.get_source_latency_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/source-latency/domain/:domain - Get latency stats for a specific domain
+async fn get_source_latency_domain_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    match state.manager.get_source_latency_domain(&domain).await {
+        Some(stats) => Json(serde_json::to_value(stats).unwrap_or_default()),
+        None => Json(serde_json::json!({"error": "Domain not found"})),
+    }
+}
+
+/// GET /api/source-latency/all - Get latency stats for all domains
+async fn get_source_latency_all_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let all_stats = state.manager.get_source_latency_all().await;
+    Json(serde_json::to_value(all_stats).unwrap_or_default())
+}
+
+/// GET /api/source-latency/best - Get the best domain (lowest latency)
+async fn get_best_latency_domain_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    match state.manager.get_best_latency_domain().await {
+        Some(domain) => Json(serde_json::json!({"domain": domain})),
+        None => Json(serde_json::json!({"error": "No domains tracked"})),
+    }
+}
+
+/// GET /api/source-latency/rank - Rank all domains by latency
+async fn rank_domains_by_latency_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let ranked = state.manager.rank_domains_by_latency().await;
+    Json(serde_json::to_value(ranked).unwrap_or_default())
+}
+
+/// POST /api/source-latency/clear/:domain - Clear latency data for a specific domain
+async fn clear_source_latency_domain_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_source_latency_domain(&domain).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/source-latency/clear - Clear all source latency data
+async fn clear_source_latency_all_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_source_latency_all().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/source-latency/decay - Apply periodic decay to all domains
+async fn apply_source_latency_decay_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.apply_source_latency_decay().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+// ── Phase 151: Bandwidth QoS REST API Handlers ─────────────────────────────
+
+/// GET /api/bandwidth-qos - Get bandwidth QoS configuration
+async fn get_bandwidth_qos_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_bandwidth_qos_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/bandwidth-qos - Update bandwidth QoS configuration
+async fn set_bandwidth_qos_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::bandwidth_qos::BandwidthQosConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_bandwidth_qos_config(config).await;
+    let _ = state.manager.save_bandwidth_qos_config().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/bandwidth-qos/summary - Get bandwidth QoS summary
+async fn get_bandwidth_qos_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.manager.get_bandwidth_qos_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// POST /api/bandwidth-qos/assign/:task_id - Assign QoS tier to a task
+async fn assign_qos_tier_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let tier_str = body
+        .get("tier")
+        .and_then(|v| v.as_str())
+        .unwrap_or("normal");
+    match crate::bandwidth_qos::QosTier::parse(tier_str) {
+        Some(tier) => match state.manager.assign_qos_tier(&task_id, tier).await {
+            Ok(()) => {
+                let _ = state.manager.save_bandwidth_qos_config().await;
+                Json(serde_json::json!({"status": "ok", "task_id": task_id, "tier": tier_str}))
+            }
+            Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+        },
+        None => Json(serde_json::json!({"error": format!("Invalid tier: {}", tier_str)})),
+    }
+}
+
+/// POST /api/bandwidth-qos/assign/:task_id/remove - Remove QoS assignment
+async fn remove_qos_assignment_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    match state.manager.remove_qos_assignment(&task_id).await {
+        Ok(()) => {
+            let _ = state.manager.save_bandwidth_qos_config().await;
+            Json(serde_json::json!({"status": "ok"}))
+        }
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/bandwidth-qos/task/:task_id - Get QoS tier for a task
+async fn get_task_qos_tier_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let tier = state.manager.get_task_qos_tier(&task_id).await;
+    let weight = state.manager.get_task_qos_weight(&task_id).await;
+    Json(serde_json::json!({
+        "task_id": task_id,
+        "tier": format!("{:?}", tier).to_lowercase(),
+        "weight": weight,
+    }))
+}
+
+/// GET /api/bandwidth-qos/rules - List all QoS rules
+async fn list_qos_rules_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let rules = state.manager.list_qos_rules().await;
+    Json(serde_json::to_value(rules).unwrap_or_default())
+}
+
+/// POST /api/bandwidth-qos/rules - Add a QoS auto-classification rule
+async fn add_qos_rule_handler(
+    State(state): State<Arc<WebState>>,
+    Json(rule): Json<crate::bandwidth_qos::QosAutoRule>,
+) -> Json<serde_json::Value> {
+    match state.manager.add_qos_rule(rule).await {
+        Ok(()) => {
+            let _ = state.manager.save_bandwidth_qos_config().await;
+            Json(serde_json::json!({"status": "ok"}))
+        }
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// DELETE /api/bandwidth-qos/rules/:rule_id - Remove a QoS rule
+async fn remove_qos_rule_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(rule_id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    match state.manager.remove_qos_rule(&rule_id).await {
+        Ok(_) => {
+            let _ = state.manager.save_bandwidth_qos_config().await;
+            Json(serde_json::json!({"status": "ok"}))
+        }
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// POST /api/bandwidth-qos/rules/:rule_id/enable - Enable/disable a QoS rule
+async fn set_qos_rule_enabled_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(rule_id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let enabled = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    match state.manager.set_qos_rule_enabled(&rule_id, enabled).await {
+        Ok(()) => {
+            let _ = state.manager.save_bandwidth_qos_config().await;
+            Json(serde_json::json!({"status": "ok"}))
+        }
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// POST /api/bandwidth-qos/rules/:rule_id/priority - Set rule priority
+async fn set_qos_rule_priority_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(rule_id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let priority = body.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    match state
+        .manager
+        .set_qos_rule_priority(&rule_id, priority)
+        .await
+    {
+        Ok(()) => {
+            let _ = state.manager.save_bandwidth_qos_config().await;
+            Json(serde_json::json!({"status": "ok"}))
+        }
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// POST /api/bandwidth-qos/clear/assignments - Clear all QoS assignments
+async fn clear_qos_assignments_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_qos_assignments().await;
+    let _ = state.manager.save_bandwidth_qos_config().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/bandwidth-qos/clear/rules - Clear all QoS rules
+async fn clear_qos_rules_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    state.manager.clear_qos_rules().await;
+    let _ = state.manager.save_bandwidth_qos_config().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+// ========== Phase 149: Bandwidth Usage Tracker REST API Handlers ==========
+
+/// GET /api/bandwidth-usage - Get bandwidth usage tracker configuration
+async fn get_bandwidth_usage_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_bandwidth_usage_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/bandwidth-usage - Update bandwidth usage tracker configuration
+async fn set_bandwidth_usage_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::bandwidth_usage::BandwidthUsageConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_bandwidth_usage_config(config).await;
+    let _ = state.manager.save_bandwidth_usage().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/bandwidth-usage/summary - Get bandwidth usage summary
+async fn get_bandwidth_usage_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.manager.get_bandwidth_usage_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/bandwidth-usage/24h - Get rolling 24-hour window summary
+async fn get_bandwidth_usage_24h_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.manager.get_bandwidth_usage_24h().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/bandwidth-usage/peak-hours - Get peak hour analysis
+async fn get_bandwidth_usage_peak_hours_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let top_n = params
+        .get("top_n")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(5);
+    let analysis = state.manager.get_bandwidth_usage_peak_hours(top_n).await;
+    Json(serde_json::to_value(analysis).unwrap_or_default())
+}
+
+/// POST /api/bandwidth-usage/clear - Clear all bandwidth usage data
+async fn clear_bandwidth_usage_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_bandwidth_usage().await;
+    let _ = state.manager.save_bandwidth_usage().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/bandwidth-usage/format - Get human-readable bandwidth usage report
+async fn get_bandwidth_usage_format_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let report = state.manager.format_bandwidth_usage().await;
+    Json(serde_json::json!({"report": report}))
 }
