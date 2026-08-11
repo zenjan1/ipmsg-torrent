@@ -24,6 +24,7 @@ pub mod connection_health;
 pub mod connection_pool;
 pub mod csv_export;
 pub mod data_cap;
+pub mod dashboard;
 pub mod data_retention;
 pub mod dependency_graph;
 pub mod dht;
@@ -1001,6 +1002,8 @@ pub struct DownloadManager {
     data_retention: Arc<Mutex<data_retention::DataRetentionManager>>,
     /// Download source quality tracker for long-term reliability scoring
     source_quality: Arc<Mutex<source_quality::SourceQualityManager>>,
+    /// Dashboard manager for unified system overview
+    dashboard: Arc<Mutex<dashboard::DashboardManager>>,
 }
 
 impl DownloadManager {
@@ -1208,6 +1211,7 @@ impl DownloadManager {
             source_quality: Arc::new(Mutex::new(source_quality::SourceQualityManager::new(
                 data_dir.clone(),
             ))),
+            dashboard: Arc::new(Mutex::new(dashboard::DashboardManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1547,6 +1551,7 @@ impl DownloadManager {
             source_quality: Arc::new(Mutex::new(source_quality::SourceQualityManager::new(
                 data_dir.clone(),
             ))),
+            dashboard: Arc::new(Mutex::new(dashboard::DashboardManager::new())),
         };
         // Restore tag manager from disk
         dm.tag_manager.restore().await;
@@ -10187,6 +10192,150 @@ impl DownloadManager {
         self.source_quality.lock().await.load_config().await
     }
 
+    // ── Dashboard API ────────────────────────────────────────────────────
+
+    /// Get dashboard configuration
+    pub async fn get_dashboard_config(&self) -> dashboard::DashboardConfig {
+        self.dashboard.lock().await.get_config().clone()
+    }
+
+    /// Set dashboard configuration
+    pub async fn set_dashboard_config(&self, config: dashboard::DashboardConfig) {
+        self.dashboard.lock().await.set_config(config);
+    }
+
+    /// Check if dashboard is enabled
+    pub async fn is_dashboard_enabled(&self) -> bool {
+        self.dashboard.lock().await.is_enabled()
+    }
+
+    /// Generate a comprehensive dashboard snapshot aggregating all system data
+    pub async fn generate_dashboard(&self) -> dashboard::DashboardSnapshot {
+        let config = self.get_dashboard_config().await;
+        if !config.enabled {
+            return dashboard::DashboardSnapshot {
+                snapshot_at: chrono::Utc::now(),
+                queue_status: dashboard::QueueStatus::default(),
+                current_speed_bps: 0,
+                current_upload_bps: 0,
+                health_status: queue_health::HealthStatus::Healthy,
+                health_score: 100,
+                issue_count: 0,
+                prediction: None,
+                top_active: vec![],
+                protocol_breakdown: None,
+                disk_status: None,
+                total_downloaded_bytes: 0,
+                total_uploaded_bytes: 0,
+                uptime_seconds: 0,
+            };
+        }
+
+        let tasks = self.tasks.lock().await;
+        let queue_status = dashboard::QueueStatus {
+            total: tasks.len(),
+            running: tasks.iter().filter(|t| t.state == DownloadState::Downloading).count(),
+            queued: tasks.iter().filter(|t| t.state == DownloadState::Queued).count(),
+            paused: tasks.iter().filter(|t| t.state == DownloadState::Paused).count(),
+            completed: tasks.iter().filter(|t| t.state == DownloadState::Complete).count(),
+            error: tasks.iter().filter(|t| t.state == DownloadState::Error).count(),
+            recycled: self.recycle_bin.lock().await.list().len(),
+        };
+
+        let current_speed_bps: u64 = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Downloading)
+            .map(|t| t.speed_bps as u64)
+            .sum();
+
+        let current_upload_bps: u64 = 0; // TODO: track upload speed
+
+        let total_downloaded_bytes: u64 = tasks.iter().map(|t| t.downloaded).sum();
+        let total_uploaded_bytes: u64 = 0; // TODO: track upload bytes
+
+        // Get queue health
+        let default_health_config = queue_health::HealthMonitorConfig::default();
+        let health_report = self.get_queue_health_report(&default_health_config).await;
+        let health_status = health_report.summary.status;
+        let health_score = health_report.summary.health_score as u32;
+        let issue_count = health_report.issues.len();
+
+        // Get queue completion prediction if enabled
+        let prediction = if config.include_prediction {
+            Some(self.predict_queue_completion().await)
+        } else {
+            None
+        };
+
+        // Get top active downloads
+        let mut top_active: Vec<dashboard::TopActiveTask> = tasks
+            .iter()
+            .filter(|t| t.state == DownloadState::Downloading)
+            .map(|t| dashboard::TopActiveTask {
+                task_id: t.id.clone(),
+                task_name: t.name.clone(),
+                progress: t.progress(),
+                speed_bps: t.speed_bps as u64,
+                eta_seconds: t.eta_seconds(),
+                total_size: t.size,
+                downloaded: t.downloaded,
+                priority: t.priority.clone(),
+                protocol: format!("{:?}", t.protocol),
+            })
+            .collect();
+        top_active.sort_by(|a, b| b.speed_bps.cmp(&a.speed_bps));
+        top_active.truncate(config.top_active_count);
+
+        // Get protocol breakdown if enabled
+        let protocol_breakdown = if config.include_protocol_breakdown {
+            Some(dashboard::ProtocolBreakdown {
+                http_count: tasks.iter().filter(|t| matches!(t.protocol, DownloadProtocol::Xunlei)).count(),
+                torrent_count: tasks.iter().filter(|t| matches!(t.protocol, DownloadProtocol::Torrent)).count(),
+                ed2k_count: tasks.iter().filter(|t| matches!(t.protocol, DownloadProtocol::Ed2k)).count(),
+                p2p_count: tasks.iter().filter(|t| matches!(t.protocol, DownloadProtocol::P2P)).count(),
+                magnet_count: tasks.iter().filter(|t| matches!(t.protocol, DownloadProtocol::Magnet)).count(),
+            })
+        } else {
+            None
+        };
+
+        // Get disk status if enabled
+        let disk_status = if config.include_disk_status {
+            let disk_summary = self.get_disk_monitor_summary().await;
+            Some(dashboard::DiskStatus {
+                available_bytes: disk_summary.available_bytes,
+                total_bytes: disk_summary.total_bytes,
+                usage_percent: if disk_summary.total_bytes > 0 {
+                    (disk_summary.total_bytes - disk_summary.available_bytes) as f64
+                        / disk_summary.total_bytes as f64
+                } else {
+                    0.0
+                },
+                is_low: disk_summary.available_bytes < disk_summary.warning_threshold_bytes,
+                is_critical: disk_summary.available_bytes < disk_summary.critical_threshold_bytes,
+            })
+        } else {
+            None
+        };
+
+        dashboard::DashboardSnapshot {
+            snapshot_at: chrono::Utc::now(),
+            queue_status,
+            current_speed_bps,
+            current_upload_bps,
+            health_status,
+            health_score,
+            issue_count,
+            prediction,
+            top_active,
+            protocol_breakdown,
+            disk_status,
+            total_downloaded_bytes,
+            total_uploaded_bytes,
+            uptime_seconds: 0, // TODO: track actual uptime
+        }
+    }
+
     /// Set the priority of a download task.
     /// Higher priority tasks are spawned first when concurrent limits are active.
     pub async fn set_priority(&self, task_id: &str, priority: DownloadPriority) -> bool {
@@ -12774,10 +12923,16 @@ impl DownloadManager {
         let auto_resumed_count = monitor.auto_resumed_count().await;
         let available_bytes =
             disk_monitor::get_available_space(monitor.monitor_path()).unwrap_or_default();
+        let total_bytes = disk_monitor::get_total_space(monitor.monitor_path()).unwrap_or(available_bytes * 2);
+        let warning_threshold = total_bytes / 10; // 10%
+        let critical_threshold = total_bytes / 20; // 5%
         disk_monitor::DiskMonitorSummary {
             enabled: config.enabled,
             status,
             available_bytes,
+            total_bytes,
+            warning_threshold_bytes: warning_threshold,
+            critical_threshold_bytes: critical_threshold,
             safety_margin_bytes: config.safety_margin_bytes,
             check_interval_secs: config.check_interval_secs,
             is_monitoring,
@@ -19643,8 +19798,7 @@ mod url_allowlist_tests {
         let category = path_organizer::FileCategory {
             name: "test_category".to_string(),
             extensions: vec![".test".to_string()],
-            target_dir: "test_output".to_string(),
-            enabled: true,
+            directory: "test_output".to_string(),
         };
         dm1.add_file_category(category).await;
         // Save config to disk

@@ -583,23 +583,23 @@ mod tests {
         let manager = SourceQualityManager::new(PathBuf::from("/tmp"));
 
         source.reliability_score = 85.0;
-        manager.update_tier(&mut source);
+        SourceQualityManager::update_tier_static(&mut source);
         assert_eq!(source.tier, SourceTier::Excellent);
 
         source.reliability_score = 65.0;
-        manager.update_tier(&mut source);
+        SourceQualityManager::update_tier_static(&mut source);
         assert_eq!(source.tier, SourceTier::Good);
 
         source.reliability_score = 45.0;
-        manager.update_tier(&mut source);
+        SourceQualityManager::update_tier_static(&mut source);
         assert_eq!(source.tier, SourceTier::Average);
 
         source.reliability_score = 25.0;
-        manager.update_tier(&mut source);
+        SourceQualityManager::update_tier_static(&mut source);
         assert_eq!(source.tier, SourceTier::Poor);
 
         source.reliability_score = 15.0;
-        manager.update_tier(&mut source);
+        SourceQualityManager::update_tier_static(&mut source);
         assert_eq!(source.tier, SourceTier::Unreliable);
     }
 

@@ -66,6 +66,9 @@ pub struct DiskMonitorSummary {
     pub enabled: bool,
     pub status: DiskSpaceStatus,
     pub available_bytes: u64,
+    pub total_bytes: u64,
+    pub warning_threshold_bytes: u64,
+    pub critical_threshold_bytes: u64,
     pub safety_margin_bytes: u64,
     pub check_interval_secs: u64,
     pub is_monitoring: bool,
@@ -139,6 +142,41 @@ pub fn get_available_space(path: &Path) -> Result<u64, DiskSpaceError> {
     #[cfg(not(unix))]
     {
         // Fallback: assume plenty of space on non-Unix
+        let _ = path;
+        Ok(u64::MAX)
+    }
+}
+
+/// Get total disk space (in bytes) for the filesystem containing `path`.
+///
+/// Uses `statvfs` on Unix systems. Returns the total space of the filesystem.
+pub fn get_total_space(path: &Path) -> Result<u64, DiskSpaceError> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::mem::MaybeUninit;
+
+        let path_str = path.to_string_lossy();
+        let c_path = CString::new(path_str.as_ref())
+            .map_err(|_| DiskSpaceError::QueryFailed("invalid path".into()))?;
+
+        let mut stat = MaybeUninit::<libc::statvfs>::uninit();
+        let ret = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+
+        if ret != 0 {
+            return Err(DiskSpaceError::QueryFailed(format!(
+                "statvfs failed for {}",
+                path_str
+            )));
+        }
+
+        let stat = unsafe { stat.assume_init() };
+        // f_blocks is total number of blocks, f_frsize is fundamental block size
+        Ok(stat.f_blocks * stat.f_frsize)
+    }
+
+    #[cfg(not(unix))]
+    {
         let _ = path;
         Ok(u64::MAX)
     }
@@ -476,6 +514,9 @@ mod tests {
             enabled: true,
             status: DiskSpaceStatus::Sufficient,
             available_bytes: 1_000_000_000,
+            total_bytes: 10_000_000_000,
+            warning_threshold_bytes: 2_000_000_000,
+            critical_threshold_bytes: 1_000_000_000,
             safety_margin_bytes: 100_000_000,
             check_interval_secs: 30,
             is_monitoring: false,
