@@ -176,6 +176,22 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/notification-center/event-prefs/remove",
             post(remove_event_preference_handler),
         )
+        .route("/api/expiry", get(get_expiry_config_handler))
+        .route("/api/expiry", post(set_expiry_config_handler))
+        .route("/api/expiry/summary", get(get_expiry_summary_handler))
+        .route("/api/expiry/refresh", post(refresh_expiries_handler))
+        .route("/api/expiry/clear", post(clear_all_expiries_handler))
+        .route(
+            "/api/expiry/cleanup",
+            post(cleanup_expired_expiries_handler),
+        )
+        .route("/api/expiry/report", get(get_expiry_report_handler))
+        .route("/api/expiry/task/:task_id", get(get_task_expiry_handler))
+        .route("/api/expiry/task/:task_id", post(set_task_expiry_handler))
+        .route(
+            "/api/expiry/task/:task_id/remove",
+            post(remove_task_expiry_handler),
+        )
         .route("/api/task-speed", get(get_task_speed))
         .route("/api/task-speed", post(set_task_speed))
         .route("/api/checksum", post(set_checksum))
@@ -1237,6 +1253,19 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/file-stats/extension/:ext",
             get(get_extension_stats_handler),
         )
+        // Phase 148: Task Activity REST API
+        .route(
+            "/api/task-activity",
+            get(get_all_activity_summaries_handler),
+        )
+        .route(
+            "/api/task-activity/:task_id",
+            get(get_task_activity_handler).delete(clear_task_activity_handler),
+        )
+        .route(
+            "/api/task-activity/:task_id/log",
+            post(log_task_activity_handler),
+        )
         // Phase 144: SLA Compliance REST API
         .route(
             "/api/sla-compliance",
@@ -1272,6 +1301,50 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             post(clear_all_sla_history_handler),
         )
         .route("/api/sla-compliance/report", get(get_sla_report_handler))
+        .route(
+            "/api/host-conn-limit",
+            get(get_host_conn_limit_config_handler).post(set_host_conn_limit_config_handler),
+        )
+        .route(
+            "/api/host-conn-limit/summary",
+            get(get_host_conn_limit_summary_handler),
+        )
+        .route(
+            "/api/host-conn-limit/host/:hostname",
+            get(get_host_conn_state_handler),
+        )
+        .route(
+            "/api/host-conn-limit/host/:hostname/acquire",
+            post(acquire_host_connection_handler),
+        )
+        .route(
+            "/api/host-conn-limit/host/:hostname/release",
+            post(release_host_connection_handler),
+        )
+        .route(
+            "/api/host-conn-limit/host/:hostname/failure",
+            post(record_host_failure_handler),
+        )
+        .route(
+            "/api/host-conn-limit/host/:hostname/remove",
+            post(remove_host_connection_handler),
+        )
+        .route(
+            "/api/host-conn-limit/overrides",
+            get(list_host_overrides_handler).post(set_host_override_handler),
+        )
+        .route(
+            "/api/host-conn-limit/overrides/:hostname",
+            delete(remove_host_override_handler),
+        )
+        .route(
+            "/api/host-conn-limit/clear",
+            post(clear_host_connections_handler),
+        )
+        .route(
+            "/api/host-conn-limit/cleanup",
+            post(cleanup_stale_hosts_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -9874,4 +9947,326 @@ async fn remove_event_preference_handler(
         .remove_notification_event_preference(event)
         .await;
     Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+// ========== Download Expiry API (Phase 148) ==========
+
+/// GET /api/expiry - Get expiry configuration
+async fn get_expiry_config_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let config = state.manager.get_expiry_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/expiry - Update expiry configuration
+async fn set_expiry_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::download_expiry::ExpiryConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_expiry_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/expiry/summary - Get expiry summary
+async fn get_expiry_summary_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let summary = state.manager.get_expiry_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// POST /api/expiry/refresh - Refresh all expiry states
+async fn refresh_expiries_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let expired = state.manager.refresh_expiries().await;
+    Json(serde_json::json!({"expired_count": expired.len(), "expired_ids": expired}))
+}
+
+/// POST /api/expiry/clear - Clear all expiry tracking
+async fn clear_all_expiries_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    state.manager.clear_all_expiries().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/expiry/cleanup - Cleanup expired tasks
+async fn cleanup_expired_expiries_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let count = state.manager.cleanup_expired_expiries().await;
+    Json(serde_json::json!({"cleaned_count": count}))
+}
+
+/// GET /api/expiry/report - Get human-readable expiry report
+async fn get_expiry_report_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let limit = params
+        .get("limit")
+        .and_then(|l| l.parse::<usize>().ok())
+        .unwrap_or(20);
+    let report = state.manager.format_expiry_report(limit).await;
+    Json(serde_json::json!({"report": report}))
+}
+
+/// GET /api/expiry/task/:task_id - Get expiry info for a task
+async fn get_task_expiry_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.manager.get_task_expiry(&task_id).await {
+        Some(expiry) => Ok(Json(serde_json::to_value(expiry).unwrap_or_default())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// POST /api/expiry/task/:task_id - Set expiry for a task (duration_secs in body)
+async fn set_task_expiry_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+    Json(body): Json<SetExpiryRequest>,
+) -> Json<serde_json::Value> {
+    if let Some(duration_secs) = body.duration_secs {
+        state
+            .manager
+            .set_task_expiry_duration(&task_id, duration_secs)
+            .await;
+    } else if let Some(expires_at) = body.expires_at {
+        let dt = chrono::DateTime::parse_from_rfc3339(&expires_at)
+            .map(|d| d.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+        state.manager.set_task_expiry(&task_id, dt).await;
+    }
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/expiry/task/:task_id/remove - Remove expiry for a task
+async fn remove_task_expiry_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Json<serde_json::Value> {
+    state.manager.remove_task_expiry(&task_id).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetExpiryRequest {
+    duration_secs: Option<u64>,
+    expires_at: Option<String>,
+}
+
+// ========== Phase 148: Task Activity REST API Handlers ==========
+
+/// GET /api/task-activity - Get all activity summaries
+async fn get_all_activity_summaries_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::task_activity::TaskActivitySummary>> {
+    let summaries = state.manager.get_all_activity_summaries().await;
+    Json(summaries)
+}
+
+/// GET /api/task-activity/:task_id - Get activity log for a specific task
+async fn get_task_activity_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<crate::task_activity::TaskActivityLog>, StatusCode> {
+    state
+        .manager
+        .get_task_activity(&task_id)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// DELETE /api/task-activity/:task_id - Clear activity log for a specific task
+async fn clear_task_activity_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_task_activity(&task_id).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/task-activity/:task_id/log - Manually log an activity event
+#[derive(Debug, Deserialize)]
+struct LogActivityRequest {
+    event_type: String,
+    task_name: String,
+    message: Option<String>,
+    value: Option<f64>,
+}
+
+async fn log_task_activity_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+    Json(req): Json<LogActivityRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let event_type = match req.event_type.as_str() {
+        "created" => crate::task_activity::ActivityEventType::Created,
+        "started" => crate::task_activity::ActivityEventType::Started,
+        "paused" => crate::task_activity::ActivityEventType::Paused,
+        "resumed" => crate::task_activity::ActivityEventType::Resumed,
+        "completed" => crate::task_activity::ActivityEventType::Completed,
+        "failed" => crate::task_activity::ActivityEventType::Failed,
+        "removed" => crate::task_activity::ActivityEventType::Removed,
+        "auto_retry" => crate::task_activity::ActivityEventType::AutoRetry,
+        "speed_limit_changed" => crate::task_activity::ActivityEventType::SpeedLimitChanged,
+        "mirror_switched" => crate::task_activity::ActivityEventType::MirrorSwitched,
+        "connection_error" => crate::task_activity::ActivityEventType::ConnectionError,
+        "timeout" => crate::task_activity::ActivityEventType::Timeout,
+        "checksum_verify" => crate::task_activity::ActivityEventType::ChecksumVerify,
+        "checksum_result" => crate::task_activity::ActivityEventType::ChecksumResult,
+        "hook_executed" => crate::task_activity::ActivityEventType::HookExecuted,
+        "cooldown_triggered" => crate::task_activity::ActivityEventType::CooldownTriggered,
+        "conflict_resolved" => crate::task_activity::ActivityEventType::ConflictResolved,
+        "progress_milestone" => crate::task_activity::ActivityEventType::ProgressMilestone,
+        "note_changed" => crate::task_activity::ActivityEventType::NoteChanged,
+        "comment_added" => crate::task_activity::ActivityEventType::CommentAdded,
+        "tags_changed" => crate::task_activity::ActivityEventType::TagsChanged,
+        "info" => crate::task_activity::ActivityEventType::Info,
+        "warning" => crate::task_activity::ActivityEventType::Warning,
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    let message = req
+        .message
+        .unwrap_or_else(|| format!("Manual log: {}", req.event_type));
+
+    if let Some(value) = req.value {
+        state
+            .manager
+            .log_task_activity_with_value(&task_id, &req.task_name, event_type, message, value)
+            .await;
+    } else {
+        state
+            .manager
+            .log_task_activity(&task_id, &req.task_name, event_type, message)
+            .await;
+    }
+
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+// ========== Host Connection Limiter API (Phase 148) ==========
+
+/// GET /api/host-conn-limit - Get host connection limiter configuration
+async fn get_host_conn_limit_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_host_conn_limit_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/host-conn-limit - Update host connection limiter configuration
+async fn set_host_conn_limit_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::host_conn_limit::HostConnLimitConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_host_conn_limit_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/host-conn-limit/summary - Get host connection limiter summary
+async fn get_host_conn_limit_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.manager.get_host_conn_limit_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/host-conn-limit/host/:hostname - Get connection state for a host
+async fn get_host_conn_state_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(hostname): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.manager.get_host_connection_state(&hostname).await {
+        Some(info) => Ok(Json(serde_json::to_value(info).unwrap_or_default())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// POST /api/host-conn-limit/host/:hostname/acquire - Acquire a connection slot
+async fn acquire_host_connection_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(hostname): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let result = state.manager.acquire_host_connection(&hostname).await;
+    Json(serde_json::json!({"result": format!("{:?}", result)}))
+}
+
+/// POST /api/host-conn-limit/host/:hostname/release - Release a connection slot
+async fn release_host_connection_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(hostname): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    state.manager.release_host_connection(&hostname).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/host-conn-limit/host/:hostname/failure - Record a connection failure
+async fn record_host_failure_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(hostname): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    state.manager.record_host_failure(&hostname).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/host-conn-limit/host/:hostname/remove - Remove a host from tracking
+async fn remove_host_connection_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(hostname): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let removed = state.manager.remove_host_connection(&hostname).await;
+    Json(serde_json::json!({"removed": removed}))
+}
+
+/// GET /api/host-conn-limit/overrides - List all host overrides
+async fn list_host_overrides_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let overrides = state.manager.list_host_connection_overrides().await;
+    Json(serde_json::to_value(overrides).unwrap_or_default())
+}
+
+/// POST /api/host-conn-limit/overrides - Set a host override
+async fn set_host_override_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SetHostOverrideRequest>,
+) -> Json<serde_json::Value> {
+    state
+        .manager
+        .set_host_connection_override(&req.hostname, req.max_connections)
+        .await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// DELETE /api/host-conn-limit/overrides/:hostname - Remove a host override
+async fn remove_host_override_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(hostname): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let removed = state
+        .manager
+        .remove_host_connection_override(&hostname)
+        .await;
+    Json(serde_json::json!({"removed": removed}))
+}
+
+/// POST /api/host-conn-limit/clear - Clear all host tracking data
+async fn clear_host_connections_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_host_connections().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/host-conn-limit/cleanup - Clean up stale host connections
+async fn cleanup_stale_hosts_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.cleanup_stale_host_connections().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+#[derive(serde::Deserialize)]
+struct SetHostOverrideRequest {
+    hostname: String,
+    max_connections: u32,
 }

@@ -241,3 +241,121 @@ fn test_download_task_progress_zero_size() {
 
     assert_eq!(task.progress(), 0.0);
 }
+
+// ========== Phase 148: Task Activity REST API Tests ==========
+
+#[tokio::test]
+async fn test_task_activity_get_all_summaries() {
+    let tmp = TempDir::new().unwrap();
+    let dm = DownloadManager::new(tmp.path().to_path_buf());
+
+    // Initially empty
+    let summaries = dm.get_all_activity_summaries().await;
+    assert!(summaries.is_empty(), "Should start with no activity logs");
+}
+
+#[tokio::test]
+async fn test_task_activity_log_and_retrieve() {
+    let tmp = TempDir::new().unwrap();
+    let dm = DownloadManager::new(tmp.path().to_path_buf());
+
+    let task_id = "test-task-123";
+    let task_name = "Test Task";
+
+    // Log some activity
+    dm.log_task_activity(
+        task_id,
+        task_name,
+        ipmsg_download::task_activity::ActivityEventType::Created,
+        "Task created",
+    )
+    .await;
+
+    dm.log_task_activity(
+        task_id,
+        task_name,
+        ipmsg_download::task_activity::ActivityEventType::Started,
+        "Task started",
+    )
+    .await;
+
+    // Retrieve activity log
+    let log = dm.get_task_activity(task_id).await;
+    assert!(log.is_some(), "Should find activity log");
+    let log = log.unwrap();
+    assert_eq!(log.task_id, task_id);
+    assert_eq!(log.task_name, task_name);
+
+    // Check summaries
+    let summaries = dm.get_all_activity_summaries().await;
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].task_id, task_id);
+    assert_eq!(summaries[0].total_events, 2);
+}
+
+#[tokio::test]
+async fn test_task_activity_clear() {
+    let tmp = TempDir::new().unwrap();
+    let dm = DownloadManager::new(tmp.path().to_path_buf());
+
+    let task_id = "test-task-456";
+
+    // Log activity
+    dm.log_task_activity(
+        task_id,
+        "Test Task",
+        ipmsg_download::task_activity::ActivityEventType::Created,
+        "Created",
+    )
+    .await;
+
+    // Clear activity
+    dm.clear_task_activity(task_id).await;
+
+    // Should be empty
+    let log = dm.get_task_activity(task_id).await;
+    assert!(log.is_none() || log.unwrap().events().count() == 0);
+}
+
+#[tokio::test]
+async fn test_task_activity_with_value() {
+    let tmp = TempDir::new().unwrap();
+    let dm = DownloadManager::new(tmp.path().to_path_buf());
+
+    let task_id = "test-task-789";
+
+    dm.log_task_activity_with_value(
+        task_id,
+        "Test Task",
+        ipmsg_download::task_activity::ActivityEventType::ProgressMilestone,
+        "Progress: 50%",
+        50.0,
+    )
+    .await;
+
+    let log = dm.get_task_activity(task_id).await.unwrap();
+    let events: Vec<_> = log.events().collect();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].numeric_value, Some(50.0));
+}
+
+#[tokio::test]
+async fn test_task_activity_remove() {
+    let tmp = TempDir::new().unwrap();
+    let dm = DownloadManager::new(tmp.path().to_path_buf());
+
+    let task_id = "test-task-remove";
+
+    dm.log_task_activity(
+        task_id,
+        "Test Task",
+        ipmsg_download::task_activity::ActivityEventType::Created,
+        "Created",
+    )
+    .await;
+
+    dm.remove_task_activity(task_id).await;
+
+    let log = dm.get_task_activity(task_id).await;
+    assert!(log.is_none());
+}

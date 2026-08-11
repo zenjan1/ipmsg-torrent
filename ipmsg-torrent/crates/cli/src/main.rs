@@ -343,6 +343,27 @@ enum Command {
         /// Arguments for the subcommand
         args: Vec<String>,
     },
+    /// Download expiry management (set/remove expiry, refresh, cleanup)
+    DlExpiry {
+        /// Subcommand: status, set <task_id> <duration_secs>, remove <task_id>, refresh, cleanup, clear, report
+        subcmd: String,
+        /// Arguments for the subcommand
+        args: Vec<String>,
+    },
+    /// View per-task activity logs
+    DlActivity {
+        /// Subcommand: list, show <task_id>, clear <task_id>
+        subcmd: String,
+        /// Arguments for the subcommand
+        args: Vec<String>,
+    },
+    /// Host connection limiter management
+    DlHostConnLimit {
+        /// Subcommand: status, config, summary, host, override, remove, clear, cleanup
+        subcmd: String,
+        /// Arguments for the subcommand
+        args: Vec<String>,
+    },
     /// Set download schedule time window (e.g., "09:00-17:00" or "none" to disable)
     DlSchedule {
         task_id: String,
@@ -1325,6 +1346,52 @@ fn parse_command(input: &str) -> Command {
                 Command::Unknown(
                     "/dlnc <status|config|history|analytics|flush|clear|quiet-hours|batch>"
                         .to_string(),
+                )
+            }
+        }
+        "dlexpiry" | "dl-expiry" | "dlexp" => {
+            // /dlexpiry <subcommand> [args...]
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                let subcmd = args[1].to_string();
+                let sub_args: Vec<String> = args[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlExpiry {
+                    subcmd,
+                    args: sub_args,
+                }
+            } else {
+                Command::Unknown(
+                    "/dlexpiry <status|set|remove|refresh|cleanup|clear|report>".to_string(),
+                )
+            }
+        }
+        "dlactivity" | "dl-activity" => {
+            // /dlactivity <subcommand> [args...]
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                let subcmd = args[1].to_string();
+                let sub_args: Vec<String> = args[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlActivity {
+                    subcmd,
+                    args: sub_args,
+                }
+            } else {
+                Command::Unknown("/dlactivity <list|show|clear>".to_string())
+            }
+        }
+        "dlhcl" | "dl-hcl" | "dlhostconn" => {
+            // /dlhcl <subcommand> [args...]
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                let subcmd = args[1].to_string();
+                let sub_args: Vec<String> = args[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlHostConnLimit {
+                    subcmd,
+                    args: sub_args,
+                }
+            } else {
+                Command::Unknown(
+                    "/dlhcl <status|config|summary|host|override|remove|clear|cleanup>".to_string(),
                 )
             }
         }
@@ -2574,6 +2641,9 @@ fn command_help() -> String {
         "/dlautoshutdown <disabled|exit|shell:<cmd>> - Auto-shutdown when all downloads complete",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/dlnc [cmd]         - Notification center (status|config|history|analytics|flush|clear|quiet-hours|batch)",
+        "/dlexpiry [cmd]     - Download expiry management (status|set|remove|refresh|cleanup|clear|report)",
+        "/dlactivity [cmd]   - Task activity logs (list|show|clear)",
+        "/dlhcl [cmd]         - Host connection limiter (status|config|summary|host|override|remove|clear|cleanup)",
         "/dlpath <path>       - Set download save path (absolute path)",
         "/dlorganize <on|off> - Enable/disable auto-organize by file type",
         "/dlrename <id> <name> - Rename a download task",
@@ -9272,6 +9342,471 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Unknown subcommand. Use: status, config, history, analytics, flush, clear, quiet-hours, batch".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlExpiry { subcmd, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcmd.as_str() {
+                "status" => {
+                    let summary = download_manager.get_expiry_summary().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "⏰ Expiry Status:\n  Total tracked: {}\n  Expired: {}\n  Critical (<5min): {}\n  High (<1h): {}\n  Medium (<24h): {}\n  Low (>24h): {}",
+                            summary.total_tracked,
+                            summary.expired_count,
+                            summary.critical_count,
+                            summary.high_count,
+                            summary.medium_count,
+                            summary.low_count
+                        ),
+                    );
+                }
+                "set" => {
+                    if args.len() >= 2 {
+                        let task_id = args[0].clone();
+                        if let Ok(duration_secs) = args[1].parse::<u64>() {
+                            download_manager
+                                .set_task_expiry_duration(&task_id, duration_secs)
+                                .await;
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!(
+                                    "⏰ Expiry set for task {} ({} seconds)",
+                                    &task_id[..8.min(task_id.len())],
+                                    duration_secs
+                                ),
+                            );
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "Usage: /dlexpiry set <task_id> <duration_secs>".to_string(),
+                            );
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlexpiry set <task_id> <duration_secs>".to_string(),
+                        );
+                    }
+                }
+                "remove" => {
+                    if args.len() >= 1 {
+                        let task_id = args[0].clone();
+                        download_manager.remove_task_expiry(&task_id).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "⏰ Expiry removed for task {}",
+                                &task_id[..8.min(task_id.len())]
+                            ),
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlexpiry remove <task_id>".to_string(),
+                        );
+                    }
+                }
+                "refresh" => {
+                    let expired = download_manager.refresh_expiries().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("⏰ Refreshed expiries, {} tasks expired", expired.len()),
+                    );
+                }
+                "cleanup" => {
+                    let count = download_manager.cleanup_expired_expiries().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("⏰ Cleaned up {} expired tasks", count));
+                }
+                "clear" => {
+                    download_manager.clear_all_expiries().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "⏰ All expiry tracking cleared".to_string());
+                }
+                "report" => {
+                    let limit = args
+                        .first()
+                        .and_then(|l| l.parse::<usize>().ok())
+                        .unwrap_or(20);
+                    let report = download_manager.format_expiry_report(limit).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("⏰ Expiry Report:\n{}", report));
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Unknown subcommand. Use: status, set, remove, refresh, cleanup, clear, report".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlActivity { subcmd, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcmd.as_str() {
+                "list" => {
+                    let summaries = download_manager.get_all_activity_summaries().await;
+                    let mut s = state.lock().await;
+                    if summaries.is_empty() {
+                        s.add_system_message("main", "📋 No task activity logs found.".to_string());
+                    } else {
+                        let mut output = String::from("📋 Task Activity Logs:\n");
+                        for summary in summaries.iter().take(20) {
+                            output.push_str(&format!(
+                                "  • {} ({}): {} events, last: {}\n",
+                                summary.task_name,
+                                &summary.task_id[..8.min(summary.task_id.len())],
+                                summary.total_events,
+                                summary
+                                    .last_event
+                                    .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                                    .unwrap_or_else(|| "N/A".to_string())
+                            ));
+                        }
+                        if summaries.len() > 20 {
+                            output.push_str(&format!("  ... and {} more\n", summaries.len() - 20));
+                        }
+                        s.add_system_message("main", output);
+                    }
+                }
+                "show" => {
+                    if args.len() >= 1 {
+                        let task_id = args[0].clone();
+                        if let Some(log) = download_manager.get_task_activity(&task_id).await {
+                            let mut s = state.lock().await;
+                            let mut output = format!("📋 Activity Log for {}:\n", log.task_name);
+                            let events: Vec<_> = log.events().collect();
+                            for event in events.iter().take(50) {
+                                output.push_str(&format!(
+                                    "  [{}] {} - {}{}\n",
+                                    event.timestamp.format("%H:%M:%S"),
+                                    event.event_type,
+                                    event.message,
+                                    event
+                                        .numeric_value
+                                        .map(|v| format!(" ({:.1})", v))
+                                        .unwrap_or_default()
+                                ));
+                            }
+                            if events.len() > 50 {
+                                output.push_str(&format!(
+                                    "  ... and {} more events\n",
+                                    events.len() - 50
+                                ));
+                            }
+                            s.add_system_message("main", output);
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!(
+                                    "📋 No activity log found for task {}",
+                                    &task_id[..8.min(task_id.len())]
+                                ),
+                            );
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlactivity show <task_id>".to_string(),
+                        );
+                    }
+                }
+                "clear" => {
+                    if args.len() >= 1 {
+                        let task_id = args[0].clone();
+                        download_manager.clear_task_activity(&task_id).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "📋 Activity log cleared for task {}",
+                                &task_id[..8.min(task_id.len())]
+                            ),
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlactivity clear <task_id>".to_string(),
+                        );
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Unknown subcommand. Use: list, show <task_id>, clear <task_id>"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlHostConnLimit { subcmd, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcmd.as_str() {
+                "status" => {
+                    let summary = download_manager.get_host_conn_limit_summary().await;
+                    let mut s = state.lock().await;
+                    let status = if summary.enabled {
+                        "✅ Enabled"
+                    } else {
+                        "❌ Disabled"
+                    };
+                    let output = format!(
+                        "🔗 Host Connection Limiter Status:\n\
+                         Status: {}\n\
+                         Default max connections/host: {}\n\
+                         Host overrides: {}\n\
+                         Tracked hosts: {}\n\
+                         Hosts at limit: {}\n\
+                         Total active connections: {}",
+                        status,
+                        summary.default_max_connections,
+                        summary.override_count,
+                        summary.tracked_host_count,
+                        summary.hosts_at_limit,
+                        summary.total_active_connections,
+                    );
+                    s.add_system_message("main", output);
+                }
+                "config" => {
+                    if args.len() >= 2 {
+                        let key = args[0].as_str();
+                        let val = args[1].as_str();
+                        let mut config = download_manager.get_host_conn_limit_config().await;
+                        match key {
+                            "enabled" => {
+                                config.enabled = val == "true" || val == "1" || val == "on";
+                            }
+                            "default" => {
+                                if let Ok(v) = val.parse::<u32>() {
+                                    config.default_max_connections = v;
+                                } else {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid value for default. Use a number.".to_string(),
+                                    );
+                                    return;
+                                }
+                            }
+                            "timeout" => {
+                                if let Ok(v) = val.parse::<u64>() {
+                                    config.idle_timeout_secs = v;
+                                } else {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "Invalid value for timeout. Use a number.".to_string(),
+                                    );
+                                    return;
+                                }
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dlhcl config <enabled|default|timeout> <value>"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                        }
+                        download_manager.set_host_conn_limit_config(config).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "✅ Host connection limit config updated.".to_string(),
+                        );
+                    } else {
+                        let config = download_manager.get_host_conn_limit_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "🔗 Host Connection Limit Config:\n\
+                             Enabled: {}\n\
+                             Default max connections: {}\n\
+                             Max tracked hosts: {}\n\
+                             Idle timeout: {}s\n\
+                             Overrides: {}",
+                                config.enabled,
+                                config.default_max_connections,
+                                config.max_tracked_hosts,
+                                config.idle_timeout_secs,
+                                config.host_overrides.len(),
+                            ),
+                        );
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_host_conn_limit_summary().await;
+                    let mut s = state.lock().await;
+                    if summary.top_hosts.is_empty() {
+                        s.add_system_message("main", "🔗 No hosts currently tracked.".to_string());
+                    } else {
+                        let mut output = format!(
+                            "🔗 Host Connection Summary (top {}):\n",
+                            summary.top_hosts.len()
+                        );
+                        for host in &summary.top_hosts {
+                            let limit_indicator = if host.at_limit { " [AT LIMIT]" } else { "" };
+                            output.push_str(&format!(
+                                "  • {}: {}/{} active{} | total: {} | failures: {} | peak: {} | idle: {}s\n",
+                                host.hostname,
+                                host.active_connections,
+                                host.max_connections,
+                                limit_indicator,
+                                host.total_connections,
+                                host.total_failures,
+                                host.peak_connections,
+                                host.idle_secs,
+                            ));
+                        }
+                        s.add_system_message("main", output);
+                    }
+                }
+                "host" => {
+                    if args.len() >= 1 {
+                        let hostname = &args[0];
+                        if let Some(info) =
+                            download_manager.get_host_connection_state(hostname).await
+                        {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!(
+                                    "🔗 Host: {}\n\
+                                 Active: {}/{}\n\
+                                 Total connections: {}\n\
+                                 Failures: {}\n\
+                                 Peak: {}\n\
+                                 At limit: {}\n\
+                                 Idle: {}s",
+                                    info.hostname,
+                                    info.active_connections,
+                                    info.max_connections,
+                                    info.total_connections,
+                                    info.total_failures,
+                                    info.peak_connections,
+                                    if info.at_limit { "YES" } else { "no" },
+                                    info.idle_secs,
+                                ),
+                            );
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("🔗 Host '{}' not tracked.", hostname),
+                            );
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlhcl host <hostname>".to_string());
+                    }
+                }
+                "override" => {
+                    if args.len() >= 2 {
+                        let hostname = &args[0];
+                        if let Ok(max) = args[1].parse::<u32>() {
+                            download_manager
+                                .set_host_connection_override(hostname, max)
+                                .await;
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Override set: {} -> {} connections", hostname, max),
+                            );
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "Invalid max connections value.".to_string(),
+                            );
+                        }
+                    } else {
+                        // List overrides
+                        let overrides = download_manager.list_host_connection_overrides().await;
+                        let mut s = state.lock().await;
+                        if overrides.is_empty() {
+                            s.add_system_message(
+                                "main",
+                                "🔗 No host overrides configured.".to_string(),
+                            );
+                        } else {
+                            let mut output = String::from("🔗 Host Overrides:\n");
+                            for (host, max) in &overrides {
+                                output.push_str(&format!("  • {}: {} connections\n", host, max));
+                            }
+                            s.add_system_message("main", output);
+                        }
+                    }
+                }
+                "remove" => {
+                    if args.len() >= 1 {
+                        let hostname = &args[0];
+                        let removed = download_manager.remove_host_connection(hostname).await;
+                        let mut s = state.lock().await;
+                        if removed {
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Host '{}' removed from tracking.", hostname),
+                            );
+                        } else {
+                            s.add_system_message(
+                                "main",
+                                format!("🔗 Host '{}' not found.", hostname),
+                            );
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlhcl remove <hostname>".to_string());
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_host_connections().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ All host connection data cleared.".to_string(),
+                    );
+                }
+                "cleanup" => {
+                    download_manager.cleanup_stale_host_connections().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ Stale host connections cleaned up.".to_string(),
+                    );
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Unknown subcommand. Use: status, config, summary, host, override, remove, clear, cleanup"
+                            .to_string(),
                     );
                 }
             }

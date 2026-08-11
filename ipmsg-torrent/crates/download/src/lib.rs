@@ -58,6 +58,7 @@ pub mod eta_estimator;
 pub mod event_webhook;
 pub mod global_budget;
 pub mod health_dashboard;
+pub mod host_conn_limit;
 pub mod integrity_verification;
 pub mod intelligent_source_selector;
 pub mod link_extractor;
@@ -1059,6 +1060,8 @@ pub struct DownloadManager {
     sla_compliance: Arc<tokio::sync::RwLock<sla_compliance::SlaComplianceManager>>,
     /// Per-task notification preferences manager (Phase 146)
     notification_preferences: Arc<Mutex<notification_preferences::NotificationPreferencesManager>>,
+    /// Host connection limiter for per-host TCP connection tracking (Phase 148)
+    host_conn_limit: Arc<Mutex<host_conn_limit::HostConnLimitManager>>,
 }
 
 impl DownloadManager {
@@ -1302,6 +1305,7 @@ impl DownloadManager {
             notification_preferences: Arc::new(Mutex::new(
                 notification_preferences::NotificationPreferencesManager::new(),
             )),
+            host_conn_limit: Arc::new(Mutex::new(host_conn_limit::HostConnLimitManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1677,6 +1681,7 @@ impl DownloadManager {
             notification_preferences: Arc::new(Mutex::new(
                 notification_preferences::NotificationPreferencesManager::new(),
             )),
+            host_conn_limit: Arc::new(Mutex::new(host_conn_limit::HostConnLimitManager::new())),
         };
         // Restore SLA compliance data from disk
         {
@@ -16099,6 +16104,133 @@ async fn parse_and_add_ed2k(manager: &DownloadManager, link: &str) -> Result<Str
         .add_ed2k(hash, file_size, file_name, servers)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ========== Host Connection Limiter (Phase 148) ==========
+
+impl DownloadManager {
+    /// Get host connection limiter configuration
+    pub async fn get_host_conn_limit_config(&self) -> host_conn_limit::HostConnLimitConfig {
+        let manager = self.host_conn_limit.lock().await;
+        manager.get_config().clone()
+    }
+
+    /// Set host connection limiter configuration
+    pub async fn set_host_conn_limit_config(&self, config: host_conn_limit::HostConnLimitConfig) {
+        let mut manager = self.host_conn_limit.lock().await;
+        manager.set_config(config);
+    }
+
+    /// Get a summary of host connection limiter status
+    pub async fn get_host_conn_limit_summary(&self) -> host_conn_limit::HostConnLimitSummary {
+        let manager = self.host_conn_limit.lock().await;
+        manager.get_summary()
+    }
+
+    /// Try to acquire a connection slot for a host
+    pub async fn acquire_host_connection(
+        &self,
+        hostname: &str,
+    ) -> host_conn_limit::ConnectionAcquireResult {
+        let mut manager = self.host_conn_limit.lock().await;
+        manager.acquire_connection(hostname)
+    }
+
+    /// Release a connection slot for a host
+    pub async fn release_host_connection(&self, hostname: &str) {
+        let mut manager = self.host_conn_limit.lock().await;
+        manager.release_connection(hostname);
+    }
+
+    /// Record a connection failure for a host
+    pub async fn record_host_failure(&self, hostname: &str) {
+        let mut manager = self.host_conn_limit.lock().await;
+        manager.record_failure(hostname);
+    }
+
+    /// Get connection state for a specific host
+    pub async fn get_host_connection_state(
+        &self,
+        hostname: &str,
+    ) -> Option<host_conn_limit::HostConnectionInfo> {
+        let manager = self.host_conn_limit.lock().await;
+        manager.get_host_state(hostname).map(|state| {
+            let max = manager.get_max_connections(&state.hostname);
+            let now = std::time::Instant::now();
+            host_conn_limit::HostConnectionInfo {
+                hostname: state.hostname.clone(),
+                active_connections: state.active_connections,
+                max_connections: max,
+                total_connections: state.total_connections,
+                total_failures: state.total_failures,
+                peak_connections: state.peak_connections,
+                at_limit: state.at_limit,
+                idle_secs: now.duration_since(state.last_activity).as_secs(),
+            }
+        })
+    }
+
+    /// Check if a host is at its connection limit
+    pub async fn is_host_at_connection_limit(&self, hostname: &str) -> bool {
+        let manager = self.host_conn_limit.lock().await;
+        manager.is_at_limit(hostname)
+    }
+
+    /// Get available connection slots for a host
+    pub async fn get_host_available_slots(&self, hostname: &str) -> u32 {
+        let manager = self.host_conn_limit.lock().await;
+        manager.available_slots(hostname)
+    }
+
+    /// Set a per-host connection limit override
+    pub async fn set_host_connection_override(&self, hostname: &str, max_connections: u32) {
+        let mut manager = self.host_conn_limit.lock().await;
+        manager.set_host_override(hostname, max_connections);
+    }
+
+    /// Remove a per-host connection limit override
+    pub async fn remove_host_connection_override(&self, hostname: &str) -> bool {
+        let mut manager = self.host_conn_limit.lock().await;
+        manager.remove_host_override(hostname)
+    }
+
+    /// List all host connection overrides
+    pub async fn list_host_connection_overrides(&self) -> Vec<(String, u32)> {
+        let manager = self.host_conn_limit.lock().await;
+        manager.list_overrides()
+    }
+
+    /// Remove a host from connection tracking
+    pub async fn remove_host_connection(&self, hostname: &str) -> bool {
+        let mut manager = self.host_conn_limit.lock().await;
+        manager.remove_host(hostname)
+    }
+
+    /// Clear all host connection tracking data
+    pub async fn clear_host_connections(&self) {
+        let mut manager = self.host_conn_limit.lock().await;
+        manager.clear_host_data();
+    }
+
+    /// Clean up stale host connections
+    pub async fn cleanup_stale_host_connections(&self) {
+        let mut manager = self.host_conn_limit.lock().await;
+        manager.cleanup_stale_hosts();
+    }
+
+    /// Save host connection limiter config to disk
+    pub async fn save_host_conn_limit_config(&self) -> std::io::Result<()> {
+        let manager = self.host_conn_limit.lock().await;
+        let config_path = self.data_dir.join("host_conn_limit_config.json");
+        manager.save_config(&config_path)
+    }
+
+    /// Load host connection limiter config from disk
+    pub async fn load_host_conn_limit_config(&self) -> std::io::Result<()> {
+        let mut manager = self.host_conn_limit.lock().await;
+        let config_path = self.data_dir.join("host_conn_limit_config.json");
+        manager.load_config(&config_path)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
