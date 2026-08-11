@@ -858,11 +858,63 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/speed-test/clear", post(clear_speed_test_handler))
         .route("/api/speed-trend", get(get_speed_trend_config_handler))
         .route("/api/speed-trend", post(set_speed_trend_config_handler))
-        .route("/api/speed-trend/summary", get(get_speed_trend_summary_handler))
+        .route(
+            "/api/speed-trend/summary",
+            get(get_speed_trend_summary_handler),
+        )
         .route("/api/speed-trend/trends", get(get_all_speed_trends_handler))
-        .route("/api/speed-trend/degrading", get(get_degrading_trends_handler))
-        .route("/api/speed-trend/improving", get(get_improving_trends_handler))
-        .route("/api/speed-trend/clear", post(clear_all_speed_trends_handler))
+        .route(
+            "/api/speed-trend/degrading",
+            get(get_degrading_trends_handler),
+        )
+        .route(
+            "/api/speed-trend/improving",
+            get(get_improving_trends_handler),
+        )
+        .route(
+            "/api/speed-trend/clear",
+            post(clear_all_speed_trends_handler),
+        )
+        .route(
+            "/api/task-scorecard",
+            get(get_task_scorecard_config_handler),
+        )
+        .route(
+            "/api/task-scorecard",
+            post(set_task_scorecard_config_handler),
+        )
+        .route(
+            "/api/task-scorecard/summary",
+            get(get_task_scorecard_summary_handler),
+        )
+        .route(
+            "/api/task-scorecard/list",
+            get(list_task_scorecards_handler),
+        )
+        .route(
+            "/api/task-scorecard/top",
+            get(get_top_task_scorecards_handler),
+        )
+        .route(
+            "/api/task-scorecard/worst",
+            get(get_worst_task_scorecards_handler),
+        )
+        .route(
+            "/api/task-scorecard/generate/:task_id",
+            post(generate_task_scorecard_handler),
+        )
+        .route(
+            "/api/task-scorecard/:task_id",
+            get(get_task_scorecard_handler),
+        )
+        .route(
+            "/api/task-scorecard/:task_id",
+            delete(delete_task_scorecard_handler),
+        )
+        .route(
+            "/api/task-scorecard/clear",
+            post(clear_all_task_scorecards_handler),
+        )
         .route("/api/webhook", get(get_webhook_summary_handler))
         .route("/api/webhook/config", get(get_webhook_config_handler))
         .route("/api/webhook/config", post(set_webhook_config_handler))
@@ -1019,22 +1071,10 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             post(clear_source_quality_handler),
         )
         // Phase 138: Speed Boost CLI + REST API Integration
-        .route(
-            "/api/speed-boost",
-            get(get_speed_boost_status_handler),
-        )
-        .route(
-            "/api/speed-boost",
-            post(set_speed_boost_config_handler),
-        )
-        .route(
-            "/api/speed-boost/start",
-            post(start_speed_boost_handler),
-        )
-        .route(
-            "/api/speed-boost/stop",
-            post(stop_speed_boost_handler),
-        )
+        .route("/api/speed-boost", get(get_speed_boost_status_handler))
+        .route("/api/speed-boost", post(set_speed_boost_config_handler))
+        .route("/api/speed-boost/start", post(start_speed_boost_handler))
+        .route("/api/speed-boost/stop", post(stop_speed_boost_handler))
         .route(
             "/api/speed-boost/preset",
             post(add_speed_boost_preset_handler),
@@ -8414,6 +8454,100 @@ async fn clear_all_speed_trends_handler(
     Json(serde_json::json!({"status": "ok"}))
 }
 
+// --- Task Scorecard (Phase 139) ---
+
+/// GET /api/task-scorecard - Get task scorecard configuration
+async fn get_task_scorecard_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_task_scorecard_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/task-scorecard - Update task scorecard configuration
+async fn set_task_scorecard_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::task_scorecard::ScorecardConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_task_scorecard_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/task-scorecard/summary - Get task scorecard summary
+async fn get_task_scorecard_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_task_scorecard_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/task-scorecard/list - List all task scorecards
+async fn list_task_scorecards_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let scorecards = state.manager.get_all_task_scorecards().await;
+    Json(serde_json::to_value(scorecards).unwrap_or_default())
+}
+
+/// GET /api/task-scorecard/top - Get top performing tasks
+async fn get_top_task_scorecards_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl axum::response::IntoResponse {
+    let n: usize = params.get("n").and_then(|s| s.parse().ok()).unwrap_or(10);
+    let top = state.manager.get_top_task_scorecards(n).await;
+    Json(serde_json::to_value(top).unwrap_or_default())
+}
+
+/// GET /api/task-scorecard/worst - Get worst performing tasks
+async fn get_worst_task_scorecards_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl axum::response::IntoResponse {
+    let n: usize = params.get("n").and_then(|s| s.parse().ok()).unwrap_or(10);
+    let worst = state.manager.get_worst_task_scorecards(n).await;
+    Json(serde_json::to_value(worst).unwrap_or_default())
+}
+
+/// POST /api/task-scorecard/generate/:task_id - Generate scorecard for a task
+async fn generate_task_scorecard_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.generate_task_scorecard(&task_id).await {
+        Some(scorecard) => Json(serde_json::to_value(scorecard).unwrap_or_default()),
+        None => Json(serde_json::json!({"error": "Task not found"})),
+    }
+}
+
+/// GET /api/task-scorecard/:task_id - Get scorecard for a specific task
+async fn get_task_scorecard_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.get_task_scorecard(&task_id).await {
+        Some(scorecard) => Json(serde_json::to_value(scorecard).unwrap_or_default()),
+        None => Json(serde_json::json!({"error": "Scorecard not found"})),
+    }
+}
+
+/// DELETE /api/task-scorecard/:task_id - Delete scorecard for a specific task
+async fn delete_task_scorecard_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let removed = state.manager.remove_task_scorecard(&task_id).await;
+    Json(serde_json::json!({"status": if removed { "removed" } else { "not_found" }}))
+}
+
+/// POST /api/task-scorecard/clear - Clear all task scorecards
+async fn clear_all_task_scorecards_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_all_task_scorecards().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
 // --- Event Webhook (Phase 130) ---
 
 /// GET /api/webhook - Get webhook summary
@@ -9007,12 +9141,8 @@ async fn start_speed_boost_handler(
     State(state): State<Arc<WebState>>,
     Json(params): Json<serde_json::Value>,
 ) -> impl axum::response::IntoResponse {
-    let duration_secs = params
-        .get("duration_secs")
-        .and_then(|v| v.as_u64());
-    let multiplier = params
-        .get("multiplier")
-        .and_then(|v| v.as_f64());
+    let duration_secs = params.get("duration_secs").and_then(|v| v.as_u64());
+    let multiplier = params.get("multiplier").and_then(|v| v.as_f64());
     let preset = params
         .get("preset")
         .and_then(|v| v.as_str())
@@ -9028,21 +9158,19 @@ async fn start_speed_boost_handler(
     };
 
     match result {
-        crate::speed_boost::BoostStartResult::Started(boost) => {
-            Json(serde_json::json!({
-                "status": "started",
-                "multiplier": boost.multiplier,
-                "expires_at": boost.expires_at,
-                "source": boost.source,
-                "remaining_secs": boost.remaining_secs()
-            }))
-        }
-        crate::speed_boost::BoostStartResult::Disabled => {
-            Json(serde_json::json!({"status": "disabled", "message": "Speed boost feature is disabled"}))
-        }
-        crate::speed_boost::BoostStartResult::AlreadyActive => {
-            Json(serde_json::json!({"status": "already_active", "message": "Another boost is already active"}))
-        }
+        crate::speed_boost::BoostStartResult::Started(boost) => Json(serde_json::json!({
+            "status": "started",
+            "multiplier": boost.multiplier,
+            "expires_at": boost.expires_at,
+            "source": boost.source,
+            "remaining_secs": boost.remaining_secs()
+        })),
+        crate::speed_boost::BoostStartResult::Disabled => Json(
+            serde_json::json!({"status": "disabled", "message": "Speed boost feature is disabled"}),
+        ),
+        crate::speed_boost::BoostStartResult::AlreadyActive => Json(
+            serde_json::json!({"status": "already_active", "message": "Another boost is already active"}),
+        ),
         crate::speed_boost::BoostStartResult::InvalidParams(msg) => {
             Json(serde_json::json!({"status": "invalid_params", "message": msg}))
         }

@@ -99,8 +99,8 @@ pub mod speed_burst;
 pub mod speed_history;
 pub mod speed_prediction;
 pub mod speed_profiles;
-pub mod speed_trend;
 pub mod speed_test;
+pub mod speed_trend;
 pub mod tag_management;
 pub mod task_activity;
 pub mod task_archive;
@@ -113,6 +113,7 @@ pub mod task_proxy;
 pub mod task_queue;
 pub mod task_schedule_windows;
 pub mod task_scheduler;
+pub mod task_scorecard;
 pub mod task_snooze;
 pub mod torrent;
 pub mod ttl;
@@ -1025,7 +1026,10 @@ pub struct DownloadManager {
     /// Source reliability tracker for per-domain reliability scoring
     source_reliability: Arc<Mutex<source_reliability::SourceReliabilityTracker>>,
     /// Notification center for advanced notification management with quiet hours and batching
+    #[allow(dead_code)]
     notification_center: Arc<Mutex<notification_center::NotificationCenterManager>>,
+    /// Task scorecard manager for unified per-task performance scoring (Phase 139)
+    task_scorecard: Arc<Mutex<task_scorecard::TaskScorecardManager>>,
 }
 
 impl DownloadManager {
@@ -1248,6 +1252,7 @@ impl DownloadManager {
             notification_center: Arc::new(Mutex::new(
                 notification_center::NotificationCenterManager::new(),
             )),
+            task_scorecard: Arc::new(Mutex::new(task_scorecard::TaskScorecardManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1384,7 +1389,7 @@ impl DownloadManager {
             }
         }
 
-        let save_path = data_dir.join("downloads");
+        let _save_path = data_dir.join("downloads");
         let dm = Self {
             tasks: Arc::new(Mutex::new(tasks)),
             speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
@@ -1602,6 +1607,7 @@ impl DownloadManager {
             notification_center: Arc::new(Mutex::new(
                 notification_center::NotificationCenterManager::new(),
             )),
+            task_scorecard: Arc::new(Mutex::new(task_scorecard::TaskScorecardManager::new())),
         };
         // Restore tag manager from disk
         dm.tag_manager.restore().await;
@@ -7289,7 +7295,7 @@ impl DownloadManager {
         let network_monitor = self.network_monitor.clone();
         let cost_tracker = self.cost_tracker.clone();
         let bandwidth_forecast = self.bandwidth_forecast.clone();
-        let bandwidth_usage = self.bandwidth_usage.clone();
+        let _bandwidth_usage = self.bandwidth_usage.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -9413,6 +9419,162 @@ impl DownloadManager {
             mgr.set_config(config);
         }
         if mgr.load_data(&data_path).is_err() {
+            // Ignore if file doesn't exist
+        }
+        Ok(())
+    }
+
+    // --- Task Scorecard (Phase 139) ---
+
+    /// Get task scorecard configuration.
+    pub async fn get_task_scorecard_config(&self) -> task_scorecard::ScorecardConfig {
+        let mgr = self.task_scorecard.lock().await;
+        mgr.config.clone()
+    }
+
+    /// Set task scorecard configuration.
+    pub async fn set_task_scorecard_config(&self, config: task_scorecard::ScorecardConfig) {
+        let mut mgr = self.task_scorecard.lock().await;
+        mgr.set_config(config);
+    }
+
+    /// Generate a scorecard for a specific task.
+    pub async fn generate_task_scorecard(
+        &self,
+        task_id: &str,
+    ) -> Option<task_scorecard::TaskScorecard> {
+        let tasks = self.tasks.lock().await;
+        let task = tasks.iter().find(|t| t.id == task_id)?;
+
+        // Extract domain from source URL
+        let source_domain = task.source_url.as_ref().and_then(|url| {
+            url::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(|h| h.to_string()))
+        });
+
+        // Look up source reliability score
+        let source_reliability_score = if let Some(ref domain) = source_domain {
+            let rel_mgr = self.source_reliability.lock().await;
+            Some(rel_mgr.get_score(domain))
+        } else {
+            None
+        };
+
+        // Get profiler data if available
+        let profiler_mgr = self.task_profiler.lock().await;
+        let profile = profiler_mgr.get_profile(task_id);
+
+        // Get anomaly data
+        let anomaly_mgr = self.speed_anomaly.lock().await;
+        let anomalies = anomaly_mgr.get_anomalies(task_id);
+
+        let progress_pct = if task.size > 0 {
+            (task.downloaded as f64 / task.size as f64 * 100.0).min(100.0)
+        } else {
+            0.0
+        };
+
+        let input = task_scorecard::ScorecardInput {
+            task_id: task_id.to_string(),
+            task_name: task.name.clone(),
+            protocol: format!("{:?}", task.protocol).to_lowercase(),
+            source_domain,
+            total_bytes: task.size,
+            downloaded_bytes: task.downloaded,
+            progress_pct,
+            avg_speed_bps: task.speed_bps,
+            peak_speed_bps: task.speed_bps * 1.5, // estimate peak as 1.5x average
+            efficiency_score: profile.map(|p| p.efficiency_score).unwrap_or(50.0),
+            stall_count: 0, // not tracked in DownloadTask
+            retry_count: task.auto_retry_count,
+            error_count: if task.error.is_some() { 1 } else { 0 },
+            duration_secs: task.active_time_seconds,
+            is_complete: task.state == crate::DownloadState::Complete,
+            source_reliability_score,
+            anomaly_count: anomalies.len() as u32,
+            bottleneck: profile.map(|p| format!("{:?}", p.bottleneck)),
+            profiler_recommendations: profile
+                .map(|p| p.recommendations.clone())
+                .unwrap_or_default(),
+        };
+
+        let mut mgr = self.task_scorecard.lock().await;
+        mgr.generate_scorecard(&input)
+    }
+
+    /// Get scorecard for a task (if already generated).
+    pub async fn get_task_scorecard(&self, task_id: &str) -> Option<task_scorecard::TaskScorecard> {
+        let mgr = self.task_scorecard.lock().await;
+        mgr.get_scorecard(task_id).cloned()
+    }
+
+    /// Get all task scorecards sorted by score (best first).
+    pub async fn get_all_task_scorecards(&self) -> Vec<task_scorecard::TaskScorecard> {
+        let mgr = self.task_scorecard.lock().await;
+        mgr.get_all_scorecards().into_iter().cloned().collect()
+    }
+
+    /// Get top performing tasks by score.
+    pub async fn get_top_task_scorecards(&self, n: usize) -> Vec<task_scorecard::TaskScorecard> {
+        let mgr = self.task_scorecard.lock().await;
+        mgr.get_top_performers(n).into_iter().cloned().collect()
+    }
+
+    /// Get worst performing tasks by score.
+    pub async fn get_worst_task_scorecards(&self, n: usize) -> Vec<task_scorecard::TaskScorecard> {
+        let mgr = self.task_scorecard.lock().await;
+        mgr.get_worst_performers(n).into_iter().cloned().collect()
+    }
+
+    /// Get scorecard summary across all tasks.
+    pub async fn get_task_scorecard_summary(&self) -> task_scorecard::ScorecardSummary {
+        let mgr = self.task_scorecard.lock().await;
+        mgr.get_summary()
+    }
+
+    /// Remove scorecard for a task.
+    pub async fn remove_task_scorecard(&self, task_id: &str) -> bool {
+        let mut mgr = self.task_scorecard.lock().await;
+        mgr.remove_scorecard(task_id)
+    }
+
+    /// Clear all task scorecards.
+    pub async fn clear_all_task_scorecards(&self) {
+        let mut mgr = self.task_scorecard.lock().await;
+        mgr.clear_all();
+    }
+
+    /// Save task scorecard data to disk.
+    pub async fn save_task_scorecard_data(&self) -> Result<(), String> {
+        let mgr = self.task_scorecard.lock().await;
+        let config_path = format!("{}/task_scorecard_config.json", self.data_dir.display());
+        let data_path = format!("{}/task_scorecard_data.json", self.data_dir.display());
+        mgr.save_config(std::path::Path::new(&config_path))
+            .await
+            .map_err(|e| e.to_string())?;
+        mgr.save_data(std::path::Path::new(&data_path))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Load task scorecard data from disk.
+    pub async fn load_task_scorecard_data(&self) -> Result<(), String> {
+        let mut mgr = self.task_scorecard.lock().await;
+        let config_path = format!("{}/task_scorecard_config.json", self.data_dir.display());
+        let data_path = format!("{}/task_scorecard_data.json", self.data_dir.display());
+        if let Ok(config) =
+            task_scorecard::TaskScorecardManager::load_config(std::path::Path::new(&config_path))
+                .await
+        {
+            mgr.set_config(config);
+        }
+        if mgr
+            .load_data(std::path::Path::new(&data_path))
+            .await
+            .is_err()
+        {
             // Ignore if file doesn't exist
         }
         Ok(())
@@ -14100,7 +14262,6 @@ impl DownloadManager {
         let mut mgr = self.bandwidth_forecast.lock().await;
         mgr.clear_all();
     }
-
 
     // ========== Phase 138: Bandwidth Usage Tracker ==========
 

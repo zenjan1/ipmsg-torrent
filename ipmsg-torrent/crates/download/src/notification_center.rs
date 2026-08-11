@@ -73,7 +73,9 @@ impl NotificationCenterEvent {
     /// Get default priority for this event type
     pub fn default_priority(&self) -> NotificationPriority {
         match self {
-            Self::DownloadComplete | Self::DownloadStarted | Self::DownloadResumed
+            Self::DownloadComplete
+            | Self::DownloadStarted
+            | Self::DownloadResumed
             | Self::DownloadPaused => NotificationPriority::Normal,
             Self::ProgressMilestone => NotificationPriority::Low,
             Self::DownloadFailed | Self::SpeedAlert | Self::DiskSpaceWarning => {
@@ -374,10 +376,7 @@ impl NotificationCenterManager {
     /// Check if quiet hours are currently active
     pub fn is_quiet_hours_active(&self) -> bool {
         let now = Local::now();
-        self.config
-            .quiet_hours
-            .is_quiet_time(now)
-            .unwrap_or(false)
+        self.config.quiet_hours.is_quiet_time(now).unwrap_or(false)
     }
 
     /// Create and queue a notification
@@ -424,7 +423,9 @@ impl NotificationCenterManager {
     fn get_priority_for_event(&self, event: NotificationCenterEvent) -> NotificationPriority {
         for pref in &self.config.event_preferences {
             if pref.event == event {
-                return pref.priority_override.unwrap_or_else(|| event.default_priority());
+                return pref
+                    .priority_override
+                    .unwrap_or_else(|| event.default_priority());
             }
         }
         event.default_priority()
@@ -480,7 +481,7 @@ impl NotificationCenterManager {
         let channels = self.get_channels_for_event(event);
 
         // Deliver to each channel (simulated - actual delivery would integrate with notification.rs)
-        let mut success = true;
+        let success = true;
         for channel in &channels {
             // In real implementation, this would call the actual notification delivery
             debug!("Delivering notification to channel: {}", channel);
@@ -837,12 +838,15 @@ mod tests {
     fn test_notification_center_muted_event() {
         let mut center = NotificationCenterManager::new();
         center.config.batching.enabled = false;
-        center.config.event_preferences.push(EventChannelPreference {
-            event: NotificationCenterEvent::ProgressMilestone,
-            channels: vec![],
-            priority_override: None,
-            muted: true,
-        });
+        center
+            .config
+            .event_preferences
+            .push(EventChannelPreference {
+                event: NotificationCenterEvent::ProgressMilestone,
+                channels: vec![],
+                priority_override: None,
+                muted: true,
+            });
 
         center.notify(
             NotificationCenterEvent::ProgressMilestone,
@@ -1014,12 +1018,15 @@ mod tests {
     #[test]
     fn test_event_channel_preference() {
         let mut center = NotificationCenterManager::new();
-        center.config.event_preferences.push(EventChannelPreference {
-            event: NotificationCenterEvent::DownloadFailed,
-            channels: vec!["webhook".to_string(), "desktop".to_string()],
-            priority_override: Some(NotificationPriority::Critical),
-            muted: false,
-        });
+        center
+            .config
+            .event_preferences
+            .push(EventChannelPreference {
+                event: NotificationCenterEvent::DownloadFailed,
+                channels: vec!["webhook".to_string(), "desktop".to_string()],
+                priority_override: Some(NotificationPriority::Critical),
+                muted: false,
+            });
 
         // Check that preference is applied
         let priority = center.get_priority_for_event(NotificationCenterEvent::DownloadFailed);

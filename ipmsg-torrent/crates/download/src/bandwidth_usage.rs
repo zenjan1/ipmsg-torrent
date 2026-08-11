@@ -244,7 +244,8 @@ impl BandwidthUsageTracker {
         let current_bytes = current_data.map(|a| a.download_bytes).unwrap_or(0);
         let current_upload = current_data.map(|a| a.upload_bytes).unwrap_or(0);
 
-        let total_download: u64 = recent.iter().map(|s| s.download_bytes).sum::<u64>() + current_bytes;
+        let total_download: u64 =
+            recent.iter().map(|s| s.download_bytes).sum::<u64>() + current_bytes;
         let total_upload: u64 = recent.iter().map(|s| s.upload_bytes).sum::<u64>() + current_upload;
 
         let hours_with_data = recent.len() + if current_bytes > 0 { 1 } else { 0 };
@@ -580,11 +581,7 @@ impl BandwidthUsageTracker {
         let mut remaining_days = days_since_epoch;
 
         loop {
-            let days_in_year = if Self::is_leap_year(year) {
-                366
-            } else {
-                365
-            };
+            let days_in_year = if Self::is_leap_year(year) { 366 } else { 365 };
             if remaining_days < days_in_year {
                 break;
             }

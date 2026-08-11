@@ -54,12 +54,14 @@ const SLOW_SOURCE_THRESHOLD: f64 = 10_000.0; // 10 KB/s
 const DEFAULT_BLOCK_DURATION_SECS: u64 = 60;
 
 /// Buffer pool for reusing allocations
+#[allow(dead_code)]
 struct BufferPool {
     buffers: Vec<BytesMut>,
     buffer_size: usize,
     max_buffers: usize,
 }
 
+#[allow(dead_code)]
 impl BufferPool {
     fn new(buffer_size: usize, max_buffers: usize) -> Self {
         Self {
@@ -100,6 +102,7 @@ pub struct XunleiEngine {
     /// Optional rate limiter for speed control
     rate_limiter: Option<RateLimiter>,
     /// Buffer pool for reusing allocations
+    #[allow(dead_code)]
     buffer_pool: Arc<Mutex<BufferPool>>,
     /// Current estimated bandwidth (bytes/sec) for dynamic block sizing
     estimated_bandwidth: f64,
@@ -213,6 +216,7 @@ impl XunleiEngine {
     }
 
     /// Update bandwidth estimate and adjust block size if needed
+    #[allow(dead_code)]
     fn update_bandwidth_estimate(&mut self, bytes: u64, duration_ms: f64) {
         if duration_ms > 0.0 {
             let instant_bw = (bytes as f64 * 1000.0) / duration_ms;

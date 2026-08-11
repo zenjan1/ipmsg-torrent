@@ -157,6 +157,7 @@ struct DomainState {
     /// Maximum allowed connections for this domain
     max_connections: u32,
     /// Last time this domain was rate-limited
+    #[allow(dead_code)]
     last_throttle: Option<Instant>,
 }
 

@@ -9,11 +9,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Time window for trend analysis
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TrendWindow {
     /// Last 5 minutes
     Minutes5,
     /// Last 15 minutes
+    #[default]
     Minutes15,
     /// Last 30 minutes
     Minutes30,
@@ -36,12 +37,6 @@ impl TrendWindow {
             TrendWindow::Hours6 => 6 * 60 * 60,
             TrendWindow::Hours24 => 24 * 60 * 60,
         }
-    }
-}
-
-impl Default for TrendWindow {
-    fn default() -> Self {
-        TrendWindow::Minutes15
     }
 }
 
@@ -281,15 +276,6 @@ impl SpeedTrendManager {
         let min_speed = speeds.iter().copied().fold(f64::INFINITY, f64::min);
         let max_speed = speeds.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
-        // Calculate trend using linear regression slope
-        let n = speeds.len() as f64;
-        let sum_x: f64 = (0..speeds.len()).map(|i| i as f64).sum();
-        let sum_y: f64 = speeds.iter().sum();
-        let sum_xy: f64 = speeds.iter().enumerate().map(|(i, &y)| i as f64 * y).sum();
-        let sum_x2: f64 = (0..speeds.len()).map(|i| (i as f64).powi(2)).sum();
-
-        let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x.powi(2));
-
         // Calculate percentage change
         let first_speed = speeds.first().copied().unwrap_or(0.0);
         let change_percent = if first_speed > 0.0 {
@@ -476,29 +462,28 @@ impl SpeedTrendManager {
 
     /// Save configuration to file
     pub fn save_config(&self, path: &str) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(&self.config)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json =
+            serde_json::to_string_pretty(&self.config).map_err(|e| std::io::Error::other(e))?;
         std::fs::write(path, json)
     }
 
     /// Load configuration from file
     pub fn load_config(path: &str) -> std::io::Result<SpeedTrendConfig> {
         let json = std::fs::read_to_string(path)?;
-        serde_json::from_str(&json).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::from_str(&json).map_err(|e| std::io::Error::other(e))
     }
 
     /// Save data to file
     pub fn save_data(&self, path: &str) -> std::io::Result<()> {
         let json = serde_json::to_string_pretty(&self.domain_samples)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(|e| std::io::Error::other(e))?;
         std::fs::write(path, json)
     }
 
     /// Load data from file
     pub fn load_data(&mut self, path: &str) -> std::io::Result<()> {
         let json = std::fs::read_to_string(path)?;
-        self.domain_samples = serde_json::from_str(&json)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        self.domain_samples = serde_json::from_str(&json).map_err(|e| std::io::Error::other(e))?;
         Ok(())
     }
 }

@@ -227,6 +227,7 @@ enum Command {
     DlUpload {
         /// "status", "config", "summary", "tasks", "clear"
         action: String,
+        #[allow(dead_code)]
         args: Vec<String>,
     },
     /// Bandwidth forecast - predict download speeds based on historical data (Phase 136)
@@ -256,6 +257,13 @@ enum Command {
     /// Speed trend analysis - per-domain speed trend tracking (Phase 138)
     DlSpeedTrend {
         /// "status", "summary", "trends", "degrading", "improving", "clear", "config"
+        action: String,
+        #[allow(dead_code)]
+        args: Vec<String>,
+    },
+    /// Task scorecard - unified per-task performance scoring (Phase 139)
+    DlScorecard {
+        /// "status", "summary", "generate", "list", "top", "worst", "remove", "clear", "config"
         action: String,
         args: Vec<String>,
     },
@@ -1110,6 +1118,18 @@ fn parse_command(input: &str) -> Command {
                 let action = parts[1].to_string();
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlSpeedTrend { action, args }
+            }
+        }
+        "dlscorecard" | "dl-scorecard" | "dlsc" => {
+            if parts.len() < 2 {
+                Command::DlScorecard {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlScorecard { action, args }
             }
         }
         "dlpathorg" | "dl-pathorg" | "dlpo" => {
@@ -3268,7 +3288,7 @@ async fn handle_command(
                 for task in &tasks {
                     let progress = task.progress();
                     let icon = state_icon(task.state);
-                    let color = state_color(task.state);
+                    let _color = state_color(task.state);
                     let bar = format_progress_bar(progress, 20);
 
                     // Speed and ETA
@@ -7149,7 +7169,11 @@ async fn handle_command(
                     let status = dm.get_speed_boost_status().await;
                     let mut msg = format!(
                         "🚀 Speed Boost Status\n  Enabled: yes\n  Active Boost: {}",
-                        if status.active_boost.is_some() { "yes" } else { "no" }
+                        if status.active_boost.is_some() {
+                            "yes"
+                        } else {
+                            "no"
+                        }
                     );
                     if let Some(boost) = &status.active_boost {
                         msg.push_str(&format!(
@@ -7189,13 +7213,22 @@ async fn handle_command(
                                 );
                             }
                             ipmsg_download::speed_boost::BoostStartResult::Disabled => {
-                                s.add_system_message("main", "❌ Speed boost feature is disabled".to_string());
+                                s.add_system_message(
+                                    "main",
+                                    "❌ Speed boost feature is disabled".to_string(),
+                                );
                             }
                             ipmsg_download::speed_boost::BoostStartResult::AlreadyActive => {
-                                s.add_system_message("main", "⚠️ Another boost is already active".to_string());
+                                s.add_system_message(
+                                    "main",
+                                    "⚠️ Another boost is already active".to_string(),
+                                );
                             }
                             ipmsg_download::speed_boost::BoostStartResult::InvalidParams(msg) => {
-                                s.add_system_message("main", format!("❌ Invalid parameters: {}", msg));
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Invalid parameters: {}", msg),
+                                );
                             }
                         }
                     } else {
@@ -7221,7 +7254,9 @@ async fn handle_command(
                                 }
                                 _ => {
                                     // Try to parse as duration (e.g., "30m", "1h")
-                                    if let Some(secs) = ipmsg_download::auto_cleanup::parse_duration_secs(&args[i]) {
+                                    if let Some(secs) =
+                                        ipmsg_download::auto_cleanup::parse_duration_secs(&args[i])
+                                    {
                                         duration_secs = Some(secs);
                                     }
                                     i += 1;
@@ -7249,13 +7284,22 @@ async fn handle_command(
                                 );
                             }
                             ipmsg_download::speed_boost::BoostStartResult::Disabled => {
-                                s.add_system_message("main", "❌ Speed boost feature is disabled".to_string());
+                                s.add_system_message(
+                                    "main",
+                                    "❌ Speed boost feature is disabled".to_string(),
+                                );
                             }
                             ipmsg_download::speed_boost::BoostStartResult::AlreadyActive => {
-                                s.add_system_message("main", "⚠️ Another boost is already active".to_string());
+                                s.add_system_message(
+                                    "main",
+                                    "⚠️ Another boost is already active".to_string(),
+                                );
                             }
                             ipmsg_download::speed_boost::BoostStartResult::InvalidParams(msg) => {
-                                s.add_system_message("main", format!("❌ Invalid parameters: {}", msg));
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Invalid parameters: {}", msg),
+                                );
                             }
                         }
                     }
@@ -7278,10 +7322,7 @@ async fn handle_command(
                         for (id, preset) in &config.presets {
                             msg.push_str(&format!(
                                 "  - {}: {:.1}x for {}s\n    {}\n",
-                                id,
-                                preset.multiplier,
-                                preset.duration_secs,
-                                preset.description
+                                id, preset.multiplier, preset.duration_secs, preset.description
                             ));
                         }
                     }
@@ -7623,7 +7664,7 @@ async fn handle_command(
             }
         }
 
-        Command::DlSpeedTrend { action, args } => {
+        Command::DlSpeedTrend { action, args: _ } => {
             let s = state.lock().await;
             let download_manager = s.download_manager.clone();
             drop(s);
@@ -7774,6 +7815,218 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlspdtrend [status|summary|trends|degrading|improving|clear|config]"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        Command::DlScorecard { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            match action.as_str() {
+                "status" => {
+                    let config = download_manager.get_task_scorecard_config().await;
+                    let summary = download_manager.get_task_scorecard_summary().await;
+                    let msg = format!(
+                        "📊 Task Scorecard Status:\n\
+                         Enabled: {}\n\
+                         Weights: efficiency={:.0}% speed={:.0}% stability={:.0}% reliability={:.0}% progress={:.0}%\n\
+                         Min samples: {} | Max scorecards: {}\n\
+                         Total scorecards: {}\n\
+                         Avg score: {:.1}\n\
+                         Failing: {} | Excellent: {}",
+                        config.enabled,
+                        config.weights.efficiency * 100.0,
+                        config.weights.speed * 100.0,
+                        config.weights.stability * 100.0,
+                        config.weights.reliability * 100.0,
+                        config.weights.progress * 100.0,
+                        config.min_samples,
+                        config.max_scorecards,
+                        summary.total_scorecards,
+                        summary.avg_score,
+                        summary.failing_count,
+                        summary.excellent_count,
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "summary" => {
+                    let summary = download_manager.get_task_scorecard_summary().await;
+                    let msg = ipmsg_download::task_scorecard::TaskScorecardManager::format_summary(
+                        &summary,
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "generate" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlscorecard generate <task_id>".to_string(),
+                        );
+                    } else {
+                        let task_id = &args[0];
+                        match download_manager.generate_task_scorecard(task_id).await {
+                            Some(sc) => {
+                                let msg = format!(
+                                    "📊 Scorecard for task '{}':\n\
+                                     Score: {:.1} ({})\n\
+                                     {}\n\
+                                     Recommendations: {}",
+                                    sc.task_name,
+                                    sc.composite_score,
+                                    sc.grade.emoji(),
+                                    sc.summary,
+                                    if sc.recommendations.is_empty() {
+                                        "None".to_string()
+                                    } else {
+                                        sc.recommendations.join(", ")
+                                    },
+                                );
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", msg);
+                            }
+                            None => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("No task found with id '{}'", task_id),
+                                );
+                            }
+                        }
+                    }
+                }
+                "list" => {
+                    let scorecards = download_manager.get_all_task_scorecards().await;
+                    if scorecards.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "No scorecards generated. Use /dlscorecard generate <task_id>"
+                                .to_string(),
+                        );
+                    } else {
+                        let mut lines = vec!["📊 All Task Scorecards:".to_string()];
+                        for sc in &scorecards {
+                            lines.push(format!(
+                                "  {} {:.1} ({}) - {}",
+                                sc.grade.emoji(),
+                                sc.composite_score,
+                                sc.grade.label(),
+                                sc.task_name,
+                            ));
+                        }
+                        let msg = lines.join("\n");
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "top" => {
+                    let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(5);
+                    let top = download_manager.get_top_task_scorecards(n).await;
+                    if top.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No scorecards generated yet.".to_string());
+                    } else {
+                        let mut lines = vec![format!("🏆 Top {} Performers:", top.len())];
+                        for sc in &top {
+                            lines.push(format!(
+                                "  {} {:.1} ({}) - {}",
+                                sc.grade.emoji(),
+                                sc.composite_score,
+                                sc.grade.label(),
+                                sc.task_name,
+                            ));
+                        }
+                        let msg = lines.join("\n");
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "worst" => {
+                    let n: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(5);
+                    let worst = download_manager.get_worst_task_scorecards(n).await;
+                    if worst.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No scorecards generated yet.".to_string());
+                    } else {
+                        let mut lines = vec![format!("⚠️  Bottom {} Performers:", worst.len())];
+                        for sc in &worst {
+                            lines.push(format!(
+                                "  {} {:.1} ({}) - {}",
+                                sc.grade.emoji(),
+                                sc.composite_score,
+                                sc.grade.label(),
+                                sc.task_name,
+                            ));
+                        }
+                        let msg = lines.join("\n");
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "remove" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlscorecard remove <task_id>".to_string(),
+                        );
+                    } else {
+                        let task_id = &args[0];
+                        let removed = download_manager.remove_task_scorecard(task_id).await;
+                        let msg = if removed {
+                            format!("Scorecard removed for task '{}'", task_id)
+                        } else {
+                            format!("No scorecard found for task '{}'", task_id)
+                        };
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_all_task_scorecards().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "All scorecards cleared.".to_string());
+                }
+                "config" => {
+                    let config = download_manager.get_task_scorecard_config().await;
+                    let msg = format!(
+                        "📊 Scorecard Configuration:\n\
+                         Enabled: {}\n\
+                         Weights:\n\
+                           Efficiency:  {:.2}\n\
+                           Speed:       {:.2}\n\
+                           Stability:   {:.2}\n\
+                           Reliability: {:.2}\n\
+                           Progress:    {:.2}\n\
+                         Min samples: {}\n\
+                         Max scorecards: {}\n\
+                         Include recommendations: {}\n\
+                         Max recommendations: {}",
+                        config.enabled,
+                        config.weights.efficiency,
+                        config.weights.speed,
+                        config.weights.stability,
+                        config.weights.reliability,
+                        config.weights.progress,
+                        config.min_samples,
+                        config.max_scorecards,
+                        config.include_recommendations,
+                        config.max_recommendations,
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlscorecard [status|summary|generate|list|top|worst|remove|clear|config]"
                             .to_string(),
                     );
                 }

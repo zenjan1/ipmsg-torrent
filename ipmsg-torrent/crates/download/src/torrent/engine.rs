@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 /// Interval between choke/unchoke optimization rounds (seconds)
 const CHOKE_INTERVAL_SECS: u64 = 10;
 /// Number of peers to unchoke based on upload rate (tit-for-tat)
+#[allow(dead_code)]
 const OPTIMISTIC_UNCHOKE_COUNT: usize = 1;
 /// Maximum tracker announce retries before giving up
 const MAX_TRACKER_RETRIES: u32 = 3;

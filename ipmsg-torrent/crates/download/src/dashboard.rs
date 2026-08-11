@@ -11,7 +11,7 @@
 //! Useful for a quick glance at the entire download system state.
 
 use crate::DownloadPriority;
-use crate::queue_completion::{QueueCompletionConfig, QueueCompletionPrediction};
+use crate::queue_completion::QueueCompletionPrediction;
 use crate::queue_health::HealthStatus;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
