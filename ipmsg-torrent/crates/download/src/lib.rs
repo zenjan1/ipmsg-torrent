@@ -40,6 +40,7 @@ pub mod download_budget;
 pub mod download_cooldown;
 pub mod download_cost;
 pub mod download_deadline;
+pub mod download_diagnostics;
 pub mod download_expiry;
 pub mod download_file_stats;
 pub mod download_history;
@@ -81,6 +82,7 @@ pub mod preflight_check;
 pub mod priority_aging;
 pub mod progress;
 pub mod progress_milestone;
+pub mod progress_prediction;
 pub mod protocol_limits;
 pub mod proxy;
 pub mod queue_completion;
@@ -956,6 +958,8 @@ pub struct DownloadManager {
     connection_health: Arc<Mutex<connection_health::ConnectionHealthManager>>,
     /// Source rotation manager for automatic failover to alternative sources
     source_rotation: Arc<Mutex<source_rotation::SourceRotationManager>>,
+    /// Progress predictor for download completion time estimation
+    progress_predictor: Arc<Mutex<progress_prediction::ProgressPredictor>>,
     /// Bandwidth allocation manager for intelligent bandwidth distribution
     bandwidth_allocation: Arc<Mutex<bandwidth_allocation::AllocationManager>>,
     /// Per-task proxy override manager
@@ -1022,6 +1026,8 @@ pub struct DownloadManager {
     smart_queue: Arc<tokio::sync::RwLock<smart_queue::SmartQueueOptimizer>>,
     /// Preflight checker for pre-download validation
     preflight_checker: Arc<tokio::sync::RwLock<preflight_check::PreflightChecker>>,
+    /// Download diagnostics for troubleshooting issues
+    diagnostics: Arc<tokio::sync::RwLock<download_diagnostics::DownloadDiagnostics>>,
     /// Tag management system for cross-task tag operations
     tag_manager: Arc<tag_management::TagManager>,
     /// Download cost tracker for estimating monetary cost of data usage
@@ -1204,6 +1210,7 @@ impl DownloadManager {
                 connection_health::ConnectionHealthManager::new(),
             )),
             source_rotation: Arc::new(Mutex::new(source_rotation::SourceRotationManager::new())),
+            progress_predictor: Arc::new(Mutex::new(progress_prediction::ProgressPredictor::new())),
             bandwidth_allocation: Arc::new(Mutex::new(
                 bandwidth_allocation::AllocationManager::new(),
             )),
@@ -1277,6 +1284,9 @@ impl DownloadManager {
             )),
             preflight_checker: Arc::new(tokio::sync::RwLock::new(
                 preflight_check::PreflightChecker::new(&data_dir),
+            )),
+            diagnostics: Arc::new(tokio::sync::RwLock::new(
+                download_diagnostics::DownloadDiagnostics::new(),
             )),
             tag_manager: Arc::new(tag_management::TagManager::new(&data_dir)),
             cost_tracker: Arc::new(Mutex::new(download_cost::CostTracker::new())),
@@ -1591,6 +1601,7 @@ impl DownloadManager {
                 connection_health::ConnectionHealthManager::new(),
             )),
             source_rotation: Arc::new(Mutex::new(source_rotation::SourceRotationManager::new())),
+            progress_predictor: Arc::new(Mutex::new(progress_prediction::ProgressPredictor::new())),
             bandwidth_allocation: Arc::new(Mutex::new(
                 bandwidth_allocation::AllocationManager::new(),
             )),
@@ -1665,6 +1676,9 @@ impl DownloadManager {
             preflight_checker: Arc::new(tokio::sync::RwLock::new(
                 preflight_check::PreflightChecker::new(&data_dir),
             )),
+            diagnostics: Arc::new(tokio::sync::RwLock::new(
+                download_diagnostics::DownloadDiagnostics::new(),
+            )),
             tag_manager: Arc::new(tag_management::TagManager::new(&data_dir)),
             cost_tracker: Arc::new(Mutex::new(download_cost::CostTracker::new())),
             history_analytics: Arc::new(Mutex::new(
@@ -1736,6 +1750,10 @@ impl DownloadManager {
         // Restore smart queue config from disk
         if let Some(sq_cfg) = smart_queue::load_smart_queue_config(&dm.data_dir) {
             dm.smart_queue.write().await.set_config(sq_cfg);
+        }
+        // Restore diagnostics config from disk
+        if let Some(diag_cfg) = download_diagnostics::load_diagnostics_config(&dm.data_dir) {
+            dm.diagnostics.write().await.set_config(diag_cfg);
         }
         // Restore download analytics from disk
         if let Ok(analytics_records) = download_analytics::load_analytics_records(&dm.data_dir) {
@@ -5516,6 +5534,156 @@ impl DownloadManager {
     ) -> preflight_check::PreflightReport {
         let pc = self.preflight_checker.read().await;
         pc.run_checks(&input).await
+    }
+
+    // ── Download Diagnostics ─────────────────────────────────────────
+
+    /// Get diagnostics configuration
+    pub async fn get_diagnostics_config(&self) -> download_diagnostics::DiagnosticsConfig {
+        let diag = self.diagnostics.read().await;
+        diag.get_config().clone()
+    }
+
+    /// Set diagnostics configuration
+    pub async fn set_diagnostics_config(
+        &self,
+        config: download_diagnostics::DiagnosticsConfig,
+    ) -> Result<(), String> {
+        let mut diag = self.diagnostics.write().await;
+        diag.set_config(config);
+        drop(diag);
+        self.save_diagnostics_config().await
+    }
+
+    /// Run diagnostics analysis with current system state
+    pub async fn run_diagnostics(&self) -> Vec<download_diagnostics::DiagnosticFinding> {
+        let input = self.build_diagnostics_input().await;
+        let diag = self.diagnostics.read().await;
+        diag.analyze(&input)
+    }
+
+    /// Get diagnostics summary
+    pub async fn get_diagnostics_summary(&self) -> download_diagnostics::DiagnosticsSummary {
+        let findings = self.run_diagnostics().await;
+        let diag = self.diagnostics.read().await;
+        diag.summarize(&findings)
+    }
+
+    /// Get formatted diagnostics report
+    pub async fn get_diagnostics_report(&self) -> String {
+        let findings = self.run_diagnostics().await;
+        let diag = self.diagnostics.read().await;
+        diag.format_report(&findings)
+    }
+
+    /// Save diagnostics config to disk
+    pub async fn save_diagnostics_config(&self) -> Result<(), String> {
+        let diag = self.diagnostics.read().await;
+        download_diagnostics::save_diagnostics_config(diag.get_config(), &self.data_dir)
+    }
+
+    /// Load diagnostics config from disk
+    pub async fn load_diagnostics_config(&self) -> Result<(), String> {
+        if let Some(config) = download_diagnostics::load_diagnostics_config(&self.data_dir) {
+            let mut diag = self.diagnostics.write().await;
+            diag.set_config(config);
+        }
+        Ok(())
+    }
+
+    /// Build diagnostics input from current system state
+    async fn build_diagnostics_input(&self) -> download_diagnostics::DiagnosticsInput {
+        let tasks = self.tasks.lock().await;
+        let running = self.running.lock().await;
+
+        let mut active_downloads = 0;
+        let mut queued_downloads = 0;
+        let mut failed_downloads = 0;
+        let mut stalled_downloads = 0;
+        let mut current_speed_bps = 0u64;
+        let mut task_diagnostics = Vec::new();
+
+        for task in tasks.iter() {
+            let state_str = format!("{:?}", task.state);
+            let rt = running.get(&task.id);
+
+            // Calculate current speed from speed_samples
+            let speed_bps = rt
+                .map(|r| {
+                    if r.speed_samples.is_empty() {
+                        0.0
+                    } else {
+                        r.speed_samples.iter().sum::<f64>() / r.speed_samples.len() as f64
+                    }
+                })
+                .unwrap_or(0.0) as u64;
+
+            let secs_since_progress = rt
+                .map(|r| r.last_progress_time.elapsed().as_secs())
+                .unwrap_or(0);
+
+            let age_secs = chrono::Utc::now()
+                .signed_duration_since(task.created_at)
+                .num_seconds()
+                .max(0) as u64;
+
+            match task.state {
+                crate::DownloadState::Downloading => {
+                    active_downloads += 1;
+                    current_speed_bps += speed_bps;
+                    if secs_since_progress > 1800 {
+                        stalled_downloads += 1;
+                    }
+                }
+                crate::DownloadState::Queued => queued_downloads += 1,
+                crate::DownloadState::Error => failed_downloads += 1,
+                _ => {}
+            }
+
+            task_diagnostics.push(download_diagnostics::TaskDiagnosticData {
+                task_id: task.id.clone(),
+                task_name: task.name.clone(),
+                state: state_str,
+                speed_bps,
+                progress_percent: if task.size > 0 {
+                    (task.downloaded as f64 / task.size as f64) * 100.0
+                } else {
+                    0.0
+                },
+                secs_since_last_progress: secs_since_progress,
+                retry_count: rt.map(|r| r.retry_count).unwrap_or(0),
+                consecutive_failures: 0, // Not tracked in RunningTask
+                last_error: task.error.clone(),
+                age_secs,
+                total_size: task.size,
+                downloaded_bytes: task.downloaded,
+            });
+        }
+
+        let max_concurrent = self
+            .max_concurrent
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        // Get disk space
+        let available_disk_bytes = disk_monitor::get_available_space(&self.data_dir).unwrap_or(0);
+        let total_disk_bytes = disk_monitor::get_total_space(&self.data_dir).unwrap_or(0);
+
+        download_diagnostics::DiagnosticsInput {
+            current_speed_bps,
+            avg_speed_bps: 0,
+            available_disk_bytes,
+            total_disk_bytes,
+            network_connected: true,
+            dns_working: true,
+            proxy_configured: self.proxy_config.read().await.is_some(),
+            proxy_reachable: None,
+            active_downloads,
+            queued_downloads,
+            failed_downloads,
+            stalled_downloads,
+            max_concurrent,
+            task_diagnostics,
+        }
     }
 
     // ── Download Statistics ──────────────────────────────────────────

@@ -1241,10 +1241,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/uptime", get(get_uptime_handler))
         // ── Dependency Visualization API (Phase 154) ──
-        .route(
-            "/api/dependency-visualization",
-            get(get_dep_viz_handler),
-        )
+        .route("/api/dependency-visualization", get(get_dep_viz_handler))
         .route(
             "/api/dependency-visualization/stats",
             get(get_dep_viz_stats_handler),
@@ -1272,6 +1269,21 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route(
             "/api/dependency-visualization/dot",
             get(get_dep_viz_dot_handler),
+        )
+        // ── Download Diagnostics API (Phase 156) ──
+        .route("/api/diagnostics", get(get_diagnostics_handler))
+        .route(
+            "/api/diagnostics/config",
+            get(get_diagnostics_config_handler),
+        )
+        .route(
+            "/api/diagnostics/config",
+            post(set_diagnostics_config_handler),
+        )
+        .route("/api/diagnostics/run", post(run_diagnostics_handler))
+        .route(
+            "/api/diagnostics/report",
+            get(get_diagnostics_report_handler),
         )
         .route(
             "/api/file-stats",
@@ -11111,9 +11123,7 @@ async fn check_url_blocked_handler(
 // ========== Phase 154: Dependency Visualization REST API Handlers ==========
 
 /// GET /api/dependency-visualization - Build and return the dependency graph
-async fn get_dep_viz_handler(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn get_dep_viz_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     match state.manager.build_dependency_visualization().await {
         Some(graph) => Json(serde_json::to_value(graph).unwrap_or_default()),
         None => Json(serde_json::json!({"error": "no graph available"})),
@@ -11121,9 +11131,7 @@ async fn get_dep_viz_handler(
 }
 
 /// GET /api/dependency-visualization/stats - Get graph statistics
-async fn get_dep_viz_stats_handler(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn get_dep_viz_stats_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     match state.manager.get_dep_visualization_stats().await {
         Some(stats) => Json(serde_json::to_value(stats).unwrap_or_default()),
         None => Json(serde_json::json!({"error": "no stats available"})),
@@ -11131,9 +11139,7 @@ async fn get_dep_viz_stats_handler(
 }
 
 /// GET /api/dependency-visualization/config - Get visualization config
-async fn get_dep_viz_config_handler(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn get_dep_viz_config_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let config = state.manager.get_dep_visualization_config().await;
     Json(serde_json::to_value(config).unwrap_or_default())
 }
@@ -11148,41 +11154,117 @@ async fn set_dep_viz_config_handler(
 }
 
 /// GET /api/dependency-visualization/cycles - Get detected dependency cycles
-async fn get_dep_viz_cycles_handler(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn get_dep_viz_cycles_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let cycles = state.manager.get_dependency_cycles().await;
     Json(serde_json::json!({"cycles": cycles, "count": cycles.len()}))
 }
 
 /// GET /api/dependency-visualization/roots - Get root tasks (no dependencies)
-async fn get_dep_viz_roots_handler(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn get_dep_viz_roots_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let roots = state.manager.get_dependency_roots().await;
     Json(serde_json::json!({"roots": roots, "count": roots.len()}))
 }
 
 /// GET /api/dependency-visualization/leaves - Get leaf tasks (no dependents)
-async fn get_dep_viz_leaves_handler(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn get_dep_viz_leaves_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let leaves = state.manager.get_dependency_leaves().await;
     Json(serde_json::json!({"leaves": leaves, "count": leaves.len()}))
 }
 
 /// GET /api/dependency-visualization/text - Get text-based visualization
-async fn get_dep_viz_text_handler(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn get_dep_viz_text_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let text = state.manager.visualize_dependency_graph().await;
     Json(serde_json::json!({"text": text}))
 }
 
 /// GET /api/dependency-visualization/dot - Export graph in DOT format (Graphviz)
-async fn get_dep_viz_dot_handler(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn get_dep_viz_dot_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let dot = state.manager.export_dependency_graph_dot().await;
     Json(serde_json::json!({"dot": dot}))
+}
+
+// ── Download Diagnostics Handlers (Phase 156) ─────────────────────────
+
+/// GET /api/diagnostics - Get diagnostics summary
+async fn get_diagnostics_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_diagnostics_summary().await;
+    Json(serde_json::json!({
+        "total_findings": summary.total_findings,
+        "findings_by_severity": summary.findings_by_severity,
+        "findings_by_category": summary.findings_by_category,
+        "critical_count": summary.critical_count,
+        "error_count": summary.error_count,
+        "warning_count": summary.warning_count,
+        "info_count": summary.info_count,
+        "health_score": summary.health_score,
+        "top_recommendations": summary.top_recommendations
+    }))
+}
+
+/// GET /api/diagnostics/config - Get diagnostics configuration
+async fn get_diagnostics_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_diagnostics_config().await;
+    Json(serde_json::json!({
+        "enabled": config.enabled,
+        "slow_download_threshold_bps": config.slow_download_threshold_bps,
+        "stuck_task_threshold_secs": config.stuck_task_threshold_secs,
+        "min_disk_space_bytes": config.min_disk_space_bytes,
+        "max_retry_threshold": config.max_retry_threshold,
+        "max_consecutive_failures": config.max_consecutive_failures,
+        "check_network": config.check_network,
+        "check_disk": config.check_disk,
+        "check_performance": config.check_performance,
+        "check_queue": config.check_queue,
+        "max_findings_per_category": config.max_findings_per_category
+    }))
+}
+
+/// POST /api/diagnostics/config - Update diagnostics configuration
+async fn set_diagnostics_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::download_diagnostics::DiagnosticsConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_diagnostics_config(config).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// POST /api/diagnostics/run - Run diagnostics analysis
+async fn run_diagnostics_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let findings = state.manager.run_diagnostics().await;
+    let findings_json: Vec<serde_json::Value> = findings
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "category": f.category.to_string(),
+                "severity": f.severity.to_string(),
+                "title": f.title,
+                "description": f.description,
+                "recommendations": f.recommendations,
+                "related_task_ids": f.related_task_ids
+            })
+        })
+        .collect();
+    Json(serde_json::json!({
+        "findings": findings_json,
+        "count": findings.len()
+    }))
+}
+
+/// GET /api/diagnostics/report - Get formatted diagnostics report
+async fn get_diagnostics_report_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let report = state.manager.get_diagnostics_report().await;
+    Json(serde_json::json!({"report": report}))
 }

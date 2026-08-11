@@ -281,6 +281,12 @@ enum Command {
     },
     /// System uptime - view how long the system has been running (Phase 143)
     DlUptime,
+    /// Download diagnostics - run diagnostic checks and view findings (Phase 156)
+    DlDiagnostics {
+        /// "status", "run", "report", "config"
+        action: String,
+        args: Vec<String>,
+    },
     /// File type statistics - track downloads by extension and category (Phase 143)
     DlFileStats {
         /// "status", "summary", "extension <ext>", "clear", "config"
@@ -1257,6 +1263,18 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dluptime" | "dl-uptime" | "dlupt" => Command::DlUptime,
+        "dldiag" | "dl-diag" | "dldiagnostics" | "dl-diagnostics" => {
+            if parts.len() < 2 {
+                Command::DlDiagnostics {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlDiagnostics { action, args }
+            }
+        }
         "dl-sla" | "dlsla" => {
             if parts.len() < 2 {
                 Command::DlSla {
@@ -2845,6 +2863,7 @@ fn command_help() -> String {
         "/dlspeedtest [cmd] - Speed test (status|run <url>|summary|history|latest|clear|config)",
         "/dlspdtrend [cmd] - Speed trend analysis (status|summary|trends|degrading|improving|clear|config)",
         "/dluptime       - Show system uptime (how long since startup)",
+        "/dldiag         - Download diagnostics (status|run|report|config)",
         "/dldepviz [cmd]   - Dependency visualization (graph|stats|config|cycles|roots|leaves|text|dot)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
@@ -4123,6 +4142,161 @@ async fn handle_command(
             );
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
+        }
+        Command::DlDiagnostics { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            match action.as_str() {
+                "status" => {
+                    let summary = download_manager.get_diagnostics_summary().await;
+                    let msg = format!(
+                        "🔍 Download Diagnostics\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         📊 Health Score: {}/100\n\
+                         🔴 Critical: {} | 🟠 Error: {} | 🟡 Warning: {} | 🔵 Info: {}\n\
+                         📋 Total Findings: {}\n\
+                         💡 Top Recommendations:\n{}",
+                        summary.health_score,
+                        summary.critical_count,
+                        summary.error_count,
+                        summary.warning_count,
+                        summary.info_count,
+                        summary.total_findings,
+                        if summary.top_recommendations.is_empty() {
+                            "  (none)".to_string()
+                        } else {
+                            summary
+                                .top_recommendations
+                                .iter()
+                                .enumerate()
+                                .map(|(i, r)| format!("  {}. {}", i + 1, r))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "run" => {
+                    let findings = download_manager.run_diagnostics().await;
+                    if findings.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "✅ No diagnostic findings. All systems look good!".to_string(),
+                        );
+                    } else {
+                        let mut msg =
+                            format!("🔍 Diagnostic Findings ({} total):\n", findings.len());
+                        for (i, f) in findings.iter().enumerate() {
+                            let icon = match f.severity.to_string().as_str() {
+                                "CRITICAL" => "🔴",
+                                "ERROR" => "🟠",
+                                "WARNING" => "🟡",
+                                _ => "🔵",
+                            };
+                            msg.push_str(&format!(
+                                "{}. {} [{}] {}\n   {}\n",
+                                i + 1,
+                                icon,
+                                f.category,
+                                f.title,
+                                f.description
+                            ));
+                            if !f.recommendations.is_empty() {
+                                msg.push_str(&format!("   💡 {}\n", f.recommendations.join("; ")));
+                            }
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "report" => {
+                    let report = download_manager.get_diagnostics_report().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", report);
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_diagnostics_config().await;
+                        let msg = format!(
+                            "⚙️ Diagnostics Configuration\n\
+                             ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                             Enabled: {}\n\
+                             Slow Download Threshold: {} B/s\n\
+                             Stuck Task Threshold: {}s\n\
+                             Min Disk Space: {} bytes\n\
+                             Max Retry Threshold: {}\n\
+                             Max Consecutive Failures: {}\n\
+                             Checks: network={} disk={} performance={} queue={}\n\
+                             Max Findings/Category: {}",
+                            config.enabled,
+                            config.slow_download_threshold_bps,
+                            config.stuck_task_threshold_secs,
+                            config.min_disk_space_bytes,
+                            config.max_retry_threshold,
+                            config.max_consecutive_failures,
+                            config.check_network,
+                            config.check_disk,
+                            config.check_performance,
+                            config.check_queue,
+                            config.max_findings_per_category
+                        );
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    } else {
+                        let mut config = download_manager.get_diagnostics_config().await;
+                        match args[0].as_str() {
+                            "enable" => {
+                                config.enabled = true;
+                            }
+                            "disable" => {
+                                config.enabled = false;
+                            }
+                            "slow-threshold" => {
+                                if args.len() > 1 {
+                                    if let Ok(v) = args[1].parse::<u64>() {
+                                        config.slow_download_threshold_bps = v;
+                                    }
+                                }
+                            }
+                            "stuck-threshold" => {
+                                if args.len() > 1 {
+                                    if let Ok(v) = args[1].parse::<u64>() {
+                                        config.stuck_task_threshold_secs = v;
+                                    }
+                                }
+                            }
+                            "min-disk" => {
+                                if args.len() > 1 {
+                                    if let Ok(v) = args[1].parse::<u64>() {
+                                        config.min_disk_space_bytes = v;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        if let Err(e) = download_manager.set_diagnostics_config(config).await {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("❌ Failed to update config: {}", e),
+                            );
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "✅ Diagnostics configuration updated.".to_string(),
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Usage: /dldiag [status|run|report|config [enable|disable|slow-threshold <bps>|stuck-threshold <secs>|min-disk <bytes>]]".to_string());
+                }
+            }
         }
         Command::DlSpeedHistory { task_id } => {
             let s = state.lock().await;
@@ -18555,12 +18729,20 @@ async fn handle_command(
                                  Total Tasks: {}\nRoot Tasks: {}\nLeaf Tasks: {}\n\
                                  Cyclic Tasks: {}\nIsolated Tasks: {}\nMax Depth: {}\n\
                                  Avg Dependencies: {:.1}\nAvg Dependents: {:.1}\n",
-                                g.stats.total_tasks, g.stats.root_tasks, g.stats.leaf_tasks,
-                                g.stats.cyclic_tasks, g.stats.isolated_tasks, g.max_depth,
-                                g.stats.avg_dependencies, g.stats.avg_dependents
+                                g.stats.total_tasks,
+                                g.stats.root_tasks,
+                                g.stats.leaf_tasks,
+                                g.stats.cyclic_tasks,
+                                g.stats.isolated_tasks,
+                                g.max_depth,
+                                g.stats.avg_dependencies,
+                                g.stats.avg_dependents
                             );
                             if !g.cycles.is_empty() {
-                                msg.push_str(&format!("\n⚠️  Cycles Detected: {}\n", g.cycles.len()));
+                                msg.push_str(&format!(
+                                    "\n⚠️  Cycles Detected: {}\n",
+                                    g.cycles.len()
+                                ));
                                 for (i, cycle) in g.cycles.iter().enumerate() {
                                     msg.push_str(&format!("  Cycle {}: {:?}\n", i + 1, cycle));
                                 }
@@ -18570,7 +18752,11 @@ async fn handle_command(
                         }
                         None => {
                             let mut s = state.lock().await;
-                            s.add_system_message("main", "No dependency graph available. Add tasks with dependencies first.".to_string());
+                            s.add_system_message(
+                                "main",
+                                "No dependency graph available. Add tasks with dependencies first."
+                                    .to_string(),
+                            );
                         }
                     }
                 }
@@ -18583,9 +18769,13 @@ async fn handle_command(
                                  Total: {} | Roots: {} | Leaves: {}\n\
                                  Cyclic: {} | Isolated: {}\n\
                                  Avg Deps: {:.1} | Avg Dependents: {:.1}",
-                                st.total_tasks, st.root_tasks, st.leaf_tasks,
-                                st.cyclic_tasks, st.isolated_tasks,
-                                st.avg_dependencies, st.avg_dependents
+                                st.total_tasks,
+                                st.root_tasks,
+                                st.leaf_tasks,
+                                st.cyclic_tasks,
+                                st.isolated_tasks,
+                                st.avg_dependencies,
+                                st.avg_dependents
                             );
                             let mut s = state.lock().await;
                             s.add_system_message("main", msg);
@@ -18602,8 +18792,11 @@ async fn handle_command(
                         "⚙️ Dependency Visualization Config:\n\
                          Include Completed: {}\nHighlight Cycles: {}\n\
                          Max Display Depth: {}\nShow Task Names: {}\nCompute Stats: {}",
-                        config.include_completed, config.highlight_cycles,
-                        config.max_display_depth, config.show_task_names, config.compute_stats
+                        config.include_completed,
+                        config.highlight_cycles,
+                        config.max_display_depth,
+                        config.show_task_names,
+                        config.compute_stats
                     );
                     let mut s = state.lock().await;
                     s.add_system_message("main", msg);
@@ -18612,7 +18805,10 @@ async fn handle_command(
                     let cycles = download_manager.get_dependency_cycles().await;
                     if cycles.is_empty() {
                         let mut s = state.lock().await;
-                        s.add_system_message("main", "✅ No dependency cycles detected.".to_string());
+                        s.add_system_message(
+                            "main",
+                            "✅ No dependency cycles detected.".to_string(),
+                        );
                     } else {
                         let mut msg = format!("⚠️ Dependency Cycles ({}):\n", cycles.len());
                         for (i, cycle) in cycles.iter().enumerate() {
@@ -18658,7 +18854,8 @@ async fn handle_command(
                     let mut s = state.lock().await;
                     s.add_system_message(
                         "main",
-                        "Usage: /dldepviz [graph|stats|config|cycles|roots|leaves|text|dot]".to_string(),
+                        "Usage: /dldepviz [graph|stats|config|cycles|roots|leaves|text|dot]"
+                            .to_string(),
                     );
                 }
             }
@@ -19346,6 +19543,100 @@ async fn handle_command_headless(
                 summary.uptime_seconds,
                 summary.started_at.format("%Y-%m-%d %H:%M:%S UTC")
             );
+        }
+        Command::DlDiagnostics { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            match action.as_str() {
+                "status" => {
+                    let summary = download_manager.get_diagnostics_summary().await;
+                    println!(
+                        "[diagnostics] Health: {}/100, Findings: {} (Critical: {}, Error: {}, Warning: {}, Info: {})",
+                        summary.health_score,
+                        summary.total_findings,
+                        summary.critical_count,
+                        summary.error_count,
+                        summary.warning_count,
+                        summary.info_count
+                    );
+                }
+                "run" => {
+                    let findings = download_manager.run_diagnostics().await;
+                    if findings.is_empty() {
+                        println!("[diagnostics] ✅ No issues found");
+                    } else {
+                        println!("[diagnostics] Found {} issues:", findings.len());
+                        for f in findings {
+                            println!("  [{}] {}: {}", f.severity, f.category, f.title);
+                            println!("    {}", f.description);
+                            if !f.recommendations.is_empty() {
+                                println!("    💡 {}", f.recommendations.join("; "));
+                            }
+                        }
+                    }
+                }
+                "report" => {
+                    let report = download_manager.get_diagnostics_report().await;
+                    println!("{}", report);
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_diagnostics_config().await;
+                        println!(
+                            "[diagnostics config] enabled={}, slow_threshold={} B/s, stuck_threshold={}s, min_disk={} bytes, max_retry={}, max_failures={}",
+                            config.enabled,
+                            config.slow_download_threshold_bps,
+                            config.stuck_task_threshold_secs,
+                            config.min_disk_space_bytes,
+                            config.max_retry_threshold,
+                            config.max_consecutive_failures
+                        );
+                    } else {
+                        let mut config = download_manager.get_diagnostics_config().await;
+                        match args[0].as_str() {
+                            "enable" => {
+                                config.enabled = true;
+                            }
+                            "disable" => {
+                                config.enabled = false;
+                            }
+                            "slow-threshold" => {
+                                if args.len() > 1 {
+                                    if let Ok(v) = args[1].parse::<u64>() {
+                                        config.slow_download_threshold_bps = v;
+                                    }
+                                }
+                            }
+                            "stuck-threshold" => {
+                                if args.len() > 1 {
+                                    if let Ok(v) = args[1].parse::<u64>() {
+                                        config.stuck_task_threshold_secs = v;
+                                    }
+                                }
+                            }
+                            "min-disk" => {
+                                if args.len() > 1 {
+                                    if let Ok(v) = args[1].parse::<u64>() {
+                                        config.min_disk_space_bytes = v;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        if let Err(e) = download_manager.set_diagnostics_config(config).await {
+                            println!("[error] Failed to update config: {}", e);
+                        } else {
+                            println!("[diagnostics] ✅ Configuration updated");
+                        }
+                    }
+                }
+                _ => {
+                    println!(
+                        "[error] Usage: /dldiag [status|run|report|config [enable|disable|slow-threshold <bps>|stuck-threshold <secs>|min-disk <bytes>]]"
+                    );
+                }
+            }
         }
         Command::Quit => {
             println!("[quit] Shutting down...");
