@@ -662,14 +662,15 @@ impl Ed2kEngine {
                                         protocol = format!("0x{:02x}", protocol),
                                         "Unhandled peer message"
                                     );
+                                }
                             }
                         }
-                    }
-                    Ok(Err(_)) => {
-                        // Peer disconnected or error
-                    }
-                    Err(_) => {
-                        // Timeout, no control messages
+                        Ok(Err(_)) => {
+                            // Peer disconnected or error
+                        }
+                        Err(_) => {
+                            // Timeout, no control messages
+                        }
                     }
                 }
             }
