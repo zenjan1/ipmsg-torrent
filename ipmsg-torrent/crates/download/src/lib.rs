@@ -38,6 +38,7 @@ pub mod download_budget;
 pub mod download_cooldown;
 pub mod download_cost;
 pub mod download_deadline;
+pub mod download_expiry;
 pub mod download_file_stats;
 pub mod download_history;
 pub mod download_history_analytics;
@@ -89,6 +90,7 @@ pub mod retry_quota;
 pub mod rss_feed;
 pub mod save_path_manager;
 pub mod segment_download;
+pub mod sla_compliance;
 pub mod smart_queue;
 pub mod source_benchmark;
 pub mod source_quality;
@@ -1041,10 +1043,14 @@ pub struct DownloadManager {
     intelligent_source_selector: Arc<Mutex<intelligent_source_selector::IntelligentSourceSelector>>,
     /// Retry budget manager for per-domain retry tracking and blocking (Phase 142)
     retry_budget: Arc<Mutex<retry_budget::RetryBudgetManager>>,
+    /// Download expiry manager for task expiry tracking
+    download_expiry: Arc<Mutex<download_expiry::DownloadExpiryManager>>,
     /// System uptime tracker for dashboard monitoring
     system_uptime: Arc<system_uptime::SystemUptimeTracker>,
     /// File type statistics tracker for download categorization by extension (Phase 143)
     file_stats: Arc<tokio::sync::RwLock<download_file_stats::FileTypeStatsTracker>>,
+    /// SLA compliance manager for tracking download service level agreements (Phase 144)
+    sla_compliance: Arc<tokio::sync::RwLock<sla_compliance::SlaComplianceManager>>,
 }
 
 impl DownloadManager {
@@ -1273,11 +1279,15 @@ impl DownloadManager {
                 intelligent_source_selector::IntelligentSourceSelector::new(),
             )),
             retry_budget: Arc::new(Mutex::new(retry_budget::RetryBudgetManager::new())),
+            download_expiry: Arc::new(Mutex::new(download_expiry::DownloadExpiryManager::new())),
             system_uptime: Arc::new(system_uptime::SystemUptimeTracker::new()),
             file_stats: Arc::new(tokio::sync::RwLock::new(
                 download_file_stats::FileTypeStatsTracker::new(
                     download_file_stats::FileStatsConfig::default(),
                 ),
+            )),
+            sla_compliance: Arc::new(tokio::sync::RwLock::new(
+                sla_compliance::SlaComplianceManager::new(data_dir.clone()),
             )),
         };
         dm.start_scheduler();
@@ -1639,13 +1649,24 @@ impl DownloadManager {
                 intelligent_source_selector::IntelligentSourceSelector::new(),
             )),
             retry_budget: Arc::new(Mutex::new(retry_budget::RetryBudgetManager::new())),
+            download_expiry: Arc::new(Mutex::new(download_expiry::DownloadExpiryManager::new())),
             system_uptime: Arc::new(system_uptime::SystemUptimeTracker::new()),
             file_stats: Arc::new(tokio::sync::RwLock::new(
                 download_file_stats::FileTypeStatsTracker::new(
                     download_file_stats::FileStatsConfig::default(),
                 ),
             )),
+            sla_compliance: Arc::new(tokio::sync::RwLock::new(
+                sla_compliance::SlaComplianceManager::new(data_dir.clone()),
+            )),
         };
+        // Restore SLA compliance data from disk
+        {
+            let mut sla_mgr = dm.sla_compliance.write().await;
+            let _ = sla_mgr.load_config().await;
+            let _ = sla_mgr.load_definitions().await;
+            let _ = sla_mgr.load_history().await;
+        }
         // Restore tag manager from disk
         dm.tag_manager.restore().await;
         // Restore download budget from disk
@@ -1707,6 +1728,15 @@ impl DownloadManager {
         let retry_budget_state_path = dm.data_dir.join("retry_budget_state.json");
         if let Ok(state) = retry_budget::load_retry_budget_state(&retry_budget_state_path).await {
             *dm.retry_budget.lock().await = state;
+        }
+        // Restore download_expiry configuration from disk
+        let expiry_config_path = dm.data_dir.join("download_expiry_config.json");
+        if let Ok(cfg) = download_expiry::load_expiry_config(&expiry_config_path).await {
+            dm.download_expiry.lock().await.set_config(cfg);
+        }
+        let expiry_data_path = dm.data_dir.join("download_expiry_data.json");
+        if let Ok(state) = download_expiry::load_expiry_data(&expiry_data_path).await {
+            *dm.download_expiry.lock().await = state;
         }
         // Apply resume policy to tasks that were downloading
         {
@@ -15139,6 +15169,226 @@ impl DownloadManager {
     /// Save file statistics to disk
     pub async fn save_file_stats(&self) -> std::io::Result<()> {
         self.file_stats.read().await.save_data().await
+    }
+
+    // ========== Phase 144: SLA Compliance API ==========
+
+    /// Get SLA compliance configuration
+    pub async fn get_sla_config(&self) -> sla_compliance::SlaConfig {
+        self.sla_compliance.read().await.get_config().clone()
+    }
+
+    /// Set SLA compliance configuration
+    pub async fn set_sla_config(&self, config: sla_compliance::SlaConfig) -> std::io::Result<()> {
+        self.sla_compliance.write().await.set_config(config).await
+    }
+
+    /// Add a new SLA definition
+    pub async fn add_sla(
+        &self,
+        definition: sla_compliance::SlaDefinition,
+    ) -> std::io::Result<String> {
+        self.sla_compliance.write().await.add_sla(definition).await
+    }
+
+    /// Remove an SLA definition
+    pub async fn remove_sla(&self, sla_id: &str) -> std::io::Result<bool> {
+        self.sla_compliance.write().await.remove_sla(sla_id).await
+    }
+
+    /// List all SLA definitions
+    pub async fn list_slas(&self) -> Vec<sla_compliance::SlaDefinition> {
+        self.sla_compliance.read().await.list_slas().to_vec()
+    }
+
+    /// Get a specific SLA definition
+    pub async fn get_sla(&self, sla_id: &str) -> Option<sla_compliance::SlaDefinition> {
+        self.sla_compliance.read().await.get_sla(sla_id).cloned()
+    }
+
+    /// Enable or disable an SLA
+    pub async fn set_sla_enabled(&self, sla_id: &str, enabled: bool) -> std::io::Result<bool> {
+        self.sla_compliance
+            .write()
+            .await
+            .set_sla_enabled(sla_id, enabled)
+            .await
+    }
+
+    /// Evaluate all enabled SLAs against current tasks
+    pub async fn evaluate_sla_compliance(
+        &self,
+    ) -> std::io::Result<Vec<sla_compliance::SlaEvaluation>> {
+        let tasks = self.tasks.lock().await;
+        let task_data: Vec<sla_compliance::TaskSlaData> = tasks
+            .iter()
+            .map(|t| {
+                let is_complete = t.state == DownloadState::Complete;
+                let is_failed = t.state == DownloadState::Error;
+                let completed_at = if is_complete {
+                    Some(t.updated_at)
+                } else {
+                    None
+                };
+                sla_compliance::TaskSlaData {
+                    task_id: t.id.clone(),
+                    task_name: t.name.clone(),
+                    tags: t.tags.clone(),
+                    group: t.group.clone(),
+                    is_complete,
+                    is_failed,
+                    created_at: t.created_at,
+                    completed_at,
+                    avg_speed_bps: t.speed_bps,
+                    retry_count: t.auto_retry_count,
+                    progress: t.progress() as f64 / 100.0,
+                }
+            })
+            .collect();
+        drop(tasks);
+        self.sla_compliance
+            .write()
+            .await
+            .evaluate_all(&task_data)
+            .await
+    }
+
+    /// Get SLA compliance summary
+    pub async fn get_sla_summary(&self) -> sla_compliance::SlaSummary {
+        self.sla_compliance.read().await.get_summary()
+    }
+
+    /// Get compliance history for a specific SLA
+    pub async fn get_sla_history(
+        &self,
+        sla_id: &str,
+    ) -> Option<Vec<sla_compliance::ComplianceEntry>> {
+        self.sla_compliance
+            .read()
+            .await
+            .get_history(sla_id)
+            .cloned()
+    }
+
+    /// Clear compliance history for a specific SLA
+    pub async fn clear_sla_history(&self, sla_id: &str) -> std::io::Result<bool> {
+        self.sla_compliance
+            .write()
+            .await
+            .clear_history(sla_id)
+            .await
+    }
+
+    /// Clear all SLA compliance history
+    pub async fn clear_all_sla_history(&self) -> std::io::Result<()> {
+        self.sla_compliance.write().await.clear_all_history().await
+    }
+
+    /// Format SLA compliance report as human-readable string
+    pub async fn format_sla_report(&self) -> String {
+        let mgr = self.sla_compliance.read().await;
+        let summary = mgr.get_summary();
+        mgr.format_report(&summary)
+    }
+
+    // ── Download Expiry API ──────────────────────────────────────────────
+
+    /// Set expiry for a task using absolute time
+    pub async fn set_task_expiry(&self, task_id: &str, expires_at: chrono::DateTime<chrono::Utc>) {
+        self.download_expiry
+            .lock()
+            .await
+            .set_expiry(task_id, expires_at);
+    }
+
+    /// Set expiry for a task using relative duration (seconds from now)
+    pub async fn set_task_expiry_duration(&self, task_id: &str, duration_secs: u64) {
+        self.download_expiry
+            .lock()
+            .await
+            .set_expiry_duration(task_id, duration_secs);
+    }
+
+    /// Remove expiry for a task
+    pub async fn remove_task_expiry(&self, task_id: &str) {
+        self.download_expiry.lock().await.remove_expiry(task_id);
+    }
+
+    /// Get expiry info for a task
+    pub async fn get_task_expiry(&self, task_id: &str) -> Option<download_expiry::TaskExpiry> {
+        self.download_expiry
+            .lock()
+            .await
+            .get_expiry(task_id)
+            .cloned()
+    }
+
+    /// Check if a task has expiry set
+    pub async fn has_task_expiry(&self, task_id: &str) -> bool {
+        self.download_expiry.lock().await.has_expiry(task_id)
+    }
+
+    /// Refresh all expiry states and return newly expired task IDs
+    pub async fn refresh_expiries(&self) -> Vec<String> {
+        self.download_expiry.lock().await.refresh()
+    }
+
+    /// Check for pending expiry notifications
+    pub async fn check_expiry_notifications(&self) -> Vec<String> {
+        self.download_expiry.lock().await.check_notifications()
+    }
+
+    /// Get list of expired task IDs
+    pub async fn get_expired_task_ids(&self) -> Vec<String> {
+        self.download_expiry.lock().await.get_expired_ids()
+    }
+
+    /// Get expiry summary
+    pub async fn get_expiry_summary(&self) -> download_expiry::ExpirySummary {
+        self.download_expiry.lock().await.get_summary()
+    }
+
+    /// Get expiry config
+    pub async fn get_expiry_config(&self) -> download_expiry::ExpiryConfig {
+        self.download_expiry.lock().await.config().clone()
+    }
+
+    /// Set expiry config
+    pub async fn set_expiry_config(&self, config: download_expiry::ExpiryConfig) {
+        self.download_expiry.lock().await.set_config(config);
+    }
+
+    /// Clear all expiry tracking
+    pub async fn clear_all_expiries(&self) {
+        self.download_expiry.lock().await.clear();
+    }
+
+    /// Cleanup expired tasks from tracking
+    pub async fn cleanup_expired_expiries(&self) -> usize {
+        self.download_expiry.lock().await.cleanup_expired()
+    }
+
+    /// Format upcoming expiries report
+    pub async fn format_expiry_report(&self, limit: usize) -> String {
+        self.download_expiry.lock().await.format_upcoming(limit)
+    }
+
+    /// Save expiry config to disk
+    pub async fn save_expiry_config(&self) -> std::io::Result<()> {
+        let config = self.download_expiry.lock().await.config().clone();
+        let path = self.data_dir.join("download_expiry_config.json");
+        download_expiry::save_expiry_config(&config, &path)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    /// Save expiry data to disk
+    pub async fn save_expiry_data(&self) -> std::io::Result<()> {
+        let manager = self.download_expiry.lock().await.clone();
+        let path = self.data_dir.join("download_expiry_data.json");
+        download_expiry::save_expiry_data(&manager, &path)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 }
 

@@ -2,6 +2,7 @@
 //!
 //! Provides a REST API, WebSocket real-time updates, and HTML frontend.
 
+use crate::sla_compliance;
 use crate::{DownloadManager, DownloadState, DownloadTask};
 use axum::{
     Json, Router,
@@ -1200,6 +1201,41 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/file-stats/extension/:ext",
             get(get_extension_stats_handler),
         )
+        // Phase 144: SLA Compliance REST API
+        .route(
+            "/api/sla-compliance",
+            get(get_sla_config_handler).post(set_sla_config_handler),
+        )
+        .route("/api/sla-compliance/summary", get(get_sla_summary_handler))
+        .route(
+            "/api/sla-compliance/definitions",
+            get(list_sla_definitions_handler).post(add_sla_definition_handler),
+        )
+        .route(
+            "/api/sla-compliance/definitions/:id",
+            get(get_sla_definition_handler).delete(delete_sla_definition_handler),
+        )
+        .route(
+            "/api/sla-compliance/definitions/:id/enable",
+            post(set_sla_enabled_handler),
+        )
+        .route(
+            "/api/sla-compliance/evaluate",
+            post(evaluate_sla_compliance_handler),
+        )
+        .route(
+            "/api/sla-compliance/history/:id",
+            get(get_sla_history_handler),
+        )
+        .route(
+            "/api/sla-compliance/history/:id/clear",
+            post(clear_sla_history_handler),
+        )
+        .route(
+            "/api/sla-compliance/history/clear",
+            post(clear_all_sla_history_handler),
+        )
+        .route("/api/sla-compliance/report", get(get_sla_report_handler))
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -9554,4 +9590,149 @@ async fn get_extension_stats_handler(
         .await
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+// ========== Phase 144: SLA Compliance REST API Handlers ==========
+
+/// GET /api/sla-compliance - Get SLA compliance configuration
+async fn get_sla_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<sla_compliance::SlaConfig> {
+    let config = state.manager.get_sla_config().await;
+    Json(config)
+}
+
+/// POST /api/sla-compliance - Update SLA compliance configuration
+async fn set_sla_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<sla_compliance::SlaConfig>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state
+        .manager
+        .set_sla_config(config)
+        .await
+        .map(|_| Json(serde_json::json!({"status": "ok"})))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// GET /api/sla-compliance/summary - Get SLA compliance summary
+async fn get_sla_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<sla_compliance::SlaSummary> {
+    let summary = state.manager.get_sla_summary().await;
+    Json(summary)
+}
+
+/// GET /api/sla-compliance/definitions - List all SLA definitions
+async fn list_sla_definitions_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<sla_compliance::SlaDefinition>> {
+    let slas = state.manager.list_slas().await;
+    Json(slas)
+}
+
+/// POST /api/sla-compliance/definitions - Add a new SLA definition
+async fn add_sla_definition_handler(
+    State(state): State<Arc<WebState>>,
+    Json(definition): Json<sla_compliance::SlaDefinition>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state
+        .manager
+        .add_sla(definition)
+        .await
+        .map(|id| Json(serde_json::json!({"status": "ok", "id": id})))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// GET /api/sla-compliance/definitions/:id - Get a specific SLA definition
+async fn get_sla_definition_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> Result<Json<sla_compliance::SlaDefinition>, StatusCode> {
+    state
+        .manager
+        .get_sla(&id)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// DELETE /api/sla-compliance/definitions/:id - Delete an SLA definition
+async fn delete_sla_definition_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let removed = state.manager.remove_sla(&id).await;
+    removed
+        .map(|_| Json(serde_json::json!({"status": "ok"})))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// POST /api/sla-compliance/definitions/:id/enable - Enable or disable an SLA
+async fn set_sla_enabled_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let enabled = body["enabled"].as_bool().unwrap_or(true);
+    let result = state.manager.set_sla_enabled(&id, enabled).await;
+    result
+        .map(|_| Json(serde_json::json!({"status": "ok"})))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// POST /api/sla-compliance/evaluate - Evaluate all enabled SLAs
+async fn evaluate_sla_compliance_handler(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<Vec<sla_compliance::SlaEvaluation>>, StatusCode> {
+    state
+        .manager
+        .evaluate_sla_compliance()
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// GET /api/sla-compliance/history/:id - Get compliance history for an SLA
+async fn get_sla_history_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<sla_compliance::ComplianceEntry>>, StatusCode> {
+    state
+        .manager
+        .get_sla_history(&id)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// POST /api/sla-compliance/history/:id/clear - Clear compliance history for an SLA
+async fn clear_sla_history_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state
+        .manager
+        .clear_sla_history(&id)
+        .await
+        .map(|_| Json(serde_json::json!({"status": "ok"})))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// POST /api/sla-compliance/history/clear - Clear all SLA compliance history
+async fn clear_all_sla_history_handler(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state
+        .manager
+        .clear_all_sla_history()
+        .await
+        .map(|_| Json(serde_json::json!({"status": "ok"})))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// GET /api/sla-compliance/report - Get human-readable SLA compliance report
+async fn get_sla_report_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let report = state.manager.format_sla_report().await;
+    Json(serde_json::json!({"report": report}))
 }
