@@ -18175,13 +18175,21 @@ async fn handle_command(
                             stats.count,
                             format_size(stats.total_bytes),
                             format_size(stats.avg_speed_bps),
-                            stats.last_download_at.map(|t| chrono::DateTime::from_timestamp(t as i64, 0).map(|dt| dt.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "unknown".to_string())).unwrap_or_else(|| "never".to_string())
+                            stats
+                                .last_download_at
+                                .map(|t| chrono::DateTime::from_timestamp(t as i64, 0)
+                                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                                    .unwrap_or_else(|| "unknown".to_string()))
+                                .unwrap_or_else(|| "never".to_string())
                         );
                         let mut s = state.lock().await;
                         s.add_system_message("main", msg);
                     } else {
                         let mut s = state.lock().await;
-                        s.add_system_message("main", format!("No stats found for extension .{}", ext));
+                        s.add_system_message(
+                            "main",
+                            format!("No stats found for extension .{}", ext),
+                        );
                     }
                 }
                 "clear" => {
@@ -18197,14 +18205,20 @@ async fn handle_command(
                     let config = download_manager.get_file_stats_config().await;
                     let msg = format!(
                         "⚙️ File Stats Config:\n  Enabled: {}\n  Max Extensions: {}\n  Track Extensions: {}\n  Track Categories: {}",
-                        config.enabled, config.max_extensions, config.track_extensions, config.track_categories
+                        config.enabled,
+                        config.max_extensions,
+                        config.track_extensions,
+                        config.track_categories
                     );
                     let mut s = state.lock().await;
                     s.add_system_message("main", msg);
                 }
                 _ => {
                     let mut s = state.lock().await;
-                    s.add_system_message("main", "Usage: /dlfs <status|summary|extension <ext>|clear|config>".to_string());
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlfs <status|summary|extension <ext>|clear|config>".to_string(),
+                    );
                 }
             }
         }
