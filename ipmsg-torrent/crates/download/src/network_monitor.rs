@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn test_network_monitor_disabled_no_record() {
         let mut monitor = NetworkMonitor::new();
-        monitor.config().clone();
+        let _ = monitor.config().clone();
         let mut config = monitor.config.clone();
         config.enabled = false;
         monitor.set_config(config);

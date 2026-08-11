@@ -1045,6 +1045,8 @@ pub struct DownloadManager {
     retry_budget: Arc<Mutex<retry_budget::RetryBudgetManager>>,
     /// Download expiry manager for task expiry tracking
     download_expiry: Arc<Mutex<download_expiry::DownloadExpiryManager>>,
+    /// Export/import manager for task backup and migration (Phase 145)
+    task_export: Arc<Mutex<task_export::ExportHistory>>,
     /// System uptime tracker for dashboard monitoring
     system_uptime: Arc<system_uptime::SystemUptimeTracker>,
     /// File type statistics tracker for download categorization by extension (Phase 143)
@@ -1281,6 +1283,7 @@ impl DownloadManager {
             retry_budget: Arc::new(Mutex::new(retry_budget::RetryBudgetManager::new())),
             download_expiry: Arc::new(Mutex::new(download_expiry::DownloadExpiryManager::new())),
             system_uptime: Arc::new(system_uptime::SystemUptimeTracker::new()),
+            task_export: Arc::new(Mutex::new(task_export::ExportHistory::default())),
             file_stats: Arc::new(tokio::sync::RwLock::new(
                 download_file_stats::FileTypeStatsTracker::new(
                     download_file_stats::FileStatsConfig::default(),
@@ -1651,6 +1654,7 @@ impl DownloadManager {
             retry_budget: Arc::new(Mutex::new(retry_budget::RetryBudgetManager::new())),
             download_expiry: Arc::new(Mutex::new(download_expiry::DownloadExpiryManager::new())),
             system_uptime: Arc::new(system_uptime::SystemUptimeTracker::new()),
+            task_export: Arc::new(Mutex::new(task_export::ExportHistory::default())),
             file_stats: Arc::new(tokio::sync::RwLock::new(
                 download_file_stats::FileTypeStatsTracker::new(
                     download_file_stats::FileStatsConfig::default(),
@@ -1737,6 +1741,11 @@ impl DownloadManager {
         let expiry_data_path = dm.data_dir.join("download_expiry_data.json");
         if let Ok(state) = download_expiry::load_expiry_data(&expiry_data_path).await {
             *dm.download_expiry.lock().await = state;
+        }
+        // Restore task export history from disk
+        let export_history_path = dm.data_dir.join("export_history.json");
+        if let Ok(history) = task_export::load_export_history(&export_history_path).await {
+            *dm.task_export.lock().await = history;
         }
         // Apply resume policy to tasks that were downloading
         {
@@ -15387,6 +15396,219 @@ impl DownloadManager {
         let manager = self.download_expiry.lock().await.clone();
         let path = self.data_dir.join("download_expiry_data.json");
         download_expiry::save_expiry_data(&manager, &path)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    // ── Task Export/Import API (Phase 145) ──────────────────────────────────
+
+    /// Export tasks to JSON format
+    pub async fn export_tasks_json(
+        &self,
+        filter: task_export::ExportFilter,
+    ) -> Result<Vec<task_export::ExportedTask>, String> {
+        let tasks = self.tasks.lock().await;
+        let mut exported = Vec::new();
+
+        for task in tasks.iter() {
+            if !filter.matches(
+                &format!("{:?}", task.state),
+                &task.tags,
+                task.group.as_deref(),
+                task.created_at,
+            ) {
+                continue;
+            }
+
+            exported.push(task_export::ExportedTask {
+                id: task.id.clone(),
+                name: task.name.clone(),
+                url: task.source_url.clone().unwrap_or_default(),
+                protocol: format!("{:?}", task.protocol),
+                size: task.size,
+                downloaded: task.downloaded,
+                state: format!("{:?}", task.state),
+                tags: task.tags.clone(),
+                group: task.group.clone(),
+                priority: format!("{:?}", task.priority),
+                notes: task.notes.clone(),
+                speed_limit_bps: task.speed_limit_bps,
+                bandwidth_weight: task.bandwidth_weight,
+                expected_checksum: task.expected_checksum.clone(),
+                checksum_algorithm: task.checksum_algorithm.as_ref().map(|a| format!("{:?}", a)),
+                save_path: task.save_path.to_string_lossy().to_string(),
+                created_at: task.created_at,
+                updated_at: task.updated_at,
+                mirror_urls: task.mirror_urls.clone(),
+                max_download_time_secs: task.max_download_time_secs,
+                deadline: task.deadline,
+                sequential_mode: task.sequential_mode,
+            });
+        }
+
+        Ok(exported)
+    }
+
+    /// Export tasks to CSV format
+    pub async fn export_tasks_csv(
+        &self,
+        filter: task_export::ExportFilter,
+    ) -> Result<String, String> {
+        let exported = self.export_tasks_json(filter).await?;
+        let mut csv = String::from(task_export::csv_header());
+        csv.push('\n');
+        for task in &exported {
+            csv.push_str(&task_export::task_to_csv_line(task));
+            csv.push('\n');
+        }
+        Ok(csv)
+    }
+
+    /// Import tasks from JSON data
+    pub async fn import_tasks_json(
+        &self,
+        json_data: &str,
+        conflict_strategy: task_export::ImportConflictStrategy,
+    ) -> Result<task_export::ImportResult, String> {
+        let tasks = task_export::parse_json_export(json_data)
+            .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+        self.import_tasks_internal(tasks, conflict_strategy).await
+    }
+
+    /// Import tasks from CSV data
+    pub async fn import_tasks_csv(
+        &self,
+        csv_data: &str,
+        conflict_strategy: task_export::ImportConflictStrategy,
+    ) -> Result<task_export::ImportResult, String> {
+        let tasks = task_export::parse_csv_export(csv_data)
+            .map_err(|e| format!("Failed to parse CSV: {}", e))?;
+        self.import_tasks_internal(tasks, conflict_strategy).await
+    }
+
+    /// Internal import logic
+    async fn import_tasks_internal(
+        &self,
+        tasks: Vec<task_export::ExportedTask>,
+        conflict_strategy: task_export::ImportConflictStrategy,
+    ) -> Result<task_export::ImportResult, String> {
+        let mut result = task_export::ImportResult::default();
+        let mut tasks_guard = self.tasks.lock().await;
+
+        // Build URL set for deduplication
+        let existing_urls: Vec<String> = tasks_guard
+            .iter()
+            .filter_map(|t| t.source_url.clone())
+            .collect();
+        let url_set = task_export::build_url_set(&existing_urls);
+
+        for task in tasks {
+            let url = &task.url;
+
+            if task_export::is_duplicate_url(&url_set, url) {
+                match conflict_strategy {
+                    task_export::ImportConflictStrategy::Skip => {
+                        result.skipped_count += 1;
+                        continue;
+                    }
+                    task_export::ImportConflictStrategy::Overwrite => {
+                        // Find and remove existing task with same URL
+                        let existing_idx = tasks_guard.iter().position(|t| {
+                            t.source_url
+                                .as_ref()
+                                .map(|u| {
+                                    u.to_lowercase().trim_end_matches('/')
+                                        == url.to_lowercase().trim_end_matches('/')
+                                })
+                                .unwrap_or(false)
+                        });
+                        if let Some(idx) = existing_idx {
+                            tasks_guard.remove(idx);
+                            result.overwritten_count += 1;
+                        }
+                    }
+                    task_export::ImportConflictStrategy::Rename => {
+                        result.renamed_count += 1;
+                    }
+                }
+            }
+
+            // Create new task
+            let id = if result.renamed_count > 0 {
+                format!("{}_{}", task.id, chrono::Utc::now().timestamp())
+            } else {
+                task.id.clone()
+            };
+
+            let new_task = crate::DownloadTask {
+                id: id.clone(),
+                name: task.name.clone(),
+                protocol: match task.protocol.to_lowercase().as_str() {
+                    "torrent" => crate::DownloadProtocol::Torrent,
+                    "ed2k" => crate::DownloadProtocol::Ed2k,
+                    _ => crate::DownloadProtocol::Xunlei,
+                },
+                size: task.size,
+                downloaded: task.downloaded,
+                state: crate::DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: std::path::PathBuf::from(&task.save_path),
+                created_at: task.created_at,
+                updated_at: task.updated_at,
+                tags: task.tags.clone(),
+                priority: match task.priority.to_lowercase().as_str() {
+                    "high" => crate::DownloadPriority::High,
+                    "low" => crate::DownloadPriority::Low,
+                    _ => crate::DownloadPriority::Normal,
+                },
+                schedule: None,
+                bandwidth_weight: task.bandwidth_weight,
+                queue_position: None,
+                depends_on: Vec::new(),
+                notes: task.notes.clone(),
+                group: task.group.clone(),
+                speed_limit_bps: task.speed_limit_bps,
+                auto_retry_count: 0,
+                retry_after: None,
+                source_url: Some(task.url.clone()),
+                expected_checksum: task.expected_checksum.clone(),
+                checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
+                mirror_urls: task.mirror_urls.clone(),
+                retry_policy: None,
+                cooldown: None,
+                sequential_mode: task.sequential_mode,
+                max_download_time_secs: task.max_download_time_secs,
+                proxy_override: None,
+                staleness_promotion_count: 0,
+                deadline: task.deadline,
+            };
+
+            tasks_guard.push(new_task);
+            result.imported_count += 1;
+        }
+
+        Ok(result)
+    }
+
+    /// Get export history
+    pub async fn get_export_history(&self) -> Vec<task_export::ExportHistoryEntry> {
+        self.task_export.lock().await.entries.clone()
+    }
+
+    /// Add export history entry
+    pub async fn add_export_history(&self, entry: task_export::ExportHistoryEntry) {
+        let mut history = self.task_export.lock().await;
+        history.add(entry, 50);
+    }
+
+    /// Save export history to disk
+    pub async fn save_export_history(&self) -> std::io::Result<()> {
+        let history = self.task_export.lock().await.clone();
+        let path = self.data_dir.join("export_history.json");
+        task_export::save_export_history(&history, &path)
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))
     }

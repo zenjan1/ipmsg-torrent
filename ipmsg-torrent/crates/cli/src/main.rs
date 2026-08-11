@@ -1183,7 +1183,7 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dluptime" | "dl-uptime" | "dlupt" => Command::DlUptime,
-        "dls" | "dl-sla" | "dlsla" => {
+        "dl-sla" | "dlsla" => {
             if parts.len() < 2 {
                 Command::DlSla {
                     action: "status".to_string(),
@@ -16383,8 +16383,8 @@ async fn handle_command(
             let mut s = state.lock().await;
             match action.as_str() {
                 "status" => {
-                    let config = s.dm.get_sla_config().await;
-                    let summary = s.dm.get_sla_summary().await;
+                    let config = s.download_manager.get_sla_config().await;
+                    let summary = s.download_manager.get_sla_summary().await;
                     let msg = format!(
                         "SLA Compliance Status:\n\
                          Enabled: {}\n\
@@ -16403,7 +16403,7 @@ async fn handle_command(
                     s.add_system_message("main", msg);
                 }
                 "list" => {
-                    let slas = s.dm.list_slas().await;
+                    let slas = s.download_manager.list_slas().await;
                     if slas.is_empty() {
                         s.add_system_message("main", "No SLA definitions configured.".to_string());
                     } else {
@@ -16435,27 +16435,44 @@ async fn handle_command(
                         let target = match target_type.as_str() {
                             "completion_time" => {
                                 if args.len() < 3 {
-                                    s.add_system_message("main", "Usage: /dls add <name> completion_time <max_secs>".to_string());
+                                    s.add_system_message(
+                                        "main",
+                                        "Usage: /dls add <name> completion_time <max_secs>"
+                                            .to_string(),
+                                    );
                                     return;
                                 }
                                 let max_secs: u64 = args[2].parse().unwrap_or(3600);
-                                ipmsg_download::sla_compliance::SlaTarget::CompletionTimeSecs { max_secs }
+                                ipmsg_download::sla_compliance::SlaTarget::CompletionTimeSecs {
+                                    max_secs,
+                                }
                             }
                             "min_speed" => {
                                 if args.len() < 3 {
-                                    s.add_system_message("main", "Usage: /dls add <name> min_speed <min_bps>".to_string());
+                                    s.add_system_message(
+                                        "main",
+                                        "Usage: /dls add <name> min_speed <min_bps>".to_string(),
+                                    );
                                     return;
                                 }
                                 let min_bps: u64 = args[2].parse().unwrap_or(1_000_000);
-                                ipmsg_download::sla_compliance::SlaTarget::MinAverageSpeed { min_bps }
+                                ipmsg_download::sla_compliance::SlaTarget::MinAverageSpeed {
+                                    min_bps,
+                                }
                             }
                             "max_retries" => {
                                 if args.len() < 3 {
-                                    s.add_system_message("main", "Usage: /dls add <name> max_retries <max_retries>".to_string());
+                                    s.add_system_message(
+                                        "main",
+                                        "Usage: /dls add <name> max_retries <max_retries>"
+                                            .to_string(),
+                                    );
                                     return;
                                 }
                                 let max_retries: u32 = args[2].parse().unwrap_or(3);
-                                ipmsg_download::sla_compliance::SlaTarget::MaxRetries { max_retries }
+                                ipmsg_download::sla_compliance::SlaTarget::MaxRetries {
+                                    max_retries,
+                                }
                             }
                             "success_rate" => {
                                 if args.len() < 4 {
@@ -16470,7 +16487,10 @@ async fn handle_command(
                                 }
                             }
                             _ => {
-                                s.add_system_message("main", format!("Unknown target type: {}", target_type));
+                                s.add_system_message(
+                                    "main",
+                                    format!("Unknown target type: {}", target_type),
+                                );
                                 return;
                             }
                         };
@@ -16487,7 +16507,7 @@ async fn handle_command(
                             max_history: 200,
                         };
 
-                        match s.dm.add_sla(def).await {
+                        match s.download_manager.add_sla(def).await {
                             Ok(id) => {
                                 s.add_system_message("main", format!("Added SLA: {}", id));
                             }
@@ -16502,7 +16522,7 @@ async fn handle_command(
                         s.add_system_message("main", "Usage: /dls remove <sla_id>".to_string());
                     } else {
                         let sla_id = &args[0];
-                        match s.dm.remove_sla(sla_id).await {
+                        match s.download_manager.remove_sla(sla_id).await {
                             Ok(true) => {
                                 s.add_system_message("main", format!("Removed SLA: {}", sla_id));
                             }
@@ -16510,37 +16530,47 @@ async fn handle_command(
                                 s.add_system_message("main", format!("SLA not found: {}", sla_id));
                             }
                             Err(e) => {
-                                s.add_system_message("main", format!("Failed to remove SLA: {}", e));
+                                s.add_system_message(
+                                    "main",
+                                    format!("Failed to remove SLA: {}", e),
+                                );
                             }
                         }
                     }
                 }
-                "evaluate" => {
-                    match s.dm.evaluate_sla_compliance().await {
-                        Ok(evals) => {
-                            if evals.is_empty() {
-                                s.add_system_message("main", "No evaluations performed (no enabled SLAs or no tasks).".to_string());
-                            } else {
-                                let mut msg = format!("Evaluated {} task-SLA combinations:\n", evals.len());
-                                for eval in evals.iter().take(20) {
-                                    msg.push_str(&format!(
-                                        "  [{}] {} vs {}: {} ({:.1}%)\n",
-                                        eval.sla_id, eval.task_id, eval.sla_name, eval.status, eval.score
-                                    ));
-                                }
-                                if evals.len() > 20 {
-                                    msg.push_str(&format!("  ... and {} more\n", evals.len() - 20));
-                                }
-                                s.add_system_message("main", msg);
+                "evaluate" => match s.download_manager.evaluate_sla_compliance().await {
+                    Ok(evals) => {
+                        if evals.is_empty() {
+                            s.add_system_message(
+                                "main",
+                                "No evaluations performed (no enabled SLAs or no tasks)."
+                                    .to_string(),
+                            );
+                        } else {
+                            let mut msg =
+                                format!("Evaluated {} task-SLA combinations:\n", evals.len());
+                            for eval in evals.iter().take(20) {
+                                msg.push_str(&format!(
+                                    "  [{}] {} vs {}: {} ({:.1}%)\n",
+                                    eval.sla_id,
+                                    eval.task_id,
+                                    eval.sla_name,
+                                    eval.status,
+                                    eval.score
+                                ));
                             }
-                        }
-                        Err(e) => {
-                            s.add_system_message("main", format!("Failed to evaluate: {}", e));
+                            if evals.len() > 20 {
+                                msg.push_str(&format!("  ... and {} more\n", evals.len() - 20));
+                            }
+                            s.add_system_message("main", msg);
                         }
                     }
-                }
+                    Err(e) => {
+                        s.add_system_message("main", format!("Failed to evaluate: {}", e));
+                    }
+                },
                 "summary" | "report" => {
-                    let report = s.dm.format_sla_report().await;
+                    let report = s.download_manager.format_sla_report().await;
                     s.add_system_message("main", report);
                 }
                 "history" => {
@@ -16548,12 +16578,19 @@ async fn handle_command(
                         s.add_system_message("main", "Usage: /dls history <sla_id>".to_string());
                     } else {
                         let sla_id = &args[0];
-                        match s.dm.get_sla_history(sla_id).await {
+                        match s.download_manager.get_sla_history(sla_id).await {
                             Some(history) => {
                                 if history.is_empty() {
-                                    s.add_system_message("main", format!("No history for SLA: {}", sla_id));
+                                    s.add_system_message(
+                                        "main",
+                                        format!("No history for SLA: {}", sla_id),
+                                    );
                                 } else {
-                                    let mut msg = format!("History for SLA {} ({} entries):\n", sla_id, history.len());
+                                    let mut msg = format!(
+                                        "History for SLA {} ({} entries):\n",
+                                        sla_id,
+                                        history.len()
+                                    );
                                     for entry in history.iter().take(20) {
                                         msg.push_str(&format!(
                                             "  [{}] {} - {} ({:.1}%): {}\n",
@@ -16565,7 +16602,10 @@ async fn handle_command(
                                         ));
                                     }
                                     if history.len() > 20 {
-                                        msg.push_str(&format!("  ... and {} more\n", history.len() - 20));
+                                        msg.push_str(&format!(
+                                            "  ... and {} more\n",
+                                            history.len() - 20
+                                        ));
                                     }
                                     s.add_system_message("main", msg);
                                 }
@@ -16578,31 +16618,43 @@ async fn handle_command(
                 }
                 "clear" => {
                     if args.is_empty() {
-                        match s.dm.clear_all_sla_history().await {
+                        match s.download_manager.clear_all_sla_history().await {
                             Ok(_) => {
-                                s.add_system_message("main", "Cleared all SLA history.".to_string());
+                                s.add_system_message(
+                                    "main",
+                                    "Cleared all SLA history.".to_string(),
+                                );
                             }
                             Err(e) => {
-                                s.add_system_message("main", format!("Failed to clear history: {}", e));
+                                s.add_system_message(
+                                    "main",
+                                    format!("Failed to clear history: {}", e),
+                                );
                             }
                         }
                     } else {
                         let sla_id = &args[0];
-                        match s.dm.clear_sla_history(sla_id).await {
+                        match s.download_manager.clear_sla_history(sla_id).await {
                             Ok(true) => {
-                                s.add_system_message("main", format!("Cleared history for SLA: {}", sla_id));
+                                s.add_system_message(
+                                    "main",
+                                    format!("Cleared history for SLA: {}", sla_id),
+                                );
                             }
                             Ok(false) => {
                                 s.add_system_message("main", format!("SLA not found: {}", sla_id));
                             }
                             Err(e) => {
-                                s.add_system_message("main", format!("Failed to clear history: {}", e));
+                                s.add_system_message(
+                                    "main",
+                                    format!("Failed to clear history: {}", e),
+                                );
                             }
                         }
                     }
                 }
                 "config" => {
-                    let config = s.dm.get_sla_config().await;
+                    let config = s.download_manager.get_sla_config().await;
                     let msg = format!(
                         "SLA Configuration:\n\
                          Enabled: {}\n\
@@ -16619,10 +16671,14 @@ async fn handle_command(
                     s.add_system_message("main", msg);
                 }
                 "enable" => {
-                    match s.dm.set_sla_config(ipmsg_download::sla_compliance::SlaConfig {
-                        enabled: true,
-                        ..s.dm.get_sla_config().await
-                    }).await {
+                    match s
+                        .download_manager
+                        .set_sla_config(ipmsg_download::sla_compliance::SlaConfig {
+                            enabled: true,
+                            ..s.download_manager.get_sla_config().await
+                        })
+                        .await
+                    {
                         Ok(_) => {
                             s.add_system_message("main", "SLA compliance enabled.".to_string());
                         }
@@ -16632,10 +16688,14 @@ async fn handle_command(
                     }
                 }
                 "disable" => {
-                    match s.dm.set_sla_config(ipmsg_download::sla_compliance::SlaConfig {
-                        enabled: false,
-                        ..s.dm.get_sla_config().await
-                    }).await {
+                    match s
+                        .download_manager
+                        .set_sla_config(ipmsg_download::sla_compliance::SlaConfig {
+                            enabled: false,
+                            ..s.download_manager.get_sla_config().await
+                        })
+                        .await
+                    {
                         Ok(_) => {
                             s.add_system_message("main", "SLA compliance disabled.".to_string());
                         }
