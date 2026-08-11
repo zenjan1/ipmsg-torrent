@@ -273,6 +273,18 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
+    /// Retry budget - per-domain retry tracking and blocking (Phase 142)
+    DlRetryBudget {
+        /// "status", "config", "check", "clear", "summary"
+        action: String,
+        args: Vec<String>,
+    },
+    /// Retry budget - per-domain retry tracking and blocking (Phase 142)
+    DlRetryBudget {
+        /// "status", "config", "check", "clear", "summary"
+        action: String,
+        args: Vec<String>,
+    },
     /// Path organizer - auto-organize files by extension (Phase 133)
     DlPathOrganizer {
         /// "status", "enable", "disable", "add", "remove", "list", "organize"
@@ -1148,6 +1160,18 @@ fn parse_command(input: &str) -> Command {
                 let action = parts[1].to_string();
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlIntelligentSelector { action, args }
+            }
+        }
+        "dlrb" | "dl-retrybudget" | "dl-retry-budget" => {
+            if parts.len() < 2 {
+                Command::DlRetryBudget {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlRetryBudget { action, args }
             }
         }
         "dlpathorg" | "dl-pathorg" | "dlpo" => {

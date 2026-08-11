@@ -90,6 +90,7 @@ pub mod segment_download;
 pub mod smart_queue;
 pub mod source_benchmark;
 pub mod source_quality;
+pub mod retry_budget;
 pub mod source_reliability;
 pub mod source_rotation;
 pub mod speed_alert;
@@ -1033,6 +1034,8 @@ pub struct DownloadManager {
     task_scorecard: Arc<Mutex<task_scorecard::TaskScorecardManager>>,
     /// Intelligent source selector for combining reliability, health, and bandwidth data (Phase 140)
     intelligent_source_selector: Arc<Mutex<intelligent_source_selector::IntelligentSourceSelector>>,
+    /// Retry budget manager for per-domain retry tracking and blocking (Phase 142)
+    retry_budget: Arc<Mutex<retry_budget::RetryBudgetManager>>,
 }
 
 impl DownloadManager {
@@ -1259,6 +1262,7 @@ impl DownloadManager {
             intelligent_source_selector: Arc::new(Mutex::new(
                 intelligent_source_selector::IntelligentSourceSelector::new(),
             )),
+            retry_budget: Arc::new(Mutex::new(retry_budget::RetryBudgetManager::new())),
         };
         dm.start_scheduler();
         dm
@@ -1617,6 +1621,7 @@ impl DownloadManager {
             intelligent_source_selector: Arc::new(Mutex::new(
                 intelligent_source_selector::IntelligentSourceSelector::new(),
             )),
+            retry_budget: Arc::new(Mutex::new(retry_budget::RetryBudgetManager::new())),
         };
         // Restore tag manager from disk
         dm.tag_manager.restore().await;
@@ -1671,6 +1676,15 @@ impl DownloadManager {
         // Restore source reliability data from disk
         let _ = dm.load_source_reliability_config().await;
         let _ = dm.load_source_reliability_data().await;
+        // Restore retry budget config and state from disk (Phase 142)
+        let retry_budget_config_path = dm.data_dir.join("retry_budget_config.json");
+        if let Ok(cfg) = retry_budget::load_retry_budget_config(&retry_budget_config_path).await {
+            dm.retry_budget.lock().await.set_config(cfg);
+        }
+        let retry_budget_state_path = dm.data_dir.join("retry_budget_state.json");
+        if let Ok(state) = retry_budget::load_retry_budget_state(&retry_budget_state_path).await {
+            *dm.retry_budget.lock().await = state;
+        }
         // Apply resume policy to tasks that were downloading
         {
             let policy_cfg = dm.resume_policy.read().await.clone();
@@ -14842,6 +14856,82 @@ impl DownloadManager {
             bandwidth_schedule: Some(self.bandwidth_schedule.lock().await.list_rules().to_vec()),
             dependency_graph: Some(self.dependency_graph.read().await.config().clone()),
         }
+    }
+
+    // ─── Phase 142: Retry Budget Manager API ───
+
+    /// Get retry budget configuration
+    pub async fn get_retry_budget_config(&self) -> retry_budget::RetryBudgetConfig {
+        self.retry_budget.lock().await.config.clone()
+    }
+
+    /// Set retry budget configuration
+    pub async fn set_retry_budget_config(
+        &self,
+        config: retry_budget::RetryBudgetConfig,
+    ) {
+        self.retry_budget.lock().await.set_config(config);
+    }
+
+    /// Check if a domain can be retried
+    pub async fn can_retry_domain(&self, domain: &str) -> bool {
+        self.retry_budget.lock().await.can_retry_domain(domain)
+    }
+
+    /// Record a retry attempt for a domain
+    pub async fn record_retry_domain(&self, domain: &str) {
+        self.retry_budget.lock().await.record_retry(domain);
+    }
+
+    /// Record a successful download for a domain
+    pub async fn record_success_domain(&self, domain: &str) {
+        self.retry_budget.lock().await.record_success(domain);
+    }
+
+    /// Get remaining retry budget for a domain
+    pub async fn get_remaining_retry_budget(&self, domain: &str) -> u32 {
+        self.retry_budget.lock().await.get_remaining_budget(domain)
+    }
+
+    /// Get retry budget summary
+    pub async fn get_retry_budget_summary(&self) -> retry_budget::RetryBudgetSummary {
+        self.retry_budget.lock().await.get_summary()
+    }
+
+    /// Get domain retry state
+    pub async fn get_domain_retry_state(
+        &self,
+        domain: &str,
+    ) -> Option<retry_budget::DomainRetryState> {
+        self.retry_budget.lock().await.get_domain_state(domain).cloned()
+    }
+
+    /// Clear retry state for a specific domain
+    pub async fn clear_domain_retry_state(&self, domain: &str) {
+        self.retry_budget.lock().await.clear_domain(domain);
+    }
+
+    /// Clear all retry budget state
+    pub async fn clear_all_retry_budget_state(&self) {
+        self.retry_budget.lock().await.clear();
+    }
+
+    /// Save retry budget config to disk
+    pub async fn save_retry_budget_config(&self) -> std::io::Result<()> {
+        let config = self.retry_budget.lock().await.config.clone();
+        let path = self.data_dir.join("retry_budget_config.json");
+        retry_budget::save_retry_budget_config(&path, &config)
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    }
+
+    /// Save retry budget state to disk
+    pub async fn save_retry_budget_state(&self) -> std::io::Result<()> {
+        let manager = self.retry_budget.lock().await.clone();
+        let path = self.data_dir.join("retry_budget_state.json");
+        retry_budget::save_retry_budget_state(&path, &manager)
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
     }
 }
 

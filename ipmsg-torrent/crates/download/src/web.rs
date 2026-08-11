@@ -1157,6 +1157,35 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/intelligent-selector/clear",
             post(clear_intelligent_selector_handler),
         )
+        // Phase 142: Retry Budget API
+        .route(
+            "/api/retry-budget",
+            get(get_retry_budget_config_handler).post(set_retry_budget_config_handler),
+        )
+        .route(
+            "/api/retry-budget/summary",
+            get(get_retry_budget_summary_handler),
+        )
+        .route(
+            "/api/retry-budget/check/:domain",
+            get(check_retry_budget_handler),
+        )
+        .route(
+            "/api/retry-budget/record-retry/:domain",
+            post(record_retry_budget_retry_handler),
+        )
+        .route(
+            "/api/retry-budget/record-success/:domain",
+            post(record_retry_budget_success_handler),
+        )
+        .route(
+            "/api/retry-budget/clear/:domain",
+            post(clear_domain_retry_budget_handler),
+        )
+        .route(
+            "/api/retry-budget/clear",
+            post(clear_all_retry_budget_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -9362,4 +9391,84 @@ struct AddPresetRequest {
     duration_secs: u64,
     #[serde(default)]
     description: Option<String>,
+}
+
+// ─── Phase 142: Retry Budget API Handlers ───
+
+/// GET /api/retry-budget - Get retry budget configuration
+async fn get_retry_budget_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_retry_budget_config().await;
+    Json(config)
+}
+
+/// POST /api/retry-budget - Set retry budget configuration
+async fn set_retry_budget_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::retry_budget::RetryBudgetConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_retry_budget_config(config).await;
+    let _ = state.manager.save_retry_budget_config().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/retry-budget/summary - Get retry budget summary
+async fn get_retry_budget_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_retry_budget_summary().await;
+    Json(summary)
+}
+
+/// GET /api/retry-budget/check/:domain - Check if domain can be retried
+async fn check_retry_budget_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let can_retry = state.manager.can_retry_domain(&domain).await;
+    let remaining = state.manager.get_remaining_retry_budget(&domain).await;
+    let state_info = state.manager.get_domain_retry_state(&domain).await;
+    Json(serde_json::json!({
+        "domain": domain,
+        "can_retry": can_retry,
+        "remaining_budget": remaining,
+        "state": state_info
+    }))
+}
+
+/// POST /api/retry-budget/record-retry/:domain - Record a retry attempt
+async fn record_retry_budget_retry_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    state.manager.record_retry_domain(&domain).await;
+    let remaining = state.manager.get_remaining_retry_budget(&domain).await;
+    Json(serde_json::json!({"status": "recorded", "remaining_budget": remaining}))
+}
+
+/// POST /api/retry-budget/record-success/:domain - Record a successful download
+async fn record_retry_budget_success_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    state.manager.record_success_domain(&domain).await;
+    Json(serde_json::json!({"status": "recorded"}))
+}
+
+/// POST /api/retry-budget/clear/:domain - Clear retry state for a domain
+async fn clear_domain_retry_budget_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_domain_retry_state(&domain).await;
+    Json(serde_json::json!({"status": "cleared"}))
+}
+
+/// POST /api/retry-budget/clear - Clear all retry budget state
+async fn clear_all_retry_budget_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_all_retry_budget_state().await;
+    Json(serde_json::json!({"status": "cleared"}))
 }
