@@ -205,10 +205,10 @@ impl XunleiEngine {
         // Ensure we don't have too many blocks (max 1000) or too few (min 4)
         let max_blocks = 1000u64;
         let min_blocks = 4u64;
-        
+
         let size_based = file_size / max_blocks;
         let min_size = file_size / min_blocks;
-        
+
         base_size.clamp(size_based.max(MIN_BLOCK_SIZE), min_size.min(MAX_BLOCK_SIZE))
     }
 
@@ -368,8 +368,9 @@ impl XunleiEngine {
 
     /// Adjust block size based on current bandwidth estimate
     fn maybe_adjust_block_size(&mut self) {
-        let new_block_size = Self::calculate_optimal_block_size(self.file_size, self.estimated_bandwidth);
-        
+        let new_block_size =
+            Self::calculate_optimal_block_size(self.file_size, self.estimated_bandwidth);
+
         if new_block_size != self.block_size {
             tracing::debug!(
                 old_size = self.block_size,
@@ -398,7 +399,7 @@ impl XunleiEngine {
                     continue;
                 }
             }
-            
+
             // Flush the buffer
             if let Err(e) = file.flush().await {
                 tracing::warn!(error = %e, "Failed to flush file");
@@ -903,7 +904,7 @@ mod tests {
 
         let file = tokio::fs::File::create(&output_path).await.unwrap();
         file.set_len(file_size).await.unwrap();
-        engine.output_file = Some(file);
+        engine.output_file = Some(tokio::io::BufWriter::new(file));
 
         // Simulate downloading and writing blocks
         let block_data = vec![0xAB; 512]; // 512 bytes

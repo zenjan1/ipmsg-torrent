@@ -15,6 +15,7 @@ pub mod auto_pause;
 pub mod auto_shutdown;
 pub mod automation_rules;
 pub mod bandwidth_allocation;
+pub mod bandwidth_forecast;
 pub mod bandwidth_monitor;
 pub mod bandwidth_schedule;
 pub mod bulk_ops;
@@ -23,8 +24,8 @@ pub mod conflict_detection;
 pub mod connection_health;
 pub mod connection_pool;
 pub mod csv_export;
-pub mod data_cap;
 pub mod dashboard;
+pub mod data_cap;
 pub mod data_retention;
 pub mod dependency_graph;
 pub mod dht;
@@ -86,6 +87,7 @@ pub mod segment_download;
 pub mod smart_queue;
 pub mod source_benchmark;
 pub mod source_quality;
+pub mod source_reliability;
 pub mod source_rotation;
 pub mod speed_alert;
 pub mod speed_anomaly;
@@ -111,6 +113,7 @@ pub mod task_scheduler;
 pub mod task_snooze;
 pub mod torrent;
 pub mod ttl;
+pub mod upload_tracker;
 pub mod url_allowlist;
 pub mod url_blacklist;
 pub mod url_bookmarks;
@@ -1004,6 +1007,12 @@ pub struct DownloadManager {
     source_quality: Arc<Mutex<source_quality::SourceQualityManager>>,
     /// Dashboard manager for unified system overview
     dashboard: Arc<Mutex<dashboard::DashboardManager>>,
+    /// Upload speed and bytes tracker for seeding/sharing monitoring
+    upload_tracker: Arc<Mutex<upload_tracker::UploadTracker>>,
+    /// Bandwidth forecast manager for download speed prediction
+    bandwidth_forecast: Arc<Mutex<bandwidth_forecast::BandwidthForecastManager>>,
+    /// Source reliability tracker for per-domain reliability scoring
+    source_reliability: Arc<Mutex<source_reliability::SourceReliabilityTracker>>,
 }
 
 impl DownloadManager {
@@ -1212,6 +1221,15 @@ impl DownloadManager {
                 data_dir.clone(),
             ))),
             dashboard: Arc::new(Mutex::new(dashboard::DashboardManager::new())),
+            upload_tracker: Arc::new(Mutex::new(upload_tracker::UploadTracker::new())),
+            bandwidth_forecast: Arc::new(Mutex::new(
+                bandwidth_forecast::BandwidthForecastManager::new(
+                    bandwidth_forecast::ForecastConfig::default(),
+                ),
+            )),
+            source_reliability: Arc::new(Mutex::new(
+                source_reliability::SourceReliabilityTracker::new(),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -1552,6 +1570,15 @@ impl DownloadManager {
                 data_dir.clone(),
             ))),
             dashboard: Arc::new(Mutex::new(dashboard::DashboardManager::new())),
+            upload_tracker: Arc::new(Mutex::new(upload_tracker::UploadTracker::new())),
+            bandwidth_forecast: Arc::new(Mutex::new(
+                bandwidth_forecast::BandwidthForecastManager::new(
+                    bandwidth_forecast::ForecastConfig::default(),
+                ),
+            )),
+            source_reliability: Arc::new(Mutex::new(
+                source_reliability::SourceReliabilityTracker::new(),
+            )),
         };
         // Restore tag manager from disk
         dm.tag_manager.restore().await;
@@ -1603,6 +1630,9 @@ impl DownloadManager {
         if let Ok(()) = dm.source_quality.lock().await.load_sources().await {
             // Sources loaded successfully
         }
+        // Restore source reliability data from disk
+        let _ = dm.load_source_reliability_config().await;
+        let _ = dm.load_source_reliability_data().await;
         // Apply resume policy to tasks that were downloading
         {
             let policy_cfg = dm.resume_policy.read().await.clone();
@@ -1895,6 +1925,7 @@ impl DownloadManager {
         let domain_limit = self.domain_limit.clone();
         let protocol_limits = self.protocol_limits.clone();
         let retry_quota = self.retry_quota.clone();
+        let source_reliability = self.source_reliability.clone();
 
         // Spawn task snooze expiry checker (runs every 30 seconds)
         let snooze_tasks = self.tasks.clone();
@@ -2224,6 +2255,7 @@ impl DownloadManager {
                             let task_id_clone = task_id.clone();
                             let notifier_clone = notifier.clone();
                             let hook_manager_clone = hook_manager.clone();
+                            let source_reliability_clone = source_reliability.clone();
                             let proxy_config_clone = proxy_config.read().await.clone();
                             let task_rate_limiters_clone = task_rate_limiters.clone();
                             let max_auto_retries_clone = max_auto_retries.clone();
@@ -2435,6 +2467,21 @@ impl DownloadManager {
                                             task.state = DownloadState::Complete;
                                             task.downloaded = task.size;
                                             task.speed_bps = 0.0;
+                                            // Record source reliability success
+                                            if let Some(ref url) = task.source_url {
+                                                if let Some(domain) =
+                                                    domain_limit::extract_domain(url)
+                                                {
+                                                    let speed = task.speed_bps as u64;
+                                                    let size = task.size;
+                                                    let sr = source_reliability_clone.clone();
+                                                    tokio::spawn(async move {
+                                                        let mut tracker = sr.lock().await;
+                                                        tracker
+                                                            .record_success(&domain, speed, size);
+                                                    });
+                                                }
+                                            }
                                             if let Some(cs_err) = Self::verify_checksum(task).await
                                             {
                                                 task.finalize_active_time();
@@ -7214,6 +7261,7 @@ impl DownloadManager {
         let progress_milestone_config = self.progress_milestone_config.clone();
         let network_monitor = self.network_monitor.clone();
         let cost_tracker = self.cost_tracker.clone();
+        let bandwidth_forecast = self.bandwidth_forecast.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -7315,6 +7363,27 @@ impl DownloadManager {
                         if !domain.is_empty() && avg_speed > 0.0 {
                             let mut sp = speed_prediction.lock().await;
                             sp.record_speed(&domain, avg_speed);
+                        }
+                    }
+
+                    // Update bandwidth forecast with domain-based speed sample
+                    {
+                        let domain = {
+                            let t = tasks.lock().await;
+                            t.iter()
+                                .find(|t| t.id == task_id)
+                                .and_then(|t| {
+                                    t.source_url.as_ref().and_then(|u| {
+                                        url::Url::parse(u)
+                                            .ok()
+                                            .and_then(|u| u.host_str().map(|h| h.to_string()))
+                                    })
+                                })
+                                .unwrap_or_default()
+                        };
+                        if !domain.is_empty() && avg_speed > 0.0 {
+                            let mut bf = bandwidth_forecast.lock().await;
+                            bf.record_sample(&domain, avg_speed, current_downloaded);
                         }
                     }
 
@@ -10234,11 +10303,26 @@ impl DownloadManager {
         let tasks = self.tasks.lock().await;
         let queue_status = dashboard::QueueStatus {
             total: tasks.len(),
-            running: tasks.iter().filter(|t| t.state == DownloadState::Downloading).count(),
-            queued: tasks.iter().filter(|t| t.state == DownloadState::Queued).count(),
-            paused: tasks.iter().filter(|t| t.state == DownloadState::Paused).count(),
-            completed: tasks.iter().filter(|t| t.state == DownloadState::Complete).count(),
-            error: tasks.iter().filter(|t| t.state == DownloadState::Error).count(),
+            running: tasks
+                .iter()
+                .filter(|t| t.state == DownloadState::Downloading)
+                .count(),
+            queued: tasks
+                .iter()
+                .filter(|t| t.state == DownloadState::Queued)
+                .count(),
+            paused: tasks
+                .iter()
+                .filter(|t| t.state == DownloadState::Paused)
+                .count(),
+            completed: tasks
+                .iter()
+                .filter(|t| t.state == DownloadState::Complete)
+                .count(),
+            error: tasks
+                .iter()
+                .filter(|t| t.state == DownloadState::Error)
+                .count(),
             recycled: self.recycle_bin.lock().await.list().len(),
         };
 
@@ -10248,10 +10332,11 @@ impl DownloadManager {
             .map(|t| t.speed_bps as u64)
             .sum();
 
-        let current_upload_bps: u64 = 0; // TODO: track upload speed
+        let current_upload_bps: u64 =
+            self.upload_tracker.lock().await.get_total_upload_speed() as u64;
 
         let total_downloaded_bytes: u64 = tasks.iter().map(|t| t.downloaded).sum();
-        let total_uploaded_bytes: u64 = 0; // TODO: track upload bytes
+        let total_uploaded_bytes: u64 = self.upload_tracker.lock().await.get_total_uploaded();
 
         // Get queue health
         let default_health_config = queue_health::HealthMonitorConfig::default();
@@ -10289,11 +10374,26 @@ impl DownloadManager {
         // Get protocol breakdown if enabled
         let protocol_breakdown = if config.include_protocol_breakdown {
             Some(dashboard::ProtocolBreakdown {
-                http_count: tasks.iter().filter(|t| matches!(t.protocol, DownloadProtocol::Xunlei)).count(),
-                torrent_count: tasks.iter().filter(|t| matches!(t.protocol, DownloadProtocol::Torrent)).count(),
-                ed2k_count: tasks.iter().filter(|t| matches!(t.protocol, DownloadProtocol::Ed2k)).count(),
-                p2p_count: tasks.iter().filter(|t| matches!(t.protocol, DownloadProtocol::P2P)).count(),
-                magnet_count: tasks.iter().filter(|t| matches!(t.protocol, DownloadProtocol::Magnet)).count(),
+                http_count: tasks
+                    .iter()
+                    .filter(|t| matches!(t.protocol, DownloadProtocol::Xunlei))
+                    .count(),
+                torrent_count: tasks
+                    .iter()
+                    .filter(|t| matches!(t.protocol, DownloadProtocol::Torrent))
+                    .count(),
+                ed2k_count: tasks
+                    .iter()
+                    .filter(|t| matches!(t.protocol, DownloadProtocol::Ed2k))
+                    .count(),
+                p2p_count: tasks
+                    .iter()
+                    .filter(|t| matches!(t.protocol, DownloadProtocol::P2P))
+                    .count(),
+                magnet_count: tasks
+                    .iter()
+                    .filter(|t| matches!(t.protocol, DownloadProtocol::Magnet))
+                    .count(),
             })
         } else {
             None
@@ -12923,7 +13023,8 @@ impl DownloadManager {
         let auto_resumed_count = monitor.auto_resumed_count().await;
         let available_bytes =
             disk_monitor::get_available_space(monitor.monitor_path()).unwrap_or_default();
-        let total_bytes = disk_monitor::get_total_space(monitor.monitor_path()).unwrap_or(available_bytes * 2);
+        let total_bytes =
+            disk_monitor::get_total_space(monitor.monitor_path()).unwrap_or(available_bytes * 2);
         let warning_threshold = total_bytes / 10; // 10%
         let critical_threshold = total_bytes / 20; // 5%
         disk_monitor::DiskMonitorSummary {
@@ -13532,6 +13633,74 @@ impl DownloadManager {
         mgr.get_summary(0, 0)
     }
 
+    // === Upload Tracker API ===
+
+    /// Set upload tracker configuration
+    pub async fn set_upload_tracker_config(&self, config: upload_tracker::UploadTrackerConfig) {
+        let mut tracker = self.upload_tracker.lock().await;
+        tracker.set_config(config);
+    }
+
+    /// Get upload tracker configuration
+    pub async fn get_upload_tracker_config(&self) -> upload_tracker::UploadTrackerConfig {
+        let tracker = self.upload_tracker.lock().await;
+        tracker.get_config().clone()
+    }
+
+    /// Get upload tracker summary
+    pub async fn get_upload_tracker_summary(&self) -> upload_tracker::UploadTrackerSummary {
+        let tracker = self.upload_tracker.lock().await;
+        tracker.get_summary()
+    }
+
+    /// Record upload bytes for a task
+    pub async fn record_upload(&self, task_id: &str, uploaded_bytes: u64) {
+        let mut tracker = self.upload_tracker.lock().await;
+        tracker.record_upload(task_id, uploaded_bytes);
+    }
+
+    /// Get current upload speed for a task
+    pub async fn get_task_upload_speed(&self, task_id: &str) -> f64 {
+        let tracker = self.upload_tracker.lock().await;
+        tracker.get_task_upload_speed(task_id)
+    }
+
+    /// Get total uploaded bytes for a task
+    pub async fn get_task_uploaded(&self, task_id: &str) -> u64 {
+        let tracker = self.upload_tracker.lock().await;
+        tracker.get_task_uploaded(task_id)
+    }
+
+    /// Get total upload speed across all tasks
+    pub async fn get_total_upload_speed(&self) -> f64 {
+        let tracker = self.upload_tracker.lock().await;
+        tracker.get_total_upload_speed()
+    }
+
+    /// Get total uploaded bytes across all tasks
+    pub async fn get_total_uploaded(&self) -> u64 {
+        let tracker = self.upload_tracker.lock().await;
+        tracker.get_total_uploaded()
+    }
+
+    /// Remove upload tracking for a task
+    pub async fn remove_upload_tracking(&self, task_id: &str) {
+        let mut tracker = self.upload_tracker.lock().await;
+        tracker.remove_task(task_id);
+    }
+
+    /// Clear all upload tracking data
+    pub async fn clear_upload_tracking(&self) {
+        let mut tracker = self.upload_tracker.lock().await;
+        tracker.clear();
+    }
+
+    /// List all tracked task IDs
+    pub async fn list_upload_tracked_tasks(&self) -> Vec<String> {
+        let tracker = self.upload_tracker.lock().await;
+        tracker.list_tracked_tasks()
+    }
+
     /// Run dynamic priority adjustment cycle
     pub async fn run_dynamic_priority_adjustment(
         &self,
@@ -13770,10 +13939,234 @@ impl DownloadManager {
         mgr.clear_cache();
     }
 
-    /// Save source benchmark cache to disk.
+    // ========== Bandwidth Forecast API ==========
+
+    /// Get bandwidth forecast configuration.
+    pub async fn get_bandwidth_forecast_config(&self) -> bandwidth_forecast::ForecastConfig {
+        let mgr = self.bandwidth_forecast.lock().await;
+        mgr.config.clone()
+    }
+
+    /// Set bandwidth forecast configuration.
+    pub async fn set_bandwidth_forecast_config(&self, config: bandwidth_forecast::ForecastConfig) {
+        let mut mgr = self.bandwidth_forecast.lock().await;
+        mgr.config = config;
+    }
+
+    /// Get bandwidth forecast for a specific domain.
+    pub async fn forecast_bandwidth(&self, domain: &str) -> bandwidth_forecast::BandwidthForecast {
+        let mgr = self.bandwidth_forecast.lock().await;
+        mgr.forecast(domain)
+    }
+
+    /// Estimate time to complete download (seconds) for a domain.
+    pub async fn estimate_download_eta(&self, domain: &str, remaining_bytes: u64) -> Option<u64> {
+        let mgr = self.bandwidth_forecast.lock().await;
+        mgr.estimate_eta(domain, remaining_bytes)
+    }
+
+    /// Get bandwidth forecast summary for all tracked domains.
+    pub async fn get_bandwidth_forecast_summary(&self) -> bandwidth_forecast::ForecastSummary {
+        let mgr = self.bandwidth_forecast.lock().await;
+        mgr.get_summary()
+    }
+
+    /// Clear bandwidth forecast history for a specific domain.
+    pub async fn clear_bandwidth_forecast_domain(&self, domain: &str) {
+        let mut mgr = self.bandwidth_forecast.lock().await;
+        mgr.clear_domain(domain);
+    }
+
+    /// Clear all bandwidth forecast history.
+    pub async fn clear_bandwidth_forecast(&self) {
+        let mut mgr = self.bandwidth_forecast.lock().await;
+        mgr.clear_all();
+    }
+
+    /// Save bandwidth forecast config to disk.
     pub async fn save_source_benchmark_cache(&self) -> std::io::Result<()> {
         let mgr = self.source_benchmark.lock().await;
         mgr.save_cache().await
+    }
+
+    /// Save bandwidth forecast config to disk.
+    pub async fn save_bandwidth_forecast_config(&self) -> std::io::Result<()> {
+        let mgr = self.bandwidth_forecast.lock().await;
+        mgr.save_config(&self.data_dir.join("bandwidth_forecast_config.json"))
+    }
+
+    /// Load bandwidth forecast config from disk.
+    pub async fn load_bandwidth_forecast_config(&self) -> std::io::Result<()> {
+        let path = self.data_dir.join("bandwidth_forecast_config.json");
+        if path.exists() {
+            let config = bandwidth_forecast::BandwidthForecastManager::load_config(&path)?;
+            let mut mgr = self.bandwidth_forecast.lock().await;
+            mgr.config = config;
+        }
+        Ok(())
+    }
+
+    /// Save bandwidth forecast histories to disk.
+    pub async fn save_bandwidth_forecast_histories(&self) -> std::io::Result<()> {
+        let mgr = self.bandwidth_forecast.lock().await;
+        mgr.save_histories(&self.data_dir.join("bandwidth_forecast_histories.json"))
+    }
+
+    /// Load bandwidth forecast histories from disk.
+    pub async fn load_bandwidth_forecast_histories(&self) -> std::io::Result<()> {
+        let path = self.data_dir.join("bandwidth_forecast_histories.json");
+        if path.exists() {
+            let histories = bandwidth_forecast::BandwidthForecastManager::load_histories(&path)?;
+            let mut mgr = self.bandwidth_forecast.lock().await;
+            mgr.histories = histories;
+        }
+        Ok(())
+    }
+
+    // ==================== Phase 137: Source Reliability Tracker ====================
+
+    /// Get source reliability configuration.
+    pub async fn get_source_reliability_config(
+        &self,
+    ) -> source_reliability::SourceReliabilityConfig {
+        let tracker = self.source_reliability.lock().await;
+        tracker.config.clone()
+    }
+
+    /// Set source reliability configuration.
+    pub async fn set_source_reliability_config(
+        &self,
+        config: source_reliability::SourceReliabilityConfig,
+    ) {
+        let mut tracker = self.source_reliability.lock().await;
+        tracker.config = config;
+    }
+
+    /// Record a successful download for reliability tracking.
+    pub async fn record_reliability_success(&self, domain: &str, speed_bps: u64, file_size: u64) {
+        let mut tracker = self.source_reliability.lock().await;
+        tracker.record_success(domain, speed_bps, file_size);
+    }
+
+    /// Record a failed download for reliability tracking.
+    pub async fn record_reliability_failure(&self, domain: &str, error: &str) {
+        let mut tracker = self.source_reliability.lock().await;
+        tracker.record_failure(domain, error);
+    }
+
+    /// Get reliability score for a specific domain (0.0-1.0).
+    pub async fn get_source_reliability_score(&self, domain: &str) -> f64 {
+        let tracker = self.source_reliability.lock().await;
+        tracker.get_score(domain)
+    }
+
+    /// Get reliability tier for a specific domain.
+    pub async fn get_source_reliability_tier(
+        &self,
+        domain: &str,
+    ) -> source_reliability::ReliabilityTier {
+        let tracker = self.source_reliability.lock().await;
+        tracker.get_tier(domain)
+    }
+
+    /// Get reliability data for a specific domain.
+    pub async fn get_source_reliability_domain(
+        &self,
+        domain: &str,
+    ) -> Option<source_reliability::DomainReliability> {
+        let tracker = self.source_reliability.lock().await;
+        tracker.get_domain(domain).cloned()
+    }
+
+    /// Get all domains sorted by reliability (best first).
+    pub async fn get_source_reliability_domains(
+        &self,
+    ) -> Vec<source_reliability::DomainReliability> {
+        let tracker = self.source_reliability.lock().await;
+        tracker
+            .get_domains_by_reliability()
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Get domains that should be avoided (Poor or Unreliable tier).
+    pub async fn get_source_reliability_avoid(&self) -> Vec<(String, f64)> {
+        let tracker = self.source_reliability.lock().await;
+        tracker.get_avoid_domains()
+    }
+
+    /// Get reliability summary across all tracked domains.
+    pub async fn get_source_reliability_summary(&self) -> source_reliability::ReliabilitySummary {
+        let tracker = self.source_reliability.lock().await;
+        tracker.get_summary()
+    }
+
+    /// Format a human-readable reliability summary.
+    pub async fn format_source_reliability_summary(&self) -> String {
+        let tracker = self.source_reliability.lock().await;
+        tracker.format_summary()
+    }
+
+    /// Clear all source reliability data.
+    pub async fn clear_source_reliability(&self) {
+        let mut tracker = self.source_reliability.lock().await;
+        tracker.clear();
+    }
+
+    /// Clear reliability data for a specific domain.
+    pub async fn clear_source_reliability_domain(&self, domain: &str) {
+        let mut tracker = self.source_reliability.lock().await;
+        tracker.clear_domain(domain);
+    }
+
+    /// Prune old reliability samples older than the given timestamp.
+    pub async fn prune_source_reliability_samples(&self, before_timestamp: u64) {
+        let mut tracker = self.source_reliability.lock().await;
+        tracker.prune_old_samples(before_timestamp);
+    }
+
+    /// Save source reliability config to disk.
+    pub async fn save_source_reliability_config(&self) -> std::io::Result<()> {
+        let tracker = self.source_reliability.lock().await;
+        let config_path = self.data_dir.join("source_reliability_config.json");
+        let json = serde_json::to_string_pretty(&tracker.config)?;
+        std::fs::write(config_path, json)?;
+        Ok(())
+    }
+
+    /// Load source reliability config from disk.
+    pub async fn load_source_reliability_config(&self) -> std::io::Result<()> {
+        let path = self.data_dir.join("source_reliability_config.json");
+        if path.exists() {
+            let json = std::fs::read_to_string(path)?;
+            let config: source_reliability::SourceReliabilityConfig = serde_json::from_str(&json)?;
+            let mut tracker = self.source_reliability.lock().await;
+            tracker.config = config;
+        }
+        Ok(())
+    }
+
+    /// Save source reliability data to disk.
+    pub async fn save_source_reliability_data(&self) -> std::io::Result<()> {
+        let tracker = self.source_reliability.lock().await;
+        let data_path = self.data_dir.join("source_reliability_data.json");
+        let json = serde_json::to_string_pretty(&*tracker)?;
+        std::fs::write(data_path, json)?;
+        Ok(())
+    }
+
+    /// Load source reliability data from disk.
+    pub async fn load_source_reliability_data(&self) -> std::io::Result<()> {
+        let path = self.data_dir.join("source_reliability_data.json");
+        if path.exists() {
+            let json = std::fs::read_to_string(path)?;
+            let tracker_data: source_reliability::SourceReliabilityTracker =
+                serde_json::from_str(&json)?;
+            let mut tracker = self.source_reliability.lock().await;
+            tracker.domains = tracker_data.domains;
+        }
+        Ok(())
     }
 
     // ── Global Download Budget ──────────────────────────────────────────

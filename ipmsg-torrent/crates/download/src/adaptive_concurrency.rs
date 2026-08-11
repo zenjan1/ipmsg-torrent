@@ -212,7 +212,7 @@ impl AdaptiveConcurrencyManager {
     /// Get the recommended connection count considering per-domain limits
     pub fn get_connections_for_domain(&self, task_id: &str, domain: &str) -> u32 {
         let task_conn = self.get_connections(task_id);
-        
+
         // Check per-domain limit
         if let Some(domain_state) = self.domain_states.get(domain) {
             let remaining = domain_state
@@ -220,7 +220,7 @@ impl AdaptiveConcurrencyManager {
                 .saturating_sub(domain_state.active_connections);
             return task_conn.min(remaining).max(self.config.min_connections);
         }
-        
+
         task_conn.min(self.default_domain_limit)
     }
 
@@ -335,11 +335,11 @@ impl AdaptiveConcurrencyManager {
                 } else {
                     // EWMA update: SRTT = (1 - alpha) * SRTT + alpha * RTT
                     let diff = (state.smoothed_rtt_ms - response_time_ms).abs();
-                    state.smoothed_rtt_ms = EWMA_ALPHA * response_time_ms
-                        + (1.0 - EWMA_ALPHA) * state.smoothed_rtt_ms;
+                    state.smoothed_rtt_ms =
+                        EWMA_ALPHA * response_time_ms + (1.0 - EWMA_ALPHA) * state.smoothed_rtt_ms;
                     // Variance update: RTTVAR = (1 - beta) * RTTVAR + beta * |SRTT - RTT|
-                    state.rtt_variance_ms = EWMA_BETA * diff
-                        + (1.0 - EWMA_BETA) * state.rtt_variance_ms;
+                    state.rtt_variance_ms =
+                        EWMA_BETA * diff + (1.0 - EWMA_BETA) * state.rtt_variance_ms;
                     // Track minimum RTT (baseline for BBR-style estimation)
                     state.min_rtt_ms = state.min_rtt_ms.min(response_time_ms);
                 }
@@ -606,7 +606,7 @@ impl AdaptiveConcurrencyManager {
 
     /// Get the smoothed RTT estimate for a task
     pub fn get_smoothed_rtt(&self, task_id: &str) -> Option<f64> {
-        self.states.get(task_id).and(|s: &ConcurrencyState| {
+        self.states.get(task_id).and_then(|s: &ConcurrencyState| {
             if s.smoothed_rtt_ms > 0.0 {
                 Some(s.smoothed_rtt_ms)
             } else {
@@ -617,7 +617,7 @@ impl AdaptiveConcurrencyManager {
 
     /// Get the estimated bandwidth for a task
     pub fn get_estimated_bandwidth(&self, task_id: &str) -> Option<f64> {
-        self.states.get(task_id).and(|s: &ConcurrencyState| {
+        self.states.get(task_id).and_then(|s: &ConcurrencyState| {
             if s.estimated_bandwidth_bps > 0.0 {
                 Some(s.estimated_bandwidth_bps)
             } else {
@@ -637,7 +637,7 @@ impl AdaptiveConcurrencyManager {
             state.current_connections = to;
             state.last_adjustment = Some(Instant::now());
             state.total_adjustments += 1;
-            
+
             if to > from {
                 state.last_adjustment_direction = AdjustmentDirection::Increased;
                 state.consecutive_increases += 1;

@@ -178,7 +178,7 @@ impl SegmentDownloader {
         // Also consider file size (don't have too small segments)
         let min_segment_size = 256 * 1024; // 256KB minimum
         let max_by_size = (file_size / min_segment_size) as usize;
-        
+
         base_count.min(max_by_size.max(1)).min(MAX_SEGMENT_COUNT)
     }
 
@@ -197,9 +197,12 @@ impl SegmentDownloader {
 
     /// Adjust segment count based on bandwidth
     fn maybe_adjust_segment_count(&mut self) {
-        let optimal = Self::calculate_optimal_segment_count(self.file_size, self.estimated_bandwidth);
-        
-        if optimal != self.segment_count && optimal > self.segments.iter().filter(|s| !s.downloaded).count() {
+        let optimal =
+            Self::calculate_optimal_segment_count(self.file_size, self.estimated_bandwidth);
+
+        if optimal != self.segment_count
+            && optimal > self.segments.iter().filter(|s| !s.downloaded).count()
+        {
             tracing::debug!(
                 old_count = self.segment_count,
                 new_count = optimal,
@@ -349,7 +352,7 @@ impl SegmentDownloader {
                     continue;
                 }
             }
-            
+
             // Flush the buffer
             if let Err(e) = file.flush().await {
                 tracing::warn!(error = %e, "Failed to flush file");
@@ -386,7 +389,8 @@ impl SegmentDownloader {
 
             let task = tokio::spawn(async move {
                 let start = Instant::now();
-                let result = Self::download_segment_with_retry(client, url, offset, size, seg_idx).await;
+                let result =
+                    Self::download_segment_with_retry(client, url, offset, size, seg_idx).await;
                 let duration = start.elapsed();
                 (seg_idx, result, duration)
             });
@@ -433,7 +437,8 @@ impl SegmentDownloader {
                             segment = seg_idx,
                             offset = segment.offset,
                             size = data.len(),
-                            throughput = format!("{:.2} MB/s", segment.throughput_bps / 1_000_000.0),
+                            throughput =
+                                format!("{:.2} MB/s", segment.throughput_bps / 1_000_000.0),
                             "Segment downloaded"
                         );
                     }
@@ -825,7 +830,7 @@ mod tests {
             tmp_dir.path().to_path_buf(),
         );
 
-        downloader.start_time = Some(std::time::Instant::now());
+        downloader.start_time = Some(tokio::time::Instant::now());
         downloader.downloaded = 5 * 1024 * 1024;
 
         let progress = downloader.get_progress().unwrap();

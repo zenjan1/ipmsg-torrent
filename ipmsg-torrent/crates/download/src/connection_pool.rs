@@ -109,9 +109,9 @@ impl Default for PoolConfig {
             max_age: Duration::from_secs(300), // 5 minutes
             max_idle: Duration::from_secs(60), // 1 minute
             connect_timeout: Duration::from_secs(10),
-            tcp_send_buffer_size: 256 * 1024,  // 256 KB
-            tcp_recv_buffer_size: 256 * 1024,  // 256 KB
-            tcp_nodelay: true,                  // Disable Nagle for low latency
+            tcp_send_buffer_size: 256 * 1024, // 256 KB
+            tcp_recv_buffer_size: 256 * 1024, // 256 KB
+            tcp_nodelay: true,                // Disable Nagle for low latency
             dns_cache_enabled: true,
             dns_cache_ttl: Duration::from_secs(300), // 5 minutes
             health_check_enabled: true,
@@ -171,7 +171,7 @@ impl ConnectionPool {
     pub async fn can_connect_domain(&self, domain: &str) -> bool {
         let limits = self.domain_limits.lock().await;
         let counts = self.domain_counts.lock().await;
-        
+
         if let Some(&limit) = limits.get(domain) {
             let current = counts.get(domain).copied().unwrap_or(0);
             current < limit
@@ -202,7 +202,7 @@ impl ConnectionPool {
             if let Some(entries) = conns.get_mut(&addr) {
                 // Remove expired, idle, or unhealthy connections
                 entries.retain(|e| {
-                    !e.is_expired(self.config.max_age) 
+                    !e.is_expired(self.config.max_age)
                         && !e.is_idle(self.config.max_idle)
                         && (!self.config.health_check_enabled || e.is_healthy())
                 });
@@ -219,7 +219,7 @@ impl ConnectionPool {
                     }
                     // Unhealthy connection, discard it
                 }
-                
+
                 // Clean up empty entries
                 if entries.is_empty() {
                     conns.remove(&addr);
@@ -238,7 +238,10 @@ impl ConnectionPool {
         {
             let conns = self.connections.lock().await;
             if let Some(entries) = conns.get(&addr) {
-                if entries.iter().any(|e| e.is_healthy() && !e.is_idle(self.config.max_idle)) {
+                if entries
+                    .iter()
+                    .any(|e| e.is_healthy() && !e.is_idle(self.config.max_idle))
+                {
                     return Ok(()); // Already have a good connection
                 }
             }
@@ -251,11 +254,7 @@ impl ConnectionPool {
     }
 
     /// Resolve hostname with DNS caching
-    pub async fn resolve_cached(
-        &self,
-        hostname: &str,
-        port: u16,
-    ) -> Result<SocketAddr, PoolError> {
+    pub async fn resolve_cached(&self, hostname: &str, port: u16) -> Result<SocketAddr, PoolError> {
         // Check DNS cache first
         if self.config.dns_cache_enabled {
             let cache = self.dns_cache.lock().await;
@@ -303,7 +302,7 @@ impl ConnectionPool {
 
         // Remove expired, idle, or unhealthy connections
         entries.retain(|e| {
-            !e.is_expired(self.config.max_age) 
+            !e.is_expired(self.config.max_age)
                 && !e.is_idle(self.config.max_idle)
                 && (!self.config.health_check_enabled || e.is_healthy())
         });
@@ -344,7 +343,7 @@ impl ConnectionPool {
         let mut conns = self.connections.lock().await;
         conns.retain(|_, entries| {
             entries.retain(|e| {
-                !e.is_expired(self.config.max_age) 
+                !e.is_expired(self.config.max_age)
                     && !e.is_idle(self.config.max_idle)
                     && (!self.config.health_check_enabled || e.is_healthy())
             });

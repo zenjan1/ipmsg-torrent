@@ -357,7 +357,9 @@ impl Ed2kEngine {
                 }
             }
         }
-        Err(Ed2kDownloadError::Server("max retries exceeded".to_string()))
+        Err(Ed2kDownloadError::Server(
+            "max retries exceeded".to_string(),
+        ))
     }
 
     /// Request peer sources from connected peers (P2P source exchange).
@@ -624,7 +626,10 @@ impl Ed2kEngine {
                                         tracing::warn!(error = %e, "Failed to save ed2k progress");
                                     }
                                 } else {
-                                    tracing::warn!(chunk = chunk_idx, "Chunk verification failed, resetting");
+                                    tracing::warn!(
+                                        chunk = chunk_idx,
+                                        "Chunk verification failed, resetting"
+                                    );
                                     // Reset chunk state
                                     let hash = chunk.hash;
                                     let size = chunk.size;
@@ -678,9 +683,7 @@ impl Ed2kEngine {
 
         // Process newly discovered peers
         for peer_addr in new_peers {
-            if !self.peers.contains_key(&peer_addr)
-                && !self.discovered_peers.contains(&peer_addr)
-            {
+            if !self.peers.contains_key(&peer_addr) && !self.discovered_peers.contains(&peer_addr) {
                 self.discovered_peers.insert(peer_addr);
                 if let Err(e) = self.add_peer(peer_addr).await {
                     tracing::debug!(addr = %peer_addr, error = %e, "Discovered peer unavailable");

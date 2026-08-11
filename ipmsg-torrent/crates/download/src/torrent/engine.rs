@@ -695,10 +695,9 @@ impl TorrentEngine {
                     }
 
                     // Check if we're interested in anything this peer has
-                    let has_interesting = peer_state
-                        .available_pieces
-                        .iter()
-                        .any(|&p| !self.downloaded_pieces.contains(&p) && self.selected_pieces.contains(&p));
+                    let has_interesting = peer_state.available_pieces.iter().any(|&p| {
+                        !self.downloaded_pieces.contains(&p) && self.selected_pieces.contains(&p)
+                    });
 
                     if !has_interesting && !peer_state.available_pieces.is_empty() {
                         // We have everything this peer has - send NotInterested
@@ -828,7 +827,11 @@ impl TorrentEngine {
 
         // Primary tracker exhausted, try additional trackers
         for tracker_url in self.additional_trackers.clone() {
-            let failures = self.tracker_failures.get(&tracker_url).copied().unwrap_or(0);
+            let failures = self
+                .tracker_failures
+                .get(&tracker_url)
+                .copied()
+                .unwrap_or(0);
             if failures >= MAX_TRACKER_RETRIES {
                 tracing::debug!(url = %tracker_url, "Skipping tracker (too many failures)");
                 continue;
@@ -840,8 +843,7 @@ impl TorrentEngine {
             // We can't easily mutate Arc<TorrentMeta>, so just log and skip
             // In a full implementation, we'd create a temporary HttpTracker for each URL
             let _ = saved_announce;
-            self.tracker_failures
-                .insert(tracker_url, failures + 1);
+            self.tracker_failures.insert(tracker_url, failures + 1);
         }
 
         Err(last_err.unwrap_or_else(|| {
@@ -888,8 +890,8 @@ impl TorrentEngine {
                 None => continue,
             };
 
-            let should_unchoke = i < unchoke_count
-                || (peer.peer_interested && peer.downloaded_bytes > 0);
+            let should_unchoke =
+                i < unchoke_count || (peer.peer_interested && peer.downloaded_bytes > 0);
 
             if should_unchoke && peer.am_choking {
                 // Unchoke this peer
