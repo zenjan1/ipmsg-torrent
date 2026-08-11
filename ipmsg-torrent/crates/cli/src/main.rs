@@ -223,6 +223,18 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
+    /// Upload speed and bytes tracker (Phase 133)
+    DlUpload {
+        /// "status", "config", "summary", "tasks", "clear"
+        action: String,
+        args: Vec<String>,
+    },
+    /// Bandwidth forecast - predict download speeds based on historical data (Phase 136)
+    DlBandwidthForecast {
+        /// "status", "config", "predict", "summary", "clear", "remove"
+        action: String,
+        args: Vec<String>,
+    },
     /// Download cost tracker (Phase 127)
     DlCost {
         /// "status", "config", "set", "summary", "month", "all", "tasks", "daily", "clear"
@@ -1014,6 +1026,30 @@ fn parse_command(input: &str) -> Command {
                 let action = parts[1].to_string();
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlWebhook { action, args }
+            }
+        }
+        "dlupload" | "dl-upload" | "dlup" => {
+            if parts.len() < 2 {
+                Command::DlUpload {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlUpload { action, args }
+            }
+        }
+        "dlbwforecast" | "dl-bwforecast" | "dlforecast" => {
+            if parts.len() < 2 {
+                Command::DlBandwidthForecast {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlBandwidthForecast { action, args }
             }
         }
         "dlcost" | "dl-cost" => {
@@ -3184,15 +3220,20 @@ async fn handle_command(
                 s.add_system_message("main", "No download tasks".to_string());
             } else {
                 // Calculate column widths for alignment
-                let max_name_len = tasks.iter().map(|t| t.name.len()).min().unwrap_or(20).min(30);
+                let max_name_len = tasks
+                    .iter()
+                    .map(|t| t.name.len())
+                    .min()
+                    .unwrap_or(20)
+                    .min(30);
                 let mut lines = vec![format!("\n📥 Download tasks ({})\n", tasks.len())];
-                
-                for task in tasks {
+
+                for task in &tasks {
                     let progress = task.progress();
                     let icon = state_icon(task.state);
                     let color = state_color(task.state);
                     let bar = format_progress_bar(progress, 20);
-                    
+
                     // Speed and ETA
                     let speed_str = if task.speed_bps > 0.0 {
                         format_speed(task.speed_bps)
@@ -3200,21 +3241,21 @@ async fn handle_command(
                         "—".to_string()
                     };
                     let eta_str = format_eta(task.eta_seconds());
-                    
+
                     // Size info
                     let size_str = format!(
                         "{}/{}",
                         format_size(task.downloaded),
                         format_size(task.size)
                     );
-                    
+
                     // Error message if any
                     let error_str = task
                         .error
                         .as_ref()
                         .map(|e| format!(" ❌ {}", e))
                         .unwrap_or_default();
-                    
+
                     let line = format!(
                         "{} {} {:<width$} {} {:>6} {:>8} ETA:{:<6}{}",
                         icon,
@@ -3227,22 +3268,28 @@ async fn handle_command(
                         error_str,
                         width = max_name_len
                     );
-                    
+
                     lines.push(line);
                 }
-                
+
                 // Summary
-                let active = tasks.iter().filter(|t| t.state == ipmsg_download::DownloadState::Downloading).count();
-                let completed = tasks.iter().filter(|t| t.state == ipmsg_download::DownloadState::Complete).count();
+                let active = tasks
+                    .iter()
+                    .filter(|t| t.state == ipmsg_download::DownloadState::Downloading)
+                    .count();
+                let completed = tasks
+                    .iter()
+                    .filter(|t| t.state == ipmsg_download::DownloadState::Complete)
+                    .count();
                 let total_speed: f64 = tasks.iter().map(|t| t.speed_bps).sum();
-                
+
                 lines.push(format!(
                     "\n📊 Active: {} | Completed: {} | Total: {}",
                     active,
                     completed,
                     format_speed(total_speed)
                 ));
-                
+
                 s.add_system_message("main", lines.join("\n"));
             }
         }
@@ -3253,35 +3300,49 @@ async fn handle_command(
 
             let task = download_manager.get_task(&task_id).await;
             let mut s = state.lock().await;
-            
+
             match task {
                 Some(task) => {
                     let mut lines = vec![
                         format!("\n📋 Task Details: {}\n", task.name),
                         format!("ID:          {}", task.id),
                         format!("Protocol:    {:?}", task.protocol),
-                        format!("State:       {} {}", state_icon(task.state), task.state_label()),
+                        format!(
+                            "State:       {} {}",
+                            state_icon(task.state),
+                            task.state_label()
+                        ),
                         format!("Progress:    {:.1}%", task.progress()),
-                        format!("Size:        {} / {}", format_size(task.downloaded), format_size(task.size)),
+                        format!(
+                            "Size:        {} / {}",
+                            format_size(task.downloaded),
+                            format_size(task.size)
+                        ),
                         format!("Speed:       {}", format_speed(task.speed_bps)),
                         format!("ETA:         {}", format_eta(task.eta_seconds())),
                         format!("Save Path:   {}", task.save_path.display()),
-                        format!("Created:     {}", task.created_at.format("%Y-%m-%d %H:%M:%S")),
-                        format!("Updated:     {}", task.updated_at.format("%Y-%m-%d %H:%M:%S")),
+                        format!(
+                            "Created:     {}",
+                            task.created_at.format("%Y-%m-%d %H:%M:%S")
+                        ),
+                        format!(
+                            "Updated:     {}",
+                            task.updated_at.format("%Y-%m-%d %H:%M:%S")
+                        ),
                     ];
-                    
+
                     if !task.tags.is_empty() {
                         lines.push(format!("Tags:        {}", task.tags.join(", ")));
                     }
-                    
+
                     if let Some(err) = &task.error {
                         lines.push(format!("\n❌ Error: {}", err));
                     }
-                    
+
                     if let Some(url) = &task.source_url {
                         lines.push(format!("\n🔗 Source: {}", url));
                     }
-                    
+
                     // Get sources info
                     let sources = download_manager.get_task_sources(&task_id).await;
                     if !sources.is_empty() {
@@ -3306,7 +3367,7 @@ async fn handle_command(
                             lines.push(format!("  ... and {} more", sources.len() - 5));
                         }
                     }
-                    
+
                     s.add_system_message("main", lines.join("\n"));
                 }
                 None => {
@@ -3314,7 +3375,10 @@ async fn handle_command(
                 }
             }
         }
-        Command::DlLog { task_id, lines: num_lines } => {
+        Command::DlLog {
+            task_id,
+            lines: num_lines,
+        } => {
             let s = state.lock().await;
             let download_manager = s.download_manager.clone();
             drop(s);
@@ -3322,12 +3386,15 @@ async fn handle_command(
             let task = download_manager.get_task(&task_id).await;
             let activity = download_manager.get_task_activity(&task_id).await;
             let mut s = state.lock().await;
-            
+
             match task {
                 Some(task) => {
                     let max_lines = num_lines.unwrap_or(20);
-                    let mut lines = vec![format!("\n📜 Activity Log: {} (last {} events)\n", task.name, max_lines)];
-                    
+                    let mut lines = vec![format!(
+                        "\n📜 Activity Log: {} (last {} events)\n",
+                        task.name, max_lines
+                    )];
+
                     if let Some(log) = activity {
                         let events: Vec<_> = log.recent(max_lines).into_iter().collect();
                         if events.is_empty() {
@@ -3345,7 +3412,7 @@ async fn handle_command(
                     } else {
                         lines.push("  (no activity log available)".to_string());
                     }
-                    
+
                     s.add_system_message("main", lines.join("\n"));
                 }
                 None => {
@@ -3360,7 +3427,7 @@ async fn handle_command(
 
             let tasks = download_manager.list_tasks().await;
             let keyword_lower = keyword.to_lowercase();
-            
+
             let matches: Vec<_> = tasks
                 .iter()
                 .filter(|t| {
@@ -3369,17 +3436,23 @@ async fn handle_command(
                             .as_ref()
                             .map(|u| u.to_lowercase().contains(&keyword_lower))
                             .unwrap_or(false)
-                        || t.tags.iter().any(|tag| tag.to_lowercase().contains(&keyword_lower))
+                        || t.tags
+                            .iter()
+                            .any(|tag| tag.to_lowercase().contains(&keyword_lower))
                 })
                 .collect();
 
             let mut s = state.lock().await;
-            
+
             if matches.is_empty() {
                 s.add_system_message("main", format!("🔍 No tasks matching '{}'", keyword));
             } else {
-                let mut lines = vec![format!("\n🔍 Search Results: '{}' ({} found)\n", keyword, matches.len())];
-                
+                let mut lines = vec![format!(
+                    "\n🔍 Search Results: '{}' ({} found)\n",
+                    keyword,
+                    matches.len()
+                )];
+
                 for task in matches {
                     let icon = state_icon(task.state);
                     let bar = format_progress_bar(task.progress(), 15);
@@ -3391,7 +3464,7 @@ async fn handle_command(
                         task.progress()
                     ));
                 }
-                
+
                 s.add_system_message("main", lines.join("\n"));
             }
         }
@@ -3428,10 +3501,12 @@ async fn handle_command(
                 "  /dlhealth           - Show queue health report".to_string(),
                 "  /dltag <id> <tags>  - Add tags to a task".to_string(),
                 "  /dlfind [query]     - Advanced search/filter".to_string(),
+                "  /dlupload [action]  - Upload tracker (status/summary/config/tasks/clear)"
+                    .to_string(),
                 "".to_string(),
                 "Use /help for general commands".to_string(),
             ];
-            
+
             let mut s = state.lock().await;
             s.add_system_message("main", help_text.join("\n"));
         }
@@ -6779,6 +6854,251 @@ async fn handle_command(
                 _ => {
                     let mut s = state.lock().await;
                     s.add_system_message("main", "Unknown webhook action. Use: status, list, add, del, history, clear, config".to_string());
+                }
+            }
+        }
+        Command::DlUpload { action, args: _ } => {
+            let s = state.lock().await;
+            let dm = s.download_manager.clone();
+            drop(s);
+
+            match action.as_str() {
+                "status" => {
+                    let summary = dm.get_upload_tracker_summary().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", summary.formatted);
+                }
+                "summary" => {
+                    let summary = dm.get_upload_tracker_summary().await;
+                    let mut msg = format!(
+                        "📤 Upload Tracker Summary:\n  Enabled: {}\n  Tracked Tasks: {}\n  Total Uploaded: {}\n  Current Speed: {}",
+                        if summary.enabled { "yes" } else { "no" },
+                        summary.tracked_task_count,
+                        ipmsg_download::upload_tracker::format_size(summary.total_uploaded_bytes),
+                        ipmsg_download::upload_tracker::format_speed_bps(
+                            summary.current_upload_bps
+                        )
+                    );
+                    if !summary.top_uploaders.is_empty() {
+                        msg.push_str("\n  Top Uploaders:");
+                        for (task_id, speed) in &summary.top_uploaders {
+                            msg.push_str(&format!(
+                                "\n    {} - {}",
+                                task_id,
+                                ipmsg_download::upload_tracker::format_speed_bps(*speed)
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    let cfg = dm.get_upload_tracker_config().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!(
+                        "Upload Tracker Config:\n  Enabled: {}\n  Speed Window: {}s\n  Max Tracked Tasks: {}",
+                        cfg.enabled,
+                        cfg.speed_window_secs,
+                        cfg.max_tracked_tasks
+                    ));
+                }
+                "tasks" => {
+                    let tasks = dm.list_upload_tracked_tasks().await;
+                    let mut s = state.lock().await;
+                    if tasks.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "No tasks currently tracked for upload".to_string(),
+                        );
+                    } else {
+                        let mut msg = format!("Upload Tracked Tasks ({}):\n", tasks.len());
+                        for task_id in &tasks {
+                            let speed = dm.get_task_upload_speed(task_id).await;
+                            let uploaded = dm.get_task_uploaded(task_id).await;
+                            msg.push_str(&format!(
+                                "  {} - {} @ {}\n",
+                                task_id,
+                                ipmsg_download::upload_tracker::format_size(uploaded),
+                                ipmsg_download::upload_tracker::format_speed_bps(speed)
+                            ));
+                        }
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "clear" => {
+                    dm.clear_upload_tracking().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Cleared all upload tracking data".to_string());
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Unknown upload tracker action. Use: status, summary, config, tasks, clear"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlBandwidthForecast { action, args } => {
+            let s = state.lock().await;
+            let dm = s.download_manager.clone();
+            drop(s);
+
+            match action.as_str() {
+                "status" => {
+                    let config = dm.get_bandwidth_forecast_config().await;
+                    let summary = dm.get_bandwidth_forecast_summary().await;
+                    let mut msg = format!(
+                        "📊 Bandwidth Forecast\n  Enabled: {}\n  Min Samples: {}\n  Max Samples: {}\n  Trend Window: {}s\n  Tracked Domains: {}\n  High Confidence: {}",
+                        if config.enabled { "yes" } else { "no" },
+                        config.min_samples,
+                        config.max_samples,
+                        config.trend_window_secs,
+                        summary.total_domains,
+                        summary.high_confidence_count
+                    );
+                    if summary.avg_predicted_speed_bps > 0.0 {
+                        msg.push_str(&format!(
+                            "\n  Avg Predicted Speed: {:.1} KB/s",
+                            summary.avg_predicted_speed_bps / 1024.0
+                        ));
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    if args.len() < 2 {
+                        let config = dm.get_bandwidth_forecast_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!(
+                            "Bandwidth Forecast Config:\n  enabled: {}\n  min_samples: {}\n  max_samples: {}\n  trend_window_secs: {}\n  high_confidence_threshold: {:.2}\n  medium_confidence_threshold: {:.2}\n\nUsage: /dlbwforecast config <key> <value>\nKeys: enabled, min_samples, max_samples, trend_window, high_threshold, medium_threshold",
+                            config.enabled,
+                            config.min_samples,
+                            config.max_samples,
+                            config.trend_window_secs,
+                            config.high_confidence_threshold,
+                            config.medium_confidence_threshold
+                        ));
+                    } else {
+                        let mut config = dm.get_bandwidth_forecast_config().await;
+                        match args[0].as_str() {
+                            "enabled" => {
+                                config.enabled = args[1].parse().unwrap_or(true);
+                            }
+                            "min_samples" => {
+                                config.min_samples = args[1].parse().unwrap_or(5);
+                            }
+                            "max_samples" => {
+                                config.max_samples = args[1].parse().unwrap_or(200);
+                            }
+                            "trend_window" => {
+                                config.trend_window_secs = args[1].parse().unwrap_or(300);
+                            }
+                            "high_threshold" => {
+                                config.high_confidence_threshold = args[1].parse().unwrap_or(0.7);
+                            }
+                            "medium_threshold" => {
+                                config.medium_confidence_threshold = args[1].parse().unwrap_or(0.4);
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", "Unknown config key. Use: enabled, min_samples, max_samples, trend_window, high_threshold, medium_threshold".to_string());
+                            }
+                        }
+                        dm.set_bandwidth_forecast_config(config).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "✅ Bandwidth forecast config updated.".to_string(),
+                        );
+                    }
+                }
+                "predict" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlbwforecast predict <domain>".to_string(),
+                        );
+                    } else {
+                        let domain = &args[0];
+                        let forecast = dm.forecast_bandwidth(domain).await;
+                        let mut msg = format!(
+                            "📊 Forecast for {}\n  Predicted Speed: {:.1} KB/s\n  Range: {:.1} - {:.1} KB/s\n  Confidence: {} ({:.0}%)\n  Samples: {}\n  Trend: {}",
+                            forecast.key,
+                            forecast.predicted_speed_bps / 1024.0,
+                            forecast.min_speed_bps / 1024.0,
+                            forecast.max_speed_bps / 1024.0,
+                            forecast.confidence.as_str(),
+                            forecast.confidence_score * 100.0,
+                            forecast.sample_count,
+                            forecast.trend.as_str()
+                        );
+                        if let Some(tod) = forecast.time_pattern {
+                            msg.push_str(&format!("\n  Time Pattern: {}", tod.as_str()));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "summary" => {
+                    let summary = dm.get_bandwidth_forecast_summary().await;
+                    if summary.forecasts.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No bandwidth forecast data available yet. Start downloading to build historical data.".to_string());
+                    } else {
+                        let mut msg = format!(
+                            "📊 Bandwidth Forecast Summary\n  Domains: {} | High confidence: {}\n  Avg predicted speed: {:.1} KB/s\n\n",
+                            summary.total_domains,
+                            summary.high_confidence_count,
+                            summary.avg_predicted_speed_bps / 1024.0
+                        );
+                        for f in &summary.forecasts {
+                            msg.push_str(&format!(
+                                "  {} → {:.1} KB/s ({}, {} samples, trend: {})\n",
+                                f.key,
+                                f.predicted_speed_bps / 1024.0,
+                                f.confidence.as_str(),
+                                f.sample_count,
+                                f.trend.as_str()
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "remove" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlbwforecast remove <domain>".to_string(),
+                        );
+                    } else {
+                        dm.clear_bandwidth_forecast_domain(&args[0]).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Cleared forecast data for {}", args[0]),
+                        );
+                    }
+                }
+                "clear" => {
+                    dm.clear_bandwidth_forecast().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ Cleared all bandwidth forecast data.".to_string(),
+                    );
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Unknown bandwidth forecast action. Use: status, config, predict, summary, remove, clear"
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -15190,13 +15510,13 @@ fn format_size(bytes: u64) -> String {
 fn format_progress_bar(progress: f32, width: usize) -> String {
     let filled = (progress / 100.0 * width as f32) as usize;
     let empty = width.saturating_sub(filled);
-    
+
     // Use block characters: █▓▒░
     let bar: String = std::iter::repeat('█')
         .take(filled)
         .chain(std::iter::repeat('░').take(empty))
         .collect();
-    
+
     format!("[{}]", bar)
 }
 

@@ -920,6 +920,27 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/path-organizer/organize/:task_id",
             post(organize_task_handler),
         )
+        // Upload Tracker API
+        .route(
+            "/api/upload-tracker",
+            get(get_upload_tracker_config_handler),
+        )
+        .route(
+            "/api/upload-tracker",
+            post(set_upload_tracker_config_handler),
+        )
+        .route(
+            "/api/upload-tracker/summary",
+            get(get_upload_tracker_summary_handler),
+        )
+        .route(
+            "/api/upload-tracker/clear",
+            post(clear_upload_tracker_handler),
+        )
+        .route(
+            "/api/upload-tracker/tasks",
+            get(list_upload_tracked_tasks_handler),
+        )
         // Data Retention API
         .route(
             "/api/data-retention",
@@ -989,6 +1010,31 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route(
             "/api/source-quality/clear",
             post(clear_source_quality_handler),
+        )
+        // Phase 136: Bandwidth Forecast CLI + REST API Integration
+        .route(
+            "/api/bandwidth-forecast",
+            get(get_bandwidth_forecast_config_handler),
+        )
+        .route(
+            "/api/bandwidth-forecast",
+            post(set_bandwidth_forecast_config_handler),
+        )
+        .route(
+            "/api/bandwidth-forecast/summary",
+            get(get_bandwidth_forecast_summary_handler),
+        )
+        .route(
+            "/api/bandwidth-forecast/predict/:domain",
+            get(predict_bandwidth_handler),
+        )
+        .route(
+            "/api/bandwidth-forecast/domain/:domain",
+            axum::routing::delete(remove_bandwidth_forecast_domain_handler),
+        )
+        .route(
+            "/api/bandwidth-forecast/clear",
+            post(clear_bandwidth_forecast_handler),
         )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
@@ -8511,6 +8557,49 @@ async fn organize_task_handler(
     }
 }
 
+// ===== Upload Tracker API Handlers =====
+
+/// GET /api/upload-tracker - Get upload tracker configuration
+async fn get_upload_tracker_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_upload_tracker_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/upload-tracker - Set upload tracker configuration
+async fn set_upload_tracker_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::upload_tracker::UploadTrackerConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_upload_tracker_config(config).await;
+    StatusCode::OK
+}
+
+/// GET /api/upload-tracker/summary - Get upload tracker summary
+async fn get_upload_tracker_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_upload_tracker_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// POST /api/upload-tracker/clear - Clear all upload tracking data
+async fn clear_upload_tracker_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_upload_tracking().await;
+    StatusCode::OK
+}
+
+/// GET /api/upload-tracker/tasks - List all tracked task IDs
+async fn list_upload_tracked_tasks_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let tasks = state.manager.list_upload_tracked_tasks().await;
+    Json(tasks)
+}
+
 // ===== Data Retention API Handlers =====
 
 /// GET /api/data-retention - Get data retention configuration
@@ -8719,5 +8808,68 @@ async fn clear_source_quality_handler(
     State(state): State<Arc<WebState>>,
 ) -> impl axum::response::IntoResponse {
     state.manager.clear_source_quality().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+// ============================================================================
+// Phase 136: Bandwidth Forecast CLI + REST API Integration
+// ============================================================================
+
+/// GET /api/bandwidth-forecast - Get bandwidth forecast configuration
+async fn get_bandwidth_forecast_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_bandwidth_forecast_config().await;
+    Json(serde_json::json!({
+        "config": config,
+        "enabled": config.enabled,
+        "min_samples": config.min_samples,
+        "max_samples": config.max_samples,
+        "trend_window_secs": config.trend_window_secs,
+        "high_confidence_threshold": config.high_confidence_threshold,
+        "medium_confidence_threshold": config.medium_confidence_threshold
+    }))
+}
+
+/// POST /api/bandwidth-forecast - Set bandwidth forecast configuration
+async fn set_bandwidth_forecast_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::bandwidth_forecast::ForecastConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_bandwidth_forecast_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/bandwidth-forecast/summary - Get forecast summary for all domains
+async fn get_bandwidth_forecast_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_bandwidth_forecast_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/bandwidth-forecast/predict/:domain - Predict bandwidth for a specific domain
+async fn predict_bandwidth_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let forecast = state.manager.forecast_bandwidth(&domain).await;
+    Json(serde_json::to_value(forecast).unwrap_or_default())
+}
+
+/// DELETE /api/bandwidth-forecast/domain/:domain - Remove forecast data for a domain
+async fn remove_bandwidth_forecast_domain_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_bandwidth_forecast_domain(&domain).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/bandwidth-forecast/clear - Clear all bandwidth forecast data
+async fn clear_bandwidth_forecast_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_bandwidth_forecast().await;
     Json(serde_json::json!({"status": "ok"}))
 }
