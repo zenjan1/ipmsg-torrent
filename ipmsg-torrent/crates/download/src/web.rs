@@ -140,6 +140,42 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/proxy/disable", post(disable_proxy))
         .route("/api/proxy/test", post(test_proxy))
         .route("/api/notifications/history", get(get_notification_history))
+        .route(
+            "/api/notification-center",
+            get(get_notification_center_config_handler),
+        )
+        .route(
+            "/api/notification-center",
+            post(set_notification_center_config_handler),
+        )
+        .route(
+            "/api/notification-center/summary",
+            get(get_notification_center_summary_handler),
+        )
+        .route(
+            "/api/notification-center/history",
+            get(get_notification_center_history_handler),
+        )
+        .route(
+            "/api/notification-center/history/clear",
+            post(clear_notification_center_history_handler),
+        )
+        .route(
+            "/api/notification-center/analytics",
+            get(get_notification_center_analytics_handler),
+        )
+        .route(
+            "/api/notification-center/flush",
+            post(flush_notification_batch_handler),
+        )
+        .route(
+            "/api/notification-center/event-prefs",
+            post(add_event_preference_handler),
+        )
+        .route(
+            "/api/notification-center/event-prefs/remove",
+            post(remove_event_preference_handler),
+        )
         .route("/api/task-speed", get(get_task_speed))
         .route("/api/task-speed", post(set_task_speed))
         .route("/api/checksum", post(set_checksum))
@@ -9735,4 +9771,107 @@ async fn clear_all_sla_history_handler(
 async fn get_sla_report_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let report = state.manager.format_sla_report().await;
     Json(serde_json::json!({"report": report}))
+}
+
+// ========== Notification Center API (Phase 147) ==========
+
+/// GET /api/notification-center - Get notification center configuration
+async fn get_notification_center_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_notification_center_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/notification-center - Update notification center configuration
+async fn set_notification_center_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::notification_center::NotificationCenterConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_notification_center_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/notification-center/summary - Get notification center summary
+async fn get_notification_center_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.manager.get_notification_center_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/notification-center/history - Get notification history with filters
+async fn get_notification_center_history_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let filter = crate::notification_center::NotificationFilter {
+        event: params
+            .get("event")
+            .and_then(|e| serde_json::from_str(&format!("\"{}\"", e)).ok()),
+        min_priority: params
+            .get("min_priority")
+            .and_then(|p| serde_json::from_str(&format!("\"{}\"", p)).ok()),
+        channel: params.get("channel").cloned(),
+        task_id: params.get("task_id").cloned(),
+        suppressed: params.get("suppressed").and_then(|s| s.parse().ok()),
+        limit: params.get("limit").and_then(|l| l.parse().ok()),
+        ..Default::default()
+    };
+    let history = state.manager.get_notification_history(filter).await;
+    Json(serde_json::json!({
+        "entries": history,
+        "count": history.len()
+    }))
+}
+
+/// POST /api/notification-center/history/clear - Clear notification history
+async fn clear_notification_center_history_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_notification_history().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/notification-center/analytics - Get notification analytics
+async fn get_notification_center_analytics_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let analytics = state.manager.get_notification_analytics().await;
+    Json(serde_json::to_value(analytics).unwrap_or_default())
+}
+
+/// POST /api/notification-center/flush - Flush pending notification batch
+async fn flush_notification_batch_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.flush_notification_batch().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/notification-center/event-prefs - Add event channel preference
+async fn add_event_preference_handler(
+    State(state): State<Arc<WebState>>,
+    Json(preference): Json<crate::notification_center::EventChannelPreference>,
+) -> Json<serde_json::Value> {
+    state
+        .manager
+        .add_notification_event_preference(preference)
+        .await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/notification-center/event-prefs/remove - Remove event channel preference
+async fn remove_event_preference_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let event_str = params.get("event").ok_or(StatusCode::BAD_REQUEST)?;
+    let event: crate::notification_center::NotificationCenterEvent =
+        serde_json::from_str(&format!("\"{}\"", event_str)).map_err(|_| StatusCode::BAD_REQUEST)?;
+    state
+        .manager
+        .remove_notification_event_preference(event)
+        .await;
+    Ok(Json(serde_json::json!({"status": "ok"})))
 }

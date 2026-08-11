@@ -15771,6 +15771,144 @@ impl DownloadManager {
 
         Ok(())
     }
+
+    // ========== Notification Center (Phase 147) ==========
+
+    /// Get notification center configuration
+    pub async fn get_notification_center_config(
+        &self,
+    ) -> notification_center::NotificationCenterConfig {
+        let manager = self.notification_center.lock().await;
+        manager.get_config().clone()
+    }
+
+    /// Set notification center configuration
+    pub async fn set_notification_center_config(
+        &self,
+        config: notification_center::NotificationCenterConfig,
+    ) {
+        let mut manager = self.notification_center.lock().await;
+        manager.set_config(config);
+    }
+
+    /// Get notification center summary (quiet hours status, batch count, analytics)
+    pub async fn get_notification_center_summary(
+        &self,
+    ) -> notification_center::NotificationCenterSummary {
+        let manager = self.notification_center.lock().await;
+        manager.get_summary()
+    }
+
+    /// Check if quiet hours are currently active
+    pub async fn is_notification_quiet_hours_active(&self) -> bool {
+        let manager = self.notification_center.lock().await;
+        manager.is_quiet_hours_active()
+    }
+
+    /// Get notification history with optional filters
+    pub async fn get_notification_history(
+        &self,
+        filter: notification_center::NotificationFilter,
+    ) -> Vec<notification_center::NotificationRecord> {
+        let manager = self.notification_center.lock().await;
+        manager.get_history(filter)
+    }
+
+    /// Get notification analytics (delivery stats, channel usage)
+    pub async fn get_notification_analytics(&self) -> notification_center::NotificationAnalytics {
+        let manager = self.notification_center.lock().await;
+        manager.get_analytics().clone()
+    }
+
+    /// Clear notification history
+    pub async fn clear_notification_history(&self) {
+        let mut manager = self.notification_center.lock().await;
+        manager.clear_history();
+    }
+
+    /// Flush pending batched notifications immediately
+    pub async fn flush_notification_batch(&self) {
+        let mut manager = self.notification_center.lock().await;
+        manager.flush_batch();
+    }
+
+    /// Get pending batch count
+    pub async fn get_notification_batch_count(&self) -> usize {
+        let manager = self.notification_center.lock().await;
+        manager.get_pending_batch_count()
+    }
+
+    /// Add an event channel preference
+    pub async fn add_notification_event_preference(
+        &self,
+        preference: notification_center::EventChannelPreference,
+    ) {
+        let mut manager = self.notification_center.lock().await;
+        let config = manager.get_config().clone();
+        let mut new_config = config;
+        new_config.event_preferences.push(preference);
+        manager.set_config(new_config);
+    }
+
+    /// Remove event channel preferences for a specific event
+    pub async fn remove_notification_event_preference(
+        &self,
+        event: notification_center::NotificationCenterEvent,
+    ) {
+        let mut manager = self.notification_center.lock().await;
+        let config = manager.get_config().clone();
+        let mut new_config = config;
+        new_config.event_preferences.retain(|p| p.event != event);
+        manager.set_config(new_config);
+    }
+
+    /// Save notification center config to disk
+    pub async fn save_notification_center_config(&self) -> std::io::Result<()> {
+        let manager = self.notification_center.lock().await;
+        let config_path = self.data_dir.join("notification_center_config.json");
+        manager
+            .save_config(&config_path)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Load notification center config from disk
+    pub async fn load_notification_center_config(&self) -> std::io::Result<()> {
+        let mut manager = self.notification_center.lock().await;
+        let config_path = self.data_dir.join("notification_center_config.json");
+        if config_path.exists() {
+            let config = notification_center::NotificationCenterManager::load_config(&config_path)
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            manager.set_config(config);
+        }
+        Ok(())
+    }
+
+    /// Save notification center history to disk
+    pub async fn save_notification_center_history(&self) -> std::io::Result<()> {
+        let manager = self.notification_center.lock().await;
+        let history_path = self.data_dir.join("notification_center_history.json");
+        manager
+            .save_history(&history_path)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Load notification center history from disk
+    pub async fn load_notification_center_history(&self) -> std::io::Result<()> {
+        let mut manager = self.notification_center.lock().await;
+        let history_path = self.data_dir.join("notification_center_history.json");
+        if history_path.exists() {
+            manager
+                .load_history(&history_path)
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        Ok(())
+    }
 }
 
 /// Convert DownloadProtocol to protocol limits key string.
@@ -21639,5 +21777,118 @@ mod url_allowlist_tests {
         );
         let sq_config = dm.get_source_quality_config().await;
         assert_eq!(sq_config.block_duration_secs, 3600);
+    }
+
+    // ========== Phase 147: Notification Center Integration Tests ==========
+
+    #[tokio::test]
+    async fn test_notification_center_default_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+        let config = dm.get_notification_center_config().await;
+        assert_eq!(config.max_history_size, 1000);
+        assert!(config.persist_history);
+    }
+
+    #[tokio::test]
+    async fn test_notification_center_set_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+        let mut config = dm.get_notification_center_config().await;
+        config.max_history_size = 500;
+        config.batching.enabled = false;
+        dm.set_notification_center_config(config.clone()).await;
+        let updated = dm.get_notification_center_config().await;
+        assert_eq!(updated.max_history_size, 500);
+        assert!(!updated.batching.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_notification_center_summary() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+        let summary = dm.get_notification_center_summary().await;
+        assert!(!summary.quiet_hours_active);
+        assert_eq!(summary.pending_batch_count, 0);
+        assert_eq!(summary.history_size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_notification_center_quiet_hours() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+        let active = dm.is_notification_quiet_hours_active().await;
+        assert!(!active); // Default config has quiet hours disabled
+    }
+
+    #[tokio::test]
+    async fn test_notification_center_history_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+        let filter = notification_center::NotificationFilter::default();
+        let history = dm.get_notification_history(filter).await;
+        assert!(history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_notification_center_clear_history() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+        dm.clear_notification_history().await;
+        let summary = dm.get_notification_center_summary().await;
+        assert_eq!(summary.history_size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_notification_center_analytics() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+        let analytics = dm.get_notification_analytics().await;
+        assert_eq!(analytics.total_created, 0);
+        assert_eq!(analytics.total_delivered, 0);
+    }
+
+    #[tokio::test]
+    async fn test_notification_center_batch_count() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+        let count = dm.get_notification_batch_count().await;
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_notification_center_event_preference() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+        let pref = notification_center::EventChannelPreference {
+            event: notification_center::NotificationCenterEvent::DownloadComplete,
+            channels: vec!["desktop".to_string()],
+            priority_override: Some(notification_center::NotificationPriority::High),
+            muted: false,
+        };
+        dm.add_notification_event_preference(pref).await;
+        let config = dm.get_notification_center_config().await;
+        assert_eq!(config.event_preferences.len(), 1);
+        dm.remove_notification_event_preference(
+            notification_center::NotificationCenterEvent::DownloadComplete,
+        )
+        .await;
+        let config = dm.get_notification_center_config().await;
+        assert_eq!(config.event_preferences.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_notification_center_save_load_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dm = DownloadManager::new(temp_dir.path().to_path_buf());
+        let mut config = dm.get_notification_center_config().await;
+        config.max_history_size = 999;
+        dm.set_notification_center_config(config).await;
+        dm.save_notification_center_config().await.unwrap();
+        // Create new DM and load
+        let dm2 = DownloadManager::new(temp_dir.path().to_path_buf());
+        dm2.load_notification_center_config().await.unwrap();
+        let loaded = dm2.get_notification_center_config().await;
+        assert_eq!(loaded.max_history_size, 999);
     }
 }

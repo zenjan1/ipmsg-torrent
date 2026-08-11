@@ -336,6 +336,13 @@ enum Command {
         /// Configuration value (depends on action)
         value: Option<String>,
     },
+    /// Notification center management (quiet hours, batching, history, analytics)
+    DlNotificationCenter {
+        /// Subcommand: status, config, history, analytics, flush, clear, quiet-hours, batch
+        subcmd: String,
+        /// Arguments for the subcommand
+        args: Vec<String>,
+    },
     /// Set download schedule time window (e.g., "09:00-17:00" or "none" to disable)
     DlSchedule {
         task_id: String,
@@ -1301,6 +1308,23 @@ fn parse_command(input: &str) -> Command {
             } else {
                 Command::Unknown(
                     "/dlnotify <enable|disable|desktop|shell|log|webhook|status>".to_string(),
+                )
+            }
+        }
+        "dlnc" | "dl-ncenter" | "dlncenter" => {
+            // /dlnc <subcommand> [args...]
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                let subcmd = args[1].to_string();
+                let sub_args: Vec<String> = args[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlNotificationCenter {
+                    subcmd,
+                    args: sub_args,
+                }
+            } else {
+                Command::Unknown(
+                    "/dlnc <status|config|history|analytics|flush|clear|quiet-hours|batch>"
+                        .to_string(),
                 )
             }
         }
@@ -2549,6 +2573,7 @@ fn command_help() -> String {
         "/dlwf [cmd]        - Watch folders (list|add <path> [name]|remove <id>|scan|enable|disable|autoscan)",
         "/dlautoshutdown <disabled|exit|shell:<cmd>> - Auto-shutdown when all downloads complete",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
+        "/dlnc [cmd]         - Notification center (status|config|history|analytics|flush|clear|quiet-hours|batch)",
         "/dlpath <path>       - Set download save path (absolute path)",
         "/dlorganize <on|off> - Enable/disable auto-organize by file type",
         "/dlrename <id> <name> - Rename a download task",
@@ -9099,6 +9124,155 @@ async fn handle_command(
                 _ => {
                     let mut s = state.lock().await;
                     s.add_system_message("main", format!("Unknown action: {}. Use: enable, disable, desktop, shell, log, webhook, status", action));
+                }
+            }
+        }
+        Command::DlNotificationCenter { subcmd, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcmd.as_str() {
+                "status" => {
+                    let summary = download_manager.get_notification_center_summary().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "📬 Notification Center Status:\n  Quiet hours active: {}\n  Pending batch: {}\n  History size: {}\n  Total delivered: {}\n  Total suppressed: {}",
+                            summary.quiet_hours_active,
+                            summary.pending_batch_count,
+                            summary.history_size,
+                            summary.analytics.total_delivered,
+                            summary.analytics.total_suppressed
+                        ),
+                    );
+                }
+                "config" => {
+                    let config = download_manager.get_notification_center_config().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "📬 Notification Center Config:\n  Max history: {}\n  Persist history: {}\n  Batching enabled: {}\n  Batch window: {}s\n  Max batch size: {}\n  Quiet hours: {} - {}",
+                            config.max_history_size,
+                            config.persist_history,
+                            config.batching.enabled,
+                            config.batching.window_secs,
+                            config.batching.max_batch_size,
+                            config.quiet_hours.start_time,
+                            config.quiet_hours.end_time
+                        ),
+                    );
+                }
+                "history" => {
+                    let limit = args
+                        .first()
+                        .and_then(|l| l.parse::<usize>().ok())
+                        .unwrap_or(20);
+                    let filter = ipmsg_download::notification_center::NotificationFilter {
+                        limit: Some(limit),
+                        ..Default::default()
+                    };
+                    let history = download_manager.get_notification_history(filter).await;
+                    let mut s = state.lock().await;
+                    if history.is_empty() {
+                        s.add_system_message("main", "📭 No notification history".to_string());
+                    } else {
+                        let mut output = format!("📬 Recent notifications ({}):\n", history.len());
+                        for record in history.iter().take(10) {
+                            output.push_str(&format!(
+                                "  [{:?}] {} - {} (delivered: {})\n",
+                                record.event,
+                                record.title,
+                                record.message,
+                                record.delivered_at.format("%Y-%m-%d %H:%M")
+                            ));
+                        }
+                        s.add_system_message("main", output);
+                    }
+                }
+                "analytics" => {
+                    let analytics = download_manager.get_notification_analytics().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "📊 Notification Analytics:\n  Total created: {}\n  Total delivered: {}\n  Total suppressed: {}\n  Last 24h: {}\n  Last 7d: {}",
+                            analytics.total_created,
+                            analytics.total_delivered,
+                            analytics.total_suppressed,
+                            analytics.last_24h_count,
+                            analytics.last_7d_count
+                        ),
+                    );
+                }
+                "flush" => {
+                    download_manager.flush_notification_batch().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "✅ Notification batch flushed".to_string());
+                }
+                "clear" => {
+                    download_manager.clear_notification_history().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "🗑️ Notification history cleared".to_string());
+                }
+                "quiet-hours" => {
+                    if args.len() >= 2 {
+                        let start = args[0].clone();
+                        let end = args[1].clone();
+                        let mut config = download_manager.get_notification_center_config().await;
+                        config.quiet_hours.start_time = start;
+                        config.quiet_hours.end_time = end;
+                        download_manager
+                            .set_notification_center_config(config)
+                            .await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("🌙 Quiet hours set: {} - {}", args[0], args[1]),
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlnc quiet-hours <HH:MM> <HH:MM>".to_string(),
+                        );
+                    }
+                }
+                "batch" => {
+                    if args.len() >= 2 {
+                        let enabled = args[0].parse::<bool>().unwrap_or(true);
+                        let window = args[1].parse::<u64>().unwrap_or(60);
+                        let mut config = download_manager.get_notification_center_config().await;
+                        config.batching.enabled = enabled;
+                        config.batching.window_secs = window;
+                        download_manager
+                            .set_notification_center_config(config)
+                            .await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "✅ Batching {} (window: {}s)",
+                                if enabled { "enabled" } else { "disabled" },
+                                window
+                            ),
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlnc batch <true|false> <window_secs>".to_string(),
+                        );
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Unknown subcommand. Use: status, config, history, analytics, flush, clear, quiet-hours, batch".to_string(),
+                    );
                 }
             }
         }
