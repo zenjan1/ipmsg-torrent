@@ -575,89 +575,93 @@ impl Ed2kEngine {
         let mut disconnected = Vec::new();
         let mut new_peers: Vec<SocketAddr> = Vec::new();
 
-        for (addr, peer) in &mut self.peers {
-            // Try to receive data (non-blocking)
-            match tokio::time::timeout(Duration::from_millis(100), peer.receive_block()).await {
-                Ok(Ok((hash, offset, data))) => {
-                    let block_size = data.len() as u64;
+        // Collect peer addresses first to avoid borrow issues
+        let peer_addrs: Vec<SocketAddr> = self.peers.keys().copied().collect();
 
-                    // Apply rate limiting before processing
-                    if let Some(ref limiter) = self.rate_limiter {
-                        limiter.acquire(block_size).await;
-                    }
+        for addr in peer_addrs {
+            if let Some(peer) = self.peers.get_mut(&addr) {
+                // Try to receive data (non-blocking)
+                match tokio::time::timeout(Duration::from_millis(100), peer.receive_block()).await {
+                    Ok(Ok((hash, offset, data))) => {
+                        let block_size = data.len() as u64;
 
-                    // Verify the block hash matches the file hash
-                    if hash != self.file_hash.0 {
-                        tracing::warn!(
-                            addr = %addr,
-                            "Block received with mismatched file hash, discarding"
-                        );
-                        continue;
-                    }
+                        // Apply rate limiting before processing
+                        if let Some(ref limiter) = self.rate_limiter {
+                            limiter.acquire(block_size).await;
+                        }
 
-                    // Determine which chunk this block belongs to
-                    let chunk_idx = (offset / ED2K_CHUNK_SIZE) as u32;
-                    let chunk_offset_in_chunk = offset % ED2K_CHUNK_SIZE;
+                        // Verify the block hash matches the file hash
+                        if hash != self.file_hash.0 {
+                            tracing::warn!(
+                                addr = %addr,
+                                "Block received with mismatched file hash, discarding"
+                            );
+                            continue;
+                        }
 
-                    if (chunk_idx as usize) < self.chunks.len() {
-                        let chunk = &mut self.chunks[chunk_idx as usize];
-                        chunk.add_block(chunk_offset_in_chunk, data);
+                        // Determine which chunk this block belongs to
+                        let chunk_idx = (offset / ED2K_CHUNK_SIZE) as u32;
+                        let chunk_offset_in_chunk = offset % ED2K_CHUNK_SIZE;
 
-                        if chunk.complete
-                            && let Some(assembled) = chunk.assemble()
-                        {
-                            if chunk.verify(&assembled) {
-                                tracing::info!(chunk = chunk_idx, "Chunk verified (MD4)");
-                                self.downloaded_chunks.insert(chunk_idx);
-                                self.progress.mark_complete(chunk_idx);
-                                self.progress.downloaded = self.downloaded;
-                                // Persist progress after each chunk
-                                if let Err(e) = progress::save_progress(
-                                    &self.download_dir,
-                                    &self.file_name,
-                                    &self.progress,
-                                ) {
-                                    tracing::warn!(error = %e, "Failed to save ed2k progress");
+                        if (chunk_idx as usize) < self.chunks.len() {
+                            let chunk = &mut self.chunks[chunk_idx as usize];
+                            chunk.add_block(chunk_offset_in_chunk, data);
+
+                            if chunk.complete
+                                && let Some(assembled) = chunk.assemble()
+                            {
+                                if chunk.verify(&assembled) {
+                                    tracing::info!(chunk = chunk_idx, "Chunk verified (MD4)");
+                                    self.downloaded_chunks.insert(chunk_idx);
+                                    self.progress.mark_complete(chunk_idx);
+                                    self.progress.downloaded = self.downloaded;
+                                    // Persist progress after each chunk
+                                    if let Err(e) = progress::save_progress(
+                                        &self.download_dir,
+                                        &self.file_name,
+                                        &self.progress,
+                                    ) {
+                                        tracing::warn!(error = %e, "Failed to save ed2k progress");
+                                    }
+                                } else {
+                                    tracing::warn!(chunk = chunk_idx, "Chunk verification failed, resetting");
+                                    // Reset chunk state
+                                    let hash = chunk.hash;
+                                    let size = chunk.size;
+                                    *chunk = ChunkState::new(chunk_idx, size, hash);
                                 }
-                            } else {
-                                tracing::warn!(chunk = chunk_idx, "Chunk verification failed, resetting");
-                                // Reset chunk state
-                                let hash = chunk.hash;
-                                let size = chunk.size;
-                                *chunk = ChunkState::new(chunk_idx, size, hash);
                             }
                         }
+                        self.downloaded += block_size;
+                        tracing::debug!(addr = %addr, offset = offset, size = block_size, "Received block");
                     }
-                    self.downloaded += block_size;
-                    tracing::debug!(addr = %addr, offset = offset, size = block_size, "Received block");
+                    Ok(Err(e)) => {
+                        tracing::warn!(addr = %addr, error = %e, "Peer error");
+                        disconnected.push(addr);
+                    }
+                    Err(_) => {} // Timeout, no data
                 }
-                Ok(Err(e)) => {
-                    tracing::warn!(addr = %addr, error = %e, "Peer error");
-                    disconnected.push(*addr);
-                }
-                Err(_) => {} // Timeout, no data
-            }
 
-            // Try to receive HashSet messages (chunk hashes for verification)
-            // and peer source exchange messages
-            if let Some(peer) = self.peers.get_mut(addr) {
-                match tokio::time::timeout(Duration::from_millis(50), peer.recv()).await {
-                    Ok(Ok((protocol, payload))) => {
-                        match protocol {
-                            0x51 => {
-                                // HashSet: chunk hashes for file verification
-                                self.handle_hash_set(*addr, &payload);
-                            }
-                            0x42 => {
-                                // Peer source exchange: other peers that have this file
-                                self.handle_peer_sources(&payload, &mut new_peers);
-                            }
-                            _ => {
-                                tracing::trace!(
-                                    addr = %addr,
-                                    protocol = format!("0x{:02x}", protocol),
-                                    "Unhandled peer message"
-                                );
+                // Try to receive HashSet messages (chunk hashes for verification)
+                // and peer source exchange messages
+                if let Some(peer) = self.peers.get_mut(&addr) {
+                    match tokio::time::timeout(Duration::from_millis(50), peer.recv()).await {
+                        Ok(Ok((protocol, payload))) => {
+                            match protocol {
+                                0x51 => {
+                                    // HashSet: chunk hashes for file verification
+                                    self.handle_hash_set(addr, &payload);
+                                }
+                                0x42 => {
+                                    // Peer source exchange: other peers that have this file
+                                    self.handle_peer_sources(&payload, &mut new_peers);
+                                }
+                                _ => {
+                                    tracing::trace!(
+                                        addr = %addr,
+                                        protocol = format!("0x{:02x}", protocol),
+                                        "Unhandled peer message"
+                                    );
                             }
                         }
                     }

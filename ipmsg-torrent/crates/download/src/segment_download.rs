@@ -420,7 +420,9 @@ impl SegmentDownloader {
 
                     // Flush if queue is large
                     if self.pending_writes.len() >= 8 {
-                        self.flush_writes().await?;
+                        if let Err(e) = self.flush_writes().await {
+                            tracing::warn!(error = %e, "Failed to flush writes");
+                        }
                     }
 
                     // Mark segment as downloaded
