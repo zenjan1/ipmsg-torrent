@@ -235,6 +235,12 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
+    /// Speed boost - temporary global speed multiplier (Phase 138)
+    DlBoost {
+        /// "status", "start", "stop", "preset", "presets", "scheduled", "config"
+        action: String,
+        args: Vec<String>,
+    },
     /// Download cost tracker (Phase 127)
     DlCost {
         /// "status", "config", "set", "summary", "month", "all", "tasks", "daily", "clear"
@@ -244,6 +250,12 @@ enum Command {
     /// Speed test - measure download throughput to a URL
     DlSpeedTest {
         /// "status", "run", "summary", "history", "latest", "clear", "config"
+        action: String,
+        args: Vec<String>,
+    },
+    /// Speed trend analysis - per-domain speed trend tracking (Phase 138)
+    DlSpeedTrend {
+        /// "status", "summary", "trends", "degrading", "improving", "clear", "config"
         action: String,
         args: Vec<String>,
     },
@@ -1052,6 +1064,18 @@ fn parse_command(input: &str) -> Command {
                 Command::DlBandwidthForecast { action, args }
             }
         }
+        "dlboost" | "dl-boost" | "dlspeedboost" => {
+            if parts.len() < 2 {
+                Command::DlBoost {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlBoost { action, args }
+            }
+        }
         "dlcost" | "dl-cost" => {
             if parts.len() < 2 {
                 Command::DlCost {
@@ -1074,6 +1098,18 @@ fn parse_command(input: &str) -> Command {
                 let action = parts[1].to_string();
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlSpeedTest { action, args }
+            }
+        }
+        "dlspdtrend" | "dl-speedtrend" | "dlspt" => {
+            if parts.len() < 2 {
+                Command::DlSpeedTrend {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlSpeedTrend { action, args }
             }
         }
         "dlpathorg" | "dl-pathorg" | "dlpo" => {
@@ -2473,6 +2509,7 @@ fn command_help() -> String {
         "/dltimelimit [cmd] - Download time limits (status|config <enabled|default> <value>|set <task_id> <secs>|clear <task_id>)",
         "/dlautoaction [cmd] - Auto-actions on completion (status|enable|disable|add|del|list|rule-enable|task|task-remove|summary|clear)",
         "/dlspeedtest [cmd] - Speed test (status|run <url>|summary|history|latest|clear|config)",
+        "/dlspdtrend [cmd] - Speed trend analysis (status|summary|trends|degrading|improving|clear|config)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -7102,6 +7139,199 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlBoost { action, args } => {
+            let s = state.lock().await;
+            let dm = s.download_manager.clone();
+            drop(s);
+
+            match action.as_str() {
+                "status" => {
+                    let status = dm.get_speed_boost_status().await;
+                    let mut msg = format!(
+                        "🚀 Speed Boost Status\n  Enabled: yes\n  Active Boost: {}",
+                        if status.active_boost.is_some() { "yes" } else { "no" }
+                    );
+                    if let Some(boost) = &status.active_boost {
+                        msg.push_str(&format!(
+                            "\n    Multiplier: {:.1}x\n    Source: {}\n    Remaining: {}s\n    Expires: {}",
+                            boost.multiplier,
+                            boost.source,
+                            boost.remaining_secs(),
+                            boost.expires_at.format("%Y-%m-%d %H:%M:%S UTC")
+                        ));
+                    }
+                    msg.push_str(&format!(
+                        "\n  Total Boosts Started: {}\n  Manual Boosts: {}\n  Scheduled Boosts: {}\n  Presets: {}\n  Scheduled Windows: {}",
+                        status.total_boosts_started,
+                        status.total_manual_boosts,
+                        status.total_scheduled_boosts,
+                        status.preset_count,
+                        status.scheduled_window_count
+                    ));
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "start" => {
+                    if args.is_empty() {
+                        // Start with default settings
+                        let result = dm.start_speed_boost(None, None).await;
+                        let mut s = state.lock().await;
+                        match result {
+                            ipmsg_download::speed_boost::BoostStartResult::Started(boost) => {
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "🚀 Speed boost started!\n  Multiplier: {:.1}x\n  Duration: {}s\n  Expires: {}",
+                                        boost.multiplier,
+                                        boost.remaining_secs(),
+                                        boost.expires_at.format("%Y-%m-%d %H:%M:%S UTC")
+                                    ),
+                                );
+                            }
+                            ipmsg_download::speed_boost::BoostStartResult::Disabled => {
+                                s.add_system_message("main", "❌ Speed boost feature is disabled".to_string());
+                            }
+                            ipmsg_download::speed_boost::BoostStartResult::AlreadyActive => {
+                                s.add_system_message("main", "⚠️ Another boost is already active".to_string());
+                            }
+                            ipmsg_download::speed_boost::BoostStartResult::InvalidParams(msg) => {
+                                s.add_system_message("main", format!("❌ Invalid parameters: {}", msg));
+                            }
+                        }
+                    } else {
+                        // Parse duration and multiplier
+                        let mut duration_secs = None;
+                        let mut multiplier = None;
+                        let mut preset_name = None;
+
+                        let mut i = 0;
+                        while i < args.len() {
+                            match args[i].as_str() {
+                                "--duration" | "-d" if i + 1 < args.len() => {
+                                    duration_secs = args[i + 1].parse().ok();
+                                    i += 2;
+                                }
+                                "--multiplier" | "-m" if i + 1 < args.len() => {
+                                    multiplier = args[i + 1].parse().ok();
+                                    i += 2;
+                                }
+                                "--preset" | "-p" if i + 1 < args.len() => {
+                                    preset_name = Some(args[i + 1].clone());
+                                    i += 2;
+                                }
+                                _ => {
+                                    // Try to parse as duration (e.g., "30m", "1h")
+                                    if let Some(secs) = ipmsg_download::auto_cleanup::parse_duration_secs(&args[i]) {
+                                        duration_secs = Some(secs);
+                                    }
+                                    i += 1;
+                                }
+                            }
+                        }
+
+                        let result = if let Some(preset) = preset_name {
+                            dm.start_speed_boost_preset(&preset).await
+                        } else {
+                            dm.start_speed_boost(duration_secs, multiplier).await
+                        };
+
+                        let mut s = state.lock().await;
+                        match result {
+                            ipmsg_download::speed_boost::BoostStartResult::Started(boost) => {
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "🚀 Speed boost started!\n  Multiplier: {:.1}x\n  Duration: {}s\n  Expires: {}",
+                                        boost.multiplier,
+                                        boost.remaining_secs(),
+                                        boost.expires_at.format("%Y-%m-%d %H:%M:%S UTC")
+                                    ),
+                                );
+                            }
+                            ipmsg_download::speed_boost::BoostStartResult::Disabled => {
+                                s.add_system_message("main", "❌ Speed boost feature is disabled".to_string());
+                            }
+                            ipmsg_download::speed_boost::BoostStartResult::AlreadyActive => {
+                                s.add_system_message("main", "⚠️ Another boost is already active".to_string());
+                            }
+                            ipmsg_download::speed_boost::BoostStartResult::InvalidParams(msg) => {
+                                s.add_system_message("main", format!("❌ Invalid parameters: {}", msg));
+                            }
+                        }
+                    }
+                }
+                "stop" => {
+                    let stopped = dm.stop_speed_boost().await;
+                    let mut s = state.lock().await;
+                    if stopped {
+                        s.add_system_message("main", "✅ Speed boost stopped".to_string());
+                    } else {
+                        s.add_system_message("main", "ℹ️ No active boost to stop".to_string());
+                    }
+                }
+                "presets" | "preset" => {
+                    let config = dm.get_speed_boost_config().await;
+                    let mut msg = "🎯 Speed Boost Presets:\n".to_string();
+                    if config.presets.is_empty() {
+                        msg.push_str("  (no presets configured)");
+                    } else {
+                        for (id, preset) in &config.presets {
+                            msg.push_str(&format!(
+                                "  - {}: {:.1}x for {}s\n    {}\n",
+                                id,
+                                preset.multiplier,
+                                preset.duration_secs,
+                                preset.description
+                            ));
+                        }
+                    }
+                    msg.push_str("\nUsage: /dlboost start --preset <name>");
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "scheduled" => {
+                    let config = dm.get_speed_boost_config().await;
+                    let mut msg = "⏰ Scheduled Boost Windows:\n".to_string();
+                    if config.scheduled_windows.is_empty() {
+                        msg.push_str("  (no scheduled windows)");
+                    } else {
+                        for window in &config.scheduled_windows {
+                            msg.push_str(&format!(
+                                "  - {}: {:.1}x\n    Time: {} - {}\n    Days: {:?}\n    Enabled: {}\n",
+                                window.name,
+                                window.multiplier,
+                                window.start_time,
+                                window.end_time,
+                                window.days_of_week,
+                                window.enabled
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    let config = dm.get_speed_boost_config().await;
+                    let msg = format!(
+                        "⚙️ Speed Boost Config:\n  Enabled: {}\n  Default Duration: {}s\n  Default Multiplier: {:.1}x\n  Max Duration: {}s\n  Max Multiplier: {:.1}x",
+                        config.enabled,
+                        config.default_duration_secs,
+                        config.default_multiplier,
+                        config.max_duration_secs,
+                        config.max_multiplier
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlboost [status|start|stop|presets|scheduled|config]\n  start [--duration <secs>] [--multiplier <x>] [--preset <name>]".to_string(),
+                    );
+                }
+            }
+        }
         Command::DlCost { action, args } => {
             let s = state.lock().await;
             let dm = s.download_manager.clone();
@@ -7387,6 +7617,163 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlspeedtest [status|run|summary|history|latest|clear|config]"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        Command::DlSpeedTrend { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            match action.as_str() {
+                "status" => {
+                    let config = download_manager.get_speed_trend_config().await;
+                    let summary = download_manager.get_speed_trend_summary().await;
+                    let msg = format!(
+                        "Speed Trend Status:\n\
+                         Config: enabled={}, window={:?}, min_samples={}, threshold={:.1}%\n\
+                         Domains: {} total, {} improving, {} stable, {} degrading\n\
+                         Overall avg: {:.0} B/s\n\
+                         Best: {} | Worst: {}",
+                        config.enabled,
+                        config.default_window,
+                        config.min_samples,
+                        config.trend_threshold_percent,
+                        summary.total_domains,
+                        summary.improving_domains,
+                        summary.stable_domains,
+                        summary.degrading_domains,
+                        summary.overall_avg_speed_bps,
+                        summary.best_domain.as_deref().unwrap_or("N/A"),
+                        summary.worst_domain.as_deref().unwrap_or("N/A"),
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "summary" => {
+                    let summary = download_manager.get_speed_trend_summary().await;
+                    let msg = format!(
+                        "Speed Trend Summary:\n\
+                         📊 Domains tracked: {}\n\
+                         📈 Improving: {}\n\
+                         ➡️  Stable: {}\n\
+                         📉 Degrading: {}\n\
+                         Overall avg: {:.0} B/s\n\
+                         ✅ Best: {}\n\
+                         ⚠️  Worst: {}",
+                        summary.total_domains,
+                        summary.improving_domains,
+                        summary.stable_domains,
+                        summary.degrading_domains,
+                        summary.overall_avg_speed_bps,
+                        summary.best_domain.as_deref().unwrap_or("N/A"),
+                        summary.worst_domain.as_deref().unwrap_or("N/A"),
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "trends" => {
+                    let trends = download_manager.get_all_speed_trends().await;
+                    if trends.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No speed trend data available.".to_string());
+                    } else {
+                        let mut msg = "Speed Trends (all domains):\n".to_string();
+                        for trend in trends {
+                            let icon = match trend.direction {
+                                ipmsg_download::speed_trend::TrendDirection::Improving => "📈",
+                                ipmsg_download::speed_trend::TrendDirection::Stable => "➡️ ",
+                                ipmsg_download::speed_trend::TrendDirection::Degrading => "📉",
+                                ipmsg_download::speed_trend::TrendDirection::Unknown => "❓",
+                            };
+                            msg.push_str(&format!(
+                                "  {} {} | Avg: {:.0} B/s | Change: {:.1}% | Samples: {}\n",
+                                icon,
+                                trend.domain,
+                                trend.avg_speed_bps,
+                                trend.change_percent,
+                                trend.sample_count,
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "degrading" => {
+                    let trends = download_manager.get_degrading_speed_trends().await;
+                    if trends.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No degrading trends detected.".to_string());
+                    } else {
+                        let mut msg = "Degrading Trends (⚠️  speed declining):\n".to_string();
+                        for trend in trends {
+                            msg.push_str(&format!(
+                                "  📉 {} | Avg: {:.0} B/s | Change: {:.1}% | Severity: {}\n",
+                                trend.domain,
+                                trend.avg_speed_bps,
+                                trend.change_percent,
+                                trend.severity,
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "improving" => {
+                    let trends = download_manager.get_improving_speed_trends().await;
+                    if trends.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No improving trends detected.".to_string());
+                    } else {
+                        let mut msg = "Improving Trends (📈 speed increasing):\n".to_string();
+                        for trend in trends {
+                            msg.push_str(&format!(
+                                "  📈 {} | Avg: {:.0} B/s | Change: +{:.1}%\n",
+                                trend.domain,
+                                trend.avg_speed_bps,
+                                trend.change_percent.abs(),
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_all_speed_trends().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "All speed trend data cleared.".to_string());
+                }
+                "config" => {
+                    let config = download_manager.get_speed_trend_config().await;
+                    let msg = format!(
+                        "Speed Trend Config:\n\
+                         Enabled: {}\n\
+                         Default Window: {:?}\n\
+                         Min Samples: {}\n\
+                         Trend Threshold: {:.1}%\n\
+                         Max Samples/Domain: {}\n\
+                         Ignored Domains: {}",
+                        config.enabled,
+                        config.default_window,
+                        config.min_samples,
+                        config.trend_threshold_percent,
+                        config.max_samples_per_domain,
+                        if config.ignored_domains.is_empty() {
+                            "none".to_string()
+                        } else {
+                            config.ignored_domains.join(", ")
+                        },
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlspdtrend [status|summary|trends|degrading|improving|clear|config]"
                             .to_string(),
                     );
                 }

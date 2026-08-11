@@ -18,6 +18,7 @@ pub mod bandwidth_allocation;
 pub mod bandwidth_forecast;
 pub mod bandwidth_monitor;
 pub mod bandwidth_schedule;
+pub mod bandwidth_usage;
 pub mod bulk_ops;
 pub mod checksum;
 pub mod conflict_detection;
@@ -63,6 +64,7 @@ pub mod mirror_health;
 pub mod network_aware;
 pub mod network_monitor;
 pub mod notification;
+pub mod notification_center;
 pub mod path_organizer;
 pub mod path_rules;
 pub mod path_template;
@@ -97,6 +99,7 @@ pub mod speed_burst;
 pub mod speed_history;
 pub mod speed_prediction;
 pub mod speed_profiles;
+pub mod speed_trend;
 pub mod speed_test;
 pub mod tag_management;
 pub mod task_activity;
@@ -155,6 +158,10 @@ pub use bandwidth_schedule::{
     BandwidthScheduleError, BandwidthScheduleManager, BandwidthScheduleRule,
     load_bandwidth_schedule, parse_days, parse_speed_limit, parse_time, parse_time_window,
     save_bandwidth_schedule,
+};
+pub use bandwidth_usage::{
+    BandwidthUsageConfig, BandwidthUsageSummary, BandwidthUsageTracker, HourlySample,
+    PeakHourAnalysis, PeakHourEntry, ProtocolBreakdown, RollingWindowSummary,
 };
 pub use bulk_ops::{
     BulkFilter, BulkGroupAction, BulkPriorityAction, BulkResult, BulkSpeedLimitAction,
@@ -813,6 +820,8 @@ pub struct DownloadManager {
     notifier: Arc<NotificationDispatcher>,
     /// Bandwidth monitor for dashboard
     bandwidth_monitor: Arc<BandwidthMonitor>,
+    /// Bandwidth usage tracker for hourly/protocol tracking
+    bandwidth_usage: Arc<tokio::sync::Mutex<BandwidthUsageTracker>>,
     /// Auto-shutdown configuration
     auto_shutdown: Arc<tokio::sync::RwLock<AutoShutdownConfig>>,
     /// Save path manager for download directory configuration
@@ -846,6 +855,8 @@ pub struct DownloadManager {
     speed_profiles: Arc<tokio::sync::RwLock<speed_profiles::SpeedProfileManager>>,
     /// Speed test manager for pre-download throughput measurement
     speed_test: Arc<Mutex<speed_test::SpeedTestManager>>,
+    /// Speed trend manager for per-domain trend analysis
+    speed_trend: Arc<Mutex<speed_trend::SpeedTrendManager>>,
     /// Per-task download session tracking
     download_sessions: Arc<Mutex<download_session::DownloadSessionManager>>,
     /// Auto-cleanup configuration for completed/failed tasks
@@ -1013,6 +1024,8 @@ pub struct DownloadManager {
     bandwidth_forecast: Arc<Mutex<bandwidth_forecast::BandwidthForecastManager>>,
     /// Source reliability tracker for per-domain reliability scoring
     source_reliability: Arc<Mutex<source_reliability::SourceReliabilityTracker>>,
+    /// Notification center for advanced notification management with quiet hours and batching
+    notification_center: Arc<Mutex<notification_center::NotificationCenterManager>>,
 }
 
 impl DownloadManager {
@@ -1031,6 +1044,7 @@ impl DownloadManager {
                 speed_profiles::SpeedProfileManager::new(&data_dir),
             )),
             speed_test: Arc::new(Mutex::new(speed_test::SpeedTestManager::new())),
+            speed_trend: Arc::new(Mutex::new(speed_trend::SpeedTrendManager::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
@@ -1044,6 +1058,7 @@ impl DownloadManager {
             task_complete_notify: Arc::new(tokio::sync::Notify::new()),
             notifier: Arc::new(NotificationDispatcher::new(NotificationConfig::disabled())),
             bandwidth_monitor: Arc::new(BandwidthMonitor::new()),
+            bandwidth_usage: Arc::new(tokio::sync::Mutex::new(BandwidthUsageTracker::new())),
             auto_shutdown: Arc::new(tokio::sync::RwLock::new(AutoShutdownConfig::default())),
             save_path_manager: Arc::new(SavePathManager::new(save_path)),
             proxy_config: Arc::new(tokio::sync::RwLock::new(None)),
@@ -1229,6 +1244,9 @@ impl DownloadManager {
             )),
             source_reliability: Arc::new(Mutex::new(
                 source_reliability::SourceReliabilityTracker::new(),
+            )),
+            notification_center: Arc::new(Mutex::new(
+                notification_center::NotificationCenterManager::new(),
             )),
         };
         dm.start_scheduler();
@@ -1380,6 +1398,7 @@ impl DownloadManager {
                 speed_profiles::SpeedProfileManager::new(&data_dir),
             )),
             speed_test: Arc::new(Mutex::new(speed_test::SpeedTestManager::new())),
+            speed_trend: Arc::new(Mutex::new(speed_trend::SpeedTrendManager::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
             task_info: Arc::new(Mutex::new(HashMap::new())),
             task_generation: Arc::new(Mutex::new(HashMap::new())),
@@ -1393,8 +1412,9 @@ impl DownloadManager {
             task_complete_notify: Arc::new(tokio::sync::Notify::new()),
             notifier: Arc::new(NotificationDispatcher::new(NotificationConfig::disabled())),
             bandwidth_monitor: Arc::new(BandwidthMonitor::new()),
+            bandwidth_usage: Arc::new(tokio::sync::Mutex::new(BandwidthUsageTracker::new())),
             auto_shutdown: Arc::new(tokio::sync::RwLock::new(AutoShutdownConfig::default())),
-            save_path_manager: Arc::new(SavePathManager::new(save_path)),
+            save_path_manager: Arc::new(SavePathManager::new(data_dir.join("downloads"))),
             proxy_config: Arc::new(tokio::sync::RwLock::new(None)),
             task_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             max_auto_retries: Arc::new(AtomicU32::new(0)),
@@ -1578,6 +1598,9 @@ impl DownloadManager {
             )),
             source_reliability: Arc::new(Mutex::new(
                 source_reliability::SourceReliabilityTracker::new(),
+            )),
+            notification_center: Arc::new(Mutex::new(
+                notification_center::NotificationCenterManager::new(),
             )),
         };
         // Restore tag manager from disk
@@ -1898,6 +1921,10 @@ impl DownloadManager {
             }
         }
         dm.start_scheduler();
+        // Restore bandwidth usage data from disk
+        if let Err(e) = dm.load_bandwidth_usage().await {
+            tracing::warn!(error = %e, "Failed to load bandwidth usage data");
+        }
         dm.start_bandwidth_scheduler();
         dm.start_auto_pause_scheduler();
         dm
@@ -7262,6 +7289,7 @@ impl DownloadManager {
         let network_monitor = self.network_monitor.clone();
         let cost_tracker = self.cost_tracker.clone();
         let bandwidth_forecast = self.bandwidth_forecast.clone();
+        let bandwidth_usage = self.bandwidth_usage.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -9297,6 +9325,96 @@ impl DownloadManager {
         let mut mgr = self.speed_test.lock().await;
         mgr.load_config(&self.data_dir)?;
         mgr.load_history(&self.data_dir)?;
+        Ok(())
+    }
+
+    // --- Speed Trend Analysis (Phase 138) ---
+
+    /// Get the speed trend configuration.
+    pub async fn get_speed_trend_config(&self) -> speed_trend::SpeedTrendConfig {
+        let mgr = self.speed_trend.lock().await;
+        mgr.get_config().clone()
+    }
+
+    /// Update the speed trend configuration.
+    pub async fn set_speed_trend_config(&self, config: speed_trend::SpeedTrendConfig) {
+        let mut mgr = self.speed_trend.lock().await;
+        mgr.set_config(config);
+    }
+
+    /// Record a speed sample for a domain.
+    pub async fn record_speed_trend(&self, domain: &str, speed_bps: f64) {
+        let mut mgr = self.speed_trend.lock().await;
+        mgr.add_sample(domain, speed_bps);
+    }
+
+    /// Analyze trend for a specific domain.
+    pub async fn analyze_speed_trend(
+        &self,
+        domain: &str,
+        window: Option<speed_trend::TrendWindow>,
+    ) -> Option<speed_trend::DomainTrend> {
+        let mgr = self.speed_trend.lock().await;
+        mgr.analyze_domain(domain, window)
+    }
+
+    /// Get speed trend summary for all domains.
+    pub async fn get_speed_trend_summary(&self) -> speed_trend::SpeedTrendSummary {
+        let mgr = self.speed_trend.lock().await;
+        mgr.get_summary()
+    }
+
+    /// Get all domain trends.
+    pub async fn get_all_speed_trends(&self) -> Vec<speed_trend::DomainTrend> {
+        let mgr = self.speed_trend.lock().await;
+        mgr.get_all_trends()
+    }
+
+    /// Get domains with degrading trends.
+    pub async fn get_degrading_speed_trends(&self) -> Vec<speed_trend::DomainTrend> {
+        let mgr = self.speed_trend.lock().await;
+        mgr.get_degrading_domains()
+    }
+
+    /// Get domains with improving trends.
+    pub async fn get_improving_speed_trends(&self) -> Vec<speed_trend::DomainTrend> {
+        let mgr = self.speed_trend.lock().await;
+        mgr.get_improving_domains()
+    }
+
+    /// Clear speed trend data for a domain.
+    pub async fn clear_speed_trend_domain(&self, domain: &str) {
+        let mut mgr = self.speed_trend.lock().await;
+        mgr.clear_domain(domain);
+    }
+
+    /// Clear all speed trend data.
+    pub async fn clear_all_speed_trends(&self) {
+        let mut mgr = self.speed_trend.lock().await;
+        mgr.clear_all();
+    }
+
+    /// Save speed trend data to disk.
+    pub async fn save_speed_trend_data(&self) -> Result<(), String> {
+        let mgr = self.speed_trend.lock().await;
+        let config_path = format!("{}/speed_trend_config.json", self.data_dir.display());
+        let data_path = format!("{}/speed_trend_data.json", self.data_dir.display());
+        mgr.save_config(&config_path).map_err(|e| e.to_string())?;
+        mgr.save_data(&data_path).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Load speed trend data from disk.
+    pub async fn load_speed_trend_data(&self) -> Result<(), String> {
+        let mut mgr = self.speed_trend.lock().await;
+        let config_path = format!("{}/speed_trend_config.json", self.data_dir.display());
+        let data_path = format!("{}/speed_trend_data.json", self.data_dir.display());
+        if let Ok(config) = speed_trend::SpeedTrendManager::load_config(&config_path) {
+            mgr.set_config(config);
+        }
+        if mgr.load_data(&data_path).is_err() {
+            // Ignore if file doesn't exist
+        }
         Ok(())
     }
 
@@ -13983,6 +14101,72 @@ impl DownloadManager {
         mgr.clear_all();
     }
 
+
+    // ========== Phase 138: Bandwidth Usage Tracker ==========
+
+    /// Get bandwidth usage configuration.
+    pub async fn get_bandwidth_usage_config(&self) -> BandwidthUsageConfig {
+        let tracker = self.bandwidth_usage.lock().await;
+        tracker.config().clone()
+    }
+
+    /// Set bandwidth usage configuration.
+    pub async fn set_bandwidth_usage_config(&self, config: BandwidthUsageConfig) {
+        let mut tracker = self.bandwidth_usage.lock().await;
+        tracker.set_config(config);
+    }
+
+    /// Get bandwidth usage summary.
+    pub async fn get_bandwidth_usage_summary(&self) -> BandwidthUsageSummary {
+        let tracker = self.bandwidth_usage.lock().await;
+        tracker.summary()
+    }
+
+    /// Get rolling 24-hour window summary.
+    pub async fn get_bandwidth_usage_24h(&self) -> RollingWindowSummary {
+        let tracker = self.bandwidth_usage.lock().await;
+        tracker.rolling_24h_summary()
+    }
+
+    /// Get peak hour analysis.
+    pub async fn get_bandwidth_usage_peak_hours(&self, top_n: usize) -> PeakHourAnalysis {
+        let tracker = self.bandwidth_usage.lock().await;
+        tracker.peak_hour_analysis(top_n)
+    }
+
+    /// Clear bandwidth usage data.
+    pub async fn clear_bandwidth_usage(&self) {
+        let mut tracker = self.bandwidth_usage.lock().await;
+        tracker.clear();
+    }
+
+    /// Format bandwidth usage summary as human-readable string.
+    pub async fn format_bandwidth_usage(&self) -> String {
+        let tracker = self.bandwidth_usage.lock().await;
+        tracker.format_summary()
+    }
+
+    /// Save bandwidth usage data to disk.
+    pub async fn save_bandwidth_usage(&self) -> std::io::Result<()> {
+        let tracker = self.bandwidth_usage.lock().await;
+        let path = self.data_dir.join("bandwidth_usage.json");
+        let json = serde_json::to_string_pretty(&*tracker)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        tokio::fs::write(&path, json).await
+    }
+
+    /// Load bandwidth usage data from disk.
+    pub async fn load_bandwidth_usage(&self) -> std::io::Result<()> {
+        let path = self.data_dir.join("bandwidth_usage.json");
+        if path.exists() {
+            let json = tokio::fs::read_to_string(&path).await?;
+            let tracker: BandwidthUsageTracker = serde_json::from_str(&json)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            let mut current = self.bandwidth_usage.lock().await;
+            *current = tracker;
+        }
+        Ok(())
+    }
     /// Save bandwidth forecast config to disk.
     pub async fn save_source_benchmark_cache(&self) -> std::io::Result<()> {
         let mgr = self.source_benchmark.lock().await;

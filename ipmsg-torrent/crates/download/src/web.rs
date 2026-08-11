@@ -856,6 +856,13 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/speed-test/latest", get(get_speed_test_latest_handler))
         .route("/api/speed-test/clear", post(clear_speed_test_handler))
+        .route("/api/speed-trend", get(get_speed_trend_config_handler))
+        .route("/api/speed-trend", post(set_speed_trend_config_handler))
+        .route("/api/speed-trend/summary", get(get_speed_trend_summary_handler))
+        .route("/api/speed-trend/trends", get(get_all_speed_trends_handler))
+        .route("/api/speed-trend/degrading", get(get_degrading_trends_handler))
+        .route("/api/speed-trend/improving", get(get_improving_trends_handler))
+        .route("/api/speed-trend/clear", post(clear_all_speed_trends_handler))
         .route("/api/webhook", get(get_webhook_summary_handler))
         .route("/api/webhook/config", get(get_webhook_config_handler))
         .route("/api/webhook/config", post(set_webhook_config_handler))
@@ -1010,6 +1017,47 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route(
             "/api/source-quality/clear",
             post(clear_source_quality_handler),
+        )
+        // Phase 138: Speed Boost CLI + REST API Integration
+        .route(
+            "/api/speed-boost",
+            get(get_speed_boost_status_handler),
+        )
+        .route(
+            "/api/speed-boost",
+            post(set_speed_boost_config_handler),
+        )
+        .route(
+            "/api/speed-boost/start",
+            post(start_speed_boost_handler),
+        )
+        .route(
+            "/api/speed-boost/stop",
+            post(stop_speed_boost_handler),
+        )
+        .route(
+            "/api/speed-boost/preset",
+            post(add_speed_boost_preset_handler),
+        )
+        .route(
+            "/api/speed-boost/preset/:id",
+            axum::routing::delete(remove_speed_boost_preset_handler),
+        )
+        .route(
+            "/api/speed-boost/presets",
+            get(list_speed_boost_presets_handler),
+        )
+        .route(
+            "/api/speed-boost/scheduled",
+            get(list_speed_boost_scheduled_handler),
+        )
+        .route(
+            "/api/speed-boost/scheduled",
+            post(add_speed_boost_scheduled_handler),
+        )
+        .route(
+            "/api/speed-boost/scheduled/:id",
+            axum::routing::delete(remove_speed_boost_scheduled_handler),
         )
         // Phase 136: Bandwidth Forecast CLI + REST API Integration
         .route(
@@ -8307,6 +8355,65 @@ async fn clear_speed_test_handler(
     Json(serde_json::json!({"status": "ok"}))
 }
 
+// --- Speed Trend Analysis (Phase 138) ---
+
+/// GET /api/speed-trend - Get speed trend configuration
+async fn get_speed_trend_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_speed_trend_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/speed-trend - Update speed trend configuration
+async fn set_speed_trend_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::speed_trend::SpeedTrendConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_speed_trend_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/speed-trend/summary - Get speed trend summary
+async fn get_speed_trend_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_speed_trend_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/speed-trend/trends - Get all domain trends
+async fn get_all_speed_trends_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let trends = state.manager.get_all_speed_trends().await;
+    Json(serde_json::to_value(trends).unwrap_or_default())
+}
+
+/// GET /api/speed-trend/degrading - Get domains with degrading trends
+async fn get_degrading_trends_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let trends = state.manager.get_degrading_speed_trends().await;
+    Json(serde_json::to_value(trends).unwrap_or_default())
+}
+
+/// GET /api/speed-trend/improving - Get domains with improving trends
+async fn get_improving_trends_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let trends = state.manager.get_improving_speed_trends().await;
+    Json(serde_json::to_value(trends).unwrap_or_default())
+}
+
+/// POST /api/speed-trend/clear - Clear all speed trend data
+async fn clear_all_speed_trends_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_all_speed_trends().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
 // --- Event Webhook (Phase 130) ---
 
 /// GET /api/webhook - Get webhook summary
@@ -8872,4 +8979,152 @@ async fn clear_bandwidth_forecast_handler(
 ) -> impl axum::response::IntoResponse {
     state.manager.clear_bandwidth_forecast().await;
     Json(serde_json::json!({"status": "ok"}))
+}
+
+// ─────────────────────────────────────────────────────────────
+// Phase 138: Speed Boost REST API Handlers
+// ─────────────────────────────────────────────────────────────
+
+/// GET /api/speed-boost - Get speed boost status and config
+async fn get_speed_boost_status_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let status = state.manager.get_speed_boost_status().await;
+    Json(serde_json::to_value(status).unwrap_or_default())
+}
+
+/// POST /api/speed-boost - Update speed boost configuration
+async fn set_speed_boost_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::speed_boost::SpeedBoostConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_speed_boost_config(config).await;
+    StatusCode::OK
+}
+
+/// POST /api/speed-boost/start - Start a speed boost
+async fn start_speed_boost_handler(
+    State(state): State<Arc<WebState>>,
+    Json(params): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let duration_secs = params
+        .get("duration_secs")
+        .and_then(|v| v.as_u64());
+    let multiplier = params
+        .get("multiplier")
+        .and_then(|v| v.as_f64());
+    let preset = params
+        .get("preset")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let result = if let Some(preset_name) = preset {
+        state.manager.start_speed_boost_preset(&preset_name).await
+    } else {
+        state
+            .manager
+            .start_speed_boost(duration_secs, multiplier)
+            .await
+    };
+
+    match result {
+        crate::speed_boost::BoostStartResult::Started(boost) => {
+            Json(serde_json::json!({
+                "status": "started",
+                "multiplier": boost.multiplier,
+                "expires_at": boost.expires_at,
+                "source": boost.source,
+                "remaining_secs": boost.remaining_secs()
+            }))
+        }
+        crate::speed_boost::BoostStartResult::Disabled => {
+            Json(serde_json::json!({"status": "disabled", "message": "Speed boost feature is disabled"}))
+        }
+        crate::speed_boost::BoostStartResult::AlreadyActive => {
+            Json(serde_json::json!({"status": "already_active", "message": "Another boost is already active"}))
+        }
+        crate::speed_boost::BoostStartResult::InvalidParams(msg) => {
+            Json(serde_json::json!({"status": "invalid_params", "message": msg}))
+        }
+    }
+}
+
+/// POST /api/speed-boost/stop - Stop the active speed boost
+async fn stop_speed_boost_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let stopped = state.manager.stop_speed_boost().await;
+    Json(serde_json::json!({"status": if stopped { "stopped" } else { "no_active_boost" }}))
+}
+
+/// POST /api/speed-boost/preset - Add a named boost preset
+async fn add_speed_boost_preset_handler(
+    State(state): State<Arc<WebState>>,
+    Json(preset_req): Json<AddPresetRequest>,
+) -> impl axum::response::IntoResponse {
+    let preset = crate::speed_boost::BoostPreset {
+        name: preset_req.name.clone(),
+        multiplier: preset_req.multiplier,
+        duration_secs: preset_req.duration_secs,
+        description: preset_req.description.unwrap_or_default(),
+    };
+    let added = state
+        .manager
+        .add_speed_boost_preset(&preset_req.id, preset)
+        .await;
+    Json(serde_json::json!({"status": if added { "added" } else { "failed" }}))
+}
+
+/// DELETE /api/speed-boost/preset/:id - Remove a named boost preset
+async fn remove_speed_boost_preset_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let removed = state.manager.remove_speed_boost_preset(&id).await;
+    Json(serde_json::json!({"status": if removed { "removed" } else { "not_found" }}))
+}
+
+/// GET /api/speed-boost/presets - List all named boost presets
+async fn list_speed_boost_presets_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_speed_boost_config().await;
+    Json(serde_json::to_value(config.presets).unwrap_or_default())
+}
+
+/// GET /api/speed-boost/scheduled - List all scheduled boost windows
+async fn list_speed_boost_scheduled_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_speed_boost_config().await;
+    Json(serde_json::to_value(config.scheduled_windows).unwrap_or_default())
+}
+
+/// POST /api/speed-boost/scheduled - Add a scheduled boost window
+async fn add_speed_boost_scheduled_handler(
+    State(state): State<Arc<WebState>>,
+    Json(window): Json<crate::speed_boost::ScheduledBoostWindow>,
+) -> impl axum::response::IntoResponse {
+    let added = state.manager.add_scheduled_boost_window(window).await;
+    Json(serde_json::json!({"status": if added { "added" } else { "failed" }}))
+}
+
+/// DELETE /api/speed-boost/scheduled/:id - Remove a scheduled boost window
+async fn remove_speed_boost_scheduled_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let removed = state.manager.remove_scheduled_boost_window(&id).await;
+    Json(serde_json::json!({"status": if removed { "removed" } else { "not_found" }}))
+}
+
+/// Request body for adding a boost preset
+#[derive(Debug, serde::Deserialize)]
+struct AddPresetRequest {
+    id: String,
+    name: String,
+    multiplier: f64,
+    duration_secs: u64,
+    #[serde(default)]
+    description: Option<String>,
 }
