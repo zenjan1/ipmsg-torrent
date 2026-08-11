@@ -1240,6 +1240,39 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             post(clear_all_retry_budget_handler),
         )
         .route("/api/uptime", get(get_uptime_handler))
+        // ── Dependency Visualization API (Phase 154) ──
+        .route(
+            "/api/dependency-visualization",
+            get(get_dep_viz_handler),
+        )
+        .route(
+            "/api/dependency-visualization/stats",
+            get(get_dep_viz_stats_handler),
+        )
+        .route(
+            "/api/dependency-visualization/config",
+            get(get_dep_viz_config_handler).post(set_dep_viz_config_handler),
+        )
+        .route(
+            "/api/dependency-visualization/cycles",
+            get(get_dep_viz_cycles_handler),
+        )
+        .route(
+            "/api/dependency-visualization/roots",
+            get(get_dep_viz_roots_handler),
+        )
+        .route(
+            "/api/dependency-visualization/leaves",
+            get(get_dep_viz_leaves_handler),
+        )
+        .route(
+            "/api/dependency-visualization/text",
+            get(get_dep_viz_text_handler),
+        )
+        .route(
+            "/api/dependency-visualization/dot",
+            get(get_dep_viz_dot_handler),
+        )
         .route(
             "/api/file-stats",
             get(get_file_stats_handler).post(set_file_stats_handler),
@@ -1253,6 +1286,53 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/file-stats/extension/:ext",
             get(get_extension_stats_handler),
         )
+        // Phase 153: URL Blacklist REST API
+        .route(
+            "/api/url-blacklist",
+            get(get_url_blacklist_config_handler).post(set_url_blacklist_config_handler),
+        )
+        .route(
+            "/api/url-blacklist/enable",
+            post(set_url_blacklist_enabled_handler),
+        )
+        .route(
+            "/api/url-blacklist/entries",
+            get(list_blacklist_entries_handler).post(add_blacklist_entry_handler),
+        )
+        .route(
+            "/api/url-blacklist/entries/:id",
+            delete(remove_blacklist_entry_handler),
+        )
+        .route("/api/url-blacklist/check", post(check_url_blocked_handler))
+        // Phase 153: Download Cooldown REST API
+        .route(
+            "/api/cooldown",
+            get(get_cooldown_config_handler).post(set_cooldown_config_handler),
+        )
+        .route("/api/cooldown/status", post(get_cooldown_status_handler))
+        .route("/api/cooldown/tick", post(tick_cooldown_handler))
+        .route("/api/cooldown/reset/:task_id", post(reset_cooldown_handler))
+        .route("/api/cooldown/summary", get(get_cooldown_summary_handler))
+        // Phase 153: URL Health Monitor REST API
+        .route(
+            "/api/url-health",
+            get(get_url_health_config_handler).post(set_url_health_config_handler),
+        )
+        .route(
+            "/api/url-health/summary",
+            get(get_url_health_summary_handler),
+        )
+        .route("/api/url-health/checks", get(get_url_health_checks_handler))
+        .route("/api/url-health/monitor", post(monitor_url_health_handler))
+        .route(
+            "/api/url-health/monitor/:url",
+            delete(unmonitor_url_health_handler),
+        )
+        .route(
+            "/api/url-health/check/:url",
+            get(get_url_health_check_handler),
+        )
+        .route("/api/url-health/cleanup", post(cleanup_dead_urls_handler))
         // Phase 148: Task Activity REST API
         .route(
             "/api/task-activity",
@@ -10802,4 +10882,307 @@ async fn get_bandwidth_usage_format_handler(
 ) -> Json<serde_json::Value> {
     let report = state.manager.format_bandwidth_usage().await;
     Json(serde_json::json!({"report": report}))
+}
+
+// ========== Phase 153: Download Cooldown REST API Handlers ==========
+
+/// GET /api/cooldown - Get cooldown configuration
+async fn get_cooldown_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_cooldown_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/cooldown - Update cooldown configuration
+async fn set_cooldown_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::download_cooldown::CooldownConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_cooldown_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/cooldown/status - Get cooldown status for a task
+async fn get_cooldown_status_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let task_id = body
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    match state.manager.get_cooldown_status(task_id).await {
+        Some(status) => Ok(Json(serde_json::to_value(status).unwrap_or_default())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// POST /api/cooldown/tick - Tick cooldown (move expired tasks back to Queued)
+async fn tick_cooldown_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let count = state.manager.tick_cooldown().await;
+    Json(serde_json::json!({"tasks_resumed": count}))
+}
+
+/// POST /api/cooldown/reset/:task_id - Reset cooldown for a task
+async fn reset_cooldown_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    state.manager.reset_task_cooldown(&task_id).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/cooldown/summary - Get cooldown summary for all tasks
+async fn get_cooldown_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_cooldown_config().await;
+    let tasks = state.manager.list_tasks().await;
+    let mut statuses = Vec::new();
+    for task in tasks {
+        if let Some(ref cooldown_state) = task.cooldown {
+            let status =
+                crate::download_cooldown::cooldown_status(&task.id, cooldown_state, &config);
+            statuses.push(status);
+        }
+    }
+    Json(serde_json::json!({
+        "config": config,
+        "tasks_in_cooldown": statuses.len(),
+        "statuses": statuses
+    }))
+}
+
+// ========== Phase 153: URL Health Monitor REST API Handlers ==========
+
+/// GET /api/url-health - Get URL health monitor configuration
+async fn get_url_health_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_url_health_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/url-health - Update URL health monitor configuration
+async fn set_url_health_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::url_health_monitor::UrlHealthMonitorConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_url_health_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/url-health/summary - Get URL health monitoring summary
+async fn get_url_health_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.manager.get_url_health_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/url-health/checks - Get all URL health checks
+async fn get_url_health_checks_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let checks = state.manager.get_all_url_health_checks().await;
+    Json(serde_json::to_value(checks).unwrap_or_default())
+}
+
+/// POST /api/url-health/monitor - Add a URL to monitoring
+async fn monitor_url_health_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let url = body
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let success = state.manager.monitor_url_health(url).await;
+    if success {
+        Ok(Json(serde_json::json!({"status": "ok", "url": url})))
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
+/// DELETE /api/url-health/monitor/:url - Remove a URL from monitoring
+async fn unmonitor_url_health_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(url): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let success = state.manager.unmonitor_url_health(&url).await;
+    Json(serde_json::json!({"removed": success}))
+}
+
+/// GET /api/url-health/check/:url - Get health status for a specific URL
+async fn get_url_health_check_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(url): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.manager.get_url_health(&url).await {
+        Some(check) => Ok(Json(serde_json::to_value(check).unwrap_or_default())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// POST /api/url-health/cleanup - Remove dead URLs from monitoring
+async fn cleanup_dead_urls_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let removed = state.manager.url_health_monitor().cleanup_dead_urls().await;
+    Json(serde_json::json!({"removed": removed}))
+}
+
+// ========== Phase 153: URL Blacklist REST API Handlers ==========
+
+/// GET /api/url-blacklist - Get URL blacklist configuration
+async fn get_url_blacklist_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_url_blacklist_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/url-blacklist - Update URL blacklist configuration
+async fn set_url_blacklist_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::url_blacklist::BlacklistConfig>,
+) -> Json<serde_json::Value> {
+    match state.manager.set_url_blacklist_config(config).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// POST /api/url-blacklist/enable - Enable or disable URL blacklist
+async fn set_url_blacklist_enabled_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let enabled = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    match state.manager.set_blacklist_enabled(enabled).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok", "enabled": enabled})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// GET /api/url-blacklist/entries - List all blacklist entries
+async fn list_blacklist_entries_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let entries = state.manager.list_blacklist_entries().await;
+    Json(serde_json::json!({"entries": entries, "count": entries.len()}))
+}
+
+/// POST /api/url-blacklist/entries - Add a new blacklist entry
+async fn add_blacklist_entry_handler(
+    State(state): State<Arc<WebState>>,
+    Json(entry): Json<crate::url_blacklist::BlacklistEntry>,
+) -> Json<serde_json::Value> {
+    match state.manager.add_blacklist_entry(entry).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// DELETE /api/url-blacklist/entries/:id - Remove a blacklist entry
+async fn remove_blacklist_entry_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    match state.manager.remove_blacklist_entry(&id).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok", "removed": id})),
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+/// POST /api/url-blacklist/check - Check if a URL is blocked
+async fn check_url_blocked_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let result = state.manager.check_url_blocked(url).await;
+    Json(serde_json::to_value(result).unwrap_or_default())
+}
+
+// ========== Phase 154: Dependency Visualization REST API Handlers ==========
+
+/// GET /api/dependency-visualization - Build and return the dependency graph
+async fn get_dep_viz_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    match state.manager.build_dependency_visualization().await {
+        Some(graph) => Json(serde_json::to_value(graph).unwrap_or_default()),
+        None => Json(serde_json::json!({"error": "no graph available"})),
+    }
+}
+
+/// GET /api/dependency-visualization/stats - Get graph statistics
+async fn get_dep_viz_stats_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    match state.manager.get_dep_visualization_stats().await {
+        Some(stats) => Json(serde_json::to_value(stats).unwrap_or_default()),
+        None => Json(serde_json::json!({"error": "no stats available"})),
+    }
+}
+
+/// GET /api/dependency-visualization/config - Get visualization config
+async fn get_dep_viz_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_dep_visualization_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/dependency-visualization/config - Update visualization config
+async fn set_dep_viz_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::dependency_visualization::VisualizationConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_dep_visualization_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/dependency-visualization/cycles - Get detected dependency cycles
+async fn get_dep_viz_cycles_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let cycles = state.manager.get_dependency_cycles().await;
+    Json(serde_json::json!({"cycles": cycles, "count": cycles.len()}))
+}
+
+/// GET /api/dependency-visualization/roots - Get root tasks (no dependencies)
+async fn get_dep_viz_roots_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let roots = state.manager.get_dependency_roots().await;
+    Json(serde_json::json!({"roots": roots, "count": roots.len()}))
+}
+
+/// GET /api/dependency-visualization/leaves - Get leaf tasks (no dependents)
+async fn get_dep_viz_leaves_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let leaves = state.manager.get_dependency_leaves().await;
+    Json(serde_json::json!({"leaves": leaves, "count": leaves.len()}))
+}
+
+/// GET /api/dependency-visualization/text - Get text-based visualization
+async fn get_dep_viz_text_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let text = state.manager.visualize_dependency_graph().await;
+    Json(serde_json::json!({"text": text}))
+}
+
+/// GET /api/dependency-visualization/dot - Export graph in DOT format (Graphviz)
+async fn get_dep_viz_dot_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let dot = state.manager.export_dependency_graph_dot().await;
+    Json(serde_json::json!({"dot": dot}))
 }

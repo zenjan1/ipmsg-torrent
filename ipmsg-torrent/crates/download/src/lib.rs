@@ -30,6 +30,7 @@ pub mod dashboard;
 pub mod data_cap;
 pub mod data_retention;
 pub mod dependency_graph;
+pub mod dependency_visualization;
 pub mod dht;
 pub mod disk_monitor;
 pub mod domain_limit;
@@ -135,6 +136,7 @@ pub mod url_blacklist;
 pub mod url_bookmarks;
 pub mod url_dedup;
 pub mod url_expander;
+pub mod url_health_monitor;
 pub mod url_normalizer;
 pub mod url_pattern;
 pub mod url_rewrite;
@@ -912,6 +914,8 @@ pub struct DownloadManager {
     path_validator: Arc<Mutex<path_validator::PathValidator>>,
     /// Path rules for automatic save path assignment
     path_rules: Arc<Mutex<path_rules::PathRuleManager>>,
+    /// URL health monitor for tracking download URL and mirror health
+    url_health_monitor: Arc<url_health_monitor::UrlHealthMonitor>,
     /// Task archive for preserving completed/failed tasks
     task_archive: Arc<tokio::sync::RwLock<task_archive::ArchiveState>>,
     /// URL normalizer for cleaning and deduplicating download URLs
@@ -987,6 +991,9 @@ pub struct DownloadManager {
     dynamic_priority: Arc<tokio::sync::RwLock<dynamic_priority::DynamicPriorityManager>>,
     /// Dependency graph validator for checking task dependency integrity
     dependency_graph: Arc<tokio::sync::RwLock<dependency_graph::DependencyGraphValidator>>,
+    /// Dependency graph visualization manager
+    dep_visualization:
+        Arc<tokio::sync::RwLock<dependency_visualization::DependencyVisualizationManager>>,
     /// Download quota manager for per-tag/group data limits
     download_quota: Arc<Mutex<download_quota::DownloadQuotaManager>>,
     /// Advanced search query cache (not persisted, in-memory only)
@@ -1068,6 +1075,8 @@ pub struct DownloadManager {
     task_cron_scheduler: Arc<Mutex<task_cron_scheduler::TaskCronScheduler>>,
     /// Bandwidth QoS classification manager (Phase 151)
     bandwidth_qos: Arc<Mutex<bandwidth_qos::BandwidthQosManager>>,
+    /// URL blacklist for blocking unwanted downloads (Phase 153)
+    url_blacklist: Arc<tokio::sync::RwLock<url_blacklist::BlacklistConfig>>,
 }
 
 impl DownloadManager {
@@ -1075,6 +1084,9 @@ impl DownloadManager {
         let save_path = data_dir.join("downloads");
         let dm = Self {
             tasks: Arc::new(Mutex::new(Vec::new())),
+            dep_visualization: Arc::new(tokio::sync::RwLock::new(
+                dependency_visualization::DependencyVisualizationManager::new(),
+            )),
             speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
             speed_anomaly: Arc::new(Mutex::new(speed_anomaly::SpeedAnomalyDetector::new(
                 speed_anomaly::AnomalyConfig::default(),
@@ -1147,6 +1159,7 @@ impl DownloadManager {
             )),
             path_validator: Arc::new(Mutex::new(path_validator::PathValidator::new())),
             path_rules: Arc::new(Mutex::new(path_rules::PathRuleManager::new())),
+            url_health_monitor: Arc::new(url_health_monitor::UrlHealthMonitor::new()),
             task_archive: Arc::new(tokio::sync::RwLock::new(
                 task_archive::ArchiveState::default(),
             )),
@@ -1167,6 +1180,9 @@ impl DownloadManager {
             )),
             url_allowlist: Arc::new(tokio::sync::RwLock::new(
                 url_allowlist::AllowlistConfig::default(),
+            )),
+            url_blacklist: Arc::new(tokio::sync::RwLock::new(
+                url_blacklist::BlacklistConfig::default(),
             )),
             task_snooze: Arc::new(Mutex::new(task_snooze::TaskSnoozeManager::new())),
             task_scheduler: Arc::new(Mutex::new(task_scheduler::TaskSchedulerManager::new())),
@@ -1455,6 +1471,12 @@ impl DownloadManager {
         let _save_path = data_dir.join("downloads");
         let dm = Self {
             tasks: Arc::new(Mutex::new(tasks)),
+            dep_visualization: Arc::new(tokio::sync::RwLock::new(
+                dependency_visualization::DependencyVisualizationManager::new(),
+            )),
+            url_blacklist: Arc::new(tokio::sync::RwLock::new(
+                url_blacklist::BlacklistConfig::default(),
+            )),
             speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
             speed_anomaly: Arc::new(Mutex::new(speed_anomaly::SpeedAnomalyDetector::new(
                 speed_anomaly::AnomalyConfig::default(),
@@ -1527,6 +1549,7 @@ impl DownloadManager {
             )),
             path_validator: Arc::new(Mutex::new(path_validator::PathValidator::new())),
             path_rules: Arc::new(Mutex::new(path_rules::PathRuleManager::new())),
+            url_health_monitor: Arc::new(url_health_monitor::UrlHealthMonitor::new()),
             task_archive: Arc::new(tokio::sync::RwLock::new(
                 task_archive::ArchiveState::default(),
             )),
@@ -4752,6 +4775,46 @@ impl DownloadManager {
     /// Get current URL expander configuration.
     pub async fn get_url_expander(&self) -> url_expander::UrlExpanderConfig {
         self.url_expander.read().await.clone()
+    }
+
+    /// Get the URL health monitor.
+    pub fn url_health_monitor(&self) -> &url_health_monitor::UrlHealthMonitor {
+        &self.url_health_monitor
+    }
+
+    /// Monitor a URL for health checks.
+    pub async fn monitor_url_health(&self, url: &str) -> bool {
+        self.url_health_monitor.monitor_url(url).await
+    }
+
+    /// Stop monitoring a URL.
+    pub async fn unmonitor_url_health(&self, url: &str) -> bool {
+        self.url_health_monitor.unmonitor_url(url).await
+    }
+
+    /// Get health status for a specific URL.
+    pub async fn get_url_health(&self, url: &str) -> Option<url_health_monitor::UrlHealthCheck> {
+        self.url_health_monitor.get_url_health(url).await
+    }
+
+    /// Get URL health monitoring summary.
+    pub async fn get_url_health_summary(&self) -> url_health_monitor::UrlHealthSummary {
+        self.url_health_monitor.get_summary().await
+    }
+
+    /// Get all URL health checks.
+    pub async fn get_all_url_health_checks(&self) -> Vec<url_health_monitor::UrlHealthCheck> {
+        self.url_health_monitor.get_all_health_checks().await
+    }
+
+    /// Get URL health monitor configuration.
+    pub async fn get_url_health_config(&self) -> url_health_monitor::UrlHealthMonitorConfig {
+        self.url_health_monitor.get_config().await
+    }
+
+    /// Set URL health monitor configuration.
+    pub async fn set_url_health_config(&self, config: url_health_monitor::UrlHealthMonitorConfig) {
+        self.url_health_monitor.set_config(config).await;
     }
 
     /// Get the watch folder manager.
@@ -11272,6 +11335,164 @@ impl DownloadManager {
         Some(validator.get_dependents(task_id, &task_data))
     }
 
+    // ── Dependency Visualization System (Phase 154) ──
+
+    /// Build and return the dependency graph visualization.
+    pub async fn build_dependency_visualization(
+        &self,
+    ) -> Option<dependency_visualization::DependencyGraph> {
+        let tasks = self.tasks.lock().await;
+        let task_tuples: Vec<(String, String, String, Vec<String>)> = tasks
+            .iter()
+            .map(|t| {
+                (
+                    t.id.clone(),
+                    t.name.clone(),
+                    format!("{:?}", t.state),
+                    t.depends_on.clone(),
+                )
+            })
+            .collect();
+        let mut viz = self.dep_visualization.write().await;
+        viz.build_graph(&task_tuples);
+        viz.get_graph().cloned()
+    }
+
+    /// Get dependency graph visualization statistics.
+    pub async fn get_dep_visualization_stats(
+        &self,
+    ) -> Option<dependency_visualization::GraphStats> {
+        let tasks = self.tasks.lock().await;
+        let task_tuples: Vec<(String, String, String, Vec<String>)> = tasks
+            .iter()
+            .map(|t| {
+                (
+                    t.id.clone(),
+                    t.name.clone(),
+                    format!("{:?}", t.state),
+                    t.depends_on.clone(),
+                )
+            })
+            .collect();
+        let mut viz = self.dep_visualization.write().await;
+        viz.build_graph(&task_tuples);
+        viz.get_stats().cloned()
+    }
+
+    /// Get the visualization configuration.
+    pub async fn get_dep_visualization_config(
+        &self,
+    ) -> dependency_visualization::VisualizationConfig {
+        let viz = self.dep_visualization.read().await;
+        viz.get_config().clone()
+    }
+
+    /// Set the visualization configuration.
+    pub async fn set_dep_visualization_config(
+        &self,
+        config: dependency_visualization::VisualizationConfig,
+    ) {
+        let mut viz = self.dep_visualization.write().await;
+        viz.set_config(config);
+    }
+
+    /// Get detected dependency cycles.
+    pub async fn get_dependency_cycles(&self) -> Vec<Vec<String>> {
+        let tasks = self.tasks.lock().await;
+        let task_tuples: Vec<(String, String, String, Vec<String>)> = tasks
+            .iter()
+            .map(|t| {
+                (
+                    t.id.clone(),
+                    t.name.clone(),
+                    format!("{:?}", t.state),
+                    t.depends_on.clone(),
+                )
+            })
+            .collect();
+        let mut viz = self.dep_visualization.write().await;
+        viz.build_graph(&task_tuples);
+        viz.get_cycles().unwrap_or_default().to_vec()
+    }
+
+    /// Get root tasks (tasks with no dependencies).
+    pub async fn get_dependency_roots(&self) -> Vec<String> {
+        let tasks = self.tasks.lock().await;
+        let task_tuples: Vec<(String, String, String, Vec<String>)> = tasks
+            .iter()
+            .map(|t| {
+                (
+                    t.id.clone(),
+                    t.name.clone(),
+                    format!("{:?}", t.state),
+                    t.depends_on.clone(),
+                )
+            })
+            .collect();
+        let mut viz = self.dep_visualization.write().await;
+        viz.build_graph(&task_tuples);
+        viz.get_roots().unwrap_or_default().to_vec()
+    }
+
+    /// Get leaf tasks (tasks with no dependents).
+    pub async fn get_dependency_leaves(&self) -> Vec<String> {
+        let tasks = self.tasks.lock().await;
+        let task_tuples: Vec<(String, String, String, Vec<String>)> = tasks
+            .iter()
+            .map(|t| {
+                (
+                    t.id.clone(),
+                    t.name.clone(),
+                    format!("{:?}", t.state),
+                    t.depends_on.clone(),
+                )
+            })
+            .collect();
+        let mut viz = self.dep_visualization.write().await;
+        viz.build_graph(&task_tuples);
+        viz.get_leaves().unwrap_or_default().to_vec()
+    }
+
+    /// Generate a text-based visualization of the dependency graph.
+    pub async fn visualize_dependency_graph(&self) -> String {
+        let tasks = self.tasks.lock().await;
+        let task_tuples: Vec<(String, String, String, Vec<String>)> = tasks
+            .iter()
+            .map(|t| {
+                (
+                    t.id.clone(),
+                    t.name.clone(),
+                    format!("{:?}", t.state),
+                    t.depends_on.clone(),
+                )
+            })
+            .collect();
+        let mut viz = self.dep_visualization.write().await;
+        viz.build_graph(&task_tuples);
+        viz.visualize_text()
+            .unwrap_or_else(|| "No tasks to visualize".to_string())
+    }
+
+    /// Export the dependency graph in DOT format (for Graphviz).
+    pub async fn export_dependency_graph_dot(&self) -> String {
+        let tasks = self.tasks.lock().await;
+        let task_tuples: Vec<(String, String, String, Vec<String>)> = tasks
+            .iter()
+            .map(|t| {
+                (
+                    t.id.clone(),
+                    t.name.clone(),
+                    format!("{:?}", t.state),
+                    t.depends_on.clone(),
+                )
+            })
+            .collect();
+        let mut viz = self.dep_visualization.write().await;
+        viz.build_graph(&task_tuples);
+        viz.export_dot()
+            .unwrap_or_else(|| "digraph Empty {}".to_string())
+    }
+
     // ── Download Quota System (Phase 115) ──
 
     /// Set the download quota system configuration.
@@ -13299,6 +13520,81 @@ impl DownloadManager {
     pub async fn check_url_allowed(&self, url: &str) -> url_allowlist::AllowlistCheckResult {
         let config = self.url_allowlist.read().await.clone();
         url_allowlist::check_url_allowlist(url, &config)
+    }
+
+    // ========== Phase 153: URL Blacklist ==========
+
+    /// Set URL blacklist configuration and persist to disk.
+    pub async fn set_url_blacklist_config(
+        &self,
+        config: url_blacklist::BlacklistConfig,
+    ) -> Result<(), url_blacklist::BlacklistError> {
+        {
+            let mut bl = self.url_blacklist.write().await;
+            *bl = config;
+        }
+        let bl = self.url_blacklist.read().await.clone();
+        url_blacklist::save_blacklist_config(&bl, &self.data_dir)
+    }
+
+    /// Get current URL blacklist configuration.
+    pub async fn get_url_blacklist_config(&self) -> url_blacklist::BlacklistConfig {
+        self.url_blacklist.read().await.clone()
+    }
+
+    /// Enable or disable URL blacklist enforcement.
+    pub async fn set_blacklist_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<(), url_blacklist::BlacklistError> {
+        {
+            let mut bl = self.url_blacklist.write().await;
+            bl.enabled = enabled;
+        }
+        let bl = self.url_blacklist.read().await.clone();
+        url_blacklist::save_blacklist_config(&bl, &self.data_dir)
+    }
+
+    /// Add an entry to the URL blacklist.
+    pub async fn add_blacklist_entry(
+        &self,
+        entry: url_blacklist::BlacklistEntry,
+    ) -> Result<(), url_blacklist::BlacklistError> {
+        {
+            let mut bl = self.url_blacklist.write().await;
+            bl.entries.push(entry);
+        }
+        let bl = self.url_blacklist.read().await.clone();
+        url_blacklist::save_blacklist_config(&bl, &self.data_dir)
+    }
+
+    /// Remove an entry from the URL blacklist by ID.
+    pub async fn remove_blacklist_entry(
+        &self,
+        id: &str,
+    ) -> Result<(), url_blacklist::BlacklistError> {
+        {
+            let mut bl = self.url_blacklist.write().await;
+            let before = bl.entries.len();
+            bl.entries.retain(|e| e.id != id);
+            if bl.entries.len() == before {
+                return Err(url_blacklist::BlacklistError::NotFound(id.to_string()));
+            }
+        }
+        let bl = self.url_blacklist.read().await.clone();
+        url_blacklist::save_blacklist_config(&bl, &self.data_dir)
+    }
+
+    /// List all URL blacklist entries.
+    pub async fn list_blacklist_entries(&self) -> Vec<url_blacklist::BlacklistEntry> {
+        self.url_blacklist.read().await.entries.clone()
+    }
+
+    /// Check if a URL is blocked by the blacklist.
+    /// Returns `blocked: true` if blacklist is enabled and URL matches an entry.
+    pub async fn check_url_blocked(&self, url: &str) -> url_blacklist::BlacklistCheckResult {
+        let config = self.url_blacklist.read().await.clone();
+        url_blacklist::check_url_blacklist(url, &config)
     }
 
     // ========== Phase 106: Per-Task Proxy Override ==========

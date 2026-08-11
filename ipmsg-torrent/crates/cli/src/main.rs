@@ -293,6 +293,24 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
+    /// Download cooldown - exponential backoff retry for failed tasks (Phase 153)
+    DlCooldown {
+        /// "status", "config", "summary", "tick", "reset <task_id>"
+        action: String,
+        args: Vec<String>,
+    },
+    /// URL health monitor - track download URL and mirror health (Phase 153)
+    DlUrlHealth {
+        /// "status", "config", "summary", "monitor <url>", "unmonitor <url>", "check <url>", "cleanup"
+        action: String,
+        args: Vec<String>,
+    },
+    /// Dependency visualization - view and analyze task dependency graphs (Phase 154)
+    DlDepViz {
+        /// "graph", "stats", "config", "cycles", "roots", "leaves", "text", "dot"
+        action: String,
+        args: Vec<String>,
+    },
     /// Path organizer - auto-organize files by extension (Phase 133)
     DlPathOrganizer {
         /// "status", "enable", "disable", "add", "remove", "list", "organize"
@@ -1263,6 +1281,18 @@ fn parse_command(input: &str) -> Command {
                 Command::DlFileStats { action, args }
             }
         }
+        "dlcooldown" | "dl-cooldown" | "dlcd" => {
+            if parts.len() < 2 {
+                Command::DlCooldown {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlCooldown { action, args }
+            }
+        }
         "dlpathorg" | "dl-pathorg" | "dlpo" => {
             if parts.len() < 2 {
                 Command::DlPathOrganizer {
@@ -1273,6 +1303,30 @@ fn parse_command(input: &str) -> Command {
                 let action = parts[1].to_string();
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlPathOrganizer { action, args }
+            }
+        }
+        "dlurlhealth" | "dl-urlhealth" | "dluh" => {
+            if parts.len() < 2 {
+                Command::DlUrlHealth {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlUrlHealth { action, args }
+            }
+        }
+        "dldepviz" | "dl-depviz" | "dldv" => {
+            if parts.len() < 2 {
+                Command::DlDepViz {
+                    action: "graph".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlDepViz { action, args }
             }
         }
         "dlretention" | "dl-retention" => {
@@ -2791,6 +2845,7 @@ fn command_help() -> String {
         "/dlspeedtest [cmd] - Speed test (status|run <url>|summary|history|latest|clear|config)",
         "/dlspdtrend [cmd] - Speed trend analysis (status|summary|trends|degrading|improving|clear|config)",
         "/dluptime       - Show system uptime (how long since startup)",
+        "/dldepviz [cmd]   - Dependency visualization (graph|stats|config|cycles|roots|leaves|text|dot)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -3820,6 +3875,8 @@ async fn handle_command(
                 "  /dltag <id> <tags>  - Add tags to a task".to_string(),
                 "  /dlfind [query]     - Advanced search/filter".to_string(),
                 "  /dlupload [action]  - Upload tracker (status/summary/config/tasks/clear)"
+                    .to_string(),
+                "  /dlcd [action]      - Download cooldown (status/config/summary/tick/reset)"
                     .to_string(),
                 "".to_string(),
                 "Use /help for general commands".to_string(),
@@ -18117,6 +18174,491 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlrb <status|config|check|clear|summary>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlCooldown { action, args } => {
+            let download_manager = state.lock().await.download_manager.clone();
+            match action.as_str() {
+                "status" => {
+                    let config = download_manager.get_cooldown_config().await;
+                    let msg = format!(
+                        "⏳ Download Cooldown Status:\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         🔄 Enabled: {}\n\
+                         📐 Strategy: {:?}\n\
+                         🔢 Max Retries: {}",
+                        config.enabled, config.strategy, config.max_retries
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_cooldown_config().await;
+                        let msg = format!(
+                            "⚙️ Cooldown Config:\n\
+                             Enabled: {}\n\
+                             Strategy: {:?}\n\
+                             Max Retries: {} (0=unlimited)",
+                            config.enabled, config.strategy, config.max_retries
+                        );
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    } else {
+                        let mut config = download_manager.get_cooldown_config().await;
+                        match args[0].as_str() {
+                            "enable" => {
+                                config.enabled = true;
+                                download_manager.set_cooldown_config(config).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", "✅ Cooldown enabled".to_string());
+                            }
+                            "disable" => {
+                                config.enabled = false;
+                                download_manager.set_cooldown_config(config).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", "⏸️ Cooldown disabled".to_string());
+                            }
+                            "max-retries" if args.len() >= 2 => {
+                                if let Ok(n) = args[1].parse::<u32>() {
+                                    config.max_retries = n;
+                                    download_manager.set_cooldown_config(config).await;
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("✅ Max retries set to {}", n),
+                                    );
+                                } else {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message("main", "❌ Invalid number".to_string());
+                                }
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dlcd config [enable|disable|max-retries <n>]"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                "summary" => {
+                    let config = download_manager.get_cooldown_config().await;
+                    let tasks = download_manager.list_tasks().await;
+                    let mut statuses = Vec::new();
+                    for task in &tasks {
+                        if let Some(ref cooldown_state) = task.cooldown {
+                            let status = ipmsg_download::download_cooldown::cooldown_status(
+                                &task.id,
+                                cooldown_state,
+                                &config,
+                            );
+                            statuses.push(status);
+                        }
+                    }
+                    let mut msg = format!(
+                        "⏳ Cooldown Summary:\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         Tasks in cooldown: {}\n",
+                        statuses.len()
+                    );
+                    for status in &statuses {
+                        let retry_info = if status.can_retry_now {
+                            "✅ ready to retry".to_string()
+                        } else if let Some(secs) = status.seconds_until_retry {
+                            format!("⏳ retry in {}s", secs)
+                        } else {
+                            "🔒 max retries exceeded".to_string()
+                        };
+                        msg.push_str(&format!(
+                            "  {} - attempt {} - {}\n",
+                            status.task_id, status.state.retry_attempt, retry_info
+                        ));
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "tick" => {
+                    let count = download_manager.tick_cooldown().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("✅ Tick cooldown: {} task(s) resumed", count),
+                    );
+                }
+                "reset" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlcd reset <task_id>".to_string());
+                        return;
+                    }
+                    let task_id = &args[0];
+                    download_manager.reset_task_cooldown(task_id).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("✅ Cooldown reset for task {}", task_id));
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlcd <status|config|summary|tick|reset <task_id>>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlUrlHealth { action, args } => {
+            let download_manager = state.lock().await.download_manager.clone();
+            match action.as_str() {
+                "status" => {
+                    let config = download_manager.get_url_health_config().await;
+                    let summary = download_manager.get_url_health_summary().await;
+                    let msg = format!(
+                        "🔍 URL Health Monitor Status:\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         🔄 Enabled: {}\n\
+                         ⏱️  Check Interval: {}s\n\
+                         📊 Monitored URLs: {}\n\
+                         ✅ Healthy: {}\n\
+                         ⚠️  Degraded: {}\n\
+                         ❌ Dead: {}\n\
+                         ❓ Unknown: {}",
+                        config.enabled,
+                        config.check_interval_secs,
+                        summary.total_monitored,
+                        summary.healthy_count,
+                        summary.degraded_count,
+                        summary.dead_count,
+                        summary.unknown_count
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_url_health_config().await;
+                        let msg = format!(
+                            "⚙️ URL Health Config:\n\
+                             Enabled: {}\n\
+                             Check Interval: {}s\n\
+                             Timeout: {}s\n\
+                             Degraded Threshold: {}ms\n\
+                             Dead Threshold: {} failures\n\
+                             Recovery Threshold: {} successes\n\
+                             Max URLs: {}",
+                            config.enabled,
+                            config.check_interval_secs,
+                            config.timeout_secs,
+                            config.degraded_threshold_ms,
+                            config.dead_threshold,
+                            config.recovery_threshold,
+                            config.max_monitored_urls
+                        );
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    } else {
+                        let mut config = download_manager.get_url_health_config().await;
+                        match args[0].as_str() {
+                            "enable" => {
+                                config.enabled = true;
+                                download_manager.set_url_health_config(config).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "✅ URL health monitoring enabled".to_string(),
+                                );
+                            }
+                            "disable" => {
+                                config.enabled = false;
+                                download_manager.set_url_health_config(config).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "❌ URL health monitoring disabled".to_string(),
+                                );
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dluh config [enable|disable]".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                "summary" => {
+                    let checks = download_manager.get_all_url_health_checks().await;
+                    if checks.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "📊 No URLs being monitored".to_string());
+                    } else {
+                        let mut msg =
+                            "📊 URL Health Summary:\n━━━━━━━━━━━━━━━━━━━━━━━━━\n".to_string();
+                        for check in checks.iter().take(10) {
+                            let status_icon = match check.status {
+                                ipmsg_download::url_health_monitor::UrlHealthStatus::Healthy => {
+                                    "✅"
+                                }
+                                ipmsg_download::url_health_monitor::UrlHealthStatus::Degraded => {
+                                    "⚠️"
+                                }
+                                ipmsg_download::url_health_monitor::UrlHealthStatus::Dead => "❌",
+                                ipmsg_download::url_health_monitor::UrlHealthStatus::Unknown => {
+                                    "❓"
+                                }
+                            };
+                            let response = check
+                                .response_time_ms
+                                .map(|ms| format!("{}ms", ms))
+                                .unwrap_or_else(|| "N/A".to_string());
+                            msg.push_str(&format!(
+                                "{} {} - {} ({} checks)\n",
+                                status_icon, check.url, response, check.total_checks
+                            ));
+                        }
+                        if checks.len() > 10 {
+                            msg.push_str(&format!("... and {} more URLs\n", checks.len() - 10));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "monitor" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dluh monitor <url>".to_string());
+                        return;
+                    }
+                    let url = &args[0];
+                    let success = download_manager.monitor_url_health(url).await;
+                    let mut s = state.lock().await;
+                    if success {
+                        s.add_system_message("main", format!("✅ Now monitoring: {}", url));
+                    } else {
+                        s.add_system_message(
+                            "main",
+                            "❌ Failed to monitor URL (max limit reached)".to_string(),
+                        );
+                    }
+                }
+                "unmonitor" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dluh unmonitor <url>".to_string());
+                        return;
+                    }
+                    let url = &args[0];
+                    let success = download_manager.unmonitor_url_health(url).await;
+                    let mut s = state.lock().await;
+                    if success {
+                        s.add_system_message("main", format!("✅ Stopped monitoring: {}", url));
+                    } else {
+                        s.add_system_message(
+                            "main",
+                            "❌ URL not found in monitoring list".to_string(),
+                        );
+                    }
+                }
+                "check" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dluh check <url>".to_string());
+                        return;
+                    }
+                    let url = &args[0];
+                    match download_manager.get_url_health(url).await {
+                        Some(check) => {
+                            let status_icon = match check.status {
+                                ipmsg_download::url_health_monitor::UrlHealthStatus::Healthy => {
+                                    "✅"
+                                }
+                                ipmsg_download::url_health_monitor::UrlHealthStatus::Degraded => {
+                                    "⚠️"
+                                }
+                                ipmsg_download::url_health_monitor::UrlHealthStatus::Dead => "❌",
+                                ipmsg_download::url_health_monitor::UrlHealthStatus::Unknown => {
+                                    "❓"
+                                }
+                            };
+                            let response = check
+                                .response_time_ms
+                                .map(|ms| format!("{}ms", ms))
+                                .unwrap_or_else(|| "N/A".to_string());
+                            let msg = format!(
+                                "{} {}\n\
+                                 Status: {}\n\
+                                 Response Time: {}\n\
+                                 HTTP Status: {}\n\
+                                 Total Checks: {}\n\
+                                 Successful: {}\n\
+                                 Consecutive Failures: {}\n\
+                                 Last Error: {}",
+                                status_icon,
+                                check.url,
+                                check.status,
+                                response,
+                                check
+                                    .http_status
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| "N/A".to_string()),
+                                check.total_checks,
+                                check.successful_checks,
+                                check.consecutive_failures,
+                                check.last_error.as_deref().unwrap_or("None")
+                            );
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", msg);
+                        }
+                        None => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("❌ URL not being monitored: {}", url),
+                            );
+                        }
+                    }
+                }
+                "cleanup" => {
+                    let removed = download_manager
+                        .url_health_monitor()
+                        .cleanup_dead_urls()
+                        .await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("🧹 Removed {} dead URLs from monitoring", removed),
+                    );
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dluh <status|config|summary|monitor|unmonitor|check|cleanup>"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlDepViz { action, args } => {
+            let download_manager = state.lock().await.download_manager.clone();
+            match action.as_str() {
+                "graph" => {
+                    let graph = download_manager.build_dependency_visualization().await;
+                    match graph {
+                        Some(g) => {
+                            let mut msg = format!(
+                                "📊 Dependency Graph:\n━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                                 Total Tasks: {}\nRoot Tasks: {}\nLeaf Tasks: {}\n\
+                                 Cyclic Tasks: {}\nIsolated Tasks: {}\nMax Depth: {}\n\
+                                 Avg Dependencies: {:.1}\nAvg Dependents: {:.1}\n",
+                                g.stats.total_tasks, g.stats.root_tasks, g.stats.leaf_tasks,
+                                g.stats.cyclic_tasks, g.stats.isolated_tasks, g.max_depth,
+                                g.stats.avg_dependencies, g.stats.avg_dependents
+                            );
+                            if !g.cycles.is_empty() {
+                                msg.push_str(&format!("\n⚠️  Cycles Detected: {}\n", g.cycles.len()));
+                                for (i, cycle) in g.cycles.iter().enumerate() {
+                                    msg.push_str(&format!("  Cycle {}: {:?}\n", i + 1, cycle));
+                                }
+                            }
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", msg);
+                        }
+                        None => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "No dependency graph available. Add tasks with dependencies first.".to_string());
+                        }
+                    }
+                }
+                "stats" => {
+                    let stats = download_manager.get_dep_visualization_stats().await;
+                    match stats {
+                        Some(st) => {
+                            let msg = format!(
+                                "📈 Dependency Graph Stats:\n\
+                                 Total: {} | Roots: {} | Leaves: {}\n\
+                                 Cyclic: {} | Isolated: {}\n\
+                                 Avg Deps: {:.1} | Avg Dependents: {:.1}",
+                                st.total_tasks, st.root_tasks, st.leaf_tasks,
+                                st.cyclic_tasks, st.isolated_tasks,
+                                st.avg_dependencies, st.avg_dependents
+                            );
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", msg);
+                        }
+                        None => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "No stats available.".to_string());
+                        }
+                    }
+                }
+                "config" => {
+                    let config = download_manager.get_dep_visualization_config().await;
+                    let msg = format!(
+                        "⚙️ Dependency Visualization Config:\n\
+                         Include Completed: {}\nHighlight Cycles: {}\n\
+                         Max Display Depth: {}\nShow Task Names: {}\nCompute Stats: {}",
+                        config.include_completed, config.highlight_cycles,
+                        config.max_display_depth, config.show_task_names, config.compute_stats
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "cycles" => {
+                    let cycles = download_manager.get_dependency_cycles().await;
+                    if cycles.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ No dependency cycles detected.".to_string());
+                    } else {
+                        let mut msg = format!("⚠️ Dependency Cycles ({}):\n", cycles.len());
+                        for (i, cycle) in cycles.iter().enumerate() {
+                            msg.push_str(&format!("  {}: {:?}\n", i + 1, cycle));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "roots" => {
+                    let roots = download_manager.get_dependency_roots().await;
+                    if roots.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No root tasks found.".to_string());
+                    } else {
+                        let msg = format!("🌳 Root Tasks ({}): {:?}", roots.len(), roots);
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "leaves" => {
+                    let leaves = download_manager.get_dependency_leaves().await;
+                    if leaves.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No leaf tasks found.".to_string());
+                    } else {
+                        let msg = format!("🍃 Leaf Tasks ({}): {:?}", leaves.len(), leaves);
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "text" => {
+                    let text = download_manager.visualize_dependency_graph().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("📋 Dependency Graph (Text):\n{}", text));
+                }
+                "dot" => {
+                    let dot = download_manager.export_dependency_graph_dot().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("📊 Dependency Graph (DOT):\n{}", dot));
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dldepviz [graph|stats|config|cycles|roots|leaves|text|dot]".to_string(),
                     );
                 }
             }
