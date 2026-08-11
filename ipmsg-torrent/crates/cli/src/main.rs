@@ -18122,9 +18122,91 @@ async fn handle_command(
             }
         }
         Command::DlFileStats { action, args } => {
-            // TODO: Implement file stats command handler
-            let mut s = state.lock().await;
-            s.add_system_message("main", format!("File stats command: {} {:?}", action, args));
+            let download_manager = state.lock().await.download_manager.clone();
+            match action.as_str() {
+                "status" | "summary" => {
+                    let summary = download_manager.get_file_stats_summary().await;
+                    let mut msg = String::from("📊 File Type Statistics:\n");
+                    msg.push_str(&format!(
+                        "  Total Downloads: {}\n  Total Size: {}\n  Unique Extensions: {}\n",
+                        summary.total_downloads,
+                        format_size(summary.total_bytes),
+                        summary.unique_extensions
+                    ));
+                    if !summary.by_category.is_empty() {
+                        msg.push_str("\n📁 By Category:\n");
+                        let mut cats: Vec<_> = summary.by_category.iter().collect();
+                        cats.sort_by(|a, b| b.1.count.cmp(&a.1.count));
+                        for (cat, stats) in cats {
+                            msg.push_str(&format!(
+                                "  {:12} {:>5} downloads ({})\n",
+                                format!("{:?}", cat),
+                                stats.count,
+                                format_size(stats.total_bytes)
+                            ));
+                        }
+                    }
+                    if !summary.top_by_count.is_empty() {
+                        msg.push_str("\n🔝 Top Extensions (by count):\n");
+                        for (i, ext) in summary.top_by_count.iter().enumerate().take(5) {
+                            msg.push_str(&format!(
+                                "  {}. {} - {} downloads ({})\n",
+                                i + 1,
+                                ext.extension,
+                                ext.count,
+                                format_size(ext.total_bytes)
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "extension" | "ext" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlfs extension <ext>".to_string());
+                        return;
+                    }
+                    let ext = &args[0];
+                    if let Some(stats) = download_manager.get_extension_file_stats(ext).await {
+                        let msg = format!(
+                            "📊 Extension .{} Stats:\n  Downloads: {}\n  Total Size: {}\n  Avg Speed: {}/s\n  Last Download: {}",
+                            stats.extension,
+                            stats.count,
+                            format_size(stats.total_bytes),
+                            format_size(stats.avg_speed_bps),
+                            stats.last_download_at.map(|t| chrono::DateTime::from_timestamp(t as i64, 0).map(|dt| dt.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "unknown".to_string())).unwrap_or_else(|| "never".to_string())
+                        );
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("No stats found for extension .{}", ext));
+                    }
+                }
+                "clear" => {
+                    let result = download_manager.clear_file_stats().await;
+                    let mut s = state.lock().await;
+                    if result.is_ok() {
+                        s.add_system_message("main", "✅ File stats cleared".to_string());
+                    } else {
+                        s.add_system_message("main", "❌ Failed to clear file stats".to_string());
+                    }
+                }
+                "config" => {
+                    let config = download_manager.get_file_stats_config().await;
+                    let msg = format!(
+                        "⚙️ File Stats Config:\n  Enabled: {}\n  Max Extensions: {}\n  Track Extensions: {}\n  Track Categories: {}",
+                        config.enabled, config.max_extensions, config.track_extensions, config.track_categories
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "Usage: /dlfs <status|summary|extension <ext>|clear|config>".to_string());
+                }
+            }
         }
         Command::DlSla { action, args } => {
             let mut s = state.lock().await;
