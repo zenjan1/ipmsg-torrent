@@ -57,6 +57,7 @@ pub mod event_webhook;
 pub mod global_budget;
 pub mod health_dashboard;
 pub mod integrity_verification;
+pub mod intelligent_source_selector;
 pub mod link_extractor;
 pub mod magnet;
 pub mod metadata_cache;
@@ -1030,6 +1031,8 @@ pub struct DownloadManager {
     notification_center: Arc<Mutex<notification_center::NotificationCenterManager>>,
     /// Task scorecard manager for unified per-task performance scoring (Phase 139)
     task_scorecard: Arc<Mutex<task_scorecard::TaskScorecardManager>>,
+    /// Intelligent source selector for combining reliability, health, and bandwidth data (Phase 140)
+    intelligent_source_selector: Arc<Mutex<intelligent_source_selector::IntelligentSourceSelector>>,
 }
 
 impl DownloadManager {
@@ -1253,6 +1256,9 @@ impl DownloadManager {
                 notification_center::NotificationCenterManager::new(),
             )),
             task_scorecard: Arc::new(Mutex::new(task_scorecard::TaskScorecardManager::new())),
+            intelligent_source_selector: Arc::new(Mutex::new(
+                intelligent_source_selector::IntelligentSourceSelector::new(),
+            )),
         };
         dm.start_scheduler();
         dm
@@ -1608,6 +1614,9 @@ impl DownloadManager {
                 notification_center::NotificationCenterManager::new(),
             )),
             task_scorecard: Arc::new(Mutex::new(task_scorecard::TaskScorecardManager::new())),
+            intelligent_source_selector: Arc::new(Mutex::new(
+                intelligent_source_selector::IntelligentSourceSelector::new(),
+            )),
         };
         // Restore tag manager from disk
         dm.tag_manager.restore().await;
@@ -9576,6 +9585,125 @@ impl DownloadManager {
             .is_err()
         {
             // Ignore if file doesn't exist
+        }
+        Ok(())
+    }
+
+    // --- Intelligent Source Selector (Phase 140) ---
+
+    /// Set intelligent source selector configuration.
+    pub async fn set_intelligent_selector_config(
+        &self,
+        config: intelligent_source_selector::IntelligentSelectorConfig,
+    ) {
+        let mut selector = self.intelligent_source_selector.lock().await;
+        selector.set_config(config);
+    }
+
+    /// Get intelligent source selector configuration.
+    pub async fn get_intelligent_selector_config(
+        &self,
+    ) -> intelligent_source_selector::IntelligentSelectorConfig {
+        let selector = self.intelligent_source_selector.lock().await;
+        selector.config().clone()
+    }
+
+    /// Add or update a source candidate for intelligent selection.
+    pub async fn add_intelligent_source_candidate(
+        &self,
+        candidate: intelligent_source_selector::SourceCandidate,
+    ) {
+        let mut selector = self.intelligent_source_selector.lock().await;
+        selector.add_candidate(candidate);
+    }
+
+    /// Remove all candidates for a task.
+    pub async fn remove_intelligent_source_task(&self, task_id: &str) {
+        let mut selector = self.intelligent_source_selector.lock().await;
+        selector.remove_task_candidates(task_id);
+    }
+
+    /// Perform intelligent source selection for a task.
+    pub async fn select_intelligent_sources(
+        &self,
+        task_id: &str,
+    ) -> intelligent_source_selector::SelectionResult {
+        let mut selector = self.intelligent_source_selector.lock().await;
+        selector.select_sources(task_id)
+    }
+
+    /// Get candidates for a specific task.
+    pub async fn get_intelligent_source_candidates(
+        &self,
+        task_id: &str,
+    ) -> Vec<intelligent_source_selector::SourceCandidate> {
+        let selector = self.intelligent_source_selector.lock().await;
+        selector
+            .candidates
+            .get(task_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Get all candidates across all tasks.
+    pub async fn get_all_intelligent_source_candidates(
+        &self,
+    ) -> HashMap<String, Vec<intelligent_source_selector::SourceCandidate>> {
+        let selector = self.intelligent_source_selector.lock().await;
+        selector.candidates.clone()
+    }
+
+    /// Get selector summary statistics.
+    pub async fn get_intelligent_selector_summary(
+        &self,
+    ) -> intelligent_source_selector::SelectorSummary {
+        let selector = self.intelligent_source_selector.lock().await;
+        selector.get_summary()
+    }
+
+    /// Get selection history.
+    pub async fn get_intelligent_selector_history(
+        &self,
+    ) -> Vec<intelligent_source_selector::SelectionResult> {
+        let selector = self.intelligent_source_selector.lock().await;
+        selector.selection_history.clone()
+    }
+
+    /// Clear all candidates and history.
+    pub async fn clear_intelligent_selector(&self) {
+        let mut selector = self.intelligent_source_selector.lock().await;
+        selector.clear_candidates();
+        selector.selection_history.clear();
+    }
+
+    /// Clear selection history only.
+    pub async fn clear_intelligent_selector_history(&self) {
+        let mut selector = self.intelligent_source_selector.lock().await;
+        selector.selection_history.clear();
+    }
+
+    /// Record that a source was used (for tracking selection counts).
+    pub async fn record_intelligent_source_used(&self, source_id: &str, success: bool) {
+        let mut selector = self.intelligent_source_selector.lock().await;
+        selector.record_source_used(source_id, success);
+    }
+
+    /// Save intelligent selector config to disk.
+    pub async fn save_intelligent_selector_config(&self) -> Result<(), std::io::Error> {
+        let selector = self.intelligent_source_selector.lock().await;
+        intelligent_source_selector::save_selector_config(
+            &selector.config,
+            std::path::Path::new(&self.data_dir),
+        )
+    }
+
+    /// Load intelligent selector config from disk.
+    pub async fn load_intelligent_selector_config(&self) -> Result<(), std::io::Error> {
+        if let Some(config) =
+            intelligent_source_selector::load_selector_config(std::path::Path::new(&self.data_dir))?
+        {
+            let mut selector = self.intelligent_source_selector.lock().await;
+            selector.set_config(config);
         }
         Ok(())
     }

@@ -267,6 +267,12 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
+    /// Intelligent source selector - combine reliability, health, bandwidth for source selection (Phase 140)
+    DlIntelligentSelector {
+        /// "status", "config", "select", "candidates", "summary", "history", "clear", "enable", "disable"
+        action: String,
+        args: Vec<String>,
+    },
     /// Path organizer - auto-organize files by extension (Phase 133)
     DlPathOrganizer {
         /// "status", "enable", "disable", "add", "remove", "list", "organize"
@@ -1130,6 +1136,18 @@ fn parse_command(input: &str) -> Command {
                 let action = parts[1].to_string();
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlScorecard { action, args }
+            }
+        }
+        "dlis" | "dl-intelligent" | "dl-intelligent-selector" => {
+            if parts.len() < 2 {
+                Command::DlIntelligentSelector {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlIntelligentSelector { action, args }
             }
         }
         "dlpathorg" | "dl-pathorg" | "dlpo" => {
@@ -8028,6 +8046,261 @@ async fn handle_command(
                         "main",
                         "Usage: /dlscorecard [status|summary|generate|list|top|worst|remove|clear|config]"
                             .to_string(),
+                    );
+                }
+            }
+        }
+
+        Command::DlIntelligentSelector { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            match action.as_str() {
+                "status" | "config" => {
+                    let config = download_manager.get_intelligent_selector_config().await;
+                    let summary = download_manager.get_intelligent_selector_summary().await;
+                    let msg = format!(
+                        "🧠 Intelligent Source Selector Status:\n\
+                         Enabled: {}\n\
+                         Weights: reliability={:.0}% health={:.0}% bandwidth={:.0}%\n\
+                         Min threshold: {:.2} | Max sources: {}\n\
+                         Auto failover: {} | Decay factor: {:.2}\n\
+                         Preferred domains: {}\n\
+                         Avoided domains: {}\n\
+                         ---\n\
+                         Total selections: {}\n\
+                         Avg confidence: {:.2}\n\
+                         Avg predicted speed: {}\n\
+                         Failover count: {}\n\
+                         Selection success rate: {:.0}%",
+                        config.enabled,
+                        config.reliability_weight * 100.0,
+                        config.health_weight * 100.0,
+                        config.bandwidth_weight * 100.0,
+                        config.min_score_threshold,
+                        config.max_sources_per_selection,
+                        config.auto_failover,
+                        config.unused_decay_factor,
+                        if config.preferred_domains.is_empty() {
+                            "none".to_string()
+                        } else {
+                            config.preferred_domains.join(", ")
+                        },
+                        if config.avoided_domains.is_empty() {
+                            "none".to_string()
+                        } else {
+                            config.avoided_domains.join(", ")
+                        },
+                        summary.total_selections,
+                        summary.avg_confidence,
+                        ipmsg_download::intelligent_source_selector::format_speed_bps(
+                            summary.avg_predicted_speed_bps as u64,
+                        ),
+                        summary.failover_count,
+                        summary.selection_success_rate * 100.0,
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "enable" => {
+                    let mut config = download_manager.get_intelligent_selector_config().await;
+                    config.enabled = true;
+                    download_manager
+                        .set_intelligent_selector_config(config)
+                        .await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ Intelligent source selector enabled.".to_string(),
+                    );
+                }
+                "disable" => {
+                    let mut config = download_manager.get_intelligent_selector_config().await;
+                    config.enabled = false;
+                    download_manager
+                        .set_intelligent_selector_config(config)
+                        .await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "⛔ Intelligent source selector disabled.".to_string(),
+                    );
+                }
+                "select" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlis select <task_id>".to_string());
+                    } else {
+                        let task_id = &args[0];
+                        let result = download_manager.select_intelligent_sources(task_id).await;
+                        if result.selected_sources.is_empty() {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("No candidates found for task {}.", task_id),
+                            );
+                        } else {
+                            let mut msg = format!(
+                                "🧠 Intelligent Selection for task {}:\n\
+                                 Confidence: {:.2} | Candidates evaluated: {}\n",
+                                task_id, result.confidence, result.total_candidates,
+                            );
+                            if let Some(best) = result.best_source() {
+                                msg.push_str(&format!(
+                                    "  🥇 Best: {} (score={:.2}, domain={})\n",
+                                    best.source_id, best.intelligent_score, best.domain,
+                                ));
+                            }
+                            for (i, src) in result.failover_sources().iter().enumerate() {
+                                msg.push_str(&format!(
+                                    "  🥈 Failover {}: {} (score={:.2}, domain={})\n",
+                                    i + 1,
+                                    src.source_id,
+                                    src.intelligent_score,
+                                    src.domain,
+                                ));
+                            }
+                            if !result.rejected_sources.is_empty() {
+                                msg.push_str(&format!(
+                                    "  Rejected: {} sources\n",
+                                    result.rejected_sources.len(),
+                                ));
+                            }
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", msg);
+                        }
+                    }
+                }
+                "candidates" => {
+                    if args.is_empty() {
+                        // Show all candidates
+                        let all = download_manager
+                            .get_all_intelligent_source_candidates()
+                            .await;
+                        if all.is_empty() {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                "No intelligent source candidates.".to_string(),
+                            );
+                        } else {
+                            let mut msg = String::new();
+                            for (task_id, candidates) in &all {
+                                msg.push_str(&format!(
+                                    "\n📋 Task {} ({} candidates):\n",
+                                    task_id,
+                                    candidates.len()
+                                ));
+                                for c in candidates {
+                                    msg.push_str(&format!(
+                                        "  {} | {} | score={:.2} rel={:.2} health={:.2} bw={:.2}\n",
+                                        c.source_id,
+                                        c.domain,
+                                        c.intelligent_score,
+                                        c.reliability_score,
+                                        c.health_score,
+                                        c.bandwidth_score,
+                                    ));
+                                }
+                            }
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", msg);
+                        }
+                    } else {
+                        let task_id = &args[0];
+                        let candidates = download_manager
+                            .get_intelligent_source_candidates(task_id)
+                            .await;
+                        if candidates.is_empty() {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("No candidates for task {}.", task_id),
+                            );
+                        } else {
+                            let mut msg = format!("📋 Candidates for task {}:\n", task_id);
+                            for c in &candidates {
+                                msg.push_str(&format!(
+                                    "  {} | {} | score={:.2} rel={:.2} health={:.2} bw={:.2}\n",
+                                    c.source_id,
+                                    c.domain,
+                                    c.intelligent_score,
+                                    c.reliability_score,
+                                    c.health_score,
+                                    c.bandwidth_score,
+                                ));
+                            }
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", msg);
+                        }
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_intelligent_selector_summary().await;
+                    let msg = format!(
+                        "🧠 Intelligent Selector Summary:\n\
+                         Total selections: {}\n\
+                         Avg confidence: {:.2}\n\
+                         Avg predicted speed: {}\n\
+                         Failover count: {}\n\
+                         Selection success rate: {:.0}%\n\
+                         Most selected: {}\n\
+                         Most rejected domain: {}",
+                        summary.total_selections,
+                        summary.avg_confidence,
+                        ipmsg_download::intelligent_source_selector::format_speed_bps(
+                            summary.avg_predicted_speed_bps as u64,
+                        ),
+                        summary.failover_count,
+                        summary.selection_success_rate * 100.0,
+                        summary.most_selected_source.as_deref().unwrap_or("none"),
+                        summary.most_rejected_domain.as_deref().unwrap_or("none"),
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "history" => {
+                    let history = download_manager.get_intelligent_selector_history().await;
+                    if history.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "No selection history.".to_string());
+                    } else {
+                        let mut msg =
+                            format!("📜 Selection History ({} entries):\n", history.len());
+                        for entry in history.iter().take(10) {
+                            msg.push_str(&format!(
+                                "  Task {} | confidence={:.2} | selected={} rejected={}\n",
+                                entry.task_id,
+                                entry.confidence,
+                                entry.selected_sources.len(),
+                                entry.rejected_sources.len(),
+                            ));
+                        }
+                        if history.len() > 10 {
+                            msg.push_str(&format!("  ... and {} more\n", history.len() - 10));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_intelligent_selector().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "🗑️ Intelligent selector data cleared.".to_string(),
+                    );
+                }
+                "clear-history" => {
+                    download_manager.clear_intelligent_selector_history().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "🗑️ Selection history cleared.".to_string());
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlis [status|enable|disable|select <task_id>|candidates [task_id]|summary|history|clear|clear-history]".to_string(),
                     );
                 }
             }

@@ -1124,6 +1124,39 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/bandwidth-forecast/clear",
             post(clear_bandwidth_forecast_handler),
         )
+        // Phase 140: Intelligent Source Selector API
+        .route(
+            "/api/intelligent-selector",
+            get(get_intelligent_selector_config_handler),
+        )
+        .route(
+            "/api/intelligent-selector",
+            post(set_intelligent_selector_config_handler),
+        )
+        .route(
+            "/api/intelligent-selector/summary",
+            get(get_intelligent_selector_summary_handler),
+        )
+        .route(
+            "/api/intelligent-selector/select/:task_id",
+            post(select_intelligent_sources_handler),
+        )
+        .route(
+            "/api/intelligent-selector/candidates/:task_id",
+            get(get_intelligent_selector_candidates_handler),
+        )
+        .route(
+            "/api/intelligent-selector/history",
+            get(get_intelligent_selector_history_handler),
+        )
+        .route(
+            "/api/intelligent-selector/history/clear",
+            post(clear_intelligent_selector_history_handler),
+        )
+        .route(
+            "/api/intelligent-selector/clear",
+            post(clear_intelligent_selector_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -9112,6 +9145,80 @@ async fn clear_bandwidth_forecast_handler(
     State(state): State<Arc<WebState>>,
 ) -> impl axum::response::IntoResponse {
     state.manager.clear_bandwidth_forecast().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+// ─────────────────────────────────────────────────────────────
+// Phase 140: Intelligent Source Selector REST API Handlers
+// ─────────────────────────────────────────────────────────────
+
+/// GET /api/intelligent-selector - Get intelligent selector config
+async fn get_intelligent_selector_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_intelligent_selector_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/intelligent-selector - Update intelligent selector config
+async fn set_intelligent_selector_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::intelligent_source_selector::IntelligentSelectorConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_intelligent_selector_config(config).await;
+    StatusCode::OK
+}
+
+/// GET /api/intelligent-selector/summary - Get selector summary
+async fn get_intelligent_selector_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let summary = state.manager.get_intelligent_selector_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// POST /api/intelligent-selector/select/:task_id - Select sources for a task
+async fn select_intelligent_sources_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let result = state.manager.select_intelligent_sources(&task_id).await;
+    Json(serde_json::to_value(result).unwrap_or_default())
+}
+
+/// GET /api/intelligent-selector/candidates/:task_id - Get candidates for a task
+async fn get_intelligent_selector_candidates_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    let candidates = state
+        .manager
+        .get_intelligent_source_candidates(&task_id)
+        .await;
+    Json(serde_json::to_value(candidates).unwrap_or_default())
+}
+
+/// GET /api/intelligent-selector/history - Get selection history
+async fn get_intelligent_selector_history_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let history = state.manager.get_intelligent_selector_history().await;
+    Json(serde_json::to_value(history).unwrap_or_default())
+}
+
+/// POST /api/intelligent-selector/history/clear - Clear selection history
+async fn clear_intelligent_selector_history_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_intelligent_selector_history().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/intelligent-selector/clear - Clear all data
+async fn clear_intelligent_selector_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    state.manager.clear_intelligent_selector().await;
     Json(serde_json::json!({"status": "ok"}))
 }
 
