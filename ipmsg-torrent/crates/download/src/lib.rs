@@ -68,6 +68,7 @@ pub mod network_aware;
 pub mod network_monitor;
 pub mod notification;
 pub mod notification_center;
+pub mod notification_preferences;
 pub mod path_organizer;
 pub mod path_rules;
 pub mod path_template;
@@ -93,6 +94,7 @@ pub mod segment_download;
 pub mod sla_compliance;
 pub mod smart_queue;
 pub mod source_benchmark;
+pub mod source_latency;
 pub mod source_quality;
 pub mod source_reliability;
 pub mod source_rotation;
@@ -1047,12 +1049,16 @@ pub struct DownloadManager {
     download_expiry: Arc<Mutex<download_expiry::DownloadExpiryManager>>,
     /// Export/import manager for task backup and migration (Phase 145)
     task_export: Arc<Mutex<task_export::ExportHistory>>,
+    /// Source latency monitor for per-domain connection latency tracking (Phase 145)
+    source_latency: Arc<Mutex<source_latency::SourceLatencyMonitor>>,
     /// System uptime tracker for dashboard monitoring
     system_uptime: Arc<system_uptime::SystemUptimeTracker>,
     /// File type statistics tracker for download categorization by extension (Phase 143)
     file_stats: Arc<tokio::sync::RwLock<download_file_stats::FileTypeStatsTracker>>,
     /// SLA compliance manager for tracking download service level agreements (Phase 144)
     sla_compliance: Arc<tokio::sync::RwLock<sla_compliance::SlaComplianceManager>>,
+    /// Per-task notification preferences manager (Phase 146)
+    notification_preferences: Arc<Mutex<notification_preferences::NotificationPreferencesManager>>,
 }
 
 impl DownloadManager {
@@ -1284,6 +1290,7 @@ impl DownloadManager {
             download_expiry: Arc::new(Mutex::new(download_expiry::DownloadExpiryManager::new())),
             system_uptime: Arc::new(system_uptime::SystemUptimeTracker::new()),
             task_export: Arc::new(Mutex::new(task_export::ExportHistory::default())),
+            source_latency: Arc::new(Mutex::new(source_latency::SourceLatencyMonitor::new())),
             file_stats: Arc::new(tokio::sync::RwLock::new(
                 download_file_stats::FileTypeStatsTracker::new(
                     download_file_stats::FileStatsConfig::default(),
@@ -1291,6 +1298,9 @@ impl DownloadManager {
             )),
             sla_compliance: Arc::new(tokio::sync::RwLock::new(
                 sla_compliance::SlaComplianceManager::new(data_dir.clone()),
+            )),
+            notification_preferences: Arc::new(Mutex::new(
+                notification_preferences::NotificationPreferencesManager::new(),
             )),
         };
         dm.start_scheduler();
@@ -1655,6 +1665,7 @@ impl DownloadManager {
             download_expiry: Arc::new(Mutex::new(download_expiry::DownloadExpiryManager::new())),
             system_uptime: Arc::new(system_uptime::SystemUptimeTracker::new()),
             task_export: Arc::new(Mutex::new(task_export::ExportHistory::default())),
+            source_latency: Arc::new(Mutex::new(source_latency::SourceLatencyMonitor::new())),
             file_stats: Arc::new(tokio::sync::RwLock::new(
                 download_file_stats::FileTypeStatsTracker::new(
                     download_file_stats::FileStatsConfig::default(),
@@ -1662,6 +1673,9 @@ impl DownloadManager {
             )),
             sla_compliance: Arc::new(tokio::sync::RwLock::new(
                 sla_compliance::SlaComplianceManager::new(data_dir.clone()),
+            )),
+            notification_preferences: Arc::new(Mutex::new(
+                notification_preferences::NotificationPreferencesManager::new(),
             )),
         };
         // Restore SLA compliance data from disk
@@ -15611,6 +15625,151 @@ impl DownloadManager {
         task_export::save_export_history(&history, &path)
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    // ========== Notification Preferences (Phase 146) ==========
+
+    /// Get notification preferences configuration
+    pub async fn get_notification_preferences_config(
+        &self,
+    ) -> notification_preferences::NotificationPreferencesConfig {
+        let manager = self.notification_preferences.lock().await;
+        manager.get_config().clone()
+    }
+
+    /// Set notification preferences configuration
+    pub async fn set_notification_preferences_config(
+        &self,
+        config: notification_preferences::NotificationPreferencesConfig,
+    ) {
+        let mut manager = self.notification_preferences.lock().await;
+        manager.set_config(config);
+    }
+
+    /// Get notification preferences for a specific task
+    pub async fn get_task_notification_config(
+        &self,
+        task_id: &str,
+    ) -> Option<notification_preferences::TaskNotificationConfig> {
+        let manager = self.notification_preferences.lock().await;
+        manager.get_task_config(task_id).cloned()
+    }
+
+    /// Set notification preferences for a specific task
+    pub async fn set_task_notification_config(
+        &self,
+        config: notification_preferences::TaskNotificationConfig,
+    ) {
+        let mut manager = self.notification_preferences.lock().await;
+        manager.set_task_config(config);
+    }
+
+    /// Remove notification preferences for a task
+    pub async fn remove_task_notification_config(&self, task_id: &str) -> bool {
+        let mut manager = self.notification_preferences.lock().await;
+        manager.remove_task_config(task_id)
+    }
+
+    /// Enable notifications for a task
+    pub async fn enable_task_notifications(&self, task_id: &str) {
+        let mut manager = self.notification_preferences.lock().await;
+        manager.enable_task_notifications(task_id);
+    }
+
+    /// Disable notifications for a task
+    pub async fn disable_task_notifications(&self, task_id: &str) {
+        let mut manager = self.notification_preferences.lock().await;
+        manager.disable_task_notifications(task_id);
+    }
+
+    /// Set cooldown period for a task
+    pub async fn set_task_notification_cooldown(&self, task_id: &str, cooldown_secs: u64) {
+        let mut manager = self.notification_preferences.lock().await;
+        manager.set_task_cooldown(task_id, cooldown_secs);
+    }
+
+    /// Set minimum priority for a task
+    pub async fn set_task_notification_min_priority(
+        &self,
+        task_id: &str,
+        min_priority: notification_preferences::MinimumPriority,
+    ) {
+        let mut manager = self.notification_preferences.lock().await;
+        manager.set_task_min_priority(task_id, min_priority);
+    }
+
+    /// Check if a notification should be sent for a task event
+    pub async fn should_send_notification(
+        &self,
+        task_id: &str,
+        event: &notification_preferences::TaskNotificationEvent,
+    ) -> bool {
+        let mut manager = self.notification_preferences.lock().await;
+        manager.should_notify(task_id, event)
+    }
+
+    /// Get notification preferences summary
+    pub async fn get_notification_preferences_summary(
+        &self,
+    ) -> notification_preferences::NotificationPreferencesSummary {
+        let manager = self.notification_preferences.lock().await;
+        manager.get_summary()
+    }
+
+    /// List all task notification configs
+    pub async fn list_task_notification_configs(
+        &self,
+    ) -> Vec<notification_preferences::TaskNotificationConfig> {
+        let manager = self.notification_preferences.lock().await;
+        manager.list_task_configs().into_iter().cloned().collect()
+    }
+
+    /// Clear notification cooldown for a task
+    pub async fn clear_task_notification_cooldown(&self, task_id: &str) {
+        let mut manager = self.notification_preferences.lock().await;
+        manager.clear_cooldown(task_id);
+    }
+
+    /// Clear all notification cooldowns
+    pub async fn clear_all_notification_cooldowns(&self) {
+        let mut manager = self.notification_preferences.lock().await;
+        manager.clear_all_cooldowns();
+    }
+
+    /// Save notification preferences to disk
+    pub async fn save_notification_preferences(&self) -> std::io::Result<()> {
+        let manager = self.notification_preferences.lock().await;
+        let config_path = self.data_dir.join("notification_preferences_config.json");
+        let tasks_path = self.data_dir.join("notification_preferences_tasks.json");
+
+        manager
+            .save_config(&config_path)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        manager
+            .save_task_configs(&tasks_path)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Load notification preferences from disk
+    pub async fn load_notification_preferences(&self) -> std::io::Result<()> {
+        let mut manager = self.notification_preferences.lock().await;
+        let config_path = self.data_dir.join("notification_preferences_config.json");
+        let tasks_path = self.data_dir.join("notification_preferences_tasks.json");
+
+        manager
+            .load_config(&config_path)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        manager
+            .load_task_configs(&tasks_path)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        Ok(())
     }
 }
 
