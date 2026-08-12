@@ -7,7 +7,7 @@ use crate::{DownloadManager, DownloadState, DownloadTask};
 use axum::{
     Json, Router,
     extract::{
-        Path, State,
+        Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
@@ -104,6 +104,27 @@ pub struct TaskResponse {
     pub success: bool,
     pub task_id: Option<String>,
     pub message: String,
+}
+
+/// Query parameters for export filtering (Phase 161)
+#[derive(Debug, Deserialize)]
+pub struct ExportFilterParams {
+    #[serde(default)]
+    pub states: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub group: Option<String>,
+    pub created_after: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_before: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Request body for import operations (Phase 161)
+#[derive(Debug, Deserialize)]
+pub struct ImportRequest {
+    /// The data to import (JSON or CSV string)
+    pub data: String,
+    /// Conflict strategy: "skip" (default), "overwrite", or "rename"
+    pub conflict_strategy: Option<String>,
 }
 
 /// Create the web router
@@ -454,6 +475,17 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/history-analytics/clear",
             post(clear_history_analytics),
         )
+        .route("/api/url-intelligence", get(get_url_intelligence_config))
+        .route("/api/url-intelligence", post(set_url_intelligence_config))
+        .route("/api/url-intelligence/analyze", post(analyze_url_handler))
+        .route(
+            "/api/url-intelligence/cache",
+            get(get_url_intelligence_cache_size),
+        )
+        .route(
+            "/api/url-intelligence/cache",
+            post(clear_url_intelligence_cache),
+        )
         .route("/api/speed-benchmark", get(get_speed_benchmark_config))
         .route("/api/speed-benchmark", post(set_speed_benchmark_config))
         .route("/api/speed-benchmark/run", post(run_speed_benchmark))
@@ -517,6 +549,12 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/archive/config", post(set_archive_config_handler))
         .route("/api/export/csv", get(export_csv_handler))
         .route("/api/export/csv/summary", get(export_csv_summary_handler))
+        // Phase 161: Task Export/Import REST API
+        .route("/api/task-export", get(export_tasks_json_handler))
+        .route("/api/task-export/csv", get(export_tasks_csv_handler))
+        .route("/api/task-export/history", get(get_export_history_handler))
+        .route("/api/task-import", post(import_tasks_handler))
+        .route("/api/task-import/csv", post(import_tasks_csv_handler))
         .route("/api/task-chains", get(list_task_chains_handler))
         .route("/api/task-chains", post(create_task_chain_handler))
         .route(
@@ -1267,6 +1305,17 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/progress-prediction/clear",
             post(clear_prediction_data_handler),
         )
+        // Phase 161: Link Rot Detection API
+        .route(
+            "/api/link-rot",
+            get(get_link_rot_config_handler).post(set_link_rot_config_handler),
+        )
+        .route("/api/link-rot/summary", get(get_link_rot_summary_handler))
+        .route("/api/link-rot/report", get(get_link_rot_report_handler))
+        .route("/api/link-rot/batch", get(get_link_rot_batch_handler))
+        .route("/api/link-rot/clear", post(clear_link_rot_handler))
+        .route("/api/link-rot/save", post(save_link_rot_handler))
+        .route("/api/link-rot/:task_id", get(get_link_rot_task_handler))
         // Phase 142: Retry Budget API
         .route(
             "/api/retry-budget",
@@ -3026,6 +3075,131 @@ async fn export_csv_summary_handler(
         [("Content-Type", "text/plain; charset=utf-8")],
         summary,
     )
+}
+
+// ===== Phase 161: Task Export/Import Handlers =====
+
+/// Export tasks to JSON format
+async fn export_tasks_json_handler(
+    State(state): State<Arc<WebState>>,
+    Query(params): Query<ExportFilterParams>,
+) -> impl axum::response::IntoResponse {
+    let filter = crate::task_export::ExportFilter {
+        states: params.states.clone(),
+        tags: params.tags.clone(),
+        group: params.group.clone(),
+        created_after: params.created_after,
+        created_before: params.created_before,
+    };
+
+    match state.manager.export_tasks_json(filter).await {
+        Ok(tasks) => Json(serde_json::json!({
+            "status": "ok",
+            "count": tasks.len(),
+            "tasks": tasks
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+/// Export tasks to CSV format
+async fn export_tasks_csv_handler(
+    State(state): State<Arc<WebState>>,
+    Query(params): Query<ExportFilterParams>,
+) -> impl axum::response::IntoResponse {
+    let filter = crate::task_export::ExportFilter {
+        states: params.states.clone(),
+        tags: params.tags.clone(),
+        group: params.group.clone(),
+        created_after: params.created_after,
+        created_before: params.created_before,
+    };
+
+    match state.manager.export_tasks_csv(filter).await {
+        Ok(csv) => (
+            StatusCode::OK,
+            [("Content-Type", "text/csv; charset=utf-8")],
+            csv,
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+/// Get export history
+async fn get_export_history_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let history = state.manager.get_export_history().await;
+    Json(serde_json::json!({
+        "history": history,
+        "count": history.len()
+    }))
+}
+
+/// Import tasks from JSON data
+async fn import_tasks_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ImportRequest>,
+) -> impl axum::response::IntoResponse {
+    let conflict_strategy = match req.conflict_strategy.as_deref() {
+        Some("overwrite") => crate::task_export::ImportConflictStrategy::Overwrite,
+        Some("rename") => crate::task_export::ImportConflictStrategy::Rename,
+        _ => crate::task_export::ImportConflictStrategy::Skip,
+    };
+
+    match state
+        .manager
+        .import_tasks_json(&req.data, conflict_strategy)
+        .await
+    {
+        Ok(result) => Json(serde_json::json!({
+            "status": "ok",
+            "result": result
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+/// Import tasks from CSV data
+async fn import_tasks_csv_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ImportRequest>,
+) -> impl axum::response::IntoResponse {
+    let conflict_strategy = match req.conflict_strategy.as_deref() {
+        Some("overwrite") => crate::task_export::ImportConflictStrategy::Overwrite,
+        Some("rename") => crate::task_export::ImportConflictStrategy::Rename,
+        _ => crate::task_export::ImportConflictStrategy::Skip,
+    };
+
+    match state
+        .manager
+        .import_tasks_csv(&req.data, conflict_strategy)
+        .await
+    {
+        Ok(result) => Json(serde_json::json!({
+            "status": "ok",
+            "result": result
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
 }
 
 // ===== Task Chain Handlers =====
@@ -11757,4 +11931,249 @@ async fn clear_prediction_data_handler(
 ) -> Json<serde_json::Value> {
     state.manager.clear_prediction_data().await;
     Json(serde_json::json!({"status": "ok"}))
+}
+
+// ========== Link Rot Detection (Phase 161) ==========
+
+/// GET /api/link-rot - Get link rot detection configuration
+async fn get_link_rot_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::link_rot::LinkRotConfig> {
+    let config = state.manager.get_link_rot_config().await;
+    Json(config)
+}
+
+/// POST /api/link-rot - Update link rot detection configuration
+async fn set_link_rot_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::link_rot::LinkRotConfig>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state
+        .manager
+        .set_link_rot_config(config)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+/// GET /api/link-rot/summary - Get link rot detection summary
+async fn get_link_rot_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::link_rot::LinkRotSummary> {
+    let summary = state.manager.get_link_rot_summary().await;
+    Json(summary)
+}
+
+/// GET /api/link-rot/report - Get formatted link rot report
+async fn get_link_rot_report_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let report = state.manager.get_link_rot_report().await;
+    Json(serde_json::json!({"report": report}))
+}
+
+/// GET /api/link-rot/:task_id - Get link rot check result for a task
+async fn get_link_rot_task_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<crate::link_rot::LinkCheckResult>, StatusCode> {
+    match state.manager.get_link_rot_result(&task_id).await {
+        Some(result) => Ok(Json(result)),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// POST /api/link-rot/clear - Clear all link rot data
+async fn clear_link_rot_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    state.manager.clear_link_rot().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/link-rot/save - Persist link rot data to disk
+async fn save_link_rot_handler(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state
+        .manager
+        .save_link_rot()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+/// GET /api/link-rot/batch - Get next batch of task IDs to check
+async fn get_link_rot_batch_handler(State(state): State<Arc<WebState>>) -> Json<Vec<String>> {
+    let batch = state.manager.get_link_rot_batch().await;
+    Json(batch)
+}
+
+// ===== URL Intelligence API =====
+
+/// GET /api/url-intelligence/config - Get URL intelligence configuration
+async fn get_url_intelligence_config(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::url_intelligence::UrlIntelligenceConfig> {
+    let config = state.manager.get_url_intelligence_config().await;
+    Json(config)
+}
+
+/// POST /api/url-intelligence/config - Update URL intelligence configuration
+async fn set_url_intelligence_config(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::url_intelligence::UrlIntelligenceConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_url_intelligence_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/url-intelligence/analyze - Analyze a URL for download recommendations
+async fn analyze_url_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<crate::url_intelligence::UrlAnalysis>, StatusCode> {
+    let url = req
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let analysis = state.manager.analyze_url(url).await;
+    Ok(Json(analysis))
+}
+
+/// GET /api/url-intelligence/cache - Get URL intelligence cache statistics
+async fn get_url_intelligence_cache_size(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let size = state.manager.get_url_intelligence_cache_size().await;
+    Json(serde_json::json!({"cache_size": size}))
+}
+
+/// POST /api/url-intelligence/cache/clear - Clear URL intelligence cache
+async fn clear_url_intelligence_cache(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_url_intelligence_cache().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+#[cfg(test)]
+mod phase161_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_state() -> Arc<WebState> {
+        let manager = Arc::new(DownloadManager::new(std::path::PathBuf::from(
+            "/tmp/test_phase161",
+        )));
+        Arc::new(WebState::new(manager))
+    }
+
+    #[tokio::test]
+    async fn test_export_tasks_json_empty() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/task-export")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_export_tasks_csv_empty() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/task-export/csv")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_export_history_empty() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/task-export/history")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_import_tasks_json_invalid() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/task-import")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"data": "invalid json", "conflict_strategy": "skip"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_import_tasks_csv_invalid() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/task-import/csv")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"data": "", "conflict_strategy": "skip"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Empty CSV should succeed with 0 tasks
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }

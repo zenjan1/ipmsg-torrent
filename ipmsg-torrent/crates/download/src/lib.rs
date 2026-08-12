@@ -65,6 +65,7 @@ pub mod host_conn_limit;
 pub mod integrity_verification;
 pub mod intelligent_source_selector;
 pub mod link_extractor;
+pub mod link_rot;
 pub mod magnet;
 pub mod metadata_cache;
 pub mod mirror_health;
@@ -139,6 +140,7 @@ pub mod url_bookmarks;
 pub mod url_dedup;
 pub mod url_expander;
 pub mod url_health_monitor;
+pub mod url_intelligence;
 pub mod url_normalizer;
 pub mod url_pattern;
 pub mod url_rewrite;
@@ -916,12 +918,16 @@ pub struct DownloadManager {
     path_validator: Arc<Mutex<path_validator::PathValidator>>,
     /// Path rules for automatic save path assignment
     path_rules: Arc<Mutex<path_rules::PathRuleManager>>,
+    /// Link rot detector for checking URL reachability in the queue
+    link_rot: Arc<tokio::sync::RwLock<link_rot::LinkRotDetector>>,
     /// URL health monitor for tracking download URL and mirror health
     url_health_monitor: Arc<url_health_monitor::UrlHealthMonitor>,
     /// Task archive for preserving completed/failed tasks
     task_archive: Arc<tokio::sync::RwLock<task_archive::ArchiveState>>,
     /// URL normalizer for cleaning and deduplicating download URLs
     url_normalizer: Arc<tokio::sync::RwLock<url_normalizer::UrlNormalizer>>,
+    /// URL intelligence system for pre-download analysis and optimization (Phase 161)
+    url_intelligence: Arc<tokio::sync::RwLock<url_intelligence::UrlIntelligenceManager>>,
     /// Priority aging configuration for automatic priority boosting
     priority_aging: Arc<tokio::sync::RwLock<priority_aging::PriorityAgingConfig>>,
     /// Per-task user comments manager
@@ -1167,12 +1173,18 @@ impl DownloadManager {
             )),
             path_validator: Arc::new(Mutex::new(path_validator::PathValidator::new())),
             path_rules: Arc::new(Mutex::new(path_rules::PathRuleManager::new())),
+            link_rot: Arc::new(tokio::sync::RwLock::new(link_rot::LinkRotDetector::new(
+                &data_dir,
+            ))),
             url_health_monitor: Arc::new(url_health_monitor::UrlHealthMonitor::new()),
             task_archive: Arc::new(tokio::sync::RwLock::new(
                 task_archive::ArchiveState::default(),
             )),
             url_normalizer: Arc::new(tokio::sync::RwLock::new(
                 url_normalizer::UrlNormalizer::new(),
+            )),
+            url_intelligence: Arc::new(tokio::sync::RwLock::new(
+                url_intelligence::UrlIntelligenceManager::new(),
             )),
             priority_aging: Arc::new(tokio::sync::RwLock::new(
                 priority_aging::PriorityAgingConfig::default(),
@@ -1563,6 +1575,9 @@ impl DownloadManager {
             )),
             path_validator: Arc::new(Mutex::new(path_validator::PathValidator::new())),
             path_rules: Arc::new(Mutex::new(path_rules::PathRuleManager::new())),
+            link_rot: Arc::new(tokio::sync::RwLock::new(link_rot::LinkRotDetector::new(
+                &data_dir,
+            ))),
             url_health_monitor: Arc::new(url_health_monitor::UrlHealthMonitor::new()),
             task_archive: Arc::new(tokio::sync::RwLock::new(
                 task_archive::ArchiveState::default(),
@@ -1572,6 +1587,9 @@ impl DownloadManager {
             )),
             priority_aging: Arc::new(tokio::sync::RwLock::new(
                 priority_aging::PriorityAgingConfig::default(),
+            )),
+            url_intelligence: Arc::new(tokio::sync::RwLock::new(
+                url_intelligence::UrlIntelligenceManager::new(),
             )),
             task_comments: Arc::new(Mutex::new(task_comments::TaskCommentsManager::new())),
             download_sessions: Arc::new(
@@ -4909,6 +4927,87 @@ impl DownloadManager {
         &self.url_health_monitor
     }
 
+    // ========== Link Rot Detection (Phase 161) ==========
+
+    /// Get link rot detector config.
+    pub async fn get_link_rot_config(&self) -> link_rot::LinkRotConfig {
+        self.link_rot.read().await.config().clone()
+    }
+
+    /// Update link rot detector config.
+    pub async fn set_link_rot_config(
+        &self,
+        config: link_rot::LinkRotConfig,
+    ) -> Result<(), link_rot::LinkRotError> {
+        self.link_rot.write().await.set_config(config).await
+    }
+
+    /// Track a task URL for link rot detection.
+    pub async fn track_link_rot(&self, task_id: &str, url: &str) {
+        self.link_rot.write().await.track_task(task_id, url);
+    }
+
+    /// Stop tracking a task for link rot detection.
+    pub async fn untrack_link_rot(&self, task_id: &str) {
+        self.link_rot.write().await.untrack_task(task_id);
+    }
+
+    /// Get link rot check result for a task.
+    pub async fn get_link_rot_result(&self, task_id: &str) -> Option<link_rot::LinkCheckResult> {
+        self.link_rot.read().await.get_result(task_id).cloned()
+    }
+
+    /// Get link rot summary.
+    pub async fn get_link_rot_summary(&self) -> link_rot::LinkRotSummary {
+        self.link_rot.read().await.summary()
+    }
+
+    /// Get formatted link rot report.
+    pub async fn get_link_rot_report(&self) -> String {
+        self.link_rot.read().await.format_report()
+    }
+
+    /// Clear all link rot results.
+    pub async fn clear_link_rot(&self) {
+        self.link_rot.write().await.clear();
+    }
+
+    /// Get next batch of task IDs to check for link rot.
+    pub async fn get_link_rot_batch(&self) -> Vec<String> {
+        self.link_rot.read().await.next_batch()
+    }
+
+    /// Apply a link rot check result.
+    pub async fn apply_link_rot_check(
+        &self,
+        task_id: &str,
+        success: bool,
+        http_status: Option<u16>,
+        response_time_ms: Option<u64>,
+        error: Option<String>,
+    ) -> bool {
+        self.link_rot.write().await.apply_check_result(
+            task_id,
+            success,
+            http_status,
+            response_time_ms,
+            error,
+        )
+    }
+
+    /// Save link rot data to disk.
+    pub async fn save_link_rot(&self) -> Result<(), link_rot::LinkRotError> {
+        let det = self.link_rot.read().await;
+        det.save_config().await?;
+        det.save_results().await?;
+        Ok(())
+    }
+
+    /// Load link rot data from disk.
+    pub async fn load_link_rot(&self) -> Result<(), link_rot::LinkRotError> {
+        self.link_rot.write().await.load().await
+    }
+
     /// Monitor a URL for health checks.
     pub async fn monitor_url_health(&self, url: &str) -> bool {
         self.url_health_monitor.monitor_url(url).await
@@ -6074,6 +6173,50 @@ impl DownloadManager {
     pub async fn get_url_normalizer_config(&self) -> url_normalizer::UrlNormalizerConfig {
         let normalizer = self.url_normalizer.read().await;
         normalizer.config().clone()
+    }
+
+    // ---- URL Intelligence (Phase 161) ----
+
+    /// Set URL intelligence configuration.
+    pub async fn set_url_intelligence_config(
+        &self,
+        config: url_intelligence::UrlIntelligenceConfig,
+    ) {
+        let mut mgr = self.url_intelligence.write().await;
+        mgr.set_config(config);
+    }
+
+    /// Get the current URL intelligence configuration.
+    pub async fn get_url_intelligence_config(&self) -> url_intelligence::UrlIntelligenceConfig {
+        let mgr = self.url_intelligence.read().await;
+        mgr.get_config().clone()
+    }
+
+    /// Analyze a URL and return recommendations.
+    pub async fn analyze_url(&self, url: &str) -> url_intelligence::UrlAnalysis {
+        let mut mgr = self.url_intelligence.write().await;
+        mgr.analyze_url(url)
+    }
+
+    /// Get cached analysis for a URL.
+    pub async fn get_cached_url_analysis(
+        &self,
+        url: &str,
+    ) -> Option<url_intelligence::UrlAnalysis> {
+        let mgr = self.url_intelligence.read().await;
+        mgr.get_cached_analysis(url).cloned()
+    }
+
+    /// Get URL intelligence cache size.
+    pub async fn get_url_intelligence_cache_size(&self) -> usize {
+        let mgr = self.url_intelligence.read().await;
+        mgr.get_cache_size()
+    }
+
+    /// Clear URL intelligence analysis cache.
+    pub async fn clear_url_intelligence_cache(&self) {
+        let mut mgr = self.url_intelligence.write().await;
+        mgr.clear_cache();
     }
 
     // ---- Priority Aging ----

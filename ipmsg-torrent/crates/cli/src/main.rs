@@ -235,6 +235,11 @@ enum Command {
         /// "summary [days]", "report [days]", "config", "clear"
         args: Vec<String>,
     },
+    /// URL intelligence - pre-analyze URLs for download optimization (Phase 161)
+    DlUrlIntelligence {
+        /// "analyze <url>", "config", "cache", "clear"
+        args: Vec<String>,
+    },
     /// Bandwidth forecast - predict download speeds based on historical data (Phase 136)
     DlBandwidthForecast {
         /// "status", "config", "predict", "summary", "clear", "remove"
@@ -331,6 +336,12 @@ enum Command {
     /// Progress prediction - predict download completion times (Phase 159)
     DlPrediction {
         /// "status", "predict <task_id>", "predict-all", "accuracy", "remove <task_id>", "clear", "config"
+        action: String,
+        args: Vec<String>,
+    },
+    /// Link rot detection - check URL reachability (Phase 161)
+    DlLinkRot {
+        /// "status", "config", "report", "check <task_id>", "clear", "save"
         action: String,
         args: Vec<String>,
     },
@@ -557,6 +568,13 @@ enum Command {
     DlExportCsv {
         /// Output file path
         path: String,
+    },
+    /// Task export/import management (Phase 161)
+    DlTaskExport {
+        /// Subcommand: export|import|history|config
+        subcommand: String,
+        /// Arguments for the subcommand
+        args: Vec<String>,
     },
     /// Per-task proxy override management (Phase 106)
     DlTaskProxy {
@@ -1187,6 +1205,10 @@ fn parse_command(input: &str) -> Command {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlHistoryAnalytics { args }
         }
+        "dlui" | "dl-url-intelligence" | "dlurlintel" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlUrlIntelligence { args }
+        }
         "dlbwforecast" | "dl-bwforecast" | "dlforecast" => {
             if parts.len() < 2 {
                 Command::DlBandwidthForecast {
@@ -1390,6 +1412,18 @@ fn parse_command(input: &str) -> Command {
                 let action = parts[1].to_string();
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlPrediction { action, args }
+            }
+        }
+        "dllinkrot" | "dl-linkrot" | "dlrot" => {
+            if parts.len() < 2 {
+                Command::DlLinkRot {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlLinkRot { action, args }
             }
         }
         "dlretention" | "dl-retention" => {
@@ -1868,6 +1902,29 @@ fn parse_command(input: &str) -> Command {
                 }
             } else {
                 Command::Unknown("/dlexportcsv <output_path>".to_string())
+            }
+        }
+        "dltaskexport" | "dl-taskexport" | "dlte" => {
+            // /dltaskexport <subcommand> [args...]
+            let args: Vec<&str> = input.splitn(2, ' ').collect();
+            if args.len() >= 2 {
+                let rest = args[1].trim();
+                let sub_parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                let subcommand = sub_parts[0].to_string();
+                let sub_args = if sub_parts.len() > 1 {
+                    sub_parts[1]
+                        .split_whitespace()
+                        .map(|s| s.to_string())
+                        .collect()
+                } else {
+                    vec![]
+                };
+                Command::DlTaskExport {
+                    subcommand,
+                    args: sub_args,
+                }
+            } else {
+                Command::Unknown("/dltaskexport <subcommand> [args...]".to_string())
             }
         }
         "dltp" | "dltaskproxy" | "dl-taskproxy" => {
@@ -2912,6 +2969,7 @@ fn command_help() -> String {
         "/dldepviz [cmd]   - Dependency visualization (graph|stats|config|cycles|roots|leaves|text|dot)",
         "/dlheatmap [cmd]  - Speed heatmap by hour/day (status|report|hour|day|quality|config|prune|reset)",
         "/dlprediction [cmd] - Progress prediction (status|predict|predict-all|accuracy|remove|clear|config)",
+        "/dllinkrot [cmd]  - Link rot detection (status|summary|report|check <id>|clear|save)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -7812,6 +7870,93 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlUrlIntelligence { args } => {
+            let s = state.lock().await;
+            let dm = s.download_manager.clone();
+            drop(s);
+
+            let action = args.first().map(|s| s.as_str()).unwrap_or("status");
+            match action {
+                "analyze" => {
+                    if let Some(url) = args.get(1) {
+                        let analysis = dm.analyze_url(url).await;
+                        let mut msg = format!("🔍 URL Analysis: {}\n", url);
+                        msg.push_str(&format!("  Protocol: {}\n", analysis.protocol));
+                        msg.push_str(&format!(
+                            "  Success Probability: {:.1}%\n",
+                            analysis.success_probability * 100.0
+                        ));
+                        msg.push_str(&format!(
+                            "  Recommended Connections: {}\n",
+                            analysis.recommended_connections
+                        ));
+                        msg.push_str(&format!(
+                            "  Recommended Timeout: {}s\n",
+                            analysis.recommended_timeout_secs
+                        ));
+                        if !analysis.issues.is_empty() {
+                            msg.push_str("  Issues:\n");
+                            for issue in &analysis.issues {
+                                msg.push_str(&format!(
+                                    "    [{}] {} - {}\n",
+                                    issue.severity, issue.issue_type, issue.description
+                                ));
+                            }
+                        }
+                        if !analysis.suggestions.is_empty() {
+                            msg.push_str("  Suggestions:\n");
+                            for suggestion in &analysis.suggestions {
+                                msg.push_str(&format!(
+                                    "    [{}] {}\n",
+                                    suggestion.suggestion_type, suggestion.message
+                                ));
+                            }
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlui analyze <url>".to_string());
+                    }
+                }
+                "config" => {
+                    let cfg = dm.get_url_intelligence_config().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "🔍 URL Intelligence Config:\n  Enabled: {}\n  Max URL Length: {}\n  Default Timeout: {}s\n  Default Connections: {}\n  Tracking Params: {}\n  Suspicious Patterns: {}",
+                            cfg.enabled,
+                            cfg.max_url_length,
+                            cfg.default_timeout_secs,
+                            cfg.default_connections,
+                            cfg.tracking_params.len(),
+                            cfg.suspicious_patterns.len()
+                        ),
+                    );
+                }
+                "cache" => {
+                    let size = dm.get_url_intelligence_cache_size().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("🔍 URL Intelligence Cache: {} entries", size),
+                    );
+                }
+                "clear" => {
+                    dm.clear_url_intelligence_cache().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "✅ URL intelligence cache cleared".to_string());
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlui [analyze <url>|config|cache|clear]".to_string(),
+                    );
+                }
+            }
+        }
         Command::DlBandwidthForecast { action, args } => {
             let s = state.lock().await;
             let dm = s.download_manager.clone();
@@ -12517,6 +12662,149 @@ async fn handle_command(
                 Err(e) => {
                     let mut s = state.lock().await;
                     s.add_system_message("main", format!("❌ Failed to export CSV: {}", e));
+                }
+            }
+        }
+        Command::DlTaskExport { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "export" | "json" => {
+                    // /dlte export [output_path] [--states=...] [--tags=...] [--group=...]
+                    let filter = ipmsg_download::task_export::ExportFilter::default();
+                    match download_manager.export_tasks_json(filter).await {
+                        Ok(tasks) => {
+                            let count = tasks.len();
+                            let json = serde_json::to_string_pretty(&tasks).unwrap_or_default();
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!(
+                                    "✅ Exported {} tasks to JSON ({} bytes)",
+                                    count,
+                                    json.len()
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("❌ Export failed: {}", e));
+                        }
+                    }
+                }
+                "csv" => {
+                    // /dlte csv [output_path]
+                    let filter = ipmsg_download::task_export::ExportFilter::default();
+                    match download_manager.export_tasks_csv(filter).await {
+                        Ok(csv) => {
+                            let lines = csv.lines().count();
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!(
+                                    "✅ Exported {} tasks to CSV ({} bytes)",
+                                    lines.saturating_sub(1),
+                                    csv.len()
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("❌ Export failed: {}", e));
+                        }
+                    }
+                }
+                "import" => {
+                    // /dlte import <input_path> [conflict_strategy]
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "❌ Usage: /dlte import <path> [skip|overwrite|rename]".to_string(),
+                        );
+                        return;
+                    }
+                    let path = &args[0];
+                    let conflict_strategy = if args.len() > 1 {
+                        match args[1].as_str() {
+                            "overwrite" => {
+                                ipmsg_download::task_export::ImportConflictStrategy::Overwrite
+                            }
+                            "rename" => ipmsg_download::task_export::ImportConflictStrategy::Rename,
+                            _ => ipmsg_download::task_export::ImportConflictStrategy::Skip,
+                        }
+                    } else {
+                        ipmsg_download::task_export::ImportConflictStrategy::Skip
+                    };
+
+                    match tokio::fs::read_to_string(path).await {
+                        Ok(data) => {
+                            let result = if path.ends_with(".csv") {
+                                download_manager
+                                    .import_tasks_csv(&data, conflict_strategy)
+                                    .await
+                            } else {
+                                download_manager
+                                    .import_tasks_json(&data, conflict_strategy)
+                                    .await
+                            };
+                            match result {
+                                Ok(r) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message("main", r.format_summary());
+                                }
+                                Err(e) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("❌ Import failed: {}", e),
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("❌ Failed to read file: {}", e));
+                        }
+                    }
+                }
+                "history" => {
+                    // /dlte history
+                    let history = download_manager.get_export_history().await;
+                    if history.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "📋 No export history.".to_string());
+                    } else {
+                        let mut lines = format!("📋 Export History ({} entries):\n", history.len());
+                        for entry in history.iter().take(10) {
+                            lines.push_str(&format!(
+                                "  • {} {:?} - {} tasks → {}\n",
+                                entry.exported_at.format("%Y-%m-%d %H:%M"),
+                                entry.format,
+                                entry.task_count,
+                                entry.file_path
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", lines.trim_end().to_string());
+                    }
+                }
+                "config" => {
+                    // /dlte config
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "📋 Export/Import Configuration:\n  Default format: JSON\n  Default conflict strategy: Skip\n  Max history entries: 50".to_string(),
+                    );
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "❌ Unknown subcommand. Usage: /dlte <export|csv|import|history|config> [args]".to_string(),
+                    );
                 }
             }
         }
@@ -19486,6 +19774,146 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlprediction [status|predict <id>|predict-all|accuracy|remove <id>|clear|config]".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlLinkRot { action, args } => {
+            let download_manager = state.lock().await.download_manager.clone();
+            match action.as_str() {
+                "status" | "config" => {
+                    let config = download_manager.get_link_rot_config().await;
+                    let msg = format!(
+                        "🔗 Link Rot Detection Config:\n\
+                         Enabled: {}\n\
+                         Check Interval: {}s\n\
+                         Batch Size: {}\n\
+                         Timeout: {}s\n\
+                         Degraded Threshold: {}ms\n\
+                         Dead Threshold: {} failures\n\
+                         Auto-pause Dead: {}\n\
+                         Max Tracked: {}\n\
+                         User-Agent: {}",
+                        config.enabled,
+                        config.check_interval_secs,
+                        config.batch_size,
+                        config.timeout_secs,
+                        config.degraded_threshold_ms,
+                        config.dead_threshold,
+                        config.auto_pause_dead,
+                        config.max_tracked,
+                        config.user_agent,
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "summary" => {
+                    let summary = download_manager.get_link_rot_summary().await;
+                    let mut msg = String::from("🔗 Link Rot Summary:\n");
+                    msg.push_str(&format!("  Total Tracked: {}\n", summary.total_tracked));
+                    msg.push_str(&format!("  ✅ Healthy: {}\n", summary.healthy));
+                    msg.push_str(&format!("  ⚠️  Degraded: {}\n", summary.degraded));
+                    msg.push_str(&format!("  💀 Dead: {}\n", summary.dead));
+                    msg.push_str(&format!("  ❓ Unknown: {}\n", summary.unknown));
+                    msg.push_str(&format!("  Auto-paused: {}\n", summary.auto_paused));
+                    msg.push_str(&format!("  Total Checks: {}\n", summary.total_checks));
+                    if let Some(last) = summary.last_check {
+                        msg.push_str(&format!(
+                            "  Last Check: {}\n",
+                            last.format("%Y-%m-%d %H:%M:%S")
+                        ));
+                    } else {
+                        msg.push_str("  Last Check: never\n");
+                    }
+                    if !summary.worst_tasks.is_empty() {
+                        msg.push_str("\n💀 Dead Links:\n");
+                        for task in &summary.worst_tasks {
+                            msg.push_str(&format!(
+                                "  Task {}: {} ({} failures)\n    URL: {}\n",
+                                task.task_id, task.status, task.consecutive_failures, task.url
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "report" => {
+                    let report = download_manager.get_link_rot_report().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", report);
+                }
+                "check" => {
+                    if let Some(task_id) = args.first() {
+                        match download_manager.get_link_rot_result(task_id).await {
+                            Some(result) => {
+                                let mut msg = String::from("🔗 Link Check Result:\n");
+                                msg.push_str(&format!("  Task ID: {}\n", result.task_id));
+                                msg.push_str(&format!("  URL: {}\n", result.url));
+                                msg.push_str(&format!("  Status: {}\n", result.status));
+                                if let Some(http) = result.http_status {
+                                    msg.push_str(&format!("  HTTP Status: {}\n", http));
+                                }
+                                if let Some(rt) = result.response_time_ms {
+                                    msg.push_str(&format!("  Response Time: {}ms\n", rt));
+                                }
+                                msg.push_str(&format!(
+                                    "  Consecutive Failures: {}\n",
+                                    result.consecutive_failures
+                                ));
+                                msg.push_str(&format!("  Total Checks: {}\n", result.total_checks));
+                                if let Some(last) = result.last_success {
+                                    msg.push_str(&format!(
+                                        "  Last Success: {}\n",
+                                        last.format("%Y-%m-%d %H:%M:%S")
+                                    ));
+                                }
+                                msg.push_str(&format!(
+                                    "  Last Check: {}\n",
+                                    result.last_check.format("%Y-%m-%d %H:%M:%S")
+                                ));
+                                if let Some(err) = &result.last_error {
+                                    msg.push_str(&format!("  Last Error: {}\n", err));
+                                }
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", msg);
+                            }
+                            None => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Task '{}' not found or not tracked", task_id),
+                                );
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dllinkrot check <task_id>".to_string(),
+                        );
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_link_rot().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "✅ Link rot data cleared".to_string());
+                }
+                "save" => match download_manager.save_link_rot().await {
+                    Ok(_) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "✅ Link rot data saved".to_string());
+                    }
+                    Err(e) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("❌ Save failed: {}", e));
+                    }
+                },
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dllinkrot [status|summary|report|check <id>|clear|save]"
+                            .to_string(),
                     );
                 }
             }
