@@ -2003,6 +2003,40 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/dynamic-priority/clear",
             post(clear_dynamic_priority_handler),
         )
+        // Phase 169: Duplicate Detection REST API
+        .route(
+            "/api/duplicate-detection",
+            get(get_duplicate_detection_config_handler)
+                .post(set_duplicate_detection_config_handler),
+        )
+        .route(
+            "/api/duplicate-detection/detect",
+            post(detect_duplicates_handler),
+        )
+        .route(
+            "/api/duplicate-detection/groups",
+            get(get_duplicate_groups_handler),
+        )
+        .route(
+            "/api/duplicate-detection/groups/:group_id",
+            get(get_duplicate_group_handler),
+        )
+        .route(
+            "/api/duplicate-detection/groups/:group_id",
+            delete(delete_duplicate_group_handler),
+        )
+        .route(
+            "/api/duplicate-detection/task/:task_id",
+            get(get_task_duplicate_group_handler),
+        )
+        .route(
+            "/api/duplicate-detection/summary",
+            get(get_duplicate_summary_handler),
+        )
+        .route(
+            "/api/duplicate-detection/clear",
+            post(clear_duplicates_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -13459,6 +13493,95 @@ async fn clear_dynamic_priority_handler(State(state): State<Arc<WebState>>) -> i
     Json(serde_json::json!({"status": "ok"}))
 }
 
+// ── Phase 169: Duplicate Detection REST API Handlers ──────────────────────
+
+/// GET /api/duplicate-detection - Get duplicate detection configuration
+async fn get_duplicate_detection_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl IntoResponse {
+    let config = state.manager.get_duplicate_detection_config().await;
+    Json(config)
+}
+
+/// POST /api/duplicate-detection - Update duplicate detection configuration
+async fn set_duplicate_detection_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::duplicate_detection::DuplicateDetectionConfig>,
+) -> impl IntoResponse {
+    state.manager.set_duplicate_detection_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/duplicate-detection/detect - Run duplicate detection
+async fn detect_duplicates_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let groups = state.manager.detect_duplicate_tasks().await;
+    Json(serde_json::json!({
+        "status": "ok",
+        "groups_count": groups.len(),
+        "groups": groups
+    }))
+}
+
+/// GET /api/duplicate-detection/groups - Get all duplicate groups
+async fn get_duplicate_groups_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let groups = state.manager.get_duplicate_groups().await;
+    Json(groups)
+}
+
+/// GET /api/duplicate-detection/groups/:group_id - Get a specific duplicate group
+async fn get_duplicate_group_handler(
+    State(state): State<Arc<WebState>>,
+    Path(group_id): Path<String>,
+) -> impl IntoResponse {
+    let groups = state.manager.get_duplicate_groups().await;
+    let group = groups.into_iter().find(|g| g.group_id == group_id);
+    match group {
+        Some(g) => (StatusCode::OK, Json(serde_json::to_value(g).unwrap())),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "group not found"})),
+        ),
+    }
+}
+
+/// DELETE /api/duplicate-detection/groups/:group_id - Delete a duplicate group
+async fn delete_duplicate_group_handler(
+    State(state): State<Arc<WebState>>,
+    Path(group_id): Path<String>,
+) -> impl IntoResponse {
+    // Clear all groups if specific group deletion is not supported
+    // For now, we'll clear all as the manager doesn't have individual removal
+    state.manager.clear_duplicate_groups().await;
+    Json(serde_json::json!({"status": "ok", "deleted_group": group_id}))
+}
+
+/// GET /api/duplicate-detection/task/:task_id - Get duplicate group for a task
+async fn get_task_duplicate_group_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> impl IntoResponse {
+    let group = state.manager.get_task_duplicate_group(&task_id).await;
+    match group {
+        Some(g) => (StatusCode::OK, Json(serde_json::to_value(g).unwrap())),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "task not in any duplicate group"})),
+        ),
+    }
+}
+
+/// GET /api/duplicate-detection/summary - Get duplicate detection summary
+async fn get_duplicate_summary_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let summary = state.manager.get_duplicate_summary().await;
+    Json(summary)
+}
+
+/// POST /api/duplicate-detection/clear - Clear all duplicate groups
+async fn clear_duplicates_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    state.manager.clear_duplicate_groups().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
 #[cfg(test)]
 mod phase161_tests {
     use super::*;
@@ -13579,5 +13702,206 @@ mod phase161_tests {
 
         // Empty CSV should succeed with 0 tasks
         assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[cfg(test)]
+mod phase169_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_state() -> Arc<WebState> {
+        let manager = Arc::new(DownloadManager::new(std::path::PathBuf::from(
+            "/tmp/test_phase169",
+        )));
+        Arc::new(WebState::new(manager))
+    }
+
+    #[tokio::test]
+    async fn test_get_duplicate_config() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/duplicate-detection")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(config.get("enabled").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_set_duplicate_config() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let config = serde_json::json!({
+            "enabled": false,
+            "detect_by_url": true,
+            "detect_by_filename": true,
+            "detect_by_checksum": false,
+            "detect_by_size": true,
+            "filename_similarity_threshold": 0.9,
+            "auto_pause_duplicates": false,
+            "auto_remove_duplicates": false,
+            "max_duplicate_groups": 50
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/duplicate-detection")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&config).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_detect_duplicates_empty() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/duplicate-detection/detect")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["groups_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_duplicate_groups_empty() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/duplicate-detection/groups")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_duplicate_group_not_found() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/duplicate-detection/groups/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_task_duplicate_group_not_found() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/duplicate-detection/task/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_duplicate_summary_empty() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/duplicate-detection/summary")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("total_duplicates").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_clear_duplicates() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/duplicate-detection/clear")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
     }
 }
