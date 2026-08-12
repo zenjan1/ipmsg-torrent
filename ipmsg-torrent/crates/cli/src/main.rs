@@ -2708,9 +2708,10 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dlreliability" | "dl-reliability" | "dlsr" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
                 Command::Unknown(
-                    "/dlreliability <status|summary|domain|score|tier|avoid|prune|clear|config>"
+                    "/dlreliability <status|summary|domain|score|tier|avoid|domains|prune|clear|config>"
                         .to_string(),
                 )
             } else {
@@ -15526,7 +15527,7 @@ async fn handle_command(
                                      Samples: {}\n",
                                     dr.domain,
                                     dr.tier(),
-                                    dr.score,
+                                    dr.reliability_score,
                                     dr.success_rate() * 100.0,
                                     dr.total_successes,
                                     dr.total_failures,
@@ -15609,7 +15610,7 @@ async fn handle_command(
                                 "  {} [{}] score={:.2} success={:.0}% avg={}B/s\n",
                                 dr.domain,
                                 dr.tier(),
-                                dr.score,
+                                dr.reliability_score,
                                 dr.success_rate() * 100.0,
                                 dr.avg_speed_bps,
                             ));
