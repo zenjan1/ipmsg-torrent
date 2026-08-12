@@ -469,7 +469,7 @@ impl Default for ProgressPredictor {
 // DownloadManager integration
 impl DownloadManager {
     /// Set prediction configuration
-    pub async fn set_prediction_config(&mut self, config: PredictionConfig) {
+    pub async fn set_prediction_config(&self, config: PredictionConfig) {
         let mut predictor = self.progress_predictor.lock().await;
         predictor.config = config;
     }
@@ -506,14 +506,14 @@ impl DownloadManager {
     }
 
     /// Update speed sample for prediction (called from speed tracker)
-    pub async fn update_prediction_speed(&mut self, task_id: &str, speed_bps: u64, progress: f64) {
+    pub async fn update_prediction_speed(&self, task_id: &str, speed_bps: u64, progress: f64) {
         let task_id_hash = task_id_to_u64(task_id);
         let mut predictor = self.progress_predictor.lock().await;
         predictor.update_speed(task_id_hash, speed_bps, progress);
     }
 
     /// Record task completion for accuracy tracking
-    pub async fn record_prediction_completion(&mut self, task_id: &str, actual_seconds: u64) {
+    pub async fn record_prediction_completion(&self, task_id: &str, actual_seconds: u64) {
         let task_id_hash = task_id_to_u64(task_id);
         let mut predictor = self.progress_predictor.lock().await;
         predictor.record_completion(task_id_hash, actual_seconds);
@@ -526,14 +526,14 @@ impl DownloadManager {
     }
 
     /// Remove task from prediction system
-    pub async fn remove_prediction_task(&mut self, task_id: &str) {
+    pub async fn remove_prediction_task(&self, task_id: &str) {
         let task_id_hash = task_id_to_u64(task_id);
         let mut predictor = self.progress_predictor.lock().await;
         predictor.remove_task(task_id_hash);
     }
 
     /// Clear all prediction data
-    pub async fn clear_prediction_data(&mut self) {
+    pub async fn clear_prediction_data(&self) {
         let mut predictor = self.progress_predictor.lock().await;
         predictor.clear();
     }

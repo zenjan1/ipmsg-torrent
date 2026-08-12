@@ -1231,6 +1231,32 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/intelligent-selector/clear",
             post(clear_intelligent_selector_handler),
         )
+        // Phase 159: Progress Prediction API
+        .route(
+            "/api/progress-prediction",
+            get(get_progress_prediction_config_handler)
+                .post(set_progress_prediction_config_handler),
+        )
+        .route(
+            "/api/progress-prediction/predict/:task_id",
+            get(predict_task_completion_handler),
+        )
+        .route(
+            "/api/progress-prediction/predict-all",
+            get(predict_all_tasks_handler),
+        )
+        .route(
+            "/api/progress-prediction/accuracy",
+            get(get_prediction_accuracy_handler),
+        )
+        .route(
+            "/api/progress-prediction/task/:task_id",
+            axum::routing::delete(remove_prediction_task_handler),
+        )
+        .route(
+            "/api/progress-prediction/clear",
+            post(clear_prediction_data_handler),
+        )
         // Phase 142: Retry Budget API
         .route(
             "/api/retry-budget",
@@ -11607,5 +11633,68 @@ async fn prune_speed_heatmap_handler(
     State(state): State<Arc<WebState>>,
 ) -> Json<serde_json::Value> {
     state.manager.prune_speed_heatmap().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+// ========== Phase 159: Progress Prediction REST API Handlers ==========
+
+/// GET /api/progress-prediction - Get progress prediction configuration
+async fn get_progress_prediction_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::progress_prediction::PredictionConfig> {
+    let config = state.manager.get_prediction_config().await;
+    Json(config)
+}
+
+/// POST /api/progress-prediction - Update progress prediction configuration
+async fn set_progress_prediction_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::progress_prediction::PredictionConfig>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state.manager.set_prediction_config(config).await;
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+/// GET /api/progress-prediction/predict/:task_id - Predict completion time for a task
+async fn predict_task_completion_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.manager.predict_task_completion(&task_id).await {
+        Some(prediction) => Ok(Json(serde_json::to_value(prediction).unwrap_or_default())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// GET /api/progress-prediction/predict-all - Predict all active tasks
+async fn predict_all_tasks_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::progress_prediction::PredictionResult>> {
+    let predictions = state.manager.predict_all_active_tasks().await;
+    Json(predictions)
+}
+
+/// GET /api/progress-prediction/accuracy - Get prediction accuracy summary
+async fn get_prediction_accuracy_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::progress_prediction::AccuracySummary> {
+    let accuracy = state.manager.get_prediction_accuracy().await;
+    Json(accuracy)
+}
+
+/// DELETE /api/progress-prediction/task/:task_id - Remove task from prediction system
+async fn remove_prediction_task_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Json<serde_json::Value> {
+    state.manager.remove_prediction_task(&task_id).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/progress-prediction/clear - Clear all prediction data
+async fn clear_prediction_data_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_prediction_data().await;
     Json(serde_json::json!({"status": "ok"}))
 }

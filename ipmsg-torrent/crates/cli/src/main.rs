@@ -323,6 +323,12 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
+    /// Progress prediction - predict download completion times (Phase 159)
+    DlPrediction {
+        /// "status", "predict <task_id>", "predict-all", "accuracy", "remove <task_id>", "clear", "config"
+        action: String,
+        args: Vec<String>,
+    },
     /// Path organizer - auto-organize files by extension (Phase 133)
     DlPathOrganizer {
         /// "status", "enable", "disable", "add", "remove", "list", "organize"
@@ -1363,6 +1369,18 @@ fn parse_command(input: &str) -> Command {
                 let action = parts[1].to_string();
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlHeatmap { action, args }
+            }
+        }
+        "dlprediction" | "dl-prediction" | "dlpred" => {
+            if parts.len() < 2 {
+                Command::DlPrediction {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlPrediction { action, args }
             }
         }
         "dlretention" | "dl-retention" => {
@@ -2884,6 +2902,7 @@ fn command_help() -> String {
         "/dldiag         - Download diagnostics (status|run|report|config)",
         "/dldepviz [cmd]   - Dependency visualization (graph|stats|config|cycles|roots|leaves|text|dot)",
         "/dlheatmap [cmd]  - Speed heatmap by hour/day (status|report|hour|day|quality|config|prune|reset)",
+        "/dlprediction [cmd] - Progress prediction (status|predict|predict-all|accuracy|remove|clear|config)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -19258,6 +19277,151 @@ async fn handle_command(
                         "main",
                         "Usage: /dlheatmap [status|report|hour <h>|day <d>|quality <d> <h>|config|prune|reset]"
                             .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlPrediction { action, args } => {
+            let download_manager = state.lock().await.download_manager.clone();
+            match action.as_str() {
+                "status" | "config" => {
+                    let config = download_manager.get_prediction_config().await;
+                    let msg = format!(
+                        "🔮 Progress Prediction Config:\n\
+                         Enabled: {}\n\
+                         Min Samples: {}\n\
+                         Max Samples: {}\n\
+                         Smoothing Factor: {:.2}\n\
+                         High Confidence Min Samples: {}\n\
+                         Medium Confidence Min Samples: {}\n\
+                         Track Accuracy: {}",
+                        config.enabled,
+                        config.min_samples,
+                        config.max_samples,
+                        config.smoothing_factor,
+                        config.high_confidence_min_samples,
+                        config.medium_confidence_min_samples,
+                        config.track_accuracy,
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "predict" => {
+                    if let Some(task_id) = args.first() {
+                        match download_manager.predict_task_completion(task_id).await {
+                            Some(pred) => {
+                                let mut msg = String::from("🔮 Prediction Result:\n");
+                                msg.push_str(&format!("Task ID: {}\n", pred.task_id));
+                                msg.push_str(&format!(
+                                    "Estimated Completion: {}\n",
+                                    pred.estimated_completion.format("%Y-%m-%d %H:%M:%S UTC")
+                                ));
+                                msg.push_str(&format!(
+                                    "Remaining: {}\n",
+                                    format_duration(pred.remaining_seconds as f64)
+                                ));
+                                msg.push_str(&format!("Confidence: {}\n", pred.confidence));
+                                msg.push_str(&format!(
+                                    "Optimistic: {}\n",
+                                    format_duration(pred.optimistic_seconds as f64)
+                                ));
+                                msg.push_str(&format!(
+                                    "Pessimistic: {}\n",
+                                    format_duration(pred.pessimistic_seconds as f64)
+                                ));
+                                msg.push_str(&format!("Samples: {}\n", pred.sample_count));
+                                msg.push_str(&format!(
+                                    "Predicted Speed: {:.1} KB/s\n",
+                                    pred.predicted_speed_bps as f64 / 1024.0
+                                ));
+                                msg.push_str(&format!("Progress: {:.1}%\n", pred.current_progress));
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", msg);
+                            }
+                            None => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "❌ Task '{}' not found or no prediction data",
+                                        task_id
+                                    ),
+                                );
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlprediction predict <task_id>".to_string(),
+                        );
+                    }
+                }
+                "predict-all" => {
+                    let predictions = download_manager.predict_all_active_tasks().await;
+                    if predictions.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "🔮 No active downloads to predict".to_string(),
+                        );
+                    } else {
+                        let mut msg =
+                            format!("🔮 Predictions for {} Active Tasks:\n", predictions.len());
+                        for pred in &predictions {
+                            msg.push_str(&format!(
+                                "  Task {}: {} remaining ({} confidence, {:.1} KB/s)\n",
+                                pred.task_id,
+                                format_duration(pred.remaining_seconds as f64),
+                                pred.confidence,
+                                pred.predicted_speed_bps as f64 / 1024.0,
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "accuracy" => {
+                    let accuracy = download_manager.get_prediction_accuracy().await;
+                    let mut msg = String::from("🎯 Prediction Accuracy Summary:\n");
+                    msg.push_str(&format!(
+                        "Total Predictions: {}\n",
+                        accuracy.total_predictions
+                    ));
+                    msg.push_str(&format!("Completed: {}\n", accuracy.completed_predictions));
+                    msg.push_str(&format!(
+                        "Average Error: {:.1}%\n",
+                        accuracy.avg_error_percentage
+                    ));
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "remove" => {
+                    if let Some(task_id) = args.first() {
+                        download_manager.remove_prediction_task(task_id).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Removed prediction data for task '{}'", task_id),
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlprediction remove <task_id>".to_string(),
+                        );
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_prediction_data().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "✅ All prediction data cleared".to_string());
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlprediction [status|predict <id>|predict-all|accuracy|remove <id>|clear|config]".to_string(),
                     );
                 }
             }
