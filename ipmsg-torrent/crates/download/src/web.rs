@@ -444,6 +444,16 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/download-analytics/clear",
             post(clear_download_analytics),
         )
+        .route("/api/history-analytics", get(get_history_analytics_summary))
+        .route("/api/history-analytics", post(set_history_analytics_config))
+        .route(
+            "/api/history-analytics/report",
+            get(get_history_analytics_report),
+        )
+        .route(
+            "/api/history-analytics/clear",
+            post(clear_history_analytics),
+        )
         .route("/api/speed-benchmark", get(get_speed_benchmark_config))
         .route("/api/speed-benchmark", post(set_speed_benchmark_config))
         .route("/api/speed-benchmark/run", post(run_speed_benchmark))
@@ -2079,6 +2089,56 @@ async fn prune_download_analytics(State(state): State<Arc<WebState>>) -> Json<se
 /// Clear all analytics data
 async fn clear_download_analytics(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     state.manager.clear_download_analytics().await;
+    Json(serde_json::json!({"success": true}))
+}
+
+/// Get history analytics summary
+#[derive(Deserialize)]
+struct HistoryAnalyticsQuery {
+    #[serde(default = "default_history_analytics_days")]
+    days: i64,
+}
+
+fn default_history_analytics_days() -> i64 {
+    30
+}
+
+async fn get_history_analytics_summary(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(query): axum::extract::Query<HistoryAnalyticsQuery>,
+) -> Json<serde_json::Value> {
+    let summary = state
+        .manager
+        .get_history_analytics_for_period(query.days)
+        .await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// Set history analytics configuration
+async fn set_history_analytics_config(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::download_history_analytics::HistoryAnalyticsConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_history_analytics_config(config).await;
+    Json(serde_json::json!({"success": true}))
+}
+
+/// Get formatted history analytics report
+async fn get_history_analytics_report(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Query(query): axum::extract::Query<HistoryAnalyticsQuery>,
+) -> Json<serde_json::Value> {
+    let summary = state
+        .manager
+        .get_history_analytics_for_period(query.days)
+        .await;
+    let report = state.manager.format_history_analytics(&summary).await;
+    Json(serde_json::json!({"report": report}))
+}
+
+/// Clear history analytics data
+async fn clear_history_analytics(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    state.manager.clear_history_analytics().await;
     Json(serde_json::json!({"success": true}))
 }
 

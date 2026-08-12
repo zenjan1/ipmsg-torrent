@@ -230,6 +230,11 @@ enum Command {
         #[allow(dead_code)]
         args: Vec<String>,
     },
+    /// Download history analytics - insights from past downloads (Phase 160)
+    DlHistoryAnalytics {
+        /// "summary [days]", "report [days]", "config", "clear"
+        args: Vec<String>,
+    },
     /// Bandwidth forecast - predict download speeds based on historical data (Phase 136)
     DlBandwidthForecast {
         /// "status", "config", "predict", "summary", "clear", "remove"
@@ -1177,6 +1182,10 @@ fn parse_command(input: &str) -> Command {
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlUpload { action, args }
             }
+        }
+        "dlha" | "dl-history-analytics" | "dl-historyanalytics" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlHistoryAnalytics { args }
         }
         "dlbwforecast" | "dl-bwforecast" | "dlforecast" => {
             if parts.len() < 2 {
@@ -3932,6 +3941,8 @@ async fn handle_command(
                 "  /dltag <id> <tags>  - Add tags to a task".to_string(),
                 "  /dlfind [query]     - Advanced search/filter".to_string(),
                 "  /dlupload [action]  - Upload tracker (status/summary/config/tasks/clear)"
+                    .to_string(),
+                "  /dlha [cmd]         - History analytics (summary [days]|report [days]|config|clear)"
                     .to_string(),
                 "  /dlcd [action]      - Download cooldown (status/config/summary/tick/reset)"
                     .to_string(),
@@ -7744,6 +7755,59 @@ async fn handle_command(
                         "main",
                         "Unknown upload tracker action. Use: status, summary, config, tasks, clear"
                             .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlHistoryAnalytics { args } => {
+            let s = state.lock().await;
+            let dm = s.download_manager.clone();
+            drop(s);
+
+            let action = args.first().map(|s| s.as_str()).unwrap_or("summary");
+            match action {
+                "summary" => {
+                    let days: i64 = args.get(1).and_then(|d| d.parse().ok()).unwrap_or(30);
+                    let summary = dm.get_history_analytics_for_period(days).await;
+                    let report = dm.format_history_analytics(&summary).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", report);
+                }
+                "report" => {
+                    let days: i64 = args.get(1).and_then(|d| d.parse().ok()).unwrap_or(30);
+                    let summary = dm.get_history_analytics_for_period(days).await;
+                    let report = dm.format_history_analytics(&summary).await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("📊 History Analytics Report ({} days):\n{}", days, report),
+                    );
+                }
+                "config" => {
+                    let cfg = dm.get_history_analytics_config().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "📊 History Analytics Config:\n  Enabled: {}\n  Default Period: {} days\n  Max Entries: {}\n  Tag Stats: {}\n  Domain Stats: {}",
+                            cfg.enabled,
+                            cfg.default_period_days,
+                            cfg.max_entries,
+                            if cfg.include_tag_stats { "yes" } else { "no" },
+                            if cfg.include_domain_stats { "yes" } else { "no" }
+                        ),
+                    );
+                }
+                "clear" => {
+                    dm.clear_history_analytics().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "✅ History analytics data cleared".to_string());
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlha [summary [days]|report [days]|config|clear]".to_string(),
                     );
                 }
             }
@@ -21581,5 +21645,77 @@ mod save_path_tests {
     fn test_help_contains_dlintegrity() {
         let help = command_help();
         assert!(help.contains("/dlintegrity"));
+    }
+
+    #[test]
+    fn test_parse_dlha_summary() {
+        let cmd = parse_command("/dlha summary 7");
+        match cmd {
+            Command::DlHistoryAnalytics { args } => {
+                assert_eq!(args, vec!["summary", "7"]);
+            }
+            other => panic!("Expected DlHistoryAnalytics, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlha_report() {
+        let cmd = parse_command("/dlha report 14");
+        match cmd {
+            Command::DlHistoryAnalytics { args } => {
+                assert_eq!(args, vec!["report", "14"]);
+            }
+            other => panic!("Expected DlHistoryAnalytics, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlha_config() {
+        let cmd = parse_command("/dlha config");
+        match cmd {
+            Command::DlHistoryAnalytics { args } => {
+                assert_eq!(args, vec!["config"]);
+            }
+            other => panic!("Expected DlHistoryAnalytics, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlha_clear() {
+        let cmd = parse_command("/dlha clear");
+        match cmd {
+            Command::DlHistoryAnalytics { args } => {
+                assert_eq!(args, vec!["clear"]);
+            }
+            other => panic!("Expected DlHistoryAnalytics, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlha_alias() {
+        let cmd = parse_command("/dl-history-analytics summary");
+        match cmd {
+            Command::DlHistoryAnalytics { args } => {
+                assert_eq!(args, vec!["summary"]);
+            }
+            other => panic!("Expected DlHistoryAnalytics, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlha_no_args() {
+        let cmd = parse_command("/dlha");
+        match cmd {
+            Command::DlHistoryAnalytics { args } => {
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlHistoryAnalytics, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_dlha() {
+        let help = command_help();
+        assert!(help.contains("/dlha"));
     }
 }
