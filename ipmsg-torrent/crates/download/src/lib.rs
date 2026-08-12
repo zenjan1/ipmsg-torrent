@@ -1097,6 +1097,8 @@ pub struct DownloadManager {
     connection_pool: Arc<connection_pool::ConnectionPool>,
     /// Download completion probability estimator (Phase 162)
     completion_probability: Arc<Mutex<completion_probability::CompletionProbabilityEstimator>>,
+    /// Queue health monitor configuration (Phase 166)
+    queue_health_config: Arc<tokio::sync::RwLock<queue_health::HealthMonitorConfig>>,
 }
 
 impl DownloadManager {
@@ -1213,6 +1215,9 @@ impl DownloadManager {
             connection_pool: Arc::new(connection_pool::ConnectionPool::new()),
             completion_probability: Arc::new(Mutex::new(
                 completion_probability::CompletionProbabilityEstimator::new(),
+            )),
+            queue_health_config: Arc::new(tokio::sync::RwLock::new(
+                queue_health::HealthMonitorConfig::default(),
             )),
             task_snooze: Arc::new(Mutex::new(task_snooze::TaskSnoozeManager::new())),
             task_scheduler: Arc::new(Mutex::new(task_scheduler::TaskSchedulerManager::new())),
@@ -1517,6 +1522,9 @@ impl DownloadManager {
             connection_pool: Arc::new(connection_pool::ConnectionPool::new()),
             completion_probability: Arc::new(Mutex::new(
                 completion_probability::CompletionProbabilityEstimator::new(),
+            )),
+            queue_health_config: Arc::new(tokio::sync::RwLock::new(
+                queue_health::HealthMonitorConfig::default(),
             )),
             speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
             speed_anomaly: Arc::new(Mutex::new(speed_anomaly::SpeedAnomalyDetector::new(
@@ -9524,6 +9532,46 @@ impl DownloadManager {
         drop(tasks);
 
         queue_health::analyze_queue_health(&health_data, config)
+    }
+
+    /// Set queue health monitor configuration
+    pub async fn set_queue_health_config(
+        &self,
+        config: queue_health::HealthMonitorConfig,
+    ) -> Result<(), std::io::Error> {
+        let mut current = self.queue_health_config.write().await;
+        *current = config.clone();
+        drop(current);
+
+        // Persist to disk
+        let path = self.data_dir.join("queue_health_config.json");
+        queue_health::save_health_monitor_config(&path, &config)
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    }
+
+    /// Get queue health monitor configuration
+    pub async fn get_queue_health_config(&self) -> queue_health::HealthMonitorConfig {
+        self.queue_health_config.read().await.clone()
+    }
+
+    /// Save queue health config to disk
+    pub async fn save_queue_health_config(&self) -> Result<(), std::io::Error> {
+        let config = self.queue_health_config.read().await.clone();
+        let path = self.data_dir.join("queue_health_config.json");
+        queue_health::save_health_monitor_config(&path, &config)
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    }
+
+    /// Load queue health config from disk
+    pub async fn load_queue_health_config(&self) -> Result<(), std::io::Error> {
+        let path = self.data_dir.join("queue_health_config.json");
+        if let Some(config) = queue_health::load_health_monitor_config(&path).await {
+            let mut current = self.queue_health_config.write().await;
+            *current = config;
+        }
+        Ok(())
     }
 
     /// Build comprehensive health dashboard aggregating all monitoring data

@@ -355,6 +355,7 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/auto-rules", post(add_auto_rule))
         .route("/api/auto-rules/:id/remove", post(remove_auto_rule))
         .route("/api/health", get(get_queue_health))
+        .route("/api/health/config", get(get_queue_health_config).post(set_queue_health_config))
         .route("/api/auto-cleanup", get(get_auto_cleanup))
         .route("/api/auto-cleanup", post(set_auto_cleanup))
         .route("/api/dedup", get(get_dedup_config))
@@ -3234,9 +3235,27 @@ async fn get_stats(State(state): State<Arc<WebState>>) -> Json<crate::DownloadSt
 async fn get_queue_health(
     State(state): State<Arc<WebState>>,
 ) -> Json<crate::queue_health::QueueHealthReport> {
-    let config = crate::queue_health::HealthMonitorConfig::default();
+    let config = state.manager.get_queue_health_config().await;
     let report = state.manager.get_queue_health_report(&config).await;
     Json(report)
+}
+
+/// Get queue health monitor configuration
+async fn get_queue_health_config(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::queue_health::HealthMonitorConfig> {
+    Json(state.manager.get_queue_health_config().await)
+}
+
+/// Set queue health monitor configuration
+async fn set_queue_health_config(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::queue_health::HealthMonitorConfig>,
+) -> impl IntoResponse {
+    match state.manager.set_queue_health_config(config).await {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 /// Get speed history summary for all tasks
@@ -8267,6 +8286,72 @@ mod tests {
         let report: crate::queue_health::QueueHealthReport = serde_json::from_slice(&body).unwrap();
         assert_eq!(report.summary.total_tasks, 0);
         assert_eq!(report.summary.health_score, 100);
+    }
+
+    #[tokio::test]
+    async fn test_queue_health_config_endpoints() {
+        let state = test_state();
+        let app = create_router(state);
+
+        // Test GET /api/health/config
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let config: crate::queue_health::HealthMonitorConfig =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(config.slow_threshold_bps, 1024.0);
+
+        // Test POST /api/health/config
+        let new_config = crate::queue_health::HealthMonitorConfig {
+            slow_threshold_bps: 2048.0,
+            stuck_threshold_secs: 600.0,
+            max_retry_threshold: 10,
+        };
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/health/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&new_config).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify config was updated
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let config: crate::queue_health::HealthMonitorConfig =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(config.slow_threshold_bps, 2048.0);
+        assert_eq!(config.stuck_threshold_secs, 600.0);
     }
 
     #[tokio::test]

@@ -473,6 +473,24 @@ fn calculate_health_score(summary: &QueueHealthSummary) -> u8 {
     score.clamp(0.0, 100.0) as u8
 }
 
+/// Save health monitor config to disk
+pub async fn save_health_monitor_config(
+    path: &std::path::Path,
+    config: &HealthMonitorConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let json = serde_json::to_string_pretty(config)?;
+    tokio::fs::write(path, json).await?;
+    Ok(())
+}
+
+/// Load health monitor config from disk
+pub async fn load_health_monitor_config(path: &std::path::Path) -> Option<HealthMonitorConfig> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(json) => serde_json::from_str(&json).ok(),
+        Err(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,5 +817,96 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(calculate_health_score(&summary), 100);
+    }
+
+    #[test]
+    fn test_health_monitor_config_serialization() {
+        let config = HealthMonitorConfig {
+            slow_threshold_bps: 2048.0,
+            stuck_threshold_secs: 600.0,
+            max_retry_threshold: 10,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: HealthMonitorConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.slow_threshold_bps, 2048.0);
+        assert_eq!(loaded.stuck_threshold_secs, 600.0);
+        assert_eq!(loaded.max_retry_threshold, 10);
+    }
+
+    #[test]
+    fn test_health_monitor_config_default() {
+        let config = HealthMonitorConfig::default();
+        assert_eq!(config.slow_threshold_bps, DEFAULT_SLOW_THRESHOLD_BPS);
+        assert_eq!(config.stuck_threshold_secs, DEFAULT_STUCK_THRESHOLD_SECS);
+        assert_eq!(config.max_retry_threshold, 5);
+    }
+
+    #[tokio::test]
+    async fn test_save_load_config_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("health_config.json");
+        let config = HealthMonitorConfig {
+            slow_threshold_bps: 4096.0,
+            stuck_threshold_secs: 120.0,
+            max_retry_threshold: 3,
+        };
+        save_health_monitor_config(&path, &config).await.unwrap();
+        let loaded = load_health_monitor_config(&path).await.unwrap();
+        assert_eq!(loaded.slow_threshold_bps, 4096.0);
+        assert_eq!(loaded.stuck_threshold_secs, 120.0);
+        assert_eq!(loaded.max_retry_threshold, 3);
+    }
+
+    #[tokio::test]
+    async fn test_load_config_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.json");
+        assert!(load_health_monitor_config(&path).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_load_config_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.json");
+        tokio::fs::write(&path, "not json").await.unwrap();
+        assert!(load_health_monitor_config(&path).await.is_none());
+    }
+
+    #[test]
+    fn test_queue_health_report_format_contains_all_sections() {
+        let tasks = vec![
+            make_task("t1", "fast.zip", "Downloading", 100_000.0, 2.0),
+            make_task("t2", "stuck.zip", "Downloading", 0.0, 600.0),
+            make_task("t3", "slow.zip", "Downloading", 200.0, 5.0),
+            make_task("t4", "queued.zip", "Queued", 0.0, 0.0),
+            make_task("t5", "done.zip", "Complete", 0.0, 0.0),
+        ];
+        let config = HealthMonitorConfig::default();
+        let report = analyze_queue_health(&tasks, &config);
+        let formatted = report.format_report();
+        assert!(formatted.contains("Queue Health"));
+        assert!(formatted.contains("Tasks: 5 total"));
+        assert!(formatted.contains("Stuck tasks: 1"));
+        assert!(formatted.contains("Slow tasks: 1"));
+        assert!(formatted.contains("Issues:"));
+        assert!(formatted.contains("Recommendations:"));
+    }
+
+    #[test]
+    fn test_issue_severity_ordering() {
+        // Verify severity ordering: Critical > Error > Warning > Info
+        assert!(IssueSeverity::Critical > IssueSeverity::Error);
+        assert!(IssueSeverity::Error > IssueSeverity::Warning);
+        assert!(IssueSeverity::Warning > IssueSeverity::Info);
+    }
+
+    #[test]
+    fn test_multiple_issues_same_task() {
+        let mut task = make_task("t1", "bad.zip", "Downloading", 100.0, 600.0);
+        task.auto_retry_count = 10;
+        let config = HealthMonitorConfig::default();
+        let report = analyze_queue_health(&[task], &config);
+        // Should have stuck + excessive retries issues
+        assert!(report.issues.len() >= 2);
     }
 }

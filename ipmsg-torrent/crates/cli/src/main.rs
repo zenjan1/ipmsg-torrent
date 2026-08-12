@@ -4420,7 +4420,7 @@ async fn handle_command(
             let s = state.lock().await;
             let download_manager = s.download_manager.clone();
             drop(s);
-            let config = ipmsg_download::queue_health::HealthMonitorConfig::default();
+            let config = download_manager.get_queue_health_config().await;
             let report = download_manager.get_queue_health_report(&config).await;
             let msg = report.format_report();
             let mut s = state.lock().await;
