@@ -296,6 +296,12 @@ enum Command {
     },
     /// System uptime - view how long the system has been running (Phase 143)
     DlUptime,
+    /// Sequential download mode - toggle per-task sequential piece downloading (Phase 165)
+    DlSeq {
+        /// Subcommand: get|set|list
+        subcommand: String,
+        args: Vec<String>,
+    },
     /// Save path manager - configure download directory and auto-organize (Phase 162)
     DlSavePath {
         /// "status", "config", "set-base", "organize", "category", "predict", "validate"
@@ -317,6 +323,12 @@ enum Command {
     /// SLA compliance - track download service level agreements (Phase 144)
     DlSla {
         /// "status", "list", "add", "remove", "evaluate", "summary", "history", "clear", "config"
+        action: String,
+        args: Vec<String>,
+    },
+    /// Download session tracking - per-task download session history (Phase 165)
+    DlSession {
+        /// "status", "summary", "task <task_id>", "remove <task_id>", "clear", "config"
         action: String,
         args: Vec<String>,
     },
@@ -1351,6 +1363,21 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dluptime" | "dl-uptime" | "dlupt" => Command::DlUptime,
+        "dlseq" | "dl-seq" | "dlseqmode" => {
+            if parts.len() < 2 {
+                Command::DlSeq {
+                    subcommand: "list".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let sub = parts[1].clone();
+                let cmd_args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlSeq {
+                    subcommand: sub.to_string(),
+                    args: cmd_args,
+                }
+            }
+        }
         "dlspath" | "dl-savepath" | "dlsavepath" => {
             if parts.len() < 2 {
                 Command::DlSavePath {
@@ -1385,6 +1412,18 @@ fn parse_command(input: &str) -> Command {
                 let action = parts[1].to_string();
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlSla { action, args }
+            }
+        }
+        "dl-session" | "dlsession" | "dlsess" => {
+            if parts.len() < 2 {
+                Command::DlSession {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlSession { action, args }
             }
         }
         "dlfilestats" | "dl-filestats" | "dlfs" => {
@@ -3106,6 +3145,7 @@ fn command_help() -> String {
         "/dlttl [cmd]      - Task TTL management (status|enable|disable|set <duration> [interval]|task <id> <duration>|summary)",
         "/dlerrrec [cmd]   - Error recovery (status|enable|disable|set <category> <strategy>|reset|test <error>)",
         "/dlchain [cmd]    - Task chains (list|create|delete|add|remove|enable|disable|summary)",
+        "/dlseq [cmd]      - Sequential download mode (list|get <task_id>|set <task_id> <true|false>)",
         "/dlprofiler [cmd] - Task performance profiler (status|summary|profile|refresh|clear|config)",
         "/dladaptive [cmd] - Adaptive concurrency (status|config|evaluate|clear)",
         "/dltemplate [cmd] - Download templates (list|add|del|show|match|enable|disable|categories)",
@@ -4403,6 +4443,87 @@ async fn handle_command(
             );
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
+        }
+        Command::DlSeq { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "list" => {
+                    let tasks = download_manager.list_tasks().await;
+                    let seq_tasks: Vec<_> = tasks.iter().filter(|t| t.sequential_mode).collect();
+                    if seq_tasks.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "No tasks with sequential mode enabled. Use /dlseq set <task_id> true to enable.".to_string(),
+                        );
+                    } else {
+                        let mut msg =
+                            format!("Sequential Mode Tasks ({} total):\n", seq_tasks.len());
+                        for t in &seq_tasks {
+                            msg.push_str(&format!(
+                                "  ✅ {} ({}) - {:.1}%\n",
+                                t.name,
+                                t.id,
+                                t.progress() * 100.0
+                            ));
+                        }
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "get" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlseq get <task_id>".to_string());
+                    } else {
+                        let enabled = download_manager.get_sequential_mode(&args[0]).await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "Task '{}': sequential mode = {}",
+                                args[0],
+                                if enabled {
+                                    "enabled ✅"
+                                } else {
+                                    "disabled ❌"
+                                }
+                            ),
+                        );
+                    }
+                }
+                "set" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlseq set <task_id> <true|false>".to_string(),
+                        );
+                    } else {
+                        let task_id = &args[0];
+                        let enabled =
+                            matches!(args[1].to_lowercase().as_str(), "true" | "1" | "on" | "yes");
+                        let success = download_manager.set_sequential_mode(task_id, enabled).await;
+                        if success {
+                            s.add_system_message(
+                                "main",
+                                format!(
+                                    "✅ Task '{}': sequential mode {}",
+                                    task_id,
+                                    if enabled { "enabled" } else { "disabled" }
+                                ),
+                            );
+                        } else {
+                            s.add_system_message(
+                                "main",
+                                format!("❌ Task '{}' not found", task_id),
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    s.add_system_message("main", "Usage: /dlseq <list|get|set> [args]".to_string());
+                }
+            }
         }
         Command::DlSavePath { action, args } => {
             let s = state.lock().await;
@@ -10667,17 +10788,18 @@ async fn handle_command(
                             download_manager.get_notification_preferences_config().await;
                         match args[0].as_str() {
                             "enabled" => {
-                                config.enabled = args
+                                let new_enabled = args
                                     .get(1)
                                     .map(|v| v == "true" || v == "on")
                                     .unwrap_or(!config.enabled);
+                                config.enabled = new_enabled;
                                 download_manager
-                                    .set_notification_preferences_config(config)
+                                    .set_notification_preferences_config(config.clone())
                                     .await;
                                 let mut s = state.lock().await;
                                 s.add_system_message(
                                     "main",
-                                    format!("✅ Enabled: {}", config.enabled),
+                                    format!("✅ Enabled: {}", new_enabled),
                                 );
                             }
                             "cooldown" => {
@@ -22118,6 +22240,167 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlSession { action, args } => {
+            let mut s = state.lock().await;
+            match action.as_str() {
+                "status" => {
+                    let config = s.download_manager.get_download_session_config().await;
+                    let summaries = s.download_manager.get_all_session_summaries().await;
+                    let total_sessions = summaries.iter().map(|s| s.total_sessions).sum::<usize>();
+                    let total_bytes = summaries
+                        .iter()
+                        .map(|s| s.total_bytes_transferred)
+                        .sum::<u64>();
+                    let total_duration = summaries
+                        .iter()
+                        .map(|s| s.total_download_time_secs)
+                        .sum::<f64>();
+                    let avg_speed = if total_duration > 0.0 {
+                        total_bytes as f64 / total_duration
+                    } else {
+                        0.0
+                    };
+                    let msg = format!(
+                        "📊 Download Session Status:\n\
+                         Max Sessions Per Task: {}\n\
+                         Max Total Sessions: {}\n\
+                         \n\
+                         📈 Summary:\n\
+                         Total Tasks: {}\n\
+                         Total Sessions: {}\n\
+                         Total Bytes: {}\n\
+                         Total Duration: {:.1}s\n\
+                         Average Speed: {:.2} B/s",
+                        config.max_sessions_per_task,
+                        config.max_total_sessions,
+                        summaries.len(),
+                        total_sessions,
+                        total_bytes,
+                        total_duration,
+                        avg_speed
+                    );
+                    s.add_system_message("main", msg);
+                }
+                "summary" => {
+                    let summaries = s.download_manager.get_all_session_summaries().await;
+                    if summaries.is_empty() {
+                        s.add_system_message("main", "No download sessions recorded.".to_string());
+                    } else {
+                        let mut msg =
+                            format!("📊 Download Sessions ({} tasks):\n", summaries.len());
+                        for summary in summaries.iter().take(20) {
+                            let avg = summary.overall_avg_speed_bps.unwrap_or(0);
+                            msg.push_str(&format!(
+                                "  Task {}: {} sessions, {} bytes, {:.1}s, avg speed {} B/s\n",
+                                summary.task_id,
+                                summary.total_sessions,
+                                summary.total_bytes_transferred,
+                                summary.total_download_time_secs,
+                                avg
+                            ));
+                        }
+                        if summaries.len() > 20 {
+                            msg.push_str(&format!(
+                                "  ... and {} more tasks\n",
+                                summaries.len() - 20
+                            ));
+                        }
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "task" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlsession task <task_id>".to_string(),
+                        );
+                    } else {
+                        let task_id = &args[0];
+                        match s.download_manager.get_task_session_summary(task_id).await {
+                            Some(summary) => {
+                                let avg_speed = summary.overall_avg_speed_bps.unwrap_or(0);
+                                let active_count = if summary.active_session.is_some() {
+                                    1
+                                } else {
+                                    0
+                                };
+                                let msg = format!(
+                                    "📊 Task {} Sessions:\n\
+                                     Total Sessions: {}\n\
+                                     Completed: {}\n\
+                                     Failed: {}\n\
+                                     Paused: {}\n\
+                                     Active: {}\n\
+                                     Total Bytes: {}\n\
+                                     Total Duration: {:.1}s\n\
+                                     Average Speed: {} B/s\n\
+                                     Peak Speed: {} B/s",
+                                    summary.task_id,
+                                    summary.total_sessions,
+                                    summary.completed_sessions,
+                                    summary.failed_sessions,
+                                    summary.paused_sessions,
+                                    active_count,
+                                    summary.total_bytes_transferred,
+                                    summary.total_download_time_secs,
+                                    avg_speed,
+                                    summary.peak_speed_bps
+                                );
+                                s.add_system_message("main", msg);
+                            }
+                            None => {
+                                s.add_system_message(
+                                    "main",
+                                    format!("No sessions found for task: {}", task_id),
+                                );
+                            }
+                        }
+                    }
+                }
+                "remove" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlsession remove <task_id>".to_string(),
+                        );
+                    } else {
+                        let task_id = &args[0];
+                        let removed = s.download_manager.remove_task_sessions(task_id).await;
+                        if removed {
+                            s.add_system_message(
+                                "main",
+                                format!("✅ Removed sessions for task: {}", task_id),
+                            );
+                        } else {
+                            s.add_system_message(
+                                "main",
+                                format!("❌ No sessions found for task: {}", task_id),
+                            );
+                        }
+                    }
+                }
+                "clear" => {
+                    s.download_manager.clear_all_sessions().await;
+                    s.add_system_message("main", "✅ Cleared all download sessions.".to_string());
+                }
+                "config" => {
+                    let config = s.download_manager.get_download_session_config().await;
+                    let msg = format!(
+                        "⚙️ Download Session Config:\n\
+                         Max Sessions Per Task: {}\n\
+                         Max Total Sessions: {}",
+                        config.max_sessions_per_task, config.max_total_sessions
+                    );
+                    s.add_system_message("main", msg);
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlsession <status|summary|task|remove|clear|config>".to_string(),
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -22367,6 +22650,60 @@ async fn handle_command_headless(
                 summary.uptime_seconds,
                 summary.started_at.format("%Y-%m-%d %H:%M:%S UTC")
             );
+        }
+        Command::DlSeq { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            match subcommand.as_str() {
+                "list" => {
+                    let tasks = download_manager.list_tasks().await;
+                    let seq_tasks: Vec<_> = tasks.iter().filter(|t| t.sequential_mode).collect();
+                    if seq_tasks.is_empty() {
+                        println!("[seq] No tasks with sequential mode enabled");
+                    } else {
+                        println!("[seq] Sequential Mode Tasks ({} total):", seq_tasks.len());
+                        for t in &seq_tasks {
+                            println!("  ✅ {} ({}) - {:.1}%", t.name, t.id, t.progress() * 100.0);
+                        }
+                    }
+                }
+                "get" => {
+                    if args.is_empty() {
+                        println!("[seq] Usage: /dlseq get <task_id>");
+                    } else {
+                        let enabled = download_manager.get_sequential_mode(&args[0]).await;
+                        println!(
+                            "[seq] Task '{}': sequential mode = {}",
+                            args[0],
+                            if enabled { "enabled" } else { "disabled" }
+                        );
+                    }
+                }
+                "set" => {
+                    if args.len() < 2 {
+                        println!("[seq] Usage: /dlseq set <task_id> <true|false>");
+                    } else {
+                        let task_id = &args[0];
+                        let enabled =
+                            matches!(args[1].to_lowercase().as_str(), "true" | "1" | "on" | "yes");
+                        let success = download_manager.set_sequential_mode(task_id, enabled).await;
+                        if success {
+                            println!(
+                                "[seq] ✅ Task '{}': sequential mode {}",
+                                task_id,
+                                if enabled { "enabled" } else { "disabled" }
+                            );
+                        } else {
+                            println!("[seq] ❌ Task '{}' not found", task_id);
+                        }
+                    }
+                }
+                _ => {
+                    println!("[seq] Usage: /dlseq <list|get|set> [args]");
+                }
+            }
         }
         Command::DlDiagnostics { action, args } => {
             let s = state.lock().await;

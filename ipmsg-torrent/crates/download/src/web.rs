@@ -1640,6 +1640,27 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             post(clear_all_sla_history_handler),
         )
         .route("/api/sla-compliance/report", get(get_sla_report_handler))
+        // Phase 165: Download Session REST API
+        .route(
+            "/api/download-session",
+            get(get_all_session_summaries_handler),
+        )
+        .route(
+            "/api/download-session/config",
+            get(get_download_session_config_handler).post(set_download_session_config_handler),
+        )
+        .route(
+            "/api/download-session/summary",
+            get(get_download_session_summary_handler),
+        )
+        .route(
+            "/api/download-session/task/:task_id",
+            get(get_task_session_summary_handler).delete(remove_task_sessions_handler),
+        )
+        .route(
+            "/api/download-session/clear",
+            post(clear_all_sessions_handler),
+        )
         // Phase 164: Connection Pool REST API
         .route(
             "/api/connection-pool",
@@ -10970,6 +10991,91 @@ async fn clear_all_sla_history_handler(
 async fn get_sla_report_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let report = state.manager.format_sla_report().await;
     Json(serde_json::json!({"report": report}))
+}
+
+// ========== Download Session API (Phase 165) ==========
+
+/// GET /api/download-session - Get all session summaries
+async fn get_all_session_summaries_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::download_session::TaskSessionSummary>> {
+    let summaries = state.manager.get_all_session_summaries().await;
+    Json(summaries)
+}
+
+/// GET /api/download-session/config - Get download session configuration
+async fn get_download_session_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::download_session::DownloadSessionConfig> {
+    let config = state.manager.get_download_session_config().await;
+    Json(config)
+}
+
+/// POST /api/download-session/config - Update download session configuration
+async fn set_download_session_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::download_session::DownloadSessionConfig>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state.manager.set_download_session_config(config).await;
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+/// GET /api/download-session/summary - Get download session summary
+async fn get_download_session_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summaries = state.manager.get_all_session_summaries().await;
+    let total_sessions = summaries.iter().map(|s| s.total_sessions).sum::<usize>();
+    let total_bytes = summaries
+        .iter()
+        .map(|s| s.total_bytes_transferred)
+        .sum::<u64>();
+    let total_duration = summaries
+        .iter()
+        .map(|s| s.total_download_time_secs)
+        .sum::<f64>();
+    let avg_speed = if total_duration > 0.0 {
+        total_bytes as f64 / total_duration
+    } else {
+        0.0
+    };
+    Json(serde_json::json!({
+        "total_tasks": summaries.len(),
+        "total_sessions": total_sessions,
+        "total_bytes_transferred": total_bytes,
+        "total_duration_secs": total_duration,
+        "average_speed_bps": avg_speed
+    }))
+}
+
+/// GET /api/download-session/task/:task_id - Get task session summary
+async fn get_task_session_summary_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<crate::download_session::TaskSessionSummary>, StatusCode> {
+    match state.manager.get_task_session_summary(&task_id).await {
+        Some(summary) => Ok(Json(summary)),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// DELETE /api/download-session/task/:task_id - Remove task sessions
+async fn remove_task_sessions_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let removed = state.manager.remove_task_sessions(&task_id).await;
+    if removed {
+        Ok(Json(serde_json::json!({"status": "ok", "removed": true})))
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
+/// POST /api/download-session/clear - Clear all sessions
+async fn clear_all_sessions_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    state.manager.clear_all_sessions().await;
+    Json(serde_json::json!({"status": "ok"}))
 }
 
 // ========== Connection Pool API (Phase 164) ==========

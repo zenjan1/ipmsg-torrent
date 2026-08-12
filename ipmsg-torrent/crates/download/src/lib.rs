@@ -10545,6 +10545,27 @@ impl DownloadManager {
         sessions.remove_task_sessions(task_id)
     }
 
+    /// Get download session configuration.
+    pub async fn get_download_session_config(&self) -> download_session::DownloadSessionConfig {
+        let sessions = self.download_sessions.lock().await;
+        sessions.config().clone()
+    }
+
+    /// Set download session configuration.
+    pub async fn set_download_session_config(
+        &self,
+        config: download_session::DownloadSessionConfig,
+    ) {
+        let mut sessions = self.download_sessions.lock().await;
+        sessions.set_config(config);
+    }
+
+    /// Clear all download sessions.
+    pub async fn clear_all_sessions(&self) {
+        let mut sessions = self.download_sessions.lock().await;
+        sessions.clear_all();
+    }
+
     /// Pause all running downloads.
     pub async fn pause_all(&self) -> usize {
         let tasks = self.tasks.lock().await;
