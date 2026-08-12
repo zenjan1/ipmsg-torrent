@@ -41,6 +41,27 @@ ipmsg-protocol    Wire format (CBOR messages, types)
 | `ipmsg-app` | Desktop/mobile app (Tauri v2) |
 | `ipmsg-wasm` | Browser client (WebAssembly) |
 
+## Download Engine
+
+Multi-protocol download manager with resume support:
+
+| Protocol | Description | Engine |
+|----------|-------------|--------|
+| **BitTorrent** | .torrent files, magnet links, rarest-first piece selection | `TorrentEngine` |
+| **eDonkey/eMule** | ed2k:// links, 9.28MB chunks, MD4 verification | `Ed2kEngine` |
+| **Xunlei P2SP** | HTTP/FTP + P2P hybrid, dynamic segmentation | `XunleiEngine` |
+| **HTTP/HTTPS/FTP** | Direct URL downloads with range requests | `XunleiEngine` |
+
+Key features:
+- **Resume support** — Bitmap-based progress persistence (`.progress` files)
+- **Adaptive concurrency** — RTT-based connection tuning (BBR-inspired)
+- **Connection pool** — TCP reuse, DNS caching, per-domain limits
+- **Dashboard** — Real-time speed, ETA, health monitoring
+- **Scheduling** — Time windows, bandwidth budgets, auto-pause
+- **Analytics** — Speed history, cost tracking, source quality scoring
+
+See [ENGINE.md](crates/download/ENGINE.md) for architecture details.
+
 ## Quick Start
 
 ### Prerequisites
