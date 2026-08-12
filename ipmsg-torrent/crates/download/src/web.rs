@@ -353,11 +353,17 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/download-presets", get(list_download_presets))
         .route("/api/download-presets", post(add_download_preset))
-        .route("/api/download-presets/:id", post(remove_download_preset))
+        .route("/api/download-presets/:id", delete(remove_download_preset))
+        .route("/api/download-presets/:id", put(update_download_preset))
+        .route("/api/download-presets/:id/enable", post(enable_download_preset))
+        .route("/api/download-presets/:id/disable", post(disable_download_preset))
         .route(
             "/api/download-presets/:id/apply/:task_id",
             post(apply_download_preset),
         )
+        .route("/api/download-presets/categories", get(get_preset_categories))
+        .route("/api/download-presets/category/:category", get(list_presets_by_category))
+        .route("/api/download-presets/usage-summary", get(get_preset_usage_summary))
         .route("/api/url-bookmarks", get(list_url_bookmarks))
         .route("/api/url-bookmarks", post(add_url_bookmark))
         .route("/api/url-bookmarks/:name", get(get_url_bookmark))
@@ -6599,6 +6605,90 @@ async fn apply_download_preset(
         },
         task_id: Some(task_id),
     })
+}
+
+/// PUT /api/download-presets/:id - Update a preset
+async fn update_download_preset(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(updates): Json<crate::download_presets::PresetUpdate>,
+) -> Json<TaskResponse> {
+    let updated = state.manager.update_download_preset(&id, updates).await;
+    Json(TaskResponse {
+        success: updated,
+        message: if updated {
+            format!("Updated preset {}", id)
+        } else {
+            format!("Preset {} not found", id)
+        },
+        task_id: None,
+    })
+}
+
+/// POST /api/download-presets/:id/enable - Enable a preset
+async fn enable_download_preset(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<TaskResponse> {
+    let enabled = state.manager.enable_download_preset(&id).await;
+    Json(TaskResponse {
+        success: enabled,
+        message: if enabled {
+            format!("Enabled preset {}", id)
+        } else {
+            format!("Preset {} not found", id)
+        },
+        task_id: None,
+    })
+}
+
+/// POST /api/download-presets/:id/disable - Disable a preset
+async fn disable_download_preset(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<TaskResponse> {
+    let disabled = state.manager.disable_download_preset(&id).await;
+    Json(TaskResponse {
+        success: disabled,
+        message: if disabled {
+            format!("Disabled preset {}", id)
+        } else {
+            format!("Preset {} not found", id)
+        },
+        task_id: None,
+    })
+}
+
+/// GET /api/download-presets/categories - Get all preset categories
+async fn get_preset_categories(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let categories = state.manager.get_preset_categories().await;
+    Json(serde_json::json!({
+        "categories": categories,
+        "count": categories.len()
+    }))
+}
+
+/// GET /api/download-presets/category/:category - List presets by category
+async fn list_presets_by_category(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(category): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let presets = state.manager.list_presets_by_category(&category).await;
+    Json(serde_json::json!({
+        "category": category,
+        "presets": presets,
+        "count": presets.len()
+    }))
+}
+
+/// GET /api/download-presets/usage-summary - Get preset usage statistics
+async fn get_preset_usage_summary(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::download_presets::PresetUsageSummary> {
+    let summary = state.manager.get_preset_usage_summary().await;
+    Json(summary)
 }
 
 // ========== URL Bookmarks REST API ==========

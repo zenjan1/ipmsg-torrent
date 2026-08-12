@@ -3011,6 +3011,104 @@ impl DownloadManager {
             .cloned()
     }
 
+    /// Update a download preset
+    pub async fn update_download_preset(&self, id: &str, updates: download_presets::PresetUpdate) -> bool {
+        let mut presets = self.download_presets.lock().await;
+        if let Some(preset) = presets.iter_mut().find(|p| p.id == id) {
+            if let Some(name) = updates.name {
+                preset.name = name;
+            }
+            if let Some(tags) = updates.tags {
+                preset.tags = tags;
+            }
+            if let Some(group) = updates.group {
+                preset.group = Some(group);
+            }
+            if let Some(priority) = updates.priority {
+                preset.priority = priority;
+            }
+            if let Some(speed_limit) = updates.speed_limit_bps {
+                preset.speed_limit_bps = Some(speed_limit);
+            }
+            if let Some(weight) = updates.bandwidth_weight {
+                preset.bandwidth_weight = weight;
+            }
+            if let Some(path) = updates.save_path {
+                preset.save_path = Some(std::path::PathBuf::from(path));
+            }
+            if let Some(retries) = updates.max_retries {
+                preset.max_retries = Some(retries);
+            }
+            if let Some(desc) = updates.description {
+                preset.description = Some(desc);
+            }
+            if let Some(cat) = updates.category {
+                preset.category = Some(cat);
+            }
+            if let Some(enabled) = updates.enabled {
+                preset.enabled = enabled;
+            }
+            if let Err(e) = download_presets::save_presets(&presets, &self.data_dir) {
+                tracing::warn!(error = %e, "Failed to persist download presets");
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Enable a download preset
+    pub async fn enable_download_preset(&self, id: &str) -> bool {
+        let mut presets = self.download_presets.lock().await;
+        if let Some(preset) = presets.iter_mut().find(|p| p.id == id) {
+            preset.enabled = true;
+            if let Err(e) = download_presets::save_presets(&presets, &self.data_dir) {
+                tracing::warn!(error = %e, "Failed to persist download presets");
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Disable a download preset
+    pub async fn disable_download_preset(&self, id: &str) -> bool {
+        let mut presets = self.download_presets.lock().await;
+        if let Some(preset) = presets.iter_mut().find(|p| p.id == id) {
+            preset.enabled = false;
+            if let Err(e) = download_presets::save_presets(&presets, &self.data_dir) {
+                tracing::warn!(error = %e, "Failed to persist download presets");
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get preset usage summary
+    pub async fn get_preset_usage_summary(&self) -> download_presets::PresetUsageSummary {
+        let presets = self.download_presets.lock().await;
+        let mgr = download_presets::PresetManager::from_presets(presets.clone());
+        mgr.usage_summary()
+    }
+
+    /// Get preset categories
+    pub async fn get_preset_categories(&self) -> Vec<String> {
+        let presets = self.download_presets.lock().await;
+        let mgr = download_presets::PresetManager::from_presets(presets.clone());
+        mgr.categories()
+    }
+
+    /// List presets by category
+    pub async fn list_presets_by_category(&self, category: &str) -> Vec<download_presets::DownloadPreset> {
+        let presets = self.download_presets.lock().await;
+        presets
+            .iter()
+            .filter(|p| p.category.as_deref() == Some(category))
+            .cloned()
+            .collect()
+    }
+
     /// Apply a preset to a task. Updates task tags, group, priority, speed limit, bandwidth weight.
     /// Returns true if the preset was found and applied.
     pub async fn apply_preset_to_task(&self, task_id: &str, preset_id: &str) -> bool {

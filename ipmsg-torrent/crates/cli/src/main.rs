@@ -6182,9 +6182,182 @@ async fn handle_command(
                         s.add_system_message("main", "Failed to apply preset (preset not found, disabled, or task not found)".to_string());
                     }
                 }
+                "update" => {
+                    // /dlpreset update <preset_id> <field> <value>
+                    if args.len() < 3 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpreset update <preset_id> <field> <value>\nFields: name, tags, group, priority, speed_limit, category, description".to_string(),
+                        );
+                        return;
+                    }
+                    let preset_id = &args[0];
+                    let field = args[1].as_str();
+                    let value = &args[2];
+                    
+                    let updates = match field {
+                        "name" => ipmsg_download::download_presets::PresetUpdate {
+                            name: Some(value.to_string()),
+                            ..Default::default()
+                        },
+                        "tags" => ipmsg_download::download_presets::PresetUpdate {
+                            tags: Some(value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()),
+                            ..Default::default()
+                        },
+                        "group" => ipmsg_download::download_presets::PresetUpdate {
+                            group: Some(value.to_string()),
+                            ..Default::default()
+                        },
+                        "priority" => {
+                            if let Some(p) = ipmsg_download::download_presets::parse_priority(value) {
+                                ipmsg_download::download_presets::PresetUpdate {
+                                    priority: Some(p),
+                                    ..Default::default()
+                                }
+                            } else {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("Invalid priority: {}", value));
+                                return;
+                            }
+                        }
+                        "speed_limit" => {
+                            if let Some(speed) = ipmsg_download::parse_speed_limit(value) {
+                                ipmsg_download::download_presets::PresetUpdate {
+                                    speed_limit_bps: Some(speed),
+                                    ..Default::default()
+                                }
+                            } else {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("Invalid speed limit: {}", value));
+                                return;
+                            }
+                        }
+                        "category" => ipmsg_download::download_presets::PresetUpdate {
+                            category: Some(value.to_string()),
+                            ..Default::default()
+                        },
+                        "description" => ipmsg_download::download_presets::PresetUpdate {
+                            description: Some(value.to_string()),
+                            ..Default::default()
+                        },
+                        _ => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("Unknown field: {}", field));
+                            return;
+                        }
+                    };
+                    
+                    let updated = download_manager.update_download_preset(preset_id, updates).await;
+                    let mut s = state.lock().await;
+                    if updated {
+                        s.add_system_message("main", format!("✅ Updated preset {}", preset_id));
+                    } else {
+                        s.add_system_message("main", format!("Preset {} not found", preset_id));
+                    }
+                }
+                "enable" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlpreset enable <preset_id>".to_string());
+                        return;
+                    }
+                    let preset_id = &args[0];
+                    let enabled = download_manager.enable_download_preset(preset_id).await;
+                    let mut s = state.lock().await;
+                    if enabled {
+                        s.add_system_message("main", format!("✅ Enabled preset {}", preset_id));
+                    } else {
+                        s.add_system_message("main", format!("Preset {} not found", preset_id));
+                    }
+                }
+                "disable" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlpreset disable <preset_id>".to_string());
+                        return;
+                    }
+                    let preset_id = &args[0];
+                    let disabled = download_manager.disable_download_preset(preset_id).await;
+                    let mut s = state.lock().await;
+                    if disabled {
+                        s.add_system_message("main", format!("❌ Disabled preset {}", preset_id));
+                    } else {
+                        s.add_system_message("main", format!("Preset {} not found", preset_id));
+                    }
+                }
+                "categories" => {
+                    let categories = download_manager.get_preset_categories().await;
+                    let mut output = "📂 Preset Categories:\n".to_string();
+                    if categories.is_empty() {
+                        output.push_str("  (no categories)\n");
+                    } else {
+                        for cat in categories {
+                            output.push_str(&format!("  • {}\n", cat));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", output);
+                }
+                "category" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlpreset category <category_name>".to_string());
+                        return;
+                    }
+                    let category = &args[0];
+                    let presets = download_manager.list_presets_by_category(category).await;
+                    let mut output = format!("📂 Presets in category '{}':\n", category);
+                    if presets.is_empty() {
+                        output.push_str("  (no presets in this category)\n");
+                    } else {
+                        for preset in presets {
+                            let status = if preset.enabled { "✅" } else { "❌" };
+                            output.push_str(&format!(
+                                "  {} [{}] {} (priority: {})\n",
+                                status,
+                                preset.id,
+                                preset.name,
+                                match preset.priority {
+                                    1 => "Low",
+                                    3 => "High",
+                                    _ => "Normal",
+                                }
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", output);
+                }
+                "stats" | "usage" => {
+                    let summary = download_manager.get_preset_usage_summary().await;
+                    let mut output = "📊 Preset Usage Summary:\n".to_string();
+                    output.push_str(&format!("  Total presets: {}\n", summary.total_presets));
+                    output.push_str(&format!("  Enabled: {}\n", summary.enabled_presets));
+                    output.push_str(&format!("  Disabled: {}\n", summary.disabled_presets));
+                    output.push_str(&format!("  Total usage count: {}\n", summary.total_usage_count));
+                    output.push_str(&format!("  Unused presets: {}\n", summary.unused_presets_count));
+                    
+                    if let Some((ref id, count)) = summary.most_used_preset {
+                        output.push_str(&format!("  Most used: {} ({} times)\n", id, count));
+                    }
+                    if let Some((ref id, count)) = summary.least_used_preset {
+                        output.push_str(&format!("  Least used: {} ({} times)\n", id, count));
+                    }
+                    
+                    if !summary.categories.is_empty() {
+                        output.push_str("  Categories:\n");
+                        for (cat, count) in &summary.categories {
+                            output.push_str(&format!("    • {}: {} presets\n", cat, count));
+                        }
+                    }
+                    
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", output);
+                }
                 _ => {
                     let mut s = state.lock().await;
-                    s.add_system_message("main", "Usage: /dlpreset [list|show <id>|add <id> <name> [tags] [group] [priority] [speed]|del <id>|apply <preset_id> <task_id>]".to_string());
+                    s.add_system_message("main", "Usage: /dlpreset [list|show <id>|add <id> <name> [tags] [group] [priority] [speed]|del <id>|apply <preset_id> <task_id>|update <id> <field> <value>|enable <id>|disable <id>|categories|category <name>|stats]".to_string());
                 }
             }
         }
@@ -18717,7 +18890,7 @@ async fn handle_command(
                 }
             }
         }
-        Command::DlDepViz { action, args } => {
+        Command::DlDepViz { action, args: _ } => {
             let download_manager = state.lock().await.download_manager.clone();
             match action.as_str() {
                 "graph" => {
