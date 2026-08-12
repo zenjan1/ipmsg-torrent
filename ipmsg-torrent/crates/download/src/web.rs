@@ -1552,6 +1552,43 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/sla-compliance/report", get(get_sla_report_handler))
         .route(
+            "/api/source-reliability",
+            get(get_source_reliability_config_handler).post(set_source_reliability_config_handler),
+        )
+        .route(
+            "/api/source-reliability/summary",
+            get(get_source_reliability_summary_handler),
+        )
+        .route(
+            "/api/source-reliability/report",
+            get(get_source_reliability_report_handler),
+        )
+        .route(
+            "/api/source-reliability/domains",
+            get(list_source_reliability_domains_handler),
+        )
+        .route(
+            "/api/source-reliability/domain/:domain",
+            get(get_source_reliability_domain_handler)
+                .delete(clear_source_reliability_domain_handler),
+        )
+        .route(
+            "/api/source-reliability/score/:domain",
+            get(get_source_reliability_score_handler),
+        )
+        .route(
+            "/api/source-reliability/avoid",
+            get(get_source_reliability_avoid_handler),
+        )
+        .route(
+            "/api/source-reliability/prune",
+            post(prune_source_reliability_handler),
+        )
+        .route(
+            "/api/source-reliability/clear",
+            post(clear_source_reliability_handler),
+        )
+        .route(
             "/api/host-conn-limit",
             get(get_host_conn_limit_config_handler).post(set_host_conn_limit_config_handler),
         )
@@ -10588,6 +10625,115 @@ async fn clear_all_sla_history_handler(
 async fn get_sla_report_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let report = state.manager.format_sla_report().await;
     Json(serde_json::json!({"report": report}))
+}
+
+// ========== Source Reliability Tracker API (Phase 163) ==========
+
+/// GET /api/source-reliability - Get source reliability configuration
+async fn get_source_reliability_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_source_reliability_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/source-reliability - Update source reliability configuration
+async fn set_source_reliability_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::source_reliability::SourceReliabilityConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_source_reliability_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/source-reliability/summary - Get source reliability summary
+async fn get_source_reliability_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.manager.get_source_reliability_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/source-reliability/report - Get formatted reliability report
+async fn get_source_reliability_report_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let report = state.manager.format_source_reliability_summary().await;
+    Json(serde_json::json!({"report": report}))
+}
+
+/// GET /api/source-reliability/domains - List all tracked domains
+async fn list_source_reliability_domains_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let domains = state.manager.get_source_reliability_domains().await;
+    Json(serde_json::to_value(domains).unwrap_or_default())
+}
+
+/// GET /api/source-reliability/domain/:domain - Get reliability data for a domain
+async fn get_source_reliability_domain_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.manager.get_source_reliability_domain(&domain).await {
+        Some(dr) => Ok(Json(serde_json::to_value(dr).unwrap_or_default())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// DELETE /api/source-reliability/domain/:domain - Clear reliability data for a domain
+async fn clear_source_reliability_domain_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> StatusCode {
+    state.manager.clear_source_reliability_domain(&domain).await;
+    StatusCode::OK
+}
+
+/// GET /api/source-reliability/score/:domain - Get reliability score for a domain
+async fn get_source_reliability_score_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let score = state.manager.get_source_reliability_score(&domain).await;
+    let tier = state.manager.get_source_reliability_tier(&domain).await;
+    Json(serde_json::json!({"domain": domain, "score": score, "tier": format!("{}", tier)}))
+}
+
+/// GET /api/source-reliability/avoid - Get domains marked for avoidance
+async fn get_source_reliability_avoid_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let avoid = state.manager.get_source_reliability_avoid().await;
+    let avoid_json: Vec<serde_json::Value> = avoid
+        .into_iter()
+        .map(|(domain, score)| serde_json::json!({"domain": domain, "score": score}))
+        .collect();
+    Json(serde_json::json!({"avoid_domains": avoid_json}))
+}
+
+/// POST /api/source-reliability/prune - Prune old samples
+async fn prune_source_reliability_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let timestamp = body
+        .get("before_timestamp")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    state
+        .manager
+        .prune_source_reliability_samples(timestamp)
+        .await;
+    Json(serde_json::json!({"status": "ok", "pruned_before": timestamp}))
+}
+
+/// POST /api/source-reliability/clear - Clear all reliability data
+async fn clear_source_reliability_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_source_reliability().await;
+    Json(serde_json::json!({"status": "ok"}))
 }
 
 // ========== Notification Center API (Phase 147) ==========

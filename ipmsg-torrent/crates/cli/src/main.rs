@@ -861,6 +861,12 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Source reliability tracker (status|summary|domain|score|tier|avoid|prune|clear|config)
+    DlSrcReliability {
+        /// Subcommand: status|summary|domain|score|tier|avoid|prune|clear|config
+        subcommand: String,
+        args: Vec<String>,
+    },
     Block {
         peer: String,
     },
@@ -2701,6 +2707,25 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlreliability" | "dl-reliability" | "dlsr" => {
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlreliability <status|summary|domain|score|tier|avoid|prune|clear|config>"
+                        .to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlSrcReliability {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlmirror" | "dl-mirror" | "dlmir" => {
             // /dlmirror <task_id> <url1,url2,...|clear>
             let args: Vec<&str> = input.splitn(3, ' ').collect();
@@ -2989,6 +3014,7 @@ fn command_help() -> String {
         "/dlheatmap [cmd]  - Speed heatmap by hour/day (status|report|hour|day|quality|config|prune|reset)",
         "/dlprediction [cmd] - Progress prediction (status|predict|predict-all|accuracy|remove|clear|config)",
         "/dllinkrot [cmd]  - Link rot detection (status|summary|report|check <id>|clear|save)",
+        "/dlreliability [cmd] - Source reliability tracker (status|summary|domain|score|tier|avoid|domains|prune|clear|config)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -15419,6 +15445,247 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlsw <status|config|list|add|remove|check>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlSrcReliability { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_source_reliability_config().await;
+                    let summary = download_manager.get_source_reliability_summary().await;
+                    let msg = format!(
+                        "📊 Source Reliability Tracker Status:\n\
+                         Enabled: {}\n\
+                         Max samples/domain: {}\n\
+                         Min attempts: {}\n\
+                         Decay factor: {:.2}\n\
+                         Weights: success={:.1} speed={:.1} failure={:.1}\n\
+                         Ignored domains: {}\n\
+                         \n\
+                         Summary:\n\
+                         Total domains tracked: {}\n\
+                         Average reliability: {:.1}%\n\
+                         Total samples: {}\n\
+                         \n\
+                         Tier distribution:\n\
+                         🟢 Excellent: {}\n\
+                         🔵 Good: {}\n\
+                         🟡 Fair: {}\n\
+                         🟠 Poor: {}\n\
+                         🔴 Unreliable: {}",
+                        config.enabled,
+                        config.max_samples_per_domain,
+                        config.min_attempts,
+                        config.decay_factor,
+                        config.success_weight,
+                        config.speed_weight,
+                        config.failure_weight,
+                        if config.ignored_domains.is_empty() {
+                            "none".to_string()
+                        } else {
+                            config.ignored_domains.join(", ")
+                        },
+                        summary.total_domains,
+                        summary.avg_reliability * 100.0,
+                        summary.total_samples,
+                        summary.excellent_count,
+                        summary.good_count,
+                        summary.fair_count,
+                        summary.poor_count,
+                        summary.unreliable_count,
+                    );
+                    s.add_system_message("main", msg);
+                }
+                "summary" | "report" => {
+                    let report = download_manager.format_source_reliability_summary().await;
+                    s.add_system_message("main", report);
+                }
+                "domain" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlreliability domain <domain_name>".to_string(),
+                        );
+                    } else {
+                        let domain = &args[0];
+                        match download_manager.get_source_reliability_domain(domain).await {
+                            Some(dr) => {
+                                let mut msg = format!(
+                                    "📊 Domain: {}\n\
+                                     Tier: {}\n\
+                                     Score: {:.2}\n\
+                                     Success rate: {:.1}%\n\
+                                     Successes: {} | Failures: {}\n\
+                                     Avg speed: {} B/s | Peak speed: {} B/s\n\
+                                     Samples: {}\n",
+                                    dr.domain,
+                                    dr.tier(),
+                                    dr.score,
+                                    dr.success_rate() * 100.0,
+                                    dr.total_successes,
+                                    dr.total_failures,
+                                    dr.avg_speed_bps,
+                                    dr.peak_speed_bps,
+                                    dr.samples.len(),
+                                );
+                                if let Some(last) = dr.samples.last() {
+                                    msg.push_str(&format!(
+                                        "Last sample: {} B/s ({})",
+                                        last.speed_bps,
+                                        if last.success { "success" } else { "failed" }
+                                    ));
+                                }
+                                s.add_system_message("main", msg);
+                            }
+                            None => {
+                                s.add_system_message(
+                                    "main",
+                                    format!("No reliability data for domain '{}'", domain),
+                                );
+                            }
+                        }
+                    }
+                }
+                "score" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlreliability score <domain_name>".to_string(),
+                        );
+                    } else {
+                        let domain = &args[0];
+                        let score = download_manager.get_source_reliability_score(domain).await;
+                        let tier = download_manager.get_source_reliability_tier(domain).await;
+                        s.add_system_message(
+                            "main",
+                            format!("Domain '{}': score={:.2}, tier={}", domain, score, tier),
+                        );
+                    }
+                }
+                "tier" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlreliability tier <domain_name>".to_string(),
+                        );
+                    } else {
+                        let domain = &args[0];
+                        let tier = download_manager.get_source_reliability_tier(domain).await;
+                        s.add_system_message("main", format!("Domain '{}': tier={}", domain, tier));
+                    }
+                }
+                "avoid" => {
+                    let avoid = download_manager.get_source_reliability_avoid().await;
+                    if avoid.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "No domains marked for avoidance.".to_string(),
+                        );
+                    } else {
+                        let mut msg = format!("⚠️ Domains to avoid ({}):\n", avoid.len());
+                        for (domain, score) in &avoid {
+                            msg.push_str(&format!("  {} (score: {:.2})\n", domain, score));
+                        }
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "domains" | "list" => {
+                    let domains = download_manager.get_source_reliability_domains().await;
+                    if domains.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "No reliability data tracked yet.".to_string(),
+                        );
+                    } else {
+                        let mut msg = format!("📊 All tracked domains ({}):\n", domains.len());
+                        for dr in &domains {
+                            msg.push_str(&format!(
+                                "  {} [{}] score={:.2} success={:.0}% avg={}B/s\n",
+                                dr.domain,
+                                dr.tier(),
+                                dr.score,
+                                dr.success_rate() * 100.0,
+                                dr.avg_speed_bps,
+                            ));
+                        }
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "prune" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlreliability prune <timestamp>".to_string(),
+                        );
+                    } else {
+                        match args[0].parse::<u64>() {
+                            Ok(ts) => {
+                                download_manager.prune_source_reliability_samples(ts).await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("Pruned samples older than timestamp {}", ts),
+                                );
+                            }
+                            Err(_) => {
+                                s.add_system_message(
+                                    "main",
+                                    "Invalid timestamp. Use unix epoch seconds.".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                "clear" => {
+                    if args.is_empty() {
+                        download_manager.clear_source_reliability().await;
+                        s.add_system_message(
+                            "main",
+                            "Cleared all source reliability data.".to_string(),
+                        );
+                    } else {
+                        let domain = &args[0];
+                        download_manager
+                            .clear_source_reliability_domain(domain)
+                            .await;
+                        s.add_system_message(
+                            "main",
+                            format!("Cleared reliability data for domain '{}'", domain),
+                        );
+                    }
+                }
+                "config" => {
+                    let config = download_manager.get_source_reliability_config().await;
+                    let msg = format!(
+                        "Source Reliability Config:\n\
+                         enabled: {}\n\
+                         max_samples_per_domain: {}\n\
+                         min_attempts: {}\n\
+                         decay_factor: {:.2}\n\
+                         success_weight: {:.2}\n\
+                         speed_weight: {:.2}\n\
+                         failure_weight: {:.2}\n\
+                         ignored_domains: {:?}",
+                        config.enabled,
+                        config.max_samples_per_domain,
+                        config.min_attempts,
+                        config.decay_factor,
+                        config.success_weight,
+                        config.speed_weight,
+                        config.failure_weight,
+                        config.ignored_domains,
+                    );
+                    s.add_system_message("main", msg);
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlreliability <status|summary|domain|score|tier|avoid|domains|prune|clear|config>".to_string(),
                     );
                 }
             }
