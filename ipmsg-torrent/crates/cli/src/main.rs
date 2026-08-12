@@ -351,6 +351,12 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
+    /// Completion probability estimator - predict download success rate (Phase 162)
+    DlCompletionProb {
+        /// "status", "config", "estimate <task_id>", "summary", "clear", "save", "load"
+        action: String,
+        args: Vec<String>,
+    },
     /// Path organizer - auto-organize files by extension (Phase 133)
     DlPathOrganizer {
         /// "status", "enable", "disable", "add", "remove", "list", "organize"
@@ -1592,6 +1598,22 @@ fn parse_command(input: &str) -> Command {
                 )
             }
         }
+        "dlcprob" | "dl-cprob" | "dlcp" => {
+            // /dlcprob <subcommand> [args...]
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                let subcmd = args[1].to_string();
+                let sub_args: Vec<String> = args[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlCompletionProb {
+                    action: subcmd,
+                    args: sub_args,
+                }
+            } else {
+                Command::Unknown(
+                    "/dlcprob <status|config|estimate|summary|clear|save|load>".to_string(),
+                )
+            }
+        }
         "dlactivity" | "dl-activity" => {
             // /dlactivity <subcommand> [args...]
             let args: Vec<&str> = input.split_whitespace().collect();
@@ -1930,7 +1952,7 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dlgroups" | "dl-groups" | "dlgrps" => Command::DlGroups,
-        "dlclone" | "dl-clone" | "dlcp" => {
+        "dlclone" | "dl-clone" => {
             // /dlclone <task_id>
             let args: Vec<&str> = input.splitn(2, ' ').collect();
             if args.len() >= 2 {
@@ -2731,6 +2753,25 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlts" | "dl-task-scheduler" | "dltaskscheduler" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlts <status|config|rules|add|remove|enable|disable|evaluate>".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlTaskScheduler {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlreliability" | "dl-reliability" | "dlsr" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
@@ -3021,6 +3062,7 @@ fn command_help() -> String {
         "/dlresumepolicy [cmd] - Resume policy (status|set|preview)",
         "/dlanomaly [cmd] - Speed anomaly detection (status|list|summary|remove|clear|config)",
         "/dlsw [cmd]      - Task schedule windows (status|config|list|add|remove|check)",
+        "/dlts [cmd]      - Task scheduler (status|config|rules|add|remove|enable|disable|evaluate)",
         "/dlttl [cmd]      - Task TTL management (status|enable|disable|set <duration> [interval]|task <id> <duration>|summary)",
         "/dlerrrec [cmd]   - Error recovery (status|enable|disable|set <category> <strategy>|reset|test <error>)",
         "/dlchain [cmd]    - Task chains (list|create|delete|add|remove|enable|disable|summary)",
@@ -3040,6 +3082,7 @@ fn command_help() -> String {
         "/dlheatmap [cmd]  - Speed heatmap by hour/day (status|report|hour|day|quality|config|prune|reset)",
         "/dlprediction [cmd] - Progress prediction (status|predict|predict-all|accuracy|remove|clear|config)",
         "/dllinkrot [cmd]  - Link rot detection (status|summary|report|check <id>|clear|save)",
+        "/dlcprob [cmd]    - Completion probability estimator (status|summary|estimate <id>|clear|save|load)",
         "/dlreliability [cmd] - Source reliability tracker (status|summary|domain|score|tier|avoid|domains|prune|clear|config)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
@@ -15816,6 +15859,365 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlTaskScheduler { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_task_scheduler_config().await;
+                    let evaluation = download_manager.evaluate_schedule_now().await;
+                    let rules = download_manager.get_schedule_rules().await;
+                    let mut output = String::new();
+                    output.push_str("⏰ Task Scheduler Status:\n");
+                    output.push_str(&format!("  Enabled: {}\n", config.enabled));
+                    output.push_str(&format!(
+                        "  High priority bypass quiet hours: {}\n",
+                        config.high_priority_bypass_quiet
+                    ));
+                    output.push_str(&format!(
+                        "  Quiet hours speed limit: {} B/s\n",
+                        config.quiet_hours_speed_limit_bps
+                    ));
+                    output.push_str(&format!(
+                        "  Low bandwidth speed limit: {} B/s\n",
+                        config.low_bandwidth_speed_limit_bps
+                    ));
+                    output.push_str(&format!("  Total rules: {}\n", rules.len()));
+                    output.push_str(&format!(
+                        "  Enabled rules: {}\n",
+                        rules.iter().filter(|r| r.enabled).count()
+                    ));
+                    output.push_str("\n📊 Current Evaluation:\n");
+                    output.push_str(&format!(
+                        "  Should pause: {}\n",
+                        if evaluation.should_pause { "Yes" } else { "No" }
+                    ));
+                    output.push_str(&format!(
+                        "  Speed limit: {} B/s\n",
+                        evaluation.speed_limit_bps
+                    ));
+                    if !evaluation.active_rule_ids.is_empty() {
+                        output.push_str(&format!(
+                            "  Active rules: {}\n",
+                            evaluation.active_rule_ids.join(", ")
+                        ));
+                    }
+                    output.push_str(&format!("  Description: {}\n", evaluation.description));
+                    s.add_system_message("main", output);
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_task_scheduler_config().await;
+                        let mut output = String::new();
+                        output.push_str("⚙️  Task Scheduler Config:\n");
+                        output.push_str(&format!("  enabled: {}\n", config.enabled));
+                        output.push_str(&format!(
+                            "  high_priority_bypass_quiet: {}\n",
+                            config.high_priority_bypass_quiet
+                        ));
+                        output.push_str(&format!(
+                            "  quiet_hours_speed_limit_bps: {}\n",
+                            config.quiet_hours_speed_limit_bps
+                        ));
+                        output.push_str(&format!(
+                            "  low_bandwidth_speed_limit_bps: {}\n",
+                            config.low_bandwidth_speed_limit_bps
+                        ));
+                        s.add_system_message("main", output);
+                    } else {
+                        let mut config = download_manager.get_task_scheduler_config().await;
+                        match args[0].as_str() {
+                            "enabled" => config.enabled = true,
+                            "disabled" => config.enabled = false,
+                            "bypass" => {
+                                if args.len() > 1 {
+                                    match args[1].as_str() {
+                                        "true" | "yes" | "1" => {
+                                            config.high_priority_bypass_quiet = true
+                                        }
+                                        "false" | "no" | "0" => {
+                                            config.high_priority_bypass_quiet = false
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            "quiet-limit" => {
+                                if args.len() > 1 {
+                                    if let Ok(limit) = args[1].parse::<u64>() {
+                                        config.quiet_hours_speed_limit_bps = limit;
+                                    }
+                                }
+                            }
+                            "low-limit" => {
+                                if args.len() > 1 {
+                                    if let Ok(limit) = args[1].parse::<u64>() {
+                                        config.low_bandwidth_speed_limit_bps = limit;
+                                    }
+                                }
+                            }
+                            _ => {
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dlts config [enabled|disabled|bypass <true|false>|quiet-limit <bps>|low-limit <bps>]"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                        }
+                        match download_manager.set_task_scheduler_config(config).await {
+                            Ok(_) => {
+                                s.add_system_message(
+                                    "main",
+                                    "Task scheduler config updated.".to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                s.add_system_message(
+                                    "main",
+                                    format!("Failed to update config: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "rules" => {
+                    let rules = download_manager.get_schedule_rules().await;
+                    if rules.is_empty() {
+                        s.add_system_message("main", "No schedule rules configured.".to_string());
+                    } else {
+                        let mut output = String::new();
+                        output.push_str(&format!("⏰ Schedule Rules ({}):\n", rules.len()));
+                        for rule in &rules {
+                            output.push_str(&format!(
+                                "  [{}] {} ({:?}) {:02}:{:02}-{:02}:{:02}",
+                                rule.id,
+                                rule.name,
+                                rule.schedule_type,
+                                rule.start_hour,
+                                rule.start_minute,
+                                rule.end_hour,
+                                rule.end_minute
+                            ));
+                            if !rule.days_of_week.is_empty() {
+                                output.push_str(&format!(" days={:?}", rule.days_of_week));
+                            }
+                            output.push_str(&format!(
+                                " priority={} speed_limit={} B/s\n",
+                                rule.priority, rule.speed_limit_bps
+                            ));
+                        }
+                        s.add_system_message("main", output);
+                    }
+                }
+                "add" => {
+                    if args.len() < 5 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlts add <id> <name> <type> <HH:MM-HH:MM> [priority] [speed_limit]"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    let id = &args[0];
+                    let name = &args[1];
+                    let schedule_type = match args[2].to_lowercase().as_str() {
+                        "quiet" | "quiethours" => {
+                            ipmsg_download::task_scheduler::ScheduleType::QuietHours
+                        }
+                        "active" | "activehours" => {
+                            ipmsg_download::task_scheduler::ScheduleType::ActiveHours
+                        }
+                        "high" | "highbandwidth" => {
+                            ipmsg_download::task_scheduler::ScheduleType::HighBandwidth
+                        }
+                        "low" | "lowbandwidth" => {
+                            ipmsg_download::task_scheduler::ScheduleType::LowBandwidth
+                        }
+                        _ => {
+                            s.add_system_message(
+                                "main",
+                                "Invalid schedule type. Use: quiet|active|high|low".to_string(),
+                            );
+                            return;
+                        }
+                    };
+                    let time_range = &args[3];
+                    let times: Vec<&str> = time_range.split('-').collect();
+                    if times.len() != 2 {
+                        s.add_system_message(
+                            "main",
+                            "Invalid time range format. Use HH:MM-HH:MM".to_string(),
+                        );
+                        return;
+                    }
+                    let start_parts: Vec<&str> = times[0].split(':').collect();
+                    let end_parts: Vec<&str> = times[1].split(':').collect();
+                    if start_parts.len() != 2 || end_parts.len() != 2 {
+                        s.add_system_message("main", "Invalid time format. Use HH:MM".to_string());
+                        return;
+                    }
+                    let start_hour = match start_parts[0].parse::<u32>() {
+                        Ok(h) => h,
+                        Err(_) => {
+                            s.add_system_message("main", "Invalid start hour".to_string());
+                            return;
+                        }
+                    };
+                    let start_minute = match start_parts[1].parse::<u32>() {
+                        Ok(m) => m,
+                        Err(_) => {
+                            s.add_system_message("main", "Invalid start minute".to_string());
+                            return;
+                        }
+                    };
+                    let end_hour = match end_parts[0].parse::<u32>() {
+                        Ok(h) => h,
+                        Err(_) => {
+                            s.add_system_message("main", "Invalid end hour".to_string());
+                            return;
+                        }
+                    };
+                    let end_minute = match end_parts[1].parse::<u32>() {
+                        Ok(m) => m,
+                        Err(_) => {
+                            s.add_system_message("main", "Invalid end minute".to_string());
+                            return;
+                        }
+                    };
+                    let mut rule = ipmsg_download::task_scheduler::ScheduleRule::new(
+                        id,
+                        name,
+                        schedule_type,
+                        start_hour,
+                        start_minute,
+                        end_hour,
+                        end_minute,
+                    );
+                    if args.len() > 4 {
+                        if let Ok(priority) = args[4].parse::<i32>() {
+                            rule = rule.with_priority(priority);
+                        }
+                    }
+                    if args.len() > 5 {
+                        if let Ok(speed_limit) = args[5].parse::<u64>() {
+                            rule = rule.with_speed_limit(speed_limit);
+                        }
+                    }
+                    match download_manager.add_schedule_rule(rule).await {
+                        Ok(_) => {
+                            s.add_system_message(
+                                "main",
+                                format!("Added schedule rule '{}' ({})", name, id),
+                            );
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Failed to add rule: {}", e));
+                        }
+                    }
+                }
+                "remove" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlts remove <rule_id>".to_string());
+                        return;
+                    }
+                    let rule_id = &args[0];
+                    match download_manager.remove_schedule_rule(rule_id).await {
+                        Ok(true) => {
+                            s.add_system_message(
+                                "main",
+                                format!("Removed schedule rule '{}'", rule_id),
+                            );
+                        }
+                        Ok(false) => {
+                            s.add_system_message("main", format!("Rule '{}' not found", rule_id));
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Failed to remove rule: {}", e));
+                        }
+                    }
+                }
+                "enable" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlts enable <rule_id>".to_string());
+                        return;
+                    }
+                    let rule_id = &args[0];
+                    match download_manager
+                        .set_schedule_rule_enabled(rule_id, true)
+                        .await
+                    {
+                        Ok(true) => {
+                            s.add_system_message(
+                                "main",
+                                format!("Enabled schedule rule '{}'", rule_id),
+                            );
+                        }
+                        Ok(false) => {
+                            s.add_system_message("main", format!("Rule '{}' not found", rule_id));
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Failed to enable rule: {}", e));
+                        }
+                    }
+                }
+                "disable" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlts disable <rule_id>".to_string());
+                        return;
+                    }
+                    let rule_id = &args[0];
+                    match download_manager
+                        .set_schedule_rule_enabled(rule_id, false)
+                        .await
+                    {
+                        Ok(true) => {
+                            s.add_system_message(
+                                "main",
+                                format!("Disabled schedule rule '{}'", rule_id),
+                            );
+                        }
+                        Ok(false) => {
+                            s.add_system_message("main", format!("Rule '{}' not found", rule_id));
+                        }
+                        Err(e) => {
+                            s.add_system_message("main", format!("Failed to disable rule: {}", e));
+                        }
+                    }
+                }
+                "evaluate" => {
+                    let evaluation = download_manager.evaluate_schedule_now().await;
+                    let mut output = String::new();
+                    output.push_str("⏰ Current Schedule Evaluation:\n");
+                    output.push_str(&format!(
+                        "  Should pause: {}\n",
+                        if evaluation.should_pause { "Yes" } else { "No" }
+                    ));
+                    output.push_str(&format!(
+                        "  Speed limit: {} B/s\n",
+                        evaluation.speed_limit_bps
+                    ));
+                    if !evaluation.active_rule_ids.is_empty() {
+                        output.push_str(&format!(
+                            "  Active rules: {}\n",
+                            evaluation.active_rule_ids.join(", ")
+                        ));
+                    }
+                    output.push_str(&format!("  Description: {}\n", evaluation.description));
+                    s.add_system_message("main", output);
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlts <status|config|rules|add|remove|enable|disable|evaluate>"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         Command::DlSrcReliability { subcommand, args } => {
             let download_manager = {
                 let s = state.lock().await;
@@ -20726,6 +21128,166 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dllinkrot [status|summary|report|check <id>|clear|save]"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlCompletionProb { action, args } => {
+            let download_manager = state.lock().await.download_manager.clone();
+            match action.as_str() {
+                "status" | "config" => {
+                    let config = download_manager.get_completion_probability_config().await;
+                    let msg = format!(
+                        "📊 Completion Probability Estimator Config:\n\
+                         Enabled: {}\n\
+                         Weights: reliability={:.0}% network={:.0}% history={:.0}% task_state={:.0}% disk={:.0}% error={:.0}%\n\
+                         Min Recommended Probability: {:.1}%\n\
+                         Max Cache Size: {}",
+                        config.enabled,
+                        config.weight_reliability * 100.0,
+                        config.weight_network * 100.0,
+                        config.weight_history * 100.0,
+                        config.weight_task_state * 100.0,
+                        config.weight_disk * 100.0,
+                        config.weight_error * 100.0,
+                        config.min_recommended_probability,
+                        config.max_cache_size,
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "summary" => {
+                    let summary = download_manager.get_completion_probability_summary().await;
+                    let mut msg = String::from("📊 Completion Probability Summary:\n");
+                    msg.push_str(&format!(
+                        "  Cached Estimates: {}\n",
+                        summary.cached_estimates
+                    ));
+                    msg.push_str(&format!(
+                        "  Average Probability: {:.1}%\n",
+                        summary.average_probability
+                    ));
+                    msg.push_str(&format!(
+                        "  ✅ High (>80%): {}\n",
+                        summary.high_probability_count
+                    ));
+                    msg.push_str(&format!(
+                        "  🟡 Moderate (40-80%): {}\n",
+                        summary.moderate_probability_count
+                    ));
+                    msg.push_str(&format!(
+                        "  🔴 Low (<40%): {}\n",
+                        summary.low_probability_count
+                    ));
+                    if !summary.tasks_by_probability.is_empty() {
+                        msg.push_str("\n📋 Tasks (sorted by probability):\n");
+                        for entry in &summary.tasks_by_probability {
+                            msg.push_str(&format!(
+                                "  {} {} - {:.1}% (confidence: {})\n",
+                                entry.category.emoji(),
+                                entry.task_id,
+                                entry.probability,
+                                entry.confidence,
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "estimate" => {
+                    if let Some(task_id) = args.first() {
+                        let tasks = download_manager.list_tasks().await;
+                        if let Some(task) = tasks.iter().find(|t| t.id == *task_id) {
+                            let domain = task.source_url.as_ref().and_then(|u| {
+                                // Extract domain from URL without external crate
+                                u.strip_prefix("http://")
+                                    .or_else(|| u.strip_prefix("https://"))
+                                    .or_else(|| u.strip_prefix("ftp://"))
+                                    .map(|rest| {
+                                        rest.split('/')
+                                            .next()
+                                            .unwrap_or(rest)
+                                            .split(':')
+                                            .next()
+                                            .unwrap_or(rest)
+                                            .to_string()
+                                    })
+                            });
+                            let input =
+                                ipmsg_download::completion_probability::TaskProbabilityInput {
+                                    task_id: task.id.clone(),
+                                    source_domain: domain,
+                                    protocol: format!("{:?}", task.protocol).to_lowercase(),
+                                    progress: task.progress() as f64 / 100.0,
+                                    retry_count: task.auto_retry_count,
+                                    error_count: 0,
+                                    stall_count: 0,
+                                    is_paused: task.state == ipmsg_download::DownloadState::Paused,
+                                    file_size_bytes: task.size,
+                                };
+                            let signals =
+                                ipmsg_download::completion_probability::EstimatorSignals::default();
+                            let result = download_manager
+                                .estimate_completion_probability(input, signals)
+                                .await;
+                            let report = ipmsg_download::completion_probability::CompletionProbabilityEstimator::format_report(&result);
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", report);
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!("❌ Task '{}' not found", task_id),
+                            );
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlcprob estimate <task_id>".to_string(),
+                        );
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_completion_probability_cache().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ Completion probability cache cleared".to_string(),
+                    );
+                }
+                "save" => match download_manager.save_completion_probability_config().await {
+                    Ok(_) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "✅ Completion probability config saved".to_string(),
+                        );
+                    }
+                    Err(e) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("❌ Save failed: {}", e));
+                    }
+                },
+                "load" => match download_manager.load_completion_probability_config().await {
+                    Ok(_) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "✅ Completion probability config loaded".to_string(),
+                        );
+                    }
+                    Err(e) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("❌ Load failed: {}", e));
+                    }
+                },
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlcprob [status|summary|estimate <id>|clear|save|load]"
                             .to_string(),
                     );
                 }

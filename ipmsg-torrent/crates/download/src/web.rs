@@ -2,6 +2,7 @@
 //!
 //! Provides a REST API, WebSocket real-time updates, and HTML frontend.
 
+use crate::completion_probability;
 use crate::save_path_manager::{FileCategory, SavePathConfig, SavePathManager};
 use crate::sla_compliance;
 use crate::{DownloadManager, DownloadState, DownloadTask};
@@ -782,6 +783,11 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/task-scheduler",
             post(set_task_scheduler_config_handler),
         )
+        .route(
+            "/api/task-scheduler/config",
+            get(get_task_scheduler_config_handler),
+        )
+        .route("/api/task-scheduler/rules", get(get_schedule_rules_handler))
         .route("/api/task-scheduler/rules", post(add_schedule_rule_handler))
         .route(
             "/api/task-scheduler/rules/:id",
@@ -790,6 +796,10 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route(
             "/api/task-scheduler/rules/:id",
             post(set_schedule_rule_enabled_handler),
+        )
+        .route(
+            "/api/task-scheduler/evaluate",
+            get(evaluate_schedule_now_handler),
         )
         .route(
             "/api/progress-milestone",
@@ -1797,6 +1807,27 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route(
             "/api/bandwidth-usage/format",
             get(get_bandwidth_usage_format_handler),
+        )
+        .route(
+            "/api/completion-probability",
+            get(get_completion_probability_config_handler)
+                .post(set_completion_probability_config_handler),
+        )
+        .route(
+            "/api/completion-probability/summary",
+            get(get_completion_probability_summary_handler),
+        )
+        .route(
+            "/api/completion-probability/estimate",
+            post(estimate_completion_probability_handler),
+        )
+        .route(
+            "/api/completion-probability/cache/:task_id",
+            get(get_cached_completion_probability_handler),
+        )
+        .route(
+            "/api/completion-probability/cache",
+            post(clear_completion_probability_cache_handler),
         )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
@@ -4295,6 +4326,30 @@ async fn set_schedule_rule_enabled_handler(
         Ok(false) => Json(serde_json::json!({"error": "rule not found"})),
         Err(e) => Json(serde_json::json!({"error": e.to_string()})),
     }
+}
+
+/// Get task scheduler configuration
+async fn get_task_scheduler_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_task_scheduler_config().await;
+    Json(config)
+}
+
+/// Get all schedule rules
+async fn get_schedule_rules_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let rules = state.manager.get_schedule_rules().await;
+    Json(rules)
+}
+
+/// Evaluate schedules at the current time
+async fn evaluate_schedule_now_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let evaluation = state.manager.evaluate_schedule_now().await;
+    Json(evaluation)
 }
 
 /// Get progress milestone configuration
@@ -7752,6 +7807,75 @@ async fn check_task_schedule_allowed(
         "allowed": allowed,
         "next_allowed": next_time.map(|t| t.to_rfc3339())
     }))
+}
+
+// ========== Phase 162: Completion Probability REST API ==========
+
+/// GET /api/completion-probability - Get completion probability configuration
+async fn get_completion_probability_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<completion_probability::CompletionProbabilityConfig> {
+    Json(state.manager.get_completion_probability_config().await)
+}
+
+/// POST /api/completion-probability - Update completion probability configuration
+async fn set_completion_probability_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<completion_probability::CompletionProbabilityConfig>,
+) -> StatusCode {
+    state
+        .manager
+        .set_completion_probability_config(config)
+        .await;
+    StatusCode::OK
+}
+
+/// GET /api/completion-probability/summary - Get summary of cached estimates
+async fn get_completion_probability_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<completion_probability::EstimatorSummary> {
+    Json(state.manager.get_completion_probability_summary().await)
+}
+
+/// POST /api/completion-probability/estimate - Estimate completion probability for a task
+async fn estimate_completion_probability_handler(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<EstimateProbabilityRequest>,
+) -> Json<completion_probability::CompletionProbability> {
+    Json(
+        state
+            .manager
+            .estimate_completion_probability(request.input, request.signals)
+            .await,
+    )
+}
+
+/// GET /api/completion-probability/cache/:task_id - Get cached estimate for a task
+async fn get_cached_completion_probability_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<completion_probability::CompletionProbability>, StatusCode> {
+    state
+        .manager
+        .get_cached_completion_probability(&task_id)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// POST /api/completion-probability/cache - Clear all cached estimates
+async fn clear_completion_probability_cache_handler(
+    State(state): State<Arc<WebState>>,
+) -> StatusCode {
+    state.manager.clear_completion_probability_cache().await;
+    StatusCode::OK
+}
+
+/// Request body for estimating completion probability
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EstimateProbabilityRequest {
+    input: completion_probability::TaskProbabilityInput,
+    signals: completion_probability::EstimatorSignals,
 }
 
 #[cfg(test)]

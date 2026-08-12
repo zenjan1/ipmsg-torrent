@@ -22,6 +22,7 @@ pub mod bandwidth_schedule;
 pub mod bandwidth_usage;
 pub mod bulk_ops;
 pub mod checksum;
+pub mod completion_probability;
 pub mod conflict_detection;
 pub mod connection_health;
 pub mod connection_pool;
@@ -1091,6 +1092,8 @@ pub struct DownloadManager {
     url_blacklist: Arc<tokio::sync::RwLock<url_blacklist::BlacklistConfig>>,
     /// Connection pool for TCP connection reuse and DNS caching (Phase 157)
     connection_pool: Arc<connection_pool::ConnectionPool>,
+    /// Download completion probability estimator (Phase 162)
+    completion_probability: Arc<Mutex<completion_probability::CompletionProbabilityEstimator>>,
 }
 
 impl DownloadManager {
@@ -1205,6 +1208,9 @@ impl DownloadManager {
                 url_blacklist::BlacklistConfig::default(),
             )),
             connection_pool: Arc::new(connection_pool::ConnectionPool::new()),
+            completion_probability: Arc::new(Mutex::new(
+                completion_probability::CompletionProbabilityEstimator::new(),
+            )),
             task_snooze: Arc::new(Mutex::new(task_snooze::TaskSnoozeManager::new())),
             task_scheduler: Arc::new(Mutex::new(task_scheduler::TaskSchedulerManager::new())),
             progress_milestone: Arc::new(Mutex::new(
@@ -1503,6 +1509,9 @@ impl DownloadManager {
                 url_blacklist::BlacklistConfig::default(),
             )),
             connection_pool: Arc::new(connection_pool::ConnectionPool::new()),
+            completion_probability: Arc::new(Mutex::new(
+                completion_probability::CompletionProbabilityEstimator::new(),
+            )),
             speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
             speed_anomaly: Arc::new(Mutex::new(speed_anomaly::SpeedAnomalyDetector::new(
                 speed_anomaly::AnomalyConfig::default(),
@@ -10912,6 +10921,55 @@ impl DownloadManager {
         let _ = download_history_analytics::save_analytics_config(&mgr.config, &self.data_dir);
     }
 
+    // ========== Download History API (Phase 162) ==========
+
+    /// Get download history summary (counts by outcome, protocol, total size)
+    pub async fn get_download_history_summary(&self) -> download_history::HistorySummary {
+        let entries = self.get_download_history_entries().await;
+        download_history::HistorySummary::from_entries(&entries)
+    }
+
+    /// Search download history by name substring
+    pub async fn search_download_history(
+        &self,
+        query: &str,
+    ) -> Vec<download_history::HistoryEntry> {
+        let entries = self.get_download_history_entries().await;
+        let q = query.to_lowercase();
+        entries
+            .into_iter()
+            .filter(|e| e.name.to_lowercase().contains(&q))
+            .collect()
+    }
+
+    /// Get download history entries filtered by outcome
+    pub async fn get_download_history_by_outcome(
+        &self,
+        outcome: download_history::HistoryOutcome,
+    ) -> Vec<download_history::HistoryEntry> {
+        let entries = self.get_download_history_entries().await;
+        entries
+            .into_iter()
+            .filter(|e| e.outcome == outcome)
+            .collect()
+    }
+
+    /// Remove a single entry from download history by task_id
+    pub async fn remove_download_history_entry(&self, task_id: &str) -> bool {
+        match download_history::remove_entry(&self.data_dir, task_id) {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to remove download history entry");
+                false
+            }
+        }
+    }
+
+    /// Clear all download history
+    pub async fn clear_download_history(&self) -> Result<(), String> {
+        download_history::clear_history(&self.data_dir).map_err(|e| e.to_string())
+    }
+
     // ========== Speed Benchmark API (Phase 129) ==========
 
     /// Get speed benchmark configuration
@@ -14100,6 +14158,81 @@ impl DownloadManager {
     pub async fn load_connection_pool_config(&self) -> Result<(), std::io::Error> {
         let config = connection_pool::load_pool_config(&self.data_dir)?;
         self.connection_pool.update_config(config).await;
+        Ok(())
+    }
+
+    // ========== Phase 162: Completion Probability Estimator ==========
+
+    /// Estimate completion probability for a task.
+    pub async fn estimate_completion_probability(
+        &self,
+        input: completion_probability::TaskProbabilityInput,
+        signals: completion_probability::EstimatorSignals,
+    ) -> completion_probability::CompletionProbability {
+        let mut est = self.completion_probability.lock().await;
+        est.estimate(&input, &signals)
+    }
+
+    /// Get cached completion probability for a task.
+    pub async fn get_cached_completion_probability(
+        &self,
+        task_id: &str,
+    ) -> Option<completion_probability::CompletionProbability> {
+        let est = self.completion_probability.lock().await;
+        est.get_cached(task_id).cloned()
+    }
+
+    /// Get completion probability estimator configuration.
+    pub async fn get_completion_probability_config(
+        &self,
+    ) -> completion_probability::CompletionProbabilityConfig {
+        let est = self.completion_probability.lock().await;
+        est.config().clone()
+    }
+
+    /// Update completion probability estimator configuration.
+    pub async fn set_completion_probability_config(
+        &self,
+        config: completion_probability::CompletionProbabilityConfig,
+    ) {
+        let mut est = self.completion_probability.lock().await;
+        est.set_config(config);
+    }
+
+    /// Get summary of all cached completion probability estimates.
+    pub async fn get_completion_probability_summary(
+        &self,
+    ) -> completion_probability::EstimatorSummary {
+        let est = self.completion_probability.lock().await;
+        est.summary()
+    }
+
+    /// Clear all cached completion probability estimates.
+    pub async fn clear_completion_probability_cache(&self) {
+        let mut est = self.completion_probability.lock().await;
+        est.clear_cache();
+    }
+
+    /// Save completion probability configuration to disk.
+    pub async fn save_completion_probability_config(
+        &self,
+    ) -> Result<(), completion_probability::CompletionProbabilityError> {
+        let est = self.completion_probability.lock().await;
+        let path = self.data_dir.join("completion_probability_config.json");
+        est.save_config(&path).await
+    }
+
+    /// Load completion probability configuration from disk.
+    pub async fn load_completion_probability_config(
+        &self,
+    ) -> Result<(), completion_probability::CompletionProbabilityError> {
+        let path = self.data_dir.join("completion_probability_config.json");
+        if path.exists() {
+            let config =
+                completion_probability::CompletionProbabilityEstimator::load_config(&path).await?;
+            let mut est = self.completion_probability.lock().await;
+            est.set_config(config);
+        }
         Ok(())
     }
 

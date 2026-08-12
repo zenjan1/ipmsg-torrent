@@ -140,6 +140,102 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Summary statistics for download history
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistorySummary {
+    /// Total number of history entries
+    pub total_entries: usize,
+    /// Number of successfully completed downloads
+    pub completed_count: usize,
+    /// Number of failed downloads
+    pub failed_count: usize,
+    /// Total bytes of completed downloads
+    pub total_completed_bytes: u64,
+    /// Total bytes of failed downloads (partially downloaded)
+    pub total_failed_bytes: u64,
+    /// Count by protocol
+    pub by_protocol: Vec<ProtocolCount>,
+}
+
+/// Count of downloads for a specific protocol
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolCount {
+    pub protocol: String,
+    pub count: usize,
+}
+
+impl HistorySummary {
+    /// Build summary from a list of history entries
+    pub fn from_entries(entries: &[HistoryEntry]) -> Self {
+        let completed_count = entries
+            .iter()
+            .filter(|e| e.outcome == HistoryOutcome::Completed)
+            .count();
+        let failed_count = entries
+            .iter()
+            .filter(|e| e.outcome == HistoryOutcome::Failed)
+            .count();
+        let total_completed_bytes: u64 = entries
+            .iter()
+            .filter(|e| e.outcome == HistoryOutcome::Completed)
+            .map(|e| e.size)
+            .sum();
+        let total_failed_bytes: u64 = entries
+            .iter()
+            .filter(|e| e.outcome == HistoryOutcome::Failed)
+            .map(|e| e.downloaded)
+            .sum();
+
+        // Count by protocol
+        let mut protocol_counts = std::collections::HashMap::<String, usize>::new();
+        for e in entries {
+            *protocol_counts
+                .entry(format_protocol(e.protocol).to_string())
+                .or_default() += 1;
+        }
+        let mut by_protocol: Vec<ProtocolCount> = protocol_counts
+            .into_iter()
+            .map(|(protocol, count)| ProtocolCount { protocol, count })
+            .collect();
+        by_protocol.sort_by(|a, b| b.count.cmp(&a.count));
+
+        Self {
+            total_entries: entries.len(),
+            completed_count,
+            failed_count,
+            total_completed_bytes,
+            total_failed_bytes,
+            by_protocol,
+        }
+    }
+
+    /// Format summary as human-readable string
+    pub fn format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("📜 Download History Summary"));
+        lines.push(format!("  Total entries: {}", self.total_entries));
+        lines.push(format!("  ✓ Completed: {}", self.completed_count));
+        lines.push(format!("  ✗ Failed: {}", self.failed_count));
+        lines.push(format!(
+            "  Total completed: {}",
+            format_size(self.total_completed_bytes)
+        ));
+        if self.total_failed_bytes > 0 {
+            lines.push(format!(
+                "  Wasted (failed): {}",
+                format_size(self.total_failed_bytes)
+            ));
+        }
+        if !self.by_protocol.is_empty() {
+            lines.push("  By protocol:".to_string());
+            for pc in &self.by_protocol {
+                lines.push(format!("    {}: {}", pc.protocol, pc.count));
+            }
+        }
+        lines.join("\n")
+    }
+}
+
 /// Maximum number of history entries to keep.
 const MAX_HISTORY_ENTRIES: usize = 1000;
 
