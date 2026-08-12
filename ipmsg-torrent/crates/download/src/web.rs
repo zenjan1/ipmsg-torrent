@@ -289,6 +289,33 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/smart-queue/result",
             get(get_smart_queue_result_handler),
         )
+        // Speed Anomaly Detection (Phase 173)
+        .route("/api/speed-anomaly", get(get_speed_anomaly_config_handler))
+        .route("/api/speed-anomaly", post(set_speed_anomaly_config_handler))
+        .route(
+            "/api/speed-anomaly/summary",
+            get(get_speed_anomaly_summary_handler),
+        )
+        .route(
+            "/api/speed-anomaly/anomalies",
+            get(get_speed_anomaly_list_handler),
+        )
+        .route(
+            "/api/speed-anomaly/task/:task_id",
+            get(get_speed_anomaly_task_handler),
+        )
+        .route(
+            "/api/speed-anomaly/task/:task_id/remove",
+            post(remove_speed_anomaly_task_handler),
+        )
+        .route(
+            "/api/speed-anomaly/task/:task_id/clear",
+            post(clear_speed_anomaly_task_handler),
+        )
+        .route(
+            "/api/speed-anomaly/clear",
+            post(clear_all_speed_anomalies_handler),
+        )
         .route("/api/download-quota", get(get_download_quota_config))
         .route("/api/download-quota", post(set_download_quota_config))
         .route(
@@ -6836,6 +6863,92 @@ async fn get_smart_queue_result_handler(
             serde_json::json!({"error": "No optimization result available. Run optimize first."}),
         ),
     }
+}
+
+// ── Speed Anomaly Detection API Handlers (Phase 173) ──
+
+/// GET /api/speed-anomaly — Get speed anomaly detection configuration
+async fn get_speed_anomaly_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_speed_anomaly_config().await;
+    Json(
+        serde_json::to_value(config)
+            .unwrap_or(serde_json::json!({"error": "Failed to serialize config"})),
+    )
+}
+
+/// POST /api/speed-anomaly — Update speed anomaly detection configuration
+async fn set_speed_anomaly_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::speed_anomaly::AnomalyConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_speed_anomaly_config(config.clone()).await;
+    Json(serde_json::json!({"status": "ok", "config": config}))
+}
+
+/// GET /api/speed-anomaly/summary — Get speed anomaly summary
+async fn get_speed_anomaly_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.manager.get_speed_anomaly_summary().await;
+    Json(
+        serde_json::to_value(summary)
+            .unwrap_or(serde_json::json!({"error": "Failed to serialize summary"})),
+    )
+}
+
+/// GET /api/speed-anomaly/anomalies — Get all detected speed anomalies
+async fn get_speed_anomaly_list_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let anomalies = state.manager.get_speed_anomalies().await;
+    Json(
+        serde_json::to_value(anomalies)
+            .unwrap_or(serde_json::json!({"error": "Failed to serialize anomalies"})),
+    )
+}
+
+/// GET /api/speed-anomaly/task/:task_id — Get speed anomalies for a specific task
+async fn get_speed_anomaly_task_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let anomalies = state.manager.get_task_speed_anomalies(&task_id).await;
+    Json(
+        serde_json::to_value(anomalies)
+            .unwrap_or(serde_json::json!({"error": "Failed to serialize task anomalies"})),
+    )
+}
+
+/// POST /api/speed-anomaly/task/:task_id/remove — Remove task from speed anomaly tracking
+async fn remove_speed_anomaly_task_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Json<serde_json::Value> {
+    state.manager.remove_speed_anomaly_task(&task_id).await;
+    Json(
+        serde_json::json!({"status": "ok", "message": format!("Task {} removed from tracking", task_id)}),
+    )
+}
+
+/// POST /api/speed-anomaly/task/:task_id/clear — Clear speed anomalies for a specific task
+async fn clear_speed_anomaly_task_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_task_speed_anomalies(&task_id).await;
+    Json(
+        serde_json::json!({"status": "ok", "message": format!("Task {} anomalies cleared", task_id)}),
+    )
+}
+
+/// POST /api/speed-anomaly/clear — Clear all speed anomalies
+async fn clear_all_speed_anomalies_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_all_speed_anomalies().await;
+    Json(serde_json::json!({"status": "ok", "message": "All speed anomalies cleared"}))
 }
 
 // ── Download Quota API Handlers (Phase 115) ──
@@ -14262,5 +14375,236 @@ mod phase170_tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod speed_anomaly_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_state() -> Arc<WebState> {
+        let manager = Arc::new(DownloadManager::new(std::path::PathBuf::from("/tmp/test")));
+        Arc::new(WebState::new(manager))
+    }
+
+    #[tokio::test]
+    async fn test_get_speed_anomaly_config() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-anomaly")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("enabled").is_some());
+        assert!(json.get("min_samples").is_some());
+        assert!(json.get("threshold_multiplier").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_set_speed_anomaly_config() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let config = serde_json::json!({
+            "enabled": false,
+            "min_samples": 5,
+            "threshold_multiplier": 2.5,
+            "min_speed_bps": 1024.0,
+            "max_anomalies_per_task": 10,
+            "cooldown_secs": 60
+        });
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/speed-anomaly")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&config).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify the config was updated
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-anomaly")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["enabled"], false);
+        assert_eq!(json["min_samples"], 5);
+    }
+
+    #[tokio::test]
+    async fn test_get_speed_anomaly_summary() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-anomaly/summary")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("total_anomalies").is_some());
+        assert!(json.get("severe_count").is_some());
+        assert!(json.get("moderate_count").is_some());
+        assert!(json.get("mild_count").is_some());
+        assert!(json.get("tracked_tasks").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_speed_anomaly_anomalies() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-anomaly/anomalies")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_array());
+    }
+
+    #[tokio::test]
+    async fn test_get_speed_anomaly_task() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-anomaly/task/test-task-123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_array());
+    }
+
+    #[tokio::test]
+    async fn test_remove_speed_anomaly_task() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/speed-anomaly/task/test-task-123/remove")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_clear_speed_anomaly_task() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/speed-anomaly/task/test-task-123/clear")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_clear_all_speed_anomalies() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/speed-anomaly/clear")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
     }
 }

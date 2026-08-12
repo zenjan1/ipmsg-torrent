@@ -785,6 +785,12 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// URL blacklist: block unwanted downloads
+    DlBlacklist {
+        /// Subcommand: status|enable|disable|add|del|list|check
+        subcommand: String,
+        args: Vec<String>,
+    },
     /// Task snooze: pause downloads until a specific time
     DlSnooze {
         /// Subcommand: snooze|unsnooze|list|config
@@ -2462,6 +2468,26 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlblacklist" | "dl-blacklist" | "dlbl" => {
+            // /dlblacklist <status|enable|disable|add|del|list|check> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlblacklist <status|enable|disable|add|del|list|check> [args...]".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlBlacklist {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlsnooze" | "dl-snooze" | "dlsnz" => {
             // /dlsnooze <snooze|unsnooze|list|config> [args...]
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
@@ -2498,7 +2524,7 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
-        "dlburst" | "dl-burst" | "dlsb" => {
+        "dlburst" | "dl-burst" | "dlbst" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
                 Command::Unknown("/dlburst <status|start|stop|config>".to_string())
@@ -3031,8 +3057,11 @@ fn parse_command(input: &str) -> Command {
         "dlqc" | "dl-queuecompletion" => Command::DlQueueCompletion {
             subcommand: parts.get(1).map(|s| s.to_string()),
         },
-        "dlsqopt" | "dl-smartqueue" | "dl-smart-queue" | "dlsq" => Command::DlSmartQueue {
-            subcmd: parts.get(1).map(|s| s.to_string()).unwrap_or_else(|| "status".to_string()),
+        "dlsqopt" | "dl-smartqueue" | "dl-smart-queue" | "dlsqo" => Command::DlSmartQueue {
+            subcmd: parts
+                .get(1)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "status".to_string()),
             args: parts[2..].iter().map(|s| s.to_string()).collect(),
         },
         "dlquota" | "dl-downloadquota" | "dldq" => Command::DlDownloadQuota {
@@ -3196,6 +3225,7 @@ fn command_help() -> String {
         "/dleta [task_id]   - Show ETA estimates for active downloads",
         "/dlqc [status|config] - Predict queue completion time",
         "/dlsqopt [status|config|optimize|result] - Smart queue optimizer management",
+        "/dlsanomaly [status|config|anomalies|summary|task|remove|clear] - Speed anomaly detection",
         "/dlquota [status|enable|disable|add|del|list|summary|refresh|clear] - Manage download quotas",
         "/dlaudit [cmd]     - Audit log (status|recent [n]|task <id>|clear)",
         "/dlbwsched [cmd]   - Bandwidth schedule (status|list|add|del)",
@@ -3214,6 +3244,7 @@ fn command_help() -> String {
         "/dlsnooze [cmd]    - Task snooze (snooze <id> <duration> [reason]|unsnooze <id>|list|config)",
         "/dlmilestone [cmd] - Progress milestones (status|enable|disable|add|del)",
         "/dlallowlist [cmd] - URL allowlist (status|enable|disable|add|del|list|check)",
+        "/dlblacklist [cmd] - URL blacklist (status|enable|disable|add|del|list|check)",
         "/dlrecycle [cmd]   - Recycle bin (list|restore|purge|empty|config|summary|autopause)",
         "/dlburst [cmd]     - Speed burst (status|start <task_id> [duration] [multiplier]|stop <task_id>|config)",
         "/dlnetwork [cmd]  - Network-aware download (status|enable|disable|config|summary|probe|paused|clear|reset)",
@@ -15426,7 +15457,7 @@ async fn handle_command(
             match subcmd.as_str() {
                 "status" => {
                     let summary = download_manager.get_smart_queue_summary().await;
-                    let config = download_manager.get_smart_queue_config().await;
+                    let _config = download_manager.get_smart_queue_config().await;
                     let mut s = state.lock().await;
                     let status_icon = if summary.enabled { "✅" } else { "❌" };
                     let output = format!(
@@ -15440,7 +15471,8 @@ async fn handle_command(
                         summary.strategy,
                         summary.queued_tasks,
                         summary.reorder_candidates,
-                        summary.last_optimization
+                        summary
+                            .last_optimization
                             .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
                             .unwrap_or_else(|| "Never".to_string()),
                         summary.config_summary
@@ -15458,9 +15490,16 @@ async fn handle_command(
                                 if let Ok(v) = value.parse::<bool>() {
                                     config.enabled = v;
                                     download_manager.set_smart_queue_config(config).await;
-                                    s.add_system_message("main", format!("✅ Smart queue enabled: {}", v));
+                                    s.add_system_message(
+                                        "main",
+                                        format!("✅ Smart queue enabled: {}", v),
+                                    );
                                 } else {
-                                    s.add_system_message("main", "❌ Invalid value for enabled. Use 'true' or 'false'.".to_string());
+                                    s.add_system_message(
+                                        "main",
+                                        "❌ Invalid value for enabled. Use 'true' or 'false'."
+                                            .to_string(),
+                                    );
                                 }
                             }
                             "strategy" => {
@@ -15479,15 +15518,25 @@ async fn handle_command(
                                 };
                                 config.strategy = strategy;
                                 download_manager.set_smart_queue_config(config).await;
-                                s.add_system_message("main", format!("✅ Strategy set to: {}", value));
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Strategy set to: {}", value),
+                                );
                             }
                             "auto_apply" => {
                                 if let Ok(v) = value.parse::<bool>() {
                                     config.auto_apply = v;
                                     download_manager.set_smart_queue_config(config).await;
-                                    s.add_system_message("main", format!("✅ Auto-apply set to: {}", v));
+                                    s.add_system_message(
+                                        "main",
+                                        format!("✅ Auto-apply set to: {}", v),
+                                    );
                                 } else {
-                                    s.add_system_message("main", "❌ Invalid value for auto_apply. Use 'true' or 'false'.".to_string());
+                                    s.add_system_message(
+                                        "main",
+                                        "❌ Invalid value for auto_apply. Use 'true' or 'false'."
+                                            .to_string(),
+                                    );
                                 }
                             }
                             _ => {
@@ -15562,7 +15611,11 @@ async fn handle_command(
                         s.add_system_message("main", output);
                     } else {
                         let mut s = state.lock().await;
-                        s.add_system_message("main", "❌ No optimization result available. Run 'optimize' first.".to_string());
+                        s.add_system_message(
+                            "main",
+                            "❌ No optimization result available. Run 'optimize' first."
+                                .to_string(),
+                        );
                     }
                 }
                 _ => {
@@ -18682,6 +18735,167 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlallowlist <status|enable|disable|add|del|list|check> [args...]"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlBlacklist { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_url_blacklist_config().await;
+                    let mut out = String::from("URL Blacklist Status:\n");
+                    out.push_str(&format!("  Enabled: {}\n", config.enabled));
+                    out.push_str(&format!("  Entries: {}\n", config.entries.len()));
+                    if !config.entries.is_empty() {
+                        out.push_str("  Entries list:\n");
+                        for entry in &config.entries {
+                            let status = if entry.enabled { "✓" } else { "✗" };
+                            out.push_str(&format!(
+                                "    {} {} ({:?})\n",
+                                status, entry.name, entry.pattern
+                            ));
+                        }
+                    }
+                    s.add_system_message("main", out);
+                }
+                "enable" => match download_manager.set_blacklist_enabled(true).await {
+                    Ok(()) => s.add_system_message("main", "URL blacklist enabled".to_string()),
+                    Err(e) => s.add_system_message("main", format!("Failed to enable: {}", e)),
+                },
+                "disable" => match download_manager.set_blacklist_enabled(false).await {
+                    Ok(()) => s.add_system_message("main", "URL blacklist disabled".to_string()),
+                    Err(e) => s.add_system_message("main", format!("Failed to disable: {}", e)),
+                },
+                "add" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlblacklist add <domain|exact|wildcard|regex> <pattern> [name] [reason]".to_string(),
+                        );
+                    } else {
+                        let pattern_type = &args[0];
+                        let pattern_value = &args[1];
+                        let name = if args.len() >= 3 {
+                            args[2].clone()
+                        } else {
+                            pattern_value.clone()
+                        };
+                        let reason = if args.len() >= 4 {
+                            Some(args[3..].join(" "))
+                        } else {
+                            None
+                        };
+
+                        let pattern = match pattern_type.as_str() {
+                            "domain" => ipmsg_download::url_blacklist::BlacklistPattern::Domain(
+                                pattern_value.clone(),
+                            ),
+                            "exact" => ipmsg_download::url_blacklist::BlacklistPattern::Exact(
+                                pattern_value.clone(),
+                            ),
+                            "wildcard" => {
+                                ipmsg_download::url_blacklist::BlacklistPattern::Wildcard(
+                                    pattern_value.clone(),
+                                )
+                            }
+                            "regex" => ipmsg_download::url_blacklist::BlacklistPattern::Regex(
+                                pattern_value.clone(),
+                            ),
+                            _ => {
+                                s.add_system_message(
+                                    "main",
+                                    "Invalid pattern type. Use: domain, exact, wildcard, or regex"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                        };
+
+                        let id = uuid::Uuid::new_v4().to_string();
+                        let entry = ipmsg_download::url_blacklist::BlacklistEntry::new(
+                            id, name, pattern, reason,
+                        );
+
+                        match download_manager.add_blacklist_entry(entry).await {
+                            Ok(()) => {
+                                s.add_system_message("main", "Added to blacklist".to_string())
+                            }
+                            Err(e) => s.add_system_message("main", format!("Failed to add: {}", e)),
+                        }
+                    }
+                }
+                "del" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlblacklist del <entry_id>".to_string(),
+                        );
+                    } else {
+                        let entry_id = &args[0];
+                        match download_manager.remove_blacklist_entry(entry_id).await {
+                            Ok(()) => {
+                                s.add_system_message("main", "Removed from blacklist".to_string())
+                            }
+                            Err(e) => {
+                                s.add_system_message("main", format!("Failed to remove: {}", e))
+                            }
+                        }
+                    }
+                }
+                "list" => {
+                    let entries = download_manager.list_blacklist_entries().await;
+                    if entries.is_empty() {
+                        s.add_system_message("main", "Blacklist is empty".to_string());
+                    } else {
+                        let mut out = String::from("Blacklist entries:\n");
+                        for entry in &entries {
+                            let status = if entry.enabled { "✓" } else { "✗" };
+                            out.push_str(&format!(
+                                "  {} {} ({})\n    ID: {}\n    Pattern: {:?}\n",
+                                status,
+                                entry.name,
+                                entry.created_at.format("%Y-%m-%d %H:%M"),
+                                entry.id,
+                                entry.pattern
+                            ));
+                            if let Some(ref reason) = entry.reason {
+                                out.push_str(&format!("    Reason: {}\n", reason));
+                            }
+                            out.push('\n');
+                        }
+                        s.add_system_message("main", out);
+                    }
+                }
+                "check" => {
+                    if args.is_empty() {
+                        s.add_system_message("main", "Usage: /dlblacklist check <url>".to_string());
+                    } else {
+                        let url = &args[0];
+                        let result = download_manager.check_url_blocked(url).await;
+                        if result.blocked {
+                            let mut out = format!("URL is BLOCKED: {}\n", url);
+                            if let Some(name) = result.matched_entry_name {
+                                out.push_str(&format!("  Matched entry: {}\n", name));
+                            }
+                            if let Some(reason) = result.reason {
+                                out.push_str(&format!("  Reason: {}\n", reason));
+                            }
+                            s.add_system_message("main", out);
+                        } else {
+                            s.add_system_message("main", format!("URL is allowed: {}", url));
+                        }
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlblacklist <status|enable|disable|add|del|list|check> [args...]"
                             .to_string(),
                     );
                 }
