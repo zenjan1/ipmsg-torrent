@@ -355,7 +355,19 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/auto-rules", post(add_auto_rule))
         .route("/api/auto-rules/:id/remove", post(remove_auto_rule))
         .route("/api/health", get(get_queue_health))
-        .route("/api/health/config", get(get_queue_health_config).post(set_queue_health_config))
+        .route(
+            "/api/health/config",
+            get(get_queue_health_config).post(set_queue_health_config),
+        )
+        .route(
+            "/api/queue-staleness",
+            get(get_queue_staleness).post(set_queue_staleness),
+        )
+        .route("/api/queue-staleness/check", post(check_queue_staleness))
+        .route(
+            "/api/queue-staleness/clear",
+            post(clear_queue_staleness_promotions),
+        )
         .route("/api/auto-cleanup", get(get_auto_cleanup))
         .route("/api/auto-cleanup", post(set_auto_cleanup))
         .route("/api/dedup", get(get_dedup_config))
@@ -1641,6 +1653,39 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             post(clear_all_sla_history_handler),
         )
         .route("/api/sla-compliance/report", get(get_sla_report_handler))
+        // Phase 167: Speed Alert REST API
+        .route(
+            "/api/speed-alerts",
+            get(get_speed_alert_config_handler).post(set_speed_alert_config_handler),
+        )
+        .route(
+            "/api/speed-alerts/summary",
+            get(get_speed_alert_summary_handler),
+        )
+        .route(
+            "/api/speed-alerts/history",
+            get(get_speed_alert_history_handler),
+        )
+        .route(
+            "/api/speed-alerts/history/clear",
+            post(clear_speed_alert_history_handler),
+        )
+        .route(
+            "/api/speed-alerts/task/:task_id",
+            get(get_task_speed_alerts_handler),
+        )
+        .route(
+            "/api/speed-alerts/task/:task_id/remove",
+            post(remove_speed_alert_task_handler),
+        )
+        .route(
+            "/api/speed-alerts/enable",
+            post(set_speed_alert_enabled_handler),
+        )
+        .route(
+            "/api/speed-alerts/monitors/clear",
+            post(clear_speed_alert_monitors_handler),
+        )
         // Phase 165: Download Session REST API
         .route(
             "/api/download-session",
@@ -1923,6 +1968,27 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route(
             "/api/completion-probability/cache",
             post(clear_completion_probability_cache_handler),
+        )
+        // Phase 167: Dynamic Priority REST API
+        .route(
+            "/api/dynamic-priority",
+            get(get_dynamic_priority_config_handler).post(set_dynamic_priority_config_handler),
+        )
+        .route(
+            "/api/dynamic-priority/summary",
+            get(get_dynamic_priority_summary_handler),
+        )
+        .route(
+            "/api/dynamic-priority/enable",
+            post(set_dynamic_priority_enabled_handler),
+        )
+        .route(
+            "/api/dynamic-priority/run",
+            post(run_dynamic_priority_handler),
+        )
+        .route(
+            "/api/dynamic-priority/clear",
+            post(clear_dynamic_priority_handler),
         )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
@@ -3256,6 +3322,35 @@ async fn set_queue_health_config(
         Ok(_) => StatusCode::OK,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+/// Get queue staleness configuration and current summary
+async fn get_queue_staleness(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::queue_staleness::StalenessSummary> {
+    Json(state.manager.check_queue_staleness().await)
+}
+
+/// Update queue staleness configuration
+async fn set_queue_staleness(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::queue_staleness::StalenessConfig>,
+) -> StatusCode {
+    state.manager.set_queue_staleness_config(config).await;
+    StatusCode::OK
+}
+
+/// Check queue for stale tasks and optionally promote them
+async fn check_queue_staleness(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::queue_staleness::StalenessSummary> {
+    Json(state.manager.check_queue_staleness().await)
+}
+
+/// Clear all staleness promotion counts for all tasks
+async fn clear_queue_staleness_promotions(State(state): State<Arc<WebState>>) -> StatusCode {
+    state.manager.clear_queue_staleness_promotions().await;
+    StatusCode::OK
 }
 
 /// Get speed history summary for all tasks
@@ -8355,6 +8450,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_queue_staleness_endpoints() {
+        let state = test_state();
+        let app = create_router(state);
+
+        // Test GET /api/queue-staleness
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/queue-staleness")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let summary: crate::queue_staleness::StalenessSummary =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(summary.total_queued, 0);
+        assert_eq!(summary.stale_count, 0);
+
+        // Test POST /api/queue-staleness (update config)
+        let new_config = crate::queue_staleness::StalenessConfig {
+            enabled: true,
+            stale_threshold_secs: 1800,
+            auto_promote: true,
+            max_promote_priority: crate::queue_staleness::StalePriority::High,
+            promote_levels: 2,
+            max_promotions: 5,
+            check_interval_secs: 600,
+        };
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/queue-staleness")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&new_config).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Test POST /api/queue-staleness/check
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/queue-staleness/check")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let summary: crate::queue_staleness::StalenessSummary =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(summary.config.stale_threshold_secs, 1800);
+
+        // Test POST /api/queue-staleness/clear
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/queue-staleness/clear")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn test_batch_pause_all() {
         let state = test_state();
         let app = create_router(state);
@@ -11078,6 +11260,90 @@ async fn get_sla_report_handler(State(state): State<Arc<WebState>>) -> Json<serd
     Json(serde_json::json!({"report": report}))
 }
 
+// ========== Speed Alert API (Phase 167) ==========
+
+/// GET /api/speed-alerts - Get speed alert configuration
+async fn get_speed_alert_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::speed_alert::SpeedAlertConfig> {
+    Json(state.manager.get_speed_alert_config().await)
+}
+
+/// POST /api/speed-alerts - Update speed alert configuration
+async fn set_speed_alert_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::speed_alert::SpeedAlertConfig>,
+) -> StatusCode {
+    state.manager.set_speed_alert_config(config).await;
+    StatusCode::OK
+}
+
+/// GET /api/speed-alerts/summary - Get speed alert summary
+async fn get_speed_alert_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::speed_alert::SpeedAlertSummary> {
+    Json(state.manager.get_speed_alert_summary().await)
+}
+
+/// GET /api/speed-alerts/history - Get speed alert history
+async fn get_speed_alert_history_handler(
+    State(state): State<Arc<WebState>>,
+    Query(params): Query<SpeedAlertHistoryParams>,
+) -> Json<Vec<crate::speed_alert::SpeedAlert>> {
+    let limit = params.limit.unwrap_or(50).min(200);
+    Json(state.manager.get_speed_alerts(limit).await)
+}
+
+/// POST /api/speed-alerts/history/clear - Clear all speed alert history
+async fn clear_speed_alert_history_handler(State(state): State<Arc<WebState>>) -> StatusCode {
+    state.manager.clear_speed_alert_history().await;
+    StatusCode::OK
+}
+
+/// GET /api/speed-alerts/task/:task_id - Get alerts for a specific task
+async fn get_task_speed_alerts_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+    Query(params): Query<SpeedAlertHistoryParams>,
+) -> Json<Vec<crate::speed_alert::SpeedAlert>> {
+    let limit = params.limit.unwrap_or(50).min(200);
+    Json(state.manager.get_task_speed_alerts(&task_id, limit).await)
+}
+
+/// POST /api/speed-alerts/task/:task_id/remove - Remove a task from speed alert monitoring
+async fn remove_speed_alert_task_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> StatusCode {
+    state.manager.remove_speed_alert_task(&task_id).await;
+    StatusCode::OK
+}
+
+/// POST /api/speed-alerts/enable - Enable or disable speed alerts
+async fn set_speed_alert_enabled_handler(
+    State(state): State<Arc<WebState>>,
+    Json(params): Json<SpeedAlertEnabledParams>,
+) -> StatusCode {
+    state.manager.set_speed_alert_enabled(params.enabled).await;
+    StatusCode::OK
+}
+
+/// POST /api/speed-alerts/monitors/clear - Clear all speed alert monitoring state
+async fn clear_speed_alert_monitors_handler(State(state): State<Arc<WebState>>) -> StatusCode {
+    state.manager.clear_speed_alert_monitors().await;
+    StatusCode::OK
+}
+
+#[derive(Deserialize)]
+struct SpeedAlertHistoryParams {
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct SpeedAlertEnabledParams {
+    enabled: bool,
+}
+
 // ========== Download Session API (Phase 165) ==========
 
 /// GET /api/download-session - Get all session summaries
@@ -13063,6 +13329,73 @@ async fn remove_category_dir_handler(
     let mut config = state.manager.get_save_path_config().await;
     config.category_dirs.remove(&category);
     state.manager.save_path_manager().set_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+// ── Phase 167: Dynamic Priority Handlers ──────────────────────────────────
+
+/// GET /api/dynamic-priority - Get dynamic priority configuration
+async fn get_dynamic_priority_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl IntoResponse {
+    let config = state.manager.get_dynamic_priority_config().await;
+    Json(config)
+}
+
+/// POST /api/dynamic-priority - Update dynamic priority configuration
+async fn set_dynamic_priority_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::dynamic_priority::DynamicPriorityConfig>,
+) -> impl IntoResponse {
+    state.manager.set_dynamic_priority_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/dynamic-priority/summary - Get dynamic priority summary
+async fn get_dynamic_priority_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl IntoResponse {
+    let summary = state.manager.get_dynamic_priority_summary().await;
+    Json(summary)
+}
+
+/// POST /api/dynamic-priority/enable - Enable or disable dynamic priority
+async fn set_dynamic_priority_enabled_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    match body.get("enabled").and_then(|v| v.as_bool()) {
+        Some(enabled) => {
+            state.manager.set_dynamic_priority_enabled(enabled).await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "ok", "enabled": enabled})),
+            )
+        }
+        None => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing 'enabled' field"})),
+        ),
+    }
+}
+
+/// POST /api/dynamic-priority/run - Run dynamic priority adjustment
+async fn run_dynamic_priority_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl IntoResponse {
+    let adjustments = state.manager.run_dynamic_priority_adjustment().await;
+    Json(serde_json::json!({
+        "status": "ok",
+        "adjustments_count": adjustments.len(),
+        "adjustments": adjustments
+    }))
+}
+
+/// POST /api/dynamic-priority/clear - Clear dynamic priority history
+async fn clear_dynamic_priority_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl IntoResponse {
+    state.manager.clear_dynamic_priority_history().await;
     Json(serde_json::json!({"status": "ok"}))
 }
 

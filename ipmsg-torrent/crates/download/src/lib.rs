@@ -4833,6 +4833,21 @@ impl DownloadManager {
         summary
     }
 
+    /// Clear all staleness promotion counts for all tasks.
+    /// Resets the promotion counter to 0 for every task, allowing them to be promoted again.
+    pub async fn clear_queue_staleness_promotions(&self) {
+        let mut tasks = self.tasks.lock().await;
+        for task in tasks.iter_mut() {
+            task.staleness_promotion_count = 0;
+        }
+        // Persist updated tasks
+        let tasks_ref: Vec<_> = tasks.iter().cloned().collect();
+        drop(tasks);
+        if let Err(e) = task_queue::save_task_queue(&tasks_ref, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist task queue after clearing staleness promotions");
+        }
+    }
+
     /// Get current network condition summary.
     pub async fn get_network_summary(&self) -> network_monitor::NetworkSummary {
         self.network_monitor.lock().await.summary()
@@ -16483,6 +16498,59 @@ impl DownloadManager {
         let mgr = self.sla_compliance.read().await;
         let summary = mgr.get_summary();
         mgr.format_report(&summary)
+    }
+
+    // ── Speed Alert API ────────────────────────────────────────────────
+
+    /// Set speed alert configuration
+    pub async fn set_speed_alert_config(&self, config: speed_alert::SpeedAlertConfig) {
+        self.speed_alerts.set_config(config).await;
+    }
+
+    /// Get current speed alert configuration
+    pub async fn get_speed_alert_config(&self) -> speed_alert::SpeedAlertConfig {
+        self.speed_alerts.get_config().await
+    }
+
+    /// Get speed alert history (most recent first)
+    pub async fn get_speed_alerts(&self, limit: usize) -> Vec<speed_alert::SpeedAlert> {
+        self.speed_alerts.get_alerts(limit).await
+    }
+
+    /// Get alerts for a specific task
+    pub async fn get_task_speed_alerts(
+        &self,
+        task_id: &str,
+        limit: usize,
+    ) -> Vec<speed_alert::SpeedAlert> {
+        self.speed_alerts.get_task_alerts(task_id, limit).await
+    }
+
+    /// Get speed alert summary
+    pub async fn get_speed_alert_summary(&self) -> speed_alert::SpeedAlertSummary {
+        self.speed_alerts.get_summary().await
+    }
+
+    /// Clear all speed alert history
+    pub async fn clear_speed_alert_history(&self) {
+        self.speed_alerts.clear_history().await;
+    }
+
+    /// Remove a task from speed alert monitoring
+    pub async fn remove_speed_alert_task(&self, task_id: &str) {
+        self.speed_alerts.remove_task(task_id).await;
+    }
+
+    /// Clear all speed alert monitoring state
+    pub async fn clear_speed_alert_monitors(&self) {
+        self.speed_alerts.clear_monitors().await;
+    }
+
+    /// Enable or disable speed alerts
+    pub async fn set_speed_alert_enabled(&self, enabled: bool) {
+        let mut config = self.speed_alerts.get_config().await;
+        config.enabled = enabled;
+        self.speed_alerts.set_config(config).await;
     }
 
     // ── Download Expiry API ──────────────────────────────────────────────

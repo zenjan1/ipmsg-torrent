@@ -198,7 +198,7 @@ pub struct TaskPriorityInput {
 }
 
 /// Result of a priority adjustment decision for a task.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriorityAdjustment {
     /// Task ID.
     pub task_id: String,

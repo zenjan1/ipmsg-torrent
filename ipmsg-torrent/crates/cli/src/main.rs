@@ -117,6 +117,11 @@ enum Command {
     DlStats,
     /// Show download queue health report
     DlHealth,
+    /// Queue staleness detection and auto-promotion
+    DlQueueStale {
+        action: String,
+        args: Vec<String>,
+    },
     /// Show speed history for a task or all tasks
     DlSpeedHistory {
         task_id: Option<String>,
@@ -174,6 +179,11 @@ enum Command {
     /// Speed distribution analysis (Phase 164)
     DlSpeedDist {
         /// "status", "summary", "report", "domain <name>", "protocol <name>", "hour <0-23>", "domains", "remove <domain>", "clear", "config"
+        args: Vec<String>,
+    },
+    /// Source benchmark - benchmark download URLs to find fastest source (Phase 167)
+    DlSrcBench {
+        /// "status", "config", "run <url1> [url2...]", "select <url1> <url2...>", "cache", "domain <name>", "clear", "save"
         args: Vec<String>,
     },
     /// Download backup management
@@ -320,12 +330,6 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
-    /// SLA compliance - track download service level agreements (Phase 144)
-    DlSla {
-        /// "status", "list", "add", "remove", "evaluate", "summary", "history", "clear", "config"
-        action: String,
-        args: Vec<String>,
-    },
     /// Download session tracking - per-task download session history (Phase 165)
     DlSession {
         /// "status", "summary", "task <task_id>", "remove <task_id>", "clear", "config"
@@ -371,6 +375,12 @@ enum Command {
     /// Completion probability estimator - predict download success rate (Phase 162)
     DlCompletionProb {
         /// "status", "config", "estimate <task_id>", "summary", "clear", "save", "load"
+        action: String,
+        args: Vec<String>,
+    },
+    /// SLA compliance - track download service level agreements (Phase 167)
+    DlSla {
+        /// "status", "config", "summary", "list", "add <id> <name> <type> <value>", "remove <id>", "enable <id>", "disable <id>", "evaluate", "history <id>", "report", "clear"
         action: String,
         args: Vec<String>,
     },
@@ -890,6 +900,13 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    /// Speed alert management (status|config|history|summary|clear|enable|disable|remove)
+    DlSpeedAlert {
+        /// Subcommand
+        subcommand: String,
+        /// Arguments
+        args: Vec<String>,
+    },
     /// Per-task schedule windows (status|add|remove|list|check|config)
     DlScheduleWindows {
         /// Subcommand: status|add|remove|list|check|config
@@ -1114,6 +1131,20 @@ fn parse_command(input: &str) -> Command {
         "dlrmfailed" | "dl-rm-failed" => Command::DlRmFailed,
         "dlstats" | "dl-stats" => Command::DlStats,
         "dlhealth" | "dl-health" | "dlh" => Command::DlHealth,
+        "dlqstale" | "dl-qstale" | "dlqs" => {
+            // /dlqs <action> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::DlQueueStale {
+                    action: "help".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = args[0].clone();
+                let args = args[1..].to_vec();
+                Command::DlQueueStale { action, args }
+            }
+        }
         "dlspeedhist" | "dl-speed-hist" | "dlsh" => {
             // /dlsh [task_id]
             let args = &parts[1..];
@@ -1168,6 +1199,10 @@ fn parse_command(input: &str) -> Command {
         "dlspeeddist" | "dl-speeddist" | "dlsdist" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlSpeedDist { args }
+        }
+        "dlsrcbench" | "dl-srcbench" | "dlsb" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlSrcBench { args }
         }
         "dlbackup" | "dl-backup" | "dlbk" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
@@ -2814,6 +2849,26 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlalert" | "dl-alert" | "dlspeedalert" | "dl-speed-alert" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlalert <status|config|history|summary|clear|enable|disable|remove>"
+                        .to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlSpeedAlert {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlsw" | "dl-schedule-windows" | "dlschedulewindows" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
@@ -3056,6 +3111,7 @@ fn command_help() -> String {
         "/dlrmfailed      - Remove all failed downloads",
         "/dlstats         - Show download statistics",
         "/dlhealth        - Show download queue health report",
+        "/dlqstale [cmd]  - Queue staleness detection (status|config|check|clear)",
         "/dlspeedhist [id] - Show speed history (all tasks or specific task)",
         "/dlspeedpredict [status|predict|windows|profile|domains|remove|cleanup|clear|config] - Speed prediction and optimal window analysis",
         "/dlcleanup [cmd]  - Auto-cleanup completed/failed (status|enable|disable|set|run)",
@@ -3162,7 +3218,9 @@ fn command_help() -> String {
         "/dlheatmap [cmd]  - Speed heatmap by hour/day (status|report|hour|day|quality|config|prune|reset)",
         "/dlprediction [cmd] - Progress prediction (status|predict|predict-all|accuracy|remove|clear|config)",
         "/dllinkrot [cmd]  - Link rot detection (status|summary|report|check <id>|clear|save)",
+        "/dlsrcbench [cmd] - Source benchmark (status|config|run|select|cache|domain|clear|save)",
         "/dlcprob [cmd]    - Completion probability estimator (status|summary|estimate <id>|clear|save|load)",
+        "/dlsla [cmd]      - SLA compliance tracking (status|summary|list|add|remove|enable|disable|evaluate|history|report|clear)",
         "/dlreliability [cmd] - Source reliability tracker (status|summary|domain|score|tier|avoid|domains|prune|clear|config)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
@@ -4425,6 +4483,140 @@ async fn handle_command(
             let msg = report.format_report();
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
+        }
+        Command::DlQueueStale { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            match action.as_str() {
+                "status" => {
+                    let summary = download_manager.check_queue_staleness().await;
+                    let msg = format!(
+                        "📊 Queue Staleness Status\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         Total Queued: {}\n\
+                         Stale Tasks: {}\n\
+                         Promoted: {}\n\
+                         Skipped: {}\n\
+                         Auto-promote: {}\n\
+                         Threshold: {}s\n\
+                         Max Promotions: {}",
+                        summary.total_queued,
+                        summary.stale_count,
+                        summary.promoted_count,
+                        summary.skipped_count,
+                        summary.config.auto_promote,
+                        summary.config.stale_threshold_secs,
+                        summary.config.max_promotions
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_queue_staleness_config().await;
+                        let msg = format!(
+                            "⚙️  Queue Staleness Configuration\n\
+                             ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                             Enabled: {}\n\
+                             Threshold: {}s\n\
+                             Auto-promote: {}\n\
+                             Max Priority: {}\n\
+                             Promote Levels: {}\n\
+                             Max Promotions: {}\n\
+                             Check Interval: {}s",
+                            config.enabled,
+                            config.stale_threshold_secs,
+                            config.auto_promote,
+                            config.max_promote_priority,
+                            config.promote_levels,
+                            config.max_promotions,
+                            config.check_interval_secs
+                        );
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    } else if args.len() >= 2 {
+                        let mut config = download_manager.get_queue_staleness_config().await;
+                        let parse_result: Result<(), String> = (|| {
+                            match args[0].as_str() {
+                                "enabled" => {
+                                    config.enabled = args[1]
+                                        .parse()
+                                        .map_err(|_| "enabled must be true/false")?;
+                                }
+                                "threshold" => {
+                                    config.stale_threshold_secs =
+                                        args[1].parse().map_err(|_| "threshold must be seconds")?;
+                                }
+                                "auto-promote" => {
+                                    config.auto_promote = args[1]
+                                        .parse()
+                                        .map_err(|_| "auto-promote must be true/false")?;
+                                }
+                                "max-priority" => {
+                                    config.max_promote_priority = args[1].parse().map_err(
+                                        |_| "max-priority must be low/normal/high/urgent",
+                                    )?;
+                                }
+                                "promote-levels" => {
+                                    config.promote_levels = args[1]
+                                        .parse()
+                                        .map_err(|_| "promote-levels must be a number")?;
+                                }
+                                "max-promotions" => {
+                                    config.max_promotions = args[1]
+                                        .parse()
+                                        .map_err(|_| "max-promotions must be a number")?;
+                                }
+                                "interval" => {
+                                    config.check_interval_secs =
+                                        args[1].parse().map_err(|_| "interval must be seconds")?;
+                                }
+                                _ => return Err(format!("unknown config key: {}", args[0])),
+                            }
+                            Ok(())
+                        })();
+                        match parse_result {
+                            Ok(()) => {
+                                download_manager.set_queue_staleness_config(config).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "✅ Configuration updated".to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ {}", e));
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "usage: /dlqs config [key value]".to_string());
+                    }
+                }
+                "check" => {
+                    let summary = download_manager.check_queue_staleness().await;
+                    let msg = summary.format_report();
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "clear" => {
+                    download_manager.clear_queue_staleness_promotions().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ Cleared all staleness promotion counts".to_string(),
+                    );
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "usage: /dlqs <status|config|check|clear>".to_string(),
+                    );
+                }
+            }
         }
         Command::DlUptime => {
             let s = state.lock().await;
@@ -6059,6 +6251,165 @@ async fn handle_command(
                 _ => {
                     println!(
                         "Unknown subcommand. Use: status, summary, report, domain, protocol, hour, domains, remove, clear, config"
+                    );
+                }
+            }
+        }
+        Command::DlSrcBench { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+            match sub {
+                "status" => {
+                    let config = download_manager.get_source_benchmark_config().await;
+                    let cache_summary =
+                        download_manager.get_source_benchmark_cache_summary().await;
+                    println!("Source Benchmark Status:");
+                    println!("  Enabled: {}", config.enabled);
+                    println!("  Test Size: {} bytes", config.test_size_bytes);
+                    println!("  Timeout: {}s", config.timeout_secs);
+                    println!("  Max Concurrent: {}", config.max_concurrent);
+                    println!("  Cache TTL: {}h", config.cache_ttl_hours);
+                    println!("  Max Cache Entries: {}", config.max_cache_entries);
+                    println!("\nCache Summary:");
+                    println!("  Cached Domains: {}", cache_summary.total_domains);
+                    println!("  Fast Domains (>1MB/s): {}", cache_summary.fast_domains);
+                    println!("  Slow Domains (<100KB/s): {}", cache_summary.slow_domains);
+                }
+                "config" => {
+                    if args.len() < 3 {
+                        let config = download_manager.get_source_benchmark_config().await;
+                        println!("Source Benchmark Config:");
+                        println!("  enabled: {}", config.enabled);
+                        println!("  test_size_bytes: {}", config.test_size_bytes);
+                        println!("  timeout_secs: {}", config.timeout_secs);
+                        println!("  max_concurrent: {}", config.max_concurrent);
+                        println!("  cache_ttl_hours: {}", config.cache_ttl_hours);
+                        println!("  max_cache_entries: {}", config.max_cache_entries);
+                        println!(
+                            "\nUsage: /dlsrcbench config <key> <value>\nKeys: enabled, test_size, timeout, concurrent, cache_ttl, max_cache"
+                        );
+                    } else {
+                        let mut config = download_manager.get_source_benchmark_config().await;
+                        match args[1].as_str() {
+                            "enabled" => {
+                                config.enabled = args[2].parse().unwrap_or(true);
+                            }
+                            "test_size" => {
+                                config.test_size_bytes = args[2].parse().unwrap_or(65536);
+                            }
+                            "timeout" => {
+                                config.timeout_secs = args[2].parse().unwrap_or(10);
+                            }
+                            "concurrent" => {
+                                config.max_concurrent = args[2].parse().unwrap_or(5);
+                            }
+                            "cache_ttl" => {
+                                config.cache_ttl_hours = args[2].parse().unwrap_or(24);
+                            }
+                            "max_cache" => {
+                                config.max_cache_entries = args[2].parse().unwrap_or(200);
+                            }
+                            _ => {
+                                println!(
+                                    "Unknown config key. Use: enabled, test_size, timeout, concurrent, cache_ttl, max_cache"
+                                );
+                            }
+                        }
+                        download_manager.set_source_benchmark_config(config).await;
+                        println!("✅ Source benchmark config updated.");
+                    }
+                }
+                "run" => {
+                    if args.len() < 2 {
+                        println!("Usage: /dlsrcbench run <url1> [url2...]");
+                    } else {
+                        let urls: Vec<String> = args[1..].to_vec();
+                        println!("Benchmarking {} URL(s)...", urls.len());
+                        match download_manager.benchmark_sources(&urls).await {
+                            Ok(summary) => {
+                                println!("\n{}", summary.format_report());
+                            }
+                            Err(e) => {
+                                println!("❌ Benchmark failed: {}", e);
+                            }
+                        }
+                    }
+                }
+                "select" => {
+                    if args.len() < 3 {
+                        println!("Usage: /dlsrcbench select <url1> <url2> [url3...]");
+                    } else {
+                        let urls: Vec<String> = args[1..].to_vec();
+                        println!("Selecting best source from {} URL(s)...", urls.len());
+                        match download_manager.select_best_source(&urls).await {
+                            Ok(best) => {
+                                println!("🏆 Best source: {}", best);
+                            }
+                            Err(e) => {
+                                println!("❌ Source selection failed: {}", e);
+                            }
+                        }
+                    }
+                }
+                "cache" => {
+                    let cache_summary =
+                        download_manager.get_source_benchmark_cache_summary().await;
+                    println!("Source Benchmark Cache:");
+                    println!("  Cached Domains: {}", cache_summary.total_domains);
+                    println!("  Fast Domains (>1MB/s): {}", cache_summary.fast_domains);
+                    println!("  Slow Domains (<100KB/s): {}", cache_summary.slow_domains);
+                }
+                "domain" => {
+                    if args.len() < 2 {
+                        println!("Usage: /dlsrcbench domain <domain>");
+                    } else {
+                        let domain = &args[1];
+                        match download_manager.get_cached_domain_benchmark(domain).await {
+                            Some(cached) => {
+                                println!("Domain: {}", cached.domain);
+                                println!(
+                                    "  Avg Speed: {:.2} KB/s",
+                                    cached.avg_speed_bps / 1024.0
+                                );
+                                println!("  Samples: {}", cached.sample_count);
+                                println!("  Last Tested: {}", cached.last_tested_at);
+                                println!(
+                                    "  Status: {}",
+                                    if cached.is_fast {
+                                        "🚀 Fast"
+                                    } else if cached.is_slow {
+                                        "🐌 Slow"
+                                    } else {
+                                        "⚡ Normal"
+                                    }
+                                );
+                            }
+                            None => {
+                                println!("No cached data for domain: {}", domain);
+                            }
+                        }
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_source_benchmark_cache().await;
+                    println!("✅ Source benchmark cache cleared.");
+                }
+                "save" => {
+                    match download_manager.save_source_benchmark_cache().await {
+                        Ok(_) => {
+                            println!("✅ Source benchmark cache saved to disk.");
+                        }
+                        Err(e) => {
+                            println!("❌ Failed to save cache: {}", e);
+                        }
+                    }
+                }
+                _ => {
+                    println!(
+                        "Unknown subcommand. Use: status, config, run, select, cache, domain, clear, save"
                     );
                 }
             }
@@ -15946,6 +16297,115 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlSpeedAlert { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let summary = download_manager.get_speed_alert_summary().await;
+                    let mut output = String::new();
+                    output.push_str("🚨 Speed Alert Status:\n");
+                    output.push_str(&format!("  Enabled: {}\n", summary.enabled));
+                    output.push_str(&format!("  Total alerts: {}\n", summary.total_alerts));
+                    output.push_str(&format!("  Affected tasks: {}\n", summary.affected_tasks));
+                    if !summary.alerts_by_type.is_empty() {
+                        output.push_str("  By type:\n");
+                        for (k, v) in &summary.alerts_by_type {
+                            output.push_str(&format!("    {}: {}\n", k, v));
+                        }
+                    }
+                    if !summary.alerts_by_severity.is_empty() {
+                        output.push_str("  By severity:\n");
+                        for (k, v) in &summary.alerts_by_severity {
+                            output.push_str(&format!("    {}: {}\n", k, v));
+                        }
+                    }
+                    s.add_system_message("main", output);
+                }
+                "config" => {
+                    let config = download_manager.get_speed_alert_config().await;
+                    let mut output = String::new();
+                    output.push_str("⚙️ Speed Alert Configuration:\n");
+                    output.push_str(&format!("  Enabled: {}\n", config.enabled));
+                    output.push_str(&format!(
+                        "  Min speed threshold: {} B/s\n",
+                        config.min_speed_bps.unwrap_or(0.0)
+                    ));
+                    output.push_str(&format!(
+                        "  Consecutive samples: {}\n",
+                        config.min_speed_consecutive
+                    ));
+                    output.push_str(&format!(
+                        "  Decline detection: {}\n",
+                        config.decline_detection
+                    ));
+                    output.push_str(&format!("  Decline samples: {}\n", config.decline_samples));
+                    output.push_str(&format!("  Decline ratio: {:.2}\n", config.decline_ratio));
+                    output.push_str(&format!(
+                        "  Near-stall threshold: {} B/s\n",
+                        config.near_stall_bps
+                    ));
+                    output.push_str(&format!("  Cooldown: {}s\n", config.alert_cooldown_secs));
+                    s.add_system_message("main", output);
+                }
+                "history" => {
+                    let limit = args
+                        .first()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(20);
+                    let alerts = download_manager.get_speed_alerts(limit).await;
+                    if alerts.is_empty() {
+                        s.add_system_message("main", "No speed alerts in history.".to_string());
+                    } else {
+                        let mut output = format!("🚨 Speed Alert History ({}):\n", alerts.len());
+                        for alert in &alerts {
+                            output.push_str(&format!("  {}\n", alert.format_display()));
+                        }
+                        s.add_system_message("main", output);
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_speed_alert_summary().await;
+                    s.add_system_message("main", summary.format_display());
+                }
+                "clear" => {
+                    download_manager.clear_speed_alert_history().await;
+                    s.add_system_message("main", "Speed alert history cleared.".to_string());
+                }
+                "enable" => {
+                    download_manager.set_speed_alert_enabled(true).await;
+                    s.add_system_message("main", "Speed alerts enabled.".to_string());
+                }
+                "disable" => {
+                    download_manager.set_speed_alert_enabled(false).await;
+                    s.add_system_message("main", "Speed alerts disabled.".to_string());
+                }
+                "remove" => {
+                    if args.is_empty() {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlalert remove <task_id>".to_string(),
+                        );
+                    } else {
+                        download_manager.remove_speed_alert_task(&args[0]).await;
+                        s.add_system_message(
+                            "main",
+                            format!("Speed alert monitoring removed for task {}", args[0]),
+                        );
+                    }
+                }
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlalert <status|config|history|summary|clear|enable|disable|remove>"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         Command::DlScheduleWindows { subcommand, args } => {
             let download_manager = {
                 let s = state.lock().await;
@@ -21806,6 +22266,389 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlSla { action, args } => {
+            let download_manager = state.lock().await.download_manager.clone();
+            match action.as_str() {
+                "status" | "config" => {
+                    let config = download_manager.get_sla_config().await;
+                    let msg = format!(
+                        "📋 SLA Compliance Config:\n\
+                         Enabled: {}\n\
+                         Max SLAs: {}\n\
+                         Default Max History: {}\n\
+                         Auto-eval Interval: {}s\n\
+                         Log Violations: {}",
+                        config.enabled,
+                        config.max_slas,
+                        config.default_max_history,
+                        config.auto_eval_interval_secs,
+                        config.log_violations,
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "summary" => {
+                    let summary = download_manager.get_sla_summary().await;
+                    let mut msg = String::from("📋 SLA Compliance Summary:\n");
+                    msg.push_str(&format!(
+                        "  Total SLAs: {}\n  Enabled: {}\n  Overall Score: {:.1}%\n  Status: {}\n  History Entries: {}\n",
+                        summary.total_slas,
+                        summary.enabled_slas,
+                        summary.overall_score,
+                        summary.overall_status,
+                        summary.total_history_entries,
+                    ));
+                    if !summary.per_sla.is_empty() {
+                        msg.push_str("\n📊 Per-SLA Compliance:\n");
+                        for sla in &summary.per_sla {
+                            let icon = if sla.compliance_rate >= 80.0 {
+                                "✅"
+                            } else if sla.compliance_rate >= 50.0 {
+                                "⚠️"
+                            } else {
+                                "❌"
+                            };
+                            msg.push_str(&format!(
+                                "  {} {} [{}] - Rate: {:.1}% | {}\n",
+                                icon, sla.sla_name, sla.sla_id, sla.compliance_rate, sla.target,
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "list" => {
+                    let slas = download_manager.list_slas().await;
+                    if slas.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "📋 No SLA definitions found. Use /dlsla add <id> <name> <type> <value> to create one.".to_string());
+                    } else {
+                        let mut msg = String::from("📋 SLA Definitions:\n");
+                        for sla in &slas {
+                            let status_icon = if sla.enabled { "✅" } else { "⏸" };
+                            msg.push_str(&format!(
+                                "  {} {} [{}] - {} | Target: {}\n",
+                                status_icon, sla.name, sla.id, sla.description, sla.target,
+                            ));
+                            if let Some(tag) = &sla.tag_filter {
+                                msg.push_str(&format!("      Tag filter: {}\n", tag));
+                            }
+                            if let Some(group) = &sla.group_filter {
+                                msg.push_str(&format!("      Group filter: {}\n", group));
+                            }
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "add" => {
+                    // /dlsla add <id> <name> <type> <value>
+                    // types: completion_time <secs>, min_speed <bps>, success_rate <percent>, max_retries <count>
+                    if args.len() < 4 {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlsla add <id> <name> <type> <value>\nTypes: completion_time <secs>, min_speed <bps>, success_rate <percent>, max_retries <count>".to_string());
+                    } else {
+                        let sla_id = args[0].clone();
+                        let sla_name = args[1].clone();
+                        let sla_type = args[2].clone();
+                        let value = args[3].clone();
+                        let target = match sla_type.as_str() {
+                            "completion_time" | "ct" => match value.parse::<u64>() {
+                                Ok(secs) => {
+                                    ipmsg_download::sla_compliance::SlaTarget::CompletionTimeSecs {
+                                        max_secs: secs,
+                                    }
+                                }
+                                Err(_) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message("main", "❌ Invalid value for completion_time. Use seconds (e.g., 3600)".to_string());
+                                    return;
+                                }
+                            },
+                            "min_speed" | "ms" => match value.parse::<u64>() {
+                                Ok(bps) => {
+                                    ipmsg_download::sla_compliance::SlaTarget::MinAverageSpeed {
+                                        min_bps: bps,
+                                    }
+                                }
+                                Err(_) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message("main", "❌ Invalid value for min_speed. Use bytes/sec (e.g., 1048576)".to_string());
+                                    return;
+                                }
+                            },
+                            "success_rate" | "sr" => match value.parse::<f64>() {
+                                Ok(pct) => ipmsg_download::sla_compliance::SlaTarget::SuccessRate {
+                                    target_percent: pct,
+                                    window_secs: 86400,
+                                },
+                                Err(_) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message("main", "❌ Invalid value for success_rate. Use percentage (e.g., 95.0)".to_string());
+                                    return;
+                                }
+                            },
+                            "max_retries" | "mr" => match value.parse::<u32>() {
+                                Ok(count) => {
+                                    ipmsg_download::sla_compliance::SlaTarget::MaxRetries {
+                                        max_retries: count,
+                                    }
+                                }
+                                Err(_) => {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "❌ Invalid value for max_retries. Use count (e.g., 3)"
+                                            .to_string(),
+                                    );
+                                    return;
+                                }
+                            },
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Unknown SLA type '{}'. Use: completion_time, min_speed, success_rate, max_retries", sla_type));
+                                return;
+                            }
+                        };
+                        let def = ipmsg_download::sla_compliance::SlaDefinition {
+                            id: sla_id.clone(),
+                            name: sla_name.clone(),
+                            description: format!("{}: {}", sla_type, value),
+                            target,
+                            enabled: true,
+                            tag_filter: None,
+                            group_filter: None,
+                            created_at: chrono::Utc::now(),
+                            max_history: 200,
+                        };
+                        match download_manager.add_sla(def).await {
+                            Ok(id) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ SLA '{}' added with ID: {}", sla_name, id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to add SLA: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "remove" | "del" | "delete" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlsla remove <sla_id>".to_string());
+                    } else {
+                        let sla_id = &args[0];
+                        match download_manager.remove_sla(sla_id).await {
+                            Ok(true) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ SLA '{}' removed", sla_id),
+                                );
+                            }
+                            Ok(false) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ SLA '{}' not found", sla_id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to remove SLA: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "enable" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlsla enable <sla_id>".to_string());
+                    } else {
+                        let sla_id = &args[0];
+                        match download_manager.set_sla_enabled(sla_id, true).await {
+                            Ok(true) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ SLA '{}' enabled", sla_id),
+                                );
+                            }
+                            Ok(false) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ SLA '{}' not found", sla_id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to enable SLA: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "disable" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlsla disable <sla_id>".to_string());
+                    } else {
+                        let sla_id = &args[0];
+                        match download_manager.set_sla_enabled(sla_id, false).await {
+                            Ok(true) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ SLA '{}' disabled", sla_id),
+                                );
+                            }
+                            Ok(false) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ SLA '{}' not found", sla_id),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to disable SLA: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                "evaluate" | "eval" => {
+                    let evaluations = match download_manager.evaluate_sla_compliance().await {
+                        Ok(evals) => evals,
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("❌ Evaluation failed: {}", e));
+                            return;
+                        }
+                    };
+                    if evaluations.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "📋 No SLA evaluations. Add SLAs first with /dlsla add.".to_string(),
+                        );
+                    } else {
+                        let mut msg = String::from("📋 SLA Evaluation Results:\n");
+                        for eval in &evaluations {
+                            let icon = match eval.status {
+                                ipmsg_download::sla_compliance::ComplianceStatus::Compliant => "✅",
+                                ipmsg_download::sla_compliance::ComplianceStatus::NonCompliant => {
+                                    "❌"
+                                }
+                                ipmsg_download::sla_compliance::ComplianceStatus::Pending => "⏳",
+                                ipmsg_download::sla_compliance::ComplianceStatus::Waived => "⚪",
+                            };
+                            msg.push_str(&format!(
+                                "  {} [{}] {} - Score: {:.1}% | {}\n",
+                                icon, eval.sla_id, eval.task_id, eval.score, eval.details,
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "history" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlsla history <sla_id>".to_string());
+                    } else {
+                        let sla_id = &args[0];
+                        let history = download_manager.get_sla_history(sla_id).await;
+                        match history {
+                            None => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ SLA '{}' not found", sla_id),
+                                );
+                            }
+                            Some(entries) => {
+                                if entries.is_empty() {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("📋 No compliance history for SLA '{}'", sla_id),
+                                    );
+                                } else {
+                                    let mut msg =
+                                        format!("📋 Compliance History for SLA '{}':\n", sla_id);
+                                    for entry in entries.iter().take(20) {
+                                        let icon = match entry.status {
+                                            ipmsg_download::sla_compliance::ComplianceStatus::Compliant => "✅",
+                                            ipmsg_download::sla_compliance::ComplianceStatus::NonCompliant => "❌",
+                                            ipmsg_download::sla_compliance::ComplianceStatus::Pending => "⏳",
+                                            ipmsg_download::sla_compliance::ComplianceStatus::Waived => "⚪",
+                                        };
+                                        msg.push_str(&format!(
+                                            "  {} {} - Score: {:.1}% | {} ({})\n",
+                                            icon,
+                                            entry.task_id,
+                                            entry.score,
+                                            entry.reason,
+                                            entry.recorded_at.format("%Y-%m-%d %H:%M"),
+                                        ));
+                                    }
+                                    if entries.len() > 20 {
+                                        msg.push_str(&format!(
+                                            "  ... and {} more entries\n",
+                                            entries.len() - 20
+                                        ));
+                                    }
+                                    let mut s = state.lock().await;
+                                    s.add_system_message("main", msg);
+                                }
+                            }
+                        }
+                    }
+                }
+                "report" => {
+                    let report = download_manager.format_sla_report().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", report);
+                }
+                "clear" => match download_manager.clear_all_sla_history().await {
+                    Ok(_) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "✅ All SLA compliance history cleared".to_string(),
+                        );
+                    }
+                    Err(e) => {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("❌ Failed to clear history: {}", e));
+                    }
+                },
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlsla [status|summary|list|add|remove|enable|disable|evaluate|history|report|clear]"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         Command::DlFileStats { action, args } => {
             let download_manager = state.lock().await.download_manager.clone();
             match action.as_str() {
@@ -21903,339 +22746,6 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlfs <status|summary|extension <ext>|clear|config>".to_string(),
-                    );
-                }
-            }
-        }
-        Command::DlSla { action, args } => {
-            let mut s = state.lock().await;
-            match action.as_str() {
-                "status" => {
-                    let config = s.download_manager.get_sla_config().await;
-                    let summary = s.download_manager.get_sla_summary().await;
-                    let msg = format!(
-                        "SLA Compliance Status:\n\
-                         Enabled: {}\n\
-                         Total SLAs: {}\n\
-                         Enabled SLAs: {}\n\
-                         Overall Score: {:.1}%\n\
-                         Overall Status: {}\n\
-                         History Entries: {}",
-                        config.enabled,
-                        summary.total_slas,
-                        summary.enabled_slas,
-                        summary.overall_score,
-                        summary.overall_status,
-                        summary.total_history_entries
-                    );
-                    s.add_system_message("main", msg);
-                }
-                "list" => {
-                    let slas = s.download_manager.list_slas().await;
-                    if slas.is_empty() {
-                        s.add_system_message("main", "No SLA definitions configured.".to_string());
-                    } else {
-                        let mut msg = format!("SLA Definitions ({}):\n", slas.len());
-                        for sla in slas {
-                            msg.push_str(&format!(
-                                "  [{}] {} - {} (enabled: {})\n",
-                                sla.id, sla.name, sla.target, sla.enabled
-                            ));
-                        }
-                        s.add_system_message("main", msg);
-                    }
-                }
-                "add" => {
-                    if args.len() < 2 {
-                        s.add_system_message(
-                            "main",
-                            "Usage: /dls add <name> <target_type> [args...]\n\
-                             Target types:\n\
-                             - completion_time <max_secs>\n\
-                             - min_speed <min_bps>\n\
-                             - max_retries <max_retries>\n\
-                             - success_rate <target_percent> <window_secs>"
-                                .to_string(),
-                        );
-                    } else {
-                        let name = args[0].clone();
-                        let target_type = args[1].clone();
-                        let target = match target_type.as_str() {
-                            "completion_time" => {
-                                if args.len() < 3 {
-                                    s.add_system_message(
-                                        "main",
-                                        "Usage: /dls add <name> completion_time <max_secs>"
-                                            .to_string(),
-                                    );
-                                    return;
-                                }
-                                let max_secs: u64 = args[2].parse().unwrap_or(3600);
-                                ipmsg_download::sla_compliance::SlaTarget::CompletionTimeSecs {
-                                    max_secs,
-                                }
-                            }
-                            "min_speed" => {
-                                if args.len() < 3 {
-                                    s.add_system_message(
-                                        "main",
-                                        "Usage: /dls add <name> min_speed <min_bps>".to_string(),
-                                    );
-                                    return;
-                                }
-                                let min_bps: u64 = args[2].parse().unwrap_or(1_000_000);
-                                ipmsg_download::sla_compliance::SlaTarget::MinAverageSpeed {
-                                    min_bps,
-                                }
-                            }
-                            "max_retries" => {
-                                if args.len() < 3 {
-                                    s.add_system_message(
-                                        "main",
-                                        "Usage: /dls add <name> max_retries <max_retries>"
-                                            .to_string(),
-                                    );
-                                    return;
-                                }
-                                let max_retries: u32 = args[2].parse().unwrap_or(3);
-                                ipmsg_download::sla_compliance::SlaTarget::MaxRetries {
-                                    max_retries,
-                                }
-                            }
-                            "success_rate" => {
-                                if args.len() < 4 {
-                                    s.add_system_message("main", "Usage: /dls add <name> success_rate <target_percent> <window_secs>".to_string());
-                                    return;
-                                }
-                                let target_percent: f64 = args[2].parse().unwrap_or(95.0);
-                                let window_secs: u64 = args[3].parse().unwrap_or(86400);
-                                ipmsg_download::sla_compliance::SlaTarget::SuccessRate {
-                                    target_percent,
-                                    window_secs,
-                                }
-                            }
-                            _ => {
-                                s.add_system_message(
-                                    "main",
-                                    format!("Unknown target type: {}", target_type),
-                                );
-                                return;
-                            }
-                        };
-
-                        let def = ipmsg_download::sla_compliance::SlaDefinition {
-                            id: format!("sla-{}", chrono::Utc::now().timestamp_millis()),
-                            name,
-                            description: String::new(),
-                            target,
-                            enabled: true,
-                            tag_filter: None,
-                            group_filter: None,
-                            created_at: chrono::Utc::now(),
-                            max_history: 200,
-                        };
-
-                        match s.download_manager.add_sla(def).await {
-                            Ok(id) => {
-                                s.add_system_message("main", format!("Added SLA: {}", id));
-                            }
-                            Err(e) => {
-                                s.add_system_message("main", format!("Failed to add SLA: {}", e));
-                            }
-                        }
-                    }
-                }
-                "remove" => {
-                    if args.is_empty() {
-                        s.add_system_message("main", "Usage: /dls remove <sla_id>".to_string());
-                    } else {
-                        let sla_id = &args[0];
-                        match s.download_manager.remove_sla(sla_id).await {
-                            Ok(true) => {
-                                s.add_system_message("main", format!("Removed SLA: {}", sla_id));
-                            }
-                            Ok(false) => {
-                                s.add_system_message("main", format!("SLA not found: {}", sla_id));
-                            }
-                            Err(e) => {
-                                s.add_system_message(
-                                    "main",
-                                    format!("Failed to remove SLA: {}", e),
-                                );
-                            }
-                        }
-                    }
-                }
-                "evaluate" => match s.download_manager.evaluate_sla_compliance().await {
-                    Ok(evals) => {
-                        if evals.is_empty() {
-                            s.add_system_message(
-                                "main",
-                                "No evaluations performed (no enabled SLAs or no tasks)."
-                                    .to_string(),
-                            );
-                        } else {
-                            let mut msg =
-                                format!("Evaluated {} task-SLA combinations:\n", evals.len());
-                            for eval in evals.iter().take(20) {
-                                msg.push_str(&format!(
-                                    "  [{}] {} vs {}: {} ({:.1}%)\n",
-                                    eval.sla_id,
-                                    eval.task_id,
-                                    eval.sla_name,
-                                    eval.status,
-                                    eval.score
-                                ));
-                            }
-                            if evals.len() > 20 {
-                                msg.push_str(&format!("  ... and {} more\n", evals.len() - 20));
-                            }
-                            s.add_system_message("main", msg);
-                        }
-                    }
-                    Err(e) => {
-                        s.add_system_message("main", format!("Failed to evaluate: {}", e));
-                    }
-                },
-                "summary" | "report" => {
-                    let report = s.download_manager.format_sla_report().await;
-                    s.add_system_message("main", report);
-                }
-                "history" => {
-                    if args.is_empty() {
-                        s.add_system_message("main", "Usage: /dls history <sla_id>".to_string());
-                    } else {
-                        let sla_id = &args[0];
-                        match s.download_manager.get_sla_history(sla_id).await {
-                            Some(history) => {
-                                if history.is_empty() {
-                                    s.add_system_message(
-                                        "main",
-                                        format!("No history for SLA: {}", sla_id),
-                                    );
-                                } else {
-                                    let mut msg = format!(
-                                        "History for SLA {} ({} entries):\n",
-                                        sla_id,
-                                        history.len()
-                                    );
-                                    for entry in history.iter().take(20) {
-                                        msg.push_str(&format!(
-                                            "  [{}] {} - {} ({:.1}%): {}\n",
-                                            entry.recorded_at.format("%Y-%m-%d %H:%M:%S"),
-                                            entry.task_id,
-                                            entry.status,
-                                            entry.score,
-                                            entry.reason
-                                        ));
-                                    }
-                                    if history.len() > 20 {
-                                        msg.push_str(&format!(
-                                            "  ... and {} more\n",
-                                            history.len() - 20
-                                        ));
-                                    }
-                                    s.add_system_message("main", msg);
-                                }
-                            }
-                            None => {
-                                s.add_system_message("main", format!("SLA not found: {}", sla_id));
-                            }
-                        }
-                    }
-                }
-                "clear" => {
-                    if args.is_empty() {
-                        match s.download_manager.clear_all_sla_history().await {
-                            Ok(_) => {
-                                s.add_system_message(
-                                    "main",
-                                    "Cleared all SLA history.".to_string(),
-                                );
-                            }
-                            Err(e) => {
-                                s.add_system_message(
-                                    "main",
-                                    format!("Failed to clear history: {}", e),
-                                );
-                            }
-                        }
-                    } else {
-                        let sla_id = &args[0];
-                        match s.download_manager.clear_sla_history(sla_id).await {
-                            Ok(true) => {
-                                s.add_system_message(
-                                    "main",
-                                    format!("Cleared history for SLA: {}", sla_id),
-                                );
-                            }
-                            Ok(false) => {
-                                s.add_system_message("main", format!("SLA not found: {}", sla_id));
-                            }
-                            Err(e) => {
-                                s.add_system_message(
-                                    "main",
-                                    format!("Failed to clear history: {}", e),
-                                );
-                            }
-                        }
-                    }
-                }
-                "config" => {
-                    let config = s.download_manager.get_sla_config().await;
-                    let msg = format!(
-                        "SLA Configuration:\n\
-                         Enabled: {}\n\
-                         Max SLAs: {}\n\
-                         Default Max History: {}\n\
-                         Auto Eval Interval: {}s\n\
-                         Log Violations: {}",
-                        config.enabled,
-                        config.max_slas,
-                        config.default_max_history,
-                        config.auto_eval_interval_secs,
-                        config.log_violations
-                    );
-                    s.add_system_message("main", msg);
-                }
-                "enable" => {
-                    match s
-                        .download_manager
-                        .set_sla_config(ipmsg_download::sla_compliance::SlaConfig {
-                            enabled: true,
-                            ..s.download_manager.get_sla_config().await
-                        })
-                        .await
-                    {
-                        Ok(_) => {
-                            s.add_system_message("main", "SLA compliance enabled.".to_string());
-                        }
-                        Err(e) => {
-                            s.add_system_message("main", format!("Failed to enable: {}", e));
-                        }
-                    }
-                }
-                "disable" => {
-                    match s
-                        .download_manager
-                        .set_sla_config(ipmsg_download::sla_compliance::SlaConfig {
-                            enabled: false,
-                            ..s.download_manager.get_sla_config().await
-                        })
-                        .await
-                    {
-                        Ok(_) => {
-                            s.add_system_message("main", "SLA compliance disabled.".to_string());
-                        }
-                        Err(e) => {
-                            s.add_system_message("main", format!("Failed to disable: {}", e));
-                        }
-                    }
-                }
-                _ => {
-                    s.add_system_message(
-                        "main",
-                        "Usage: /dls <status|list|add|remove|evaluate|summary|history|clear|config|enable|disable>".to_string(),
                     );
                 }
             }
@@ -24248,5 +24758,138 @@ mod save_path_tests {
     fn test_help_contains_dlha() {
         let help = command_help();
         assert!(help.contains("/dlha"));
+    }
+
+    // ========== Phase 167: Source Benchmark CLI Tests ==========
+
+    #[test]
+    fn test_parse_dlsrcbench_status() {
+        let cmd = parse_command("/dlsrcbench status");
+        match cmd {
+            Command::DlSrcBench { args } => {
+                assert_eq!(args, vec!["status"]);
+            }
+            other => panic!("Expected DlSrcBench, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsrcbench_config() {
+        let cmd = parse_command("/dlsrcbench config enabled false");
+        match cmd {
+            Command::DlSrcBench { args } => {
+                assert_eq!(args, vec!["config", "enabled", "false"]);
+            }
+            other => panic!("Expected DlSrcBench, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsrcbench_run() {
+        let cmd = parse_command("/dlsrcbench run http://example.com/file.zip http://mirror.com/file.zip");
+        match cmd {
+            Command::DlSrcBench { args } => {
+                assert_eq!(args.len(), 3);
+                assert_eq!(args[0], "run");
+                assert_eq!(args[1], "http://example.com/file.zip");
+                assert_eq!(args[2], "http://mirror.com/file.zip");
+            }
+            other => panic!("Expected DlSrcBench, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsrcbench_select() {
+        let cmd = parse_command("/dlsrcbench select http://a.com http://b.com");
+        match cmd {
+            Command::DlSrcBench { args } => {
+                assert_eq!(args.len(), 3);
+                assert_eq!(args[0], "select");
+            }
+            other => panic!("Expected DlSrcBench, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsrcbench_cache() {
+        let cmd = parse_command("/dlsrcbench cache");
+        match cmd {
+            Command::DlSrcBench { args } => {
+                assert_eq!(args, vec!["cache"]);
+            }
+            other => panic!("Expected DlSrcBench, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsrcbench_domain() {
+        let cmd = parse_command("/dlsrcbench domain example.com");
+        match cmd {
+            Command::DlSrcBench { args } => {
+                assert_eq!(args, vec!["domain", "example.com"]);
+            }
+            other => panic!("Expected DlSrcBench, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsrcbench_clear() {
+        let cmd = parse_command("/dlsrcbench clear");
+        match cmd {
+            Command::DlSrcBench { args } => {
+                assert_eq!(args, vec!["clear"]);
+            }
+            other => panic!("Expected DlSrcBench, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsrcbench_save() {
+        let cmd = parse_command("/dlsrcbench save");
+        match cmd {
+            Command::DlSrcBench { args } => {
+                assert_eq!(args, vec!["save"]);
+            }
+            other => panic!("Expected DlSrcBench, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsrcbench_no_args() {
+        let cmd = parse_command("/dlsrcbench");
+        match cmd {
+            Command::DlSrcBench { args } => {
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlSrcBench, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsrcbench_alias_long() {
+        let cmd = parse_command("/dl-srcbench status");
+        match cmd {
+            Command::DlSrcBench { args } => {
+                assert_eq!(args, vec!["status"]);
+            }
+            other => panic!("Expected DlSrcBench, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlsrcbench_alias_short() {
+        let cmd = parse_command("/dlsb status");
+        match cmd {
+            Command::DlSrcBench { args } => {
+                assert_eq!(args, vec!["status"]);
+            }
+            other => panic!("Expected DlSrcBench, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_dlsrcbench() {
+        let help = command_help();
+        assert!(help.contains("/dlsrcbench"));
     }
 }
