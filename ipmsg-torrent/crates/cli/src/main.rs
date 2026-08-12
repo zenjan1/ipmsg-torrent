@@ -317,6 +317,12 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
+    /// Speed heatmap - view download speed patterns by hour and day of week (Phase 158)
+    DlHeatmap {
+        /// "status", "summary", "report", "hour <h>", "day <d>", "quality <d> <h>", "config", "prune", "reset"
+        action: String,
+        args: Vec<String>,
+    },
     /// Path organizer - auto-organize files by extension (Phase 133)
     DlPathOrganizer {
         /// "status", "enable", "disable", "add", "remove", "list", "organize"
@@ -1345,6 +1351,18 @@ fn parse_command(input: &str) -> Command {
                 let action = parts[1].to_string();
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlDepViz { action, args }
+            }
+        }
+        "dlheatmap" | "dl-heatmap" | "dlhm" => {
+            if parts.len() < 2 {
+                Command::DlHeatmap {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlHeatmap { action, args }
             }
         }
         "dlretention" | "dl-retention" => {
@@ -2865,6 +2883,7 @@ fn command_help() -> String {
         "/dluptime       - Show system uptime (how long since startup)",
         "/dldiag         - Download diagnostics (status|run|report|config)",
         "/dldepviz [cmd]   - Dependency visualization (graph|stats|config|cycles|roots|leaves|text|dot)",
+        "/dlheatmap [cmd]  - Speed heatmap by hour/day (status|report|hour|day|quality|config|prune|reset)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -6195,14 +6214,20 @@ async fn handle_command(
                     let preset_id = &args[0];
                     let field = args[1].as_str();
                     let value = &args[2];
-                    
+
                     let updates = match field {
                         "name" => ipmsg_download::download_presets::PresetUpdate {
                             name: Some(value.to_string()),
                             ..Default::default()
                         },
                         "tags" => ipmsg_download::download_presets::PresetUpdate {
-                            tags: Some(value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()),
+                            tags: Some(
+                                value
+                                    .split(',')
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect(),
+                            ),
                             ..Default::default()
                         },
                         "group" => ipmsg_download::download_presets::PresetUpdate {
@@ -6210,14 +6235,18 @@ async fn handle_command(
                             ..Default::default()
                         },
                         "priority" => {
-                            if let Some(p) = ipmsg_download::download_presets::parse_priority(value) {
+                            if let Some(p) = ipmsg_download::download_presets::parse_priority(value)
+                            {
                                 ipmsg_download::download_presets::PresetUpdate {
                                     priority: Some(p),
                                     ..Default::default()
                                 }
                             } else {
                                 let mut s = state.lock().await;
-                                s.add_system_message("main", format!("Invalid priority: {}", value));
+                                s.add_system_message(
+                                    "main",
+                                    format!("Invalid priority: {}", value),
+                                );
                                 return;
                             }
                         }
@@ -6229,7 +6258,10 @@ async fn handle_command(
                                 }
                             } else {
                                 let mut s = state.lock().await;
-                                s.add_system_message("main", format!("Invalid speed limit: {}", value));
+                                s.add_system_message(
+                                    "main",
+                                    format!("Invalid speed limit: {}", value),
+                                );
                                 return;
                             }
                         }
@@ -6247,8 +6279,10 @@ async fn handle_command(
                             return;
                         }
                     };
-                    
-                    let updated = download_manager.update_download_preset(preset_id, updates).await;
+
+                    let updated = download_manager
+                        .update_download_preset(preset_id, updates)
+                        .await;
                     let mut s = state.lock().await;
                     if updated {
                         s.add_system_message("main", format!("✅ Updated preset {}", preset_id));
@@ -6259,7 +6293,10 @@ async fn handle_command(
                 "enable" => {
                     if args.is_empty() {
                         let mut s = state.lock().await;
-                        s.add_system_message("main", "Usage: /dlpreset enable <preset_id>".to_string());
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpreset enable <preset_id>".to_string(),
+                        );
                         return;
                     }
                     let preset_id = &args[0];
@@ -6274,7 +6311,10 @@ async fn handle_command(
                 "disable" => {
                     if args.is_empty() {
                         let mut s = state.lock().await;
-                        s.add_system_message("main", "Usage: /dlpreset disable <preset_id>".to_string());
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpreset disable <preset_id>".to_string(),
+                        );
                         return;
                     }
                     let preset_id = &args[0];
@@ -6302,7 +6342,10 @@ async fn handle_command(
                 "category" => {
                     if args.is_empty() {
                         let mut s = state.lock().await;
-                        s.add_system_message("main", "Usage: /dlpreset category <category_name>".to_string());
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpreset category <category_name>".to_string(),
+                        );
                         return;
                     }
                     let category = &args[0];
@@ -6335,23 +6378,29 @@ async fn handle_command(
                     output.push_str(&format!("  Total presets: {}\n", summary.total_presets));
                     output.push_str(&format!("  Enabled: {}\n", summary.enabled_presets));
                     output.push_str(&format!("  Disabled: {}\n", summary.disabled_presets));
-                    output.push_str(&format!("  Total usage count: {}\n", summary.total_usage_count));
-                    output.push_str(&format!("  Unused presets: {}\n", summary.unused_presets_count));
-                    
+                    output.push_str(&format!(
+                        "  Total usage count: {}\n",
+                        summary.total_usage_count
+                    ));
+                    output.push_str(&format!(
+                        "  Unused presets: {}\n",
+                        summary.unused_presets_count
+                    ));
+
                     if let Some((ref id, count)) = summary.most_used_preset {
                         output.push_str(&format!("  Most used: {} ({} times)\n", id, count));
                     }
                     if let Some((ref id, count)) = summary.least_used_preset {
                         output.push_str(&format!("  Least used: {} ({} times)\n", id, count));
                     }
-                    
+
                     if !summary.categories.is_empty() {
                         output.push_str("  Categories:\n");
                         for (cat, count) in &summary.categories {
                             output.push_str(&format!("    • {}: {} presets\n", cat, count));
                         }
                     }
-                    
+
                     let mut s = state.lock().await;
                     s.add_system_message("main", output);
                 }
@@ -19028,6 +19077,186 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dldepviz [graph|stats|config|cycles|roots|leaves|text|dot]"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlHeatmap { action, args } => {
+            let download_manager = state.lock().await.download_manager.clone();
+            match action.as_str() {
+                "status" | "summary" => {
+                    let summary = download_manager.get_speed_heatmap_summary().await;
+                    let mut msg = String::from("🌡️ Speed Heatmap Summary:\n");
+                    msg.push_str(&format!("Total Samples: {}\n", summary.total_samples));
+                    msg.push_str(&format!(
+                        "Best Hour: {:02}:00 ({:.1} KB/s)\n",
+                        summary.best_hour,
+                        summary.hourly[summary.best_hour as usize].avg_speed() / 1024.0
+                    ));
+                    msg.push_str(&format!(
+                        "Worst Hour: {:02}:00 ({:.1} KB/s)\n",
+                        summary.worst_hour,
+                        summary.hourly[summary.worst_hour as usize].avg_speed() / 1024.0
+                    ));
+                    msg.push_str(&format!(
+                        "Best Day: {} ({:.1} KB/s)\n",
+                        ipmsg_download::speed_heatmap::day_name(summary.best_day),
+                        summary.daily[summary.best_day as usize].avg_speed() / 1024.0
+                    ));
+                    msg.push_str(&format!(
+                        "Worst Day: {} ({:.1} KB/s)\n",
+                        ipmsg_download::speed_heatmap::day_name(summary.worst_day),
+                        summary.daily[summary.worst_day as usize].avg_speed() / 1024.0
+                    ));
+                    if !summary.recommended_windows.is_empty() {
+                        msg.push_str("\n📅 Recommended Download Windows:\n");
+                        for (i, win) in summary.recommended_windows.iter().enumerate() {
+                            msg.push_str(&format!(
+                                "  {}. {:02}:00-{:02}:00 {} ({:.1} KB/s, {:?})\n",
+                                i + 1,
+                                win.start_hour,
+                                win.end_hour,
+                                win.day_of_week
+                                    .map(|d| ipmsg_download::speed_heatmap::day_name(d).to_string())
+                                    .unwrap_or_else(|| "any day".to_string()),
+                                win.avg_speed_bps / 1024.0,
+                                win.quality
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "report" => {
+                    let report = download_manager.format_speed_heatmap_report().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("🌡️ Speed Heatmap Report:\n{}", report));
+                }
+                "hour" => {
+                    if let Some(hour_str) = args.first() {
+                        if let Ok(hour) = hour_str.parse::<u8>() {
+                            if hour < 24 {
+                                let speed =
+                                    download_manager.get_speed_heatmap_hourly_speed(hour).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "🕐 Hour {:02}:00 - Average Speed: {:.1} KB/s",
+                                        hour,
+                                        speed / 1024.0
+                                    ),
+                                );
+                            } else {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", "Hour must be 0-23".to_string());
+                            }
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "Invalid hour format".to_string());
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlheatmap hour <0-23>".to_string());
+                    }
+                }
+                "day" => {
+                    if let Some(day_str) = args.first() {
+                        if let Ok(day) = day_str.parse::<u8>() {
+                            if day < 7 {
+                                let speed =
+                                    download_manager.get_speed_heatmap_daily_speed(day).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "📅 {} - Average Speed: {:.1} KB/s",
+                                        ipmsg_download::speed_heatmap::day_name(day),
+                                        speed / 1024.0
+                                    ),
+                                );
+                            } else {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Day must be 0-6 (Mon-Sun)".to_string(),
+                                );
+                            }
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "Invalid day format".to_string());
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlheatmap day <0-6>".to_string());
+                    }
+                }
+                "quality" => {
+                    if args.len() >= 2 {
+                        if let (Ok(day), Ok(hour)) = (args[0].parse::<u8>(), args[1].parse::<u8>())
+                        {
+                            if day < 7 && hour < 24 {
+                                let quality =
+                                    download_manager.get_speed_heatmap_quality(day, hour).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "🎯 Quality for {} {:02}:00: {:?}",
+                                        ipmsg_download::speed_heatmap::day_name(day),
+                                        hour,
+                                        quality
+                                    ),
+                                );
+                            } else {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Day must be 0-6, hour must be 0-23".to_string(),
+                                );
+                            }
+                        } else {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", "Invalid day/hour format".to_string());
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlheatmap quality <day 0-6> <hour 0-23>".to_string(),
+                        );
+                    }
+                }
+                "config" => {
+                    let config = download_manager.get_speed_heatmap_config().await;
+                    let msg = format!(
+                        "⚙️ Speed Heatmap Config:\nEnabled: {}\nMax Samples/Hour: {}\n\
+                         Max Samples/Day: {}\nMax Samples/Cell: {}\nRetention Days: {}",
+                        config.enabled,
+                        config.max_samples_per_hour,
+                        config.max_samples_per_day,
+                        config.max_samples_per_cell,
+                        config.retention_days
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "prune" => {
+                    download_manager.prune_speed_heatmap().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "✅ Old heatmap data pruned".to_string());
+                }
+                "reset" => {
+                    download_manager.reset_speed_heatmap().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "✅ Heatmap data reset".to_string());
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlheatmap [status|report|hour <h>|day <d>|quality <d> <h>|config|prune|reset]"
                             .to_string(),
                     );
                 }

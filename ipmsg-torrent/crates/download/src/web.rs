@@ -355,15 +355,30 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/download-presets", post(add_download_preset))
         .route("/api/download-presets/:id", delete(remove_download_preset))
         .route("/api/download-presets/:id", put(update_download_preset))
-        .route("/api/download-presets/:id/enable", post(enable_download_preset))
-        .route("/api/download-presets/:id/disable", post(disable_download_preset))
+        .route(
+            "/api/download-presets/:id/enable",
+            post(enable_download_preset),
+        )
+        .route(
+            "/api/download-presets/:id/disable",
+            post(disable_download_preset),
+        )
         .route(
             "/api/download-presets/:id/apply/:task_id",
             post(apply_download_preset),
         )
-        .route("/api/download-presets/categories", get(get_preset_categories))
-        .route("/api/download-presets/category/:category", get(list_presets_by_category))
-        .route("/api/download-presets/usage-summary", get(get_preset_usage_summary))
+        .route(
+            "/api/download-presets/categories",
+            get(get_preset_categories),
+        )
+        .route(
+            "/api/download-presets/category/:category",
+            get(list_presets_by_category),
+        )
+        .route(
+            "/api/download-presets/usage-summary",
+            get(get_preset_usage_summary),
+        )
         .route("/api/url-bookmarks", get(list_url_bookmarks))
         .route("/api/url-bookmarks", post(add_url_bookmark))
         .route("/api/url-bookmarks/:name", get(get_url_bookmark))
@@ -1290,6 +1305,37 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route(
             "/api/diagnostics/report",
             get(get_diagnostics_report_handler),
+        )
+        // Phase 158: Speed Heatmap REST API
+        .route(
+            "/api/speed-heatmap",
+            get(get_speed_heatmap_config_handler)
+                .post(set_speed_heatmap_config_handler)
+                .delete(reset_speed_heatmap_handler),
+        )
+        .route(
+            "/api/speed-heatmap/summary",
+            get(get_speed_heatmap_summary_handler),
+        )
+        .route(
+            "/api/speed-heatmap/report",
+            get(get_speed_heatmap_report_handler),
+        )
+        .route(
+            "/api/speed-heatmap/hourly/:hour",
+            get(get_speed_heatmap_hourly_handler),
+        )
+        .route(
+            "/api/speed-heatmap/daily/:day",
+            get(get_speed_heatmap_daily_handler),
+        )
+        .route(
+            "/api/speed-heatmap/quality/:day/:hour",
+            get(get_speed_heatmap_quality_handler),
+        )
+        .route(
+            "/api/speed-heatmap/prune",
+            post(prune_speed_heatmap_handler),
         )
         .route(
             "/api/file-stats",
@@ -6660,9 +6706,7 @@ async fn disable_download_preset(
 }
 
 /// GET /api/download-presets/categories - Get all preset categories
-async fn get_preset_categories(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn get_preset_categories(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let categories = state.manager.get_preset_categories().await;
     Json(serde_json::json!({
         "categories": categories,
@@ -8562,6 +8606,116 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
+    }
+
+    // ===== Phase 158: Speed Heatmap API Tests =====
+
+    #[tokio::test]
+    async fn test_speed_heatmap_config_api() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-heatmap")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_speed_heatmap_summary_api() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-heatmap/summary")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_speed_heatmap_report_api() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-heatmap/report")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_speed_heatmap_hourly_api() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-heatmap/hourly/10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_speed_heatmap_daily_api() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-heatmap/daily/2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_speed_heatmap_quality_api() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-heatmap/quality/2/10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
 
@@ -11357,4 +11511,101 @@ async fn get_diagnostics_report_handler(
 ) -> impl axum::response::IntoResponse {
     let report = state.manager.get_diagnostics_report().await;
     Json(serde_json::json!({"report": report}))
+}
+
+// ========== Phase 158: Speed Heatmap REST API Handlers ==========
+
+/// GET /api/speed-heatmap - Get speed heatmap configuration
+async fn get_speed_heatmap_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::speed_heatmap::SpeedHeatmapConfig> {
+    let config = state.manager.get_speed_heatmap_config().await;
+    Json(config)
+}
+
+/// POST /api/speed-heatmap - Update speed heatmap configuration
+async fn set_speed_heatmap_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::speed_heatmap::SpeedHeatmapConfig>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state.manager.set_speed_heatmap_config(config).await;
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+/// GET /api/speed-heatmap/summary - Get speed heatmap summary
+async fn get_speed_heatmap_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::speed_heatmap::SpeedHeatmapSummary> {
+    let summary = state.manager.get_speed_heatmap_summary().await;
+    Json(summary)
+}
+
+/// GET /api/speed-heatmap/report - Get formatted speed heatmap report
+async fn get_speed_heatmap_report_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let report = state.manager.format_speed_heatmap_report().await;
+    Json(serde_json::json!({"report": report}))
+}
+
+/// GET /api/speed-heatmap/hourly/:hour - Get hourly average speed
+async fn get_speed_heatmap_hourly_handler(
+    State(state): State<Arc<WebState>>,
+    Path(hour): Path<u8>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if hour > 23 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let speed = state.manager.get_speed_heatmap_hourly_speed(hour).await;
+    Ok(Json(serde_json::json!({
+        "hour": hour,
+        "avg_speed_bps": speed
+    })))
+}
+
+/// GET /api/speed-heatmap/daily/:day - Get daily average speed
+async fn get_speed_heatmap_daily_handler(
+    State(state): State<Arc<WebState>>,
+    Path(day): Path<u8>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if day > 6 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let speed = state.manager.get_speed_heatmap_daily_speed(day).await;
+    Ok(Json(serde_json::json!({
+        "day_of_week": day,
+        "avg_speed_bps": speed
+    })))
+}
+
+/// GET /api/speed-heatmap/quality/:day/:hour - Get quality rating for a time slot
+async fn get_speed_heatmap_quality_handler(
+    State(state): State<Arc<WebState>>,
+    Path((day, hour)): Path<(u8, u8)>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if day > 6 || hour > 23 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let quality = state.manager.get_speed_heatmap_quality(day, hour).await;
+    Ok(Json(serde_json::json!({
+        "day_of_week": day,
+        "hour": hour,
+        "quality": quality
+    })))
+}
+
+/// DELETE /api/speed-heatmap - Reset all heatmap data
+async fn reset_speed_heatmap_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.reset_speed_heatmap().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/speed-heatmap/prune - Prune old heatmap data
+async fn prune_speed_heatmap_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.prune_speed_heatmap().await;
+    Json(serde_json::json!({"status": "ok"}))
 }

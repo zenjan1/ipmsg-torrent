@@ -3012,7 +3012,11 @@ impl DownloadManager {
     }
 
     /// Update a download preset
-    pub async fn update_download_preset(&self, id: &str, updates: download_presets::PresetUpdate) -> bool {
+    pub async fn update_download_preset(
+        &self,
+        id: &str,
+        updates: download_presets::PresetUpdate,
+    ) -> bool {
         let mut presets = self.download_presets.lock().await;
         if let Some(preset) = presets.iter_mut().find(|p| p.id == id) {
             if let Some(name) = updates.name {
@@ -3100,7 +3104,10 @@ impl DownloadManager {
     }
 
     /// List presets by category
-    pub async fn list_presets_by_category(&self, category: &str) -> Vec<download_presets::DownloadPreset> {
+    pub async fn list_presets_by_category(
+        &self,
+        category: &str,
+    ) -> Vec<download_presets::DownloadPreset> {
         let presets = self.download_presets.lock().await;
         presets
             .iter()

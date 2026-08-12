@@ -145,7 +145,10 @@ impl Default for PoolConfig {
 }
 
 /// Save pool configuration to disk
-pub fn save_pool_config(config: &PoolConfig, data_dir: &std::path::Path) -> Result<(), std::io::Error> {
+pub fn save_pool_config(
+    config: &PoolConfig,
+    data_dir: &std::path::Path,
+) -> Result<(), std::io::Error> {
     let path = data_dir.join("connection_pool_config.json");
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -159,8 +162,7 @@ pub fn load_pool_config(data_dir: &std::path::Path) -> Result<PoolConfig, std::i
         return Ok(PoolConfig::default());
     }
     let json = fs::read_to_string(&path)?;
-    serde_json::from_str(&json)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    serde_json::from_str(&json).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 /// DNS cache entry
@@ -523,7 +525,10 @@ impl ConnectionPool {
     /// Get current configuration (sync, clones under lock)
     pub fn get_config(&self) -> PoolConfig {
         // Use try_lock for sync access; fallback to default if locked
-        self.config.try_lock().map(|g| g.clone()).unwrap_or_default()
+        self.config
+            .try_lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Clear all connections and reset statistics

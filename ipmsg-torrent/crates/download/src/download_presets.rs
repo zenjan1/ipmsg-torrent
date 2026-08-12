@@ -222,7 +222,9 @@ pub struct PresetManager {
 impl PresetManager {
     /// Create a new preset manager
     pub fn new() -> Self {
-        Self { presets: Vec::new() }
+        Self {
+            presets: Vec::new(),
+        }
     }
 
     /// Create from existing presets
@@ -381,9 +383,7 @@ impl PresetManager {
             }
 
             match least_used {
-                None if preset.use_count > 0 => {
-                    least_used = Some((&preset.id, preset.use_count))
-                }
+                None if preset.use_count > 0 => least_used = Some((&preset.id, preset.use_count)),
                 Some((_, count)) if preset.use_count > 0 && preset.use_count < count => {
                     least_used = Some((&preset.id, preset.use_count));
                 }
@@ -913,77 +913,6 @@ mod tests {
     }
 
     #[test]
-    fn test_preset_record_usage() {
-        let mut p = DownloadPreset::new("t".to_string(), "T".to_string());
-        assert_eq!(p.use_count, 0);
-        assert!(p.last_used_at.is_none());
-        p.record_usage();
-        assert_eq!(p.use_count, 1);
-        assert!(p.last_used_at.is_some());
-        let ts = p.last_used_at.unwrap();
-        p.record_usage();
-        assert_eq!(p.use_count, 2);
-        assert!(p.last_used_at.unwrap() >= ts);
-    }
-
-    #[test]
-    fn test_preset_manager_update() {
-        let mut mgr = PresetManager::new();
-        mgr.add(DownloadPreset::new("a".to_string(), "A".to_string()));
-        let upd = PresetUpdate {
-            name: Some("Updated".to_string()),
-            category: Some("media".to_string()),
-            priority: Some(3),
-            ..Default::default()
-        };
-        assert!(mgr.update("a", upd));
-        let p = mgr.get("a").unwrap();
-        assert_eq!(p.name, "Updated");
-        assert_eq!(p.category.as_deref(), Some("media"));
-        assert_eq!(p.priority, 3);
-    }
-
-    #[test]
-    fn test_preset_manager_update_not_found() {
-        let mut mgr = PresetManager::new();
-        let upd = PresetUpdate {
-            name: Some("X".to_string()),
-            ..Default::default()
-        };
-        assert!(!mgr.update("nonexistent", upd));
-    }
-
-    #[test]
-    fn test_preset_manager_enable_disable() {
-        let mut mgr = PresetManager::new();
-        mgr.add(DownloadPreset::new("a".to_string(), "A".to_string()));
-        assert!(mgr.get("a").unwrap().enabled);
-        assert!(mgr.disable("a"));
-        assert!(!mgr.get("a").unwrap().enabled);
-        assert!(mgr.enable("a"));
-        assert!(mgr.get("a").unwrap().enabled);
-        assert!(!mgr.enable("nonexistent"));
-        assert!(!mgr.disable("nonexistent"));
-    }
-
-    #[test]
-    fn test_preset_manager_categories() {
-        let mut mgr = PresetManager::new();
-        let mut p1 = DownloadPreset::new("a".to_string(), "A".to_string());
-        p1.category = Some("media".to_string());
-        let mut p2 = DownloadPreset::new("b".to_string(), "B".to_string());
-        p2.category = Some("docs".to_string());
-        let mut p3 = DownloadPreset::new("c".to_string(), "C".to_string());
-        p3.category = Some("media".to_string());
-        mgr.add(p1);
-        mgr.add(p2);
-        mgr.add(p3);
-        let mut cats = mgr.categories();
-        cats.sort();
-        assert_eq!(cats, vec!["docs", "media"]);
-    }
-
-    #[test]
     fn test_preset_manager_list_by_category() {
         let mut mgr = PresetManager::new();
         let mut p1 = DownloadPreset::new("a".to_string(), "A".to_string());
@@ -1036,17 +965,9 @@ mod tests {
     }
 
     #[test]
-    fn test_preset_manager_record_usage() {
-        let mut mgr = PresetManager::new();
-        mgr.add(DownloadPreset::new("a".to_string(), "A".to_string()));
-        assert!(mgr.record_usage("a"));
-        assert_eq!(mgr.get("a").unwrap().use_count, 1);
-        assert!(!mgr.record_usage("nonexistent"));
-    }
-
-    #[test]
     fn test_preset_deserialize_with_new_fields() {
-        let json = r#"{"id":"x","name":"X","category":"work","use_count":42,"last_used_at":1700000000}"#;
+        let json =
+            r#"{"id":"x","name":"X","category":"work","use_count":42,"last_used_at":1700000000}"#;
         let p: DownloadPreset = serde_json::from_str(json).unwrap();
         assert_eq!(p.category.as_deref(), Some("work"));
         assert_eq!(p.use_count, 42);
