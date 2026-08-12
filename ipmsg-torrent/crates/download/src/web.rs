@@ -274,6 +274,21 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/queue-completion",
             post(set_queue_completion_config_handler),
         )
+        // Smart Queue Optimizer (Phase 172)
+        .route("/api/smart-queue", get(get_smart_queue_handler))
+        .route("/api/smart-queue", post(set_smart_queue_handler))
+        .route(
+            "/api/smart-queue/optimize",
+            post(optimize_smart_queue_handler),
+        )
+        .route(
+            "/api/smart-queue/summary",
+            get(get_smart_queue_summary_handler),
+        )
+        .route(
+            "/api/smart-queue/result",
+            get(get_smart_queue_result_handler),
+        )
         .route("/api/download-quota", get(get_download_quota_config))
         .route("/api/download-quota", post(set_download_quota_config))
         .route(
@@ -6764,6 +6779,63 @@ async fn set_queue_completion_config_handler(
         .set_queue_completion_config(config.clone())
         .await;
     Json(serde_json::json!({"status": "ok", "config": config}))
+}
+
+// ── Smart Queue Optimizer API Handlers (Phase 172) ──
+
+/// GET /api/smart-queue — Get smart queue optimizer configuration
+async fn get_smart_queue_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let config = state.manager.get_smart_queue_config().await;
+    Json(
+        serde_json::to_value(config)
+            .unwrap_or(serde_json::json!({"error": "Failed to serialize config"})),
+    )
+}
+
+/// POST /api/smart-queue — Update smart queue optimizer configuration
+async fn set_smart_queue_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::smart_queue::SmartQueueConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_smart_queue_config(config.clone()).await;
+    Json(serde_json::json!({"status": "ok", "config": config}))
+}
+
+/// POST /api/smart-queue/optimize — Run smart queue optimization
+async fn optimize_smart_queue_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let result = state.manager.optimize_smart_queue().await;
+    Json(
+        serde_json::to_value(result)
+            .unwrap_or(serde_json::json!({"error": "Failed to serialize result"})),
+    )
+}
+
+/// GET /api/smart-queue/summary — Get smart queue optimizer summary
+async fn get_smart_queue_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.manager.get_smart_queue_summary().await;
+    Json(
+        serde_json::to_value(summary)
+            .unwrap_or(serde_json::json!({"error": "Failed to serialize summary"})),
+    )
+}
+
+/// GET /api/smart-queue/result — Get last optimization result
+async fn get_smart_queue_result_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    match state.manager.get_smart_queue_last_result().await {
+        Some(result) => Json(
+            serde_json::to_value(result)
+                .unwrap_or(serde_json::json!({"error": "Failed to serialize result"})),
+        ),
+        None => Json(
+            serde_json::json!({"error": "No optimization result available. Run optimize first."}),
+        ),
+    }
 }
 
 // ── Download Quota API Handlers (Phase 115) ──

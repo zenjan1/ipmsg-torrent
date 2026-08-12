@@ -671,6 +671,11 @@ enum Command {
     DlQueueCompletion {
         subcommand: Option<String>,
     },
+    /// Smart queue optimizer management (Phase 172)
+    DlSmartQueue {
+        subcmd: String,
+        args: Vec<String>,
+    },
     /// Manage download quota system (per-tag/group data limits)
     DlDownloadQuota {
         subcommand: Option<String>,
@@ -3026,6 +3031,10 @@ fn parse_command(input: &str) -> Command {
         "dlqc" | "dl-queuecompletion" => Command::DlQueueCompletion {
             subcommand: parts.get(1).map(|s| s.to_string()),
         },
+        "dlsqopt" | "dl-smartqueue" | "dl-smart-queue" | "dlsq" => Command::DlSmartQueue {
+            subcmd: parts.get(1).map(|s| s.to_string()).unwrap_or_else(|| "status".to_string()),
+            args: parts[2..].iter().map(|s| s.to_string()).collect(),
+        },
         "dlquota" | "dl-downloadquota" | "dldq" => Command::DlDownloadQuota {
             subcommand: parts.get(1).map(|s| s.to_string()),
             args: parts[2..].iter().map(|s| s.to_string()).collect(),
@@ -3186,6 +3195,7 @@ fn command_help() -> String {
         "/dlrss <list|add|remove|enable|disable|poll> - Manage RSS/Atom feed subscriptions",
         "/dleta [task_id]   - Show ETA estimates for active downloads",
         "/dlqc [status|config] - Predict queue completion time",
+        "/dlsqopt [status|config|optimize|result] - Smart queue optimizer management",
         "/dlquota [status|enable|disable|add|del|list|summary|refresh|clear] - Manage download quotas",
         "/dlaudit [cmd]     - Audit log (status|recent [n]|task <id>|clear)",
         "/dlbwsched [cmd]   - Bandwidth schedule (status|list|add|del)",
@@ -15404,6 +15414,163 @@ async fn handle_command(
                         lines.push_str(&format!("\nEstimated completion: {}", completion_str));
                         s.add_system_message("main", lines);
                     }
+                }
+            }
+        }
+        Command::DlSmartQueue { subcmd, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+
+            match subcmd.as_str() {
+                "status" => {
+                    let summary = download_manager.get_smart_queue_summary().await;
+                    let config = download_manager.get_smart_queue_config().await;
+                    let mut s = state.lock().await;
+                    let status_icon = if summary.enabled { "✅" } else { "❌" };
+                    let output = format!(
+                        "{} Smart Queue Optimizer\n\
+                         Strategy: {}\n\
+                         Queued tasks: {}\n\
+                         Reorder candidates: {}\n\
+                         Last optimization: {}\n\
+                         Config: {}",
+                        status_icon,
+                        summary.strategy,
+                        summary.queued_tasks,
+                        summary.reorder_candidates,
+                        summary.last_optimization
+                            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                            .unwrap_or_else(|| "Never".to_string()),
+                        summary.config_summary
+                    );
+                    s.add_system_message("main", output);
+                }
+                "config" => {
+                    if args.len() >= 2 {
+                        let field = args[0].as_str();
+                        let value = args[1].as_str();
+                        let mut config = download_manager.get_smart_queue_config().await;
+                        let mut s = state.lock().await;
+                        match field {
+                            "enabled" => {
+                                if let Ok(v) = value.parse::<bool>() {
+                                    config.enabled = v;
+                                    download_manager.set_smart_queue_config(config).await;
+                                    s.add_system_message("main", format!("✅ Smart queue enabled: {}", v));
+                                } else {
+                                    s.add_system_message("main", "❌ Invalid value for enabled. Use 'true' or 'false'.".to_string());
+                                }
+                            }
+                            "strategy" => {
+                                let strategy = match value {
+                                    "balanced" => ipmsg_download::smart_queue::OptimizationStrategy::Balanced,
+                                    "deadline_first" => ipmsg_download::smart_queue::OptimizationStrategy::DeadlineFirst,
+                                    "fairness" => ipmsg_download::smart_queue::OptimizationStrategy::Fairness,
+                                    "shortest_job_first" => ipmsg_download::smart_queue::OptimizationStrategy::ShortestJobFirst,
+                                    "longest_job_first" => ipmsg_download::smart_queue::OptimizationStrategy::LongestJobFirst,
+                                    "newest_first" => ipmsg_download::smart_queue::OptimizationStrategy::NewestFirst,
+                                    "dependency_first" => ipmsg_download::smart_queue::OptimizationStrategy::DependencyFirst,
+                                    _ => {
+                                        s.add_system_message("main", "❌ Invalid strategy. Use: balanced, deadline_first, fairness, shortest_job_first, longest_job_first, newest_first, dependency_first".to_string());
+                                        return;
+                                    }
+                                };
+                                config.strategy = strategy;
+                                download_manager.set_smart_queue_config(config).await;
+                                s.add_system_message("main", format!("✅ Strategy set to: {}", value));
+                            }
+                            "auto_apply" => {
+                                if let Ok(v) = value.parse::<bool>() {
+                                    config.auto_apply = v;
+                                    download_manager.set_smart_queue_config(config).await;
+                                    s.add_system_message("main", format!("✅ Auto-apply set to: {}", v));
+                                } else {
+                                    s.add_system_message("main", "❌ Invalid value for auto_apply. Use 'true' or 'false'.".to_string());
+                                }
+                            }
+                            _ => {
+                                s.add_system_message("main", format!("❌ Unknown config field: {}. Use: enabled, strategy, auto_apply", field));
+                            }
+                        }
+                    } else {
+                        let config = download_manager.get_smart_queue_config().await;
+                        let mut s = state.lock().await;
+                        let output = format!(
+                            "Smart Queue Config:\n\
+                             Enabled: {}\n\
+                             Strategy: {}\n\
+                             Deadline weight: {:.2}\n\
+                             Priority weight: {:.2}\n\
+                             Dependency weight: {:.2}\n\
+                             Size weight: {:.2}\n\
+                             Freshness weight: {:.2}\n\
+                             Reorder threshold: {:.2}\n\
+                             Max tasks: {}\n\
+                             Auto-apply: {}",
+                            config.enabled,
+                            config.strategy,
+                            config.deadline_weight,
+                            config.priority_weight,
+                            config.dependency_weight,
+                            config.size_weight,
+                            config.freshness_weight,
+                            config.reorder_threshold,
+                            config.max_tasks,
+                            config.auto_apply
+                        );
+                        s.add_system_message("main", output);
+                    }
+                }
+                "optimize" => {
+                    let result = download_manager.optimize_smart_queue().await;
+                    let mut s = state.lock().await;
+                    let output = format!(
+                        "🔧 Optimization Result\n\
+                         Strategy: {}\n\
+                         Tasks analyzed: {}\n\
+                         Tasks to reorder: {}\n\
+                         Auto-applied: {}\n\
+                         Summary: {}",
+                        result.strategy,
+                        result.tasks_analyzed,
+                        result.tasks_to_reorder,
+                        result.auto_applied,
+                        result.summary
+                    );
+                    s.add_system_message("main", output);
+                }
+                "result" => {
+                    if let Some(result) = download_manager.get_smart_queue_last_result().await {
+                        let mut s = state.lock().await;
+                        let output = format!(
+                            "📊 Last Optimization Result\n\
+                             Time: {}\n\
+                             Strategy: {}\n\
+                             Tasks analyzed: {}\n\
+                             Tasks to reorder: {}\n\
+                             Auto-applied: {}\n\
+                             Summary: {}",
+                            result.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                            result.strategy,
+                            result.tasks_analyzed,
+                            result.tasks_to_reorder,
+                            result.auto_applied,
+                            result.summary
+                        );
+                        s.add_system_message("main", output);
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "❌ No optimization result available. Run 'optimize' first.".to_string());
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlsqopt <status|config|optimize|result> [field value]".to_string(),
+                    );
                 }
             }
         }
