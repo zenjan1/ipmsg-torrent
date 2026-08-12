@@ -6,8 +6,11 @@
 //! - Connection health monitoring and validation
 //! - Pre-connect support for queue optimization
 //! - Per-domain connection limits to prevent server overload
+//! - Configuration persistence and detailed statistics
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -78,16 +81,16 @@ impl PoolEntry {
 }
 
 /// Connection pool configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolConfig {
     /// Maximum connections per address
     pub max_connections_per_addr: usize,
-    /// Maximum age of a connection
-    pub max_age: Duration,
-    /// Maximum idle time before connection is closed
-    pub max_idle: Duration,
-    /// Connection timeout
-    pub connect_timeout: Duration,
+    /// Maximum age of a connection (seconds)
+    pub max_age_secs: u64,
+    /// Maximum idle time before connection is closed (seconds)
+    pub max_idle_secs: u64,
+    /// Connection timeout (seconds)
+    pub connect_timeout_secs: u64,
     /// TCP send buffer size (0 = system default)
     pub tcp_send_buffer_size: u32,
     /// TCP receive buffer size (0 = system default)
@@ -96,27 +99,68 @@ pub struct PoolConfig {
     pub tcp_nodelay: bool,
     /// Enable DNS caching
     pub dns_cache_enabled: bool,
-    /// DNS cache TTL
-    pub dns_cache_ttl: Duration,
+    /// DNS cache TTL (seconds)
+    pub dns_cache_ttl_secs: u64,
     /// Enable connection health checks
     pub health_check_enabled: bool,
+}
+
+impl PoolConfig {
+    /// Get max_age as Duration
+    pub fn max_age(&self) -> Duration {
+        Duration::from_secs(self.max_age_secs)
+    }
+
+    /// Get max_idle as Duration
+    pub fn max_idle(&self) -> Duration {
+        Duration::from_secs(self.max_idle_secs)
+    }
+
+    /// Get connect_timeout as Duration
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_secs(self.connect_timeout_secs)
+    }
+
+    /// Get dns_cache_ttl as Duration
+    pub fn dns_cache_ttl(&self) -> Duration {
+        Duration::from_secs(self.dns_cache_ttl_secs)
+    }
 }
 
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
             max_connections_per_addr: 4,
-            max_age: Duration::from_secs(300), // 5 minutes
-            max_idle: Duration::from_secs(60), // 1 minute
-            connect_timeout: Duration::from_secs(10),
+            max_age_secs: 300, // 5 minutes
+            max_idle_secs: 60, // 1 minute
+            connect_timeout_secs: 10,
             tcp_send_buffer_size: 256 * 1024, // 256 KB
             tcp_recv_buffer_size: 256 * 1024, // 256 KB
             tcp_nodelay: true,                // Disable Nagle for low latency
             dns_cache_enabled: true,
-            dns_cache_ttl: Duration::from_secs(300), // 5 minutes
+            dns_cache_ttl_secs: 300, // 5 minutes
             health_check_enabled: true,
         }
     }
+}
+
+/// Save pool configuration to disk
+pub fn save_pool_config(config: &PoolConfig, data_dir: &std::path::Path) -> Result<(), std::io::Error> {
+    let path = data_dir.join("connection_pool_config.json");
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    fs::write(&path, json)
+}
+
+/// Load pool configuration from disk
+pub fn load_pool_config(data_dir: &std::path::Path) -> Result<PoolConfig, std::io::Error> {
+    let path = data_dir.join("connection_pool_config.json");
+    if !path.exists() {
+        return Ok(PoolConfig::default());
+    }
+    let json = fs::read_to_string(&path)?;
+    serde_json::from_str(&json)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 /// DNS cache entry
@@ -128,7 +172,7 @@ struct DnsCacheEntry {
 
 /// Connection pool for reusing TCP connections
 pub struct ConnectionPool {
-    config: PoolConfig,
+    config: Arc<Mutex<PoolConfig>>,
     connections: Arc<Mutex<HashMap<SocketAddr, Vec<PoolEntry>>>>,
     /// DNS cache: hostname -> resolved address
     dns_cache: Arc<Mutex<HashMap<String, DnsCacheEntry>>>,
@@ -136,6 +180,10 @@ pub struct ConnectionPool {
     domain_limits: Arc<Mutex<HashMap<String, usize>>>,
     /// Current connection counts per domain
     domain_counts: Arc<Mutex<HashMap<String, usize>>>,
+    /// Pool statistics
+    stats: Arc<Mutex<PoolStats>>,
+    /// Pool creation time
+    created_at: Instant,
 }
 
 impl Default for ConnectionPool {
@@ -145,6 +193,11 @@ impl Default for ConnectionPool {
 }
 
 impl ConnectionPool {
+    /// Helper to get config with lock
+    async fn config(&self) -> tokio::sync::MutexGuard<'_, PoolConfig> {
+        self.config.lock().await
+    }
+
     /// Create a new connection pool with default configuration
     pub fn new() -> Self {
         Self::with_config(PoolConfig::default())
@@ -153,11 +206,13 @@ impl ConnectionPool {
     /// Create a new connection pool with custom configuration
     pub fn with_config(config: PoolConfig) -> Self {
         Self {
-            config,
+            config: Arc::new(Mutex::new(config)),
             connections: Arc::new(Mutex::new(HashMap::new())),
             dns_cache: Arc::new(Mutex::new(HashMap::new())),
             domain_limits: Arc::new(Mutex::new(HashMap::new())),
             domain_counts: Arc::new(Mutex::new(HashMap::new())),
+            stats: Arc::new(Mutex::new(PoolStats::default())),
+            created_at: Instant::now(),
         }
     }
 
@@ -196,28 +251,33 @@ impl ConnectionPool {
 
     /// Get a connection from the pool or create a new one
     pub async fn get_or_connect(&self, addr: SocketAddr) -> Result<TcpStream, PoolError> {
+        let config = self.config().await;
         // Try to get an existing connection
         {
             let mut conns = self.connections.lock().await;
             if let Some(entries) = conns.get_mut(&addr) {
                 // Remove expired, idle, or unhealthy connections
                 entries.retain(|e| {
-                    !e.is_expired(self.config.max_age)
-                        && !e.is_idle(self.config.max_idle)
-                        && (!self.config.health_check_enabled || e.is_healthy())
+                    !e.is_expired(config.max_age())
+                        && !e.is_idle(config.max_idle())
+                        && (!config.health_check_enabled || e.is_healthy())
                 });
 
                 // Try to get a healthy connection
                 while let Some(mut entry) = entries.pop() {
-                    if !self.config.health_check_enabled || entry.is_healthy() {
+                    if !config.health_check_enabled || entry.is_healthy() {
                         entry.record_success();
                         // Clean up empty entries
                         if entries.is_empty() {
                             conns.remove(&addr);
                         }
+                        let mut stats = self.stats.lock().await;
+                        stats.total_reused += 1;
                         return Ok(entry.stream);
                     }
                     // Unhealthy connection, discard it
+                    let mut stats = self.stats.lock().await;
+                    stats.total_discarded += 1;
                 }
 
                 // Clean up empty entries
@@ -228,19 +288,23 @@ impl ConnectionPool {
         }
 
         // Create a new connection
-        self.connect(addr).await
+        let stream = self.connect(addr).await?;
+        let mut stats = self.stats.lock().await;
+        stats.total_created += 1;
+        Ok(stream)
     }
 
     /// Pre-connect: establish a connection without immediately using it
     /// Returns immediately if a connection is already available
     pub async fn pre_connect(&self, addr: SocketAddr) -> Result<(), PoolError> {
+        let config = self.config().await;
         // Check if we already have a connection
         {
             let conns = self.connections.lock().await;
             if let Some(entries) = conns.get(&addr) {
                 if entries
                     .iter()
-                    .any(|e| e.is_healthy() && !e.is_idle(self.config.max_idle))
+                    .any(|e| e.is_healthy() && !e.is_idle(config.max_idle()))
                 {
                     return Ok(()); // Already have a good connection
                 }
@@ -255,20 +319,27 @@ impl ConnectionPool {
 
     /// Resolve hostname with DNS caching
     pub async fn resolve_cached(&self, hostname: &str, port: u16) -> Result<SocketAddr, PoolError> {
+        let config = self.config().await;
         // Check DNS cache first
-        if self.config.dns_cache_enabled {
+        if config.dns_cache_enabled {
             let cache = self.dns_cache.lock().await;
             if let Some(entry) = cache.get(hostname) {
-                if entry.resolved_at.elapsed() < self.config.dns_cache_ttl {
+                if entry.resolved_at.elapsed() < config.dns_cache_ttl() {
                     // Cache hit and not expired
                     let mut addr = entry.addr;
                     addr.set_port(port);
+                    let mut stats = self.stats.lock().await;
+                    stats.dns_cache_hits += 1;
                     return Ok(addr);
                 }
             }
         }
 
         // Cache miss or expired - resolve via DNS
+        let mut stats = self.stats.lock().await;
+        stats.dns_cache_misses += 1;
+        drop(stats);
+
         use tokio::net::lookup_host;
         let addr_str = format!("{}:{}", hostname, port);
         let addr = lookup_host(&addr_str)
@@ -278,7 +349,7 @@ impl ConnectionPool {
             .ok_or_else(|| PoolError::Dns(format!("No addresses found for {}", hostname)))?;
 
         // Update DNS cache
-        if self.config.dns_cache_enabled {
+        if config.dns_cache_enabled {
             let mut cache = self.dns_cache.lock().await;
             cache.insert(
                 hostname.to_string(),
@@ -294,6 +365,7 @@ impl ConnectionPool {
 
     /// Return a connection to the pool
     pub async fn return_connection(&self, stream: TcpStream, addr: SocketAddr) {
+        let config = self.config().await;
         let mut entry = PoolEntry::new(stream, addr);
         entry.record_success();
 
@@ -302,13 +374,13 @@ impl ConnectionPool {
 
         // Remove expired, idle, or unhealthy connections
         entries.retain(|e| {
-            !e.is_expired(self.config.max_age)
-                && !e.is_idle(self.config.max_idle)
-                && (!self.config.health_check_enabled || e.is_healthy())
+            !e.is_expired(config.max_age())
+                && !e.is_idle(config.max_idle())
+                && (!config.health_check_enabled || e.is_healthy())
         });
 
         // Add the new entry if we haven't reached the limit and it's healthy
-        if entries.len() < self.config.max_connections_per_addr && entry.is_healthy() {
+        if entries.len() < config.max_connections_per_addr && entry.is_healthy() {
             entries.push(entry);
         }
     }
@@ -325,13 +397,14 @@ impl ConnectionPool {
 
     /// Create a new connection with optimized TCP parameters
     async fn connect(&self, addr: SocketAddr) -> Result<TcpStream, PoolError> {
-        let stream = timeout(self.config.connect_timeout, TcpStream::connect(addr))
+        let config = self.config().await;
+        let stream = timeout(config.connect_timeout(), TcpStream::connect(addr))
             .await
             .map_err(|_| PoolError::Timeout)?
             .map_err(PoolError::Io)?;
 
         // Apply TCP optimizations after connection
-        if self.config.tcp_nodelay {
+        if config.tcp_nodelay {
             let _ = stream.set_nodelay(true);
         }
 
@@ -340,25 +413,27 @@ impl ConnectionPool {
 
     /// Remove expired connections from the pool
     pub async fn cleanup(&self) {
+        let config = self.config().await;
         let mut conns = self.connections.lock().await;
         conns.retain(|_, entries| {
             entries.retain(|e| {
-                !e.is_expired(self.config.max_age)
-                    && !e.is_idle(self.config.max_idle)
-                    && (!self.config.health_check_enabled || e.is_healthy())
+                !e.is_expired(config.max_age())
+                    && !e.is_idle(config.max_idle())
+                    && (!config.health_check_enabled || e.is_healthy())
             });
             !entries.is_empty()
         });
 
         // Also clean up expired DNS cache entries
-        if self.config.dns_cache_enabled {
+        if config.dns_cache_enabled {
             let mut cache = self.dns_cache.lock().await;
-            cache.retain(|_, entry| entry.resolved_at.elapsed() < self.config.dns_cache_ttl);
+            cache.retain(|_, entry| entry.resolved_at.elapsed() < config.dns_cache_ttl());
         }
     }
 
     /// Get pool statistics
     pub async fn stats(&self) -> PoolStats {
+        let config = self.config().await;
         let conns = self.connections.lock().await;
         let total_connections = conns.values().map(|v| v.len()).sum();
         let healthy_connections: usize = conns
@@ -366,19 +441,104 @@ impl ConnectionPool {
             .flat_map(|v| v.iter())
             .filter(|e| e.is_healthy())
             .count();
-        let dns_cache_size = if self.config.dns_cache_enabled {
+        let dns_cache_size = if config.dns_cache_enabled {
             let cache = self.dns_cache.lock().await;
             cache.len()
         } else {
             0
         };
 
+        let base_stats = self.stats.lock().await;
         PoolStats {
             total_addresses: conns.len(),
             total_connections,
             healthy_connections,
             dns_cache_size,
+            total_created: base_stats.total_created,
+            total_reused: base_stats.total_reused,
+            total_discarded: base_stats.total_discarded,
+            dns_cache_hits: base_stats.dns_cache_hits,
+            dns_cache_misses: base_stats.dns_cache_misses,
         }
+    }
+
+    /// Get detailed pool status including domain connections
+    pub async fn status(&self) -> PoolStatus {
+        let config = self.config().await;
+        let stats = self.stats().await;
+        let domain_connections = self.get_domain_connections().await;
+        let uptime_secs = self.created_at.elapsed().as_secs();
+
+        PoolStatus {
+            config: config.clone(),
+            stats,
+            domain_connections,
+            uptime_secs,
+        }
+    }
+
+    /// Get per-domain connection information
+    pub async fn get_domain_connections(&self) -> Vec<DomainConnectionInfo> {
+        let limits = self.domain_limits.lock().await;
+        let counts = self.domain_counts.lock().await;
+
+        let mut domain_connections: Vec<DomainConnectionInfo> = counts
+            .iter()
+            .map(|(domain, &current)| {
+                let connection_limit = limits.get(domain).copied();
+                let utilization_percent = connection_limit
+                    .map(|limit| {
+                        if limit > 0 {
+                            (current as f64 / limit as f64) * 100.0
+                        } else {
+                            0.0
+                        }
+                    })
+                    .unwrap_or(0.0);
+
+                DomainConnectionInfo {
+                    domain: domain.clone(),
+                    current_connections: current,
+                    connection_limit,
+                    utilization_percent,
+                }
+            })
+            .collect();
+
+        // Sort by current connections descending
+        domain_connections.sort_by(|a, b| b.current_connections.cmp(&a.current_connections));
+        domain_connections
+    }
+
+    /// Update pool configuration
+    pub async fn update_config(&self, config: PoolConfig) {
+        *self.config.lock().await = config;
+    }
+
+    /// Get current configuration
+    pub async fn get_config_async(&self) -> PoolConfig {
+        self.config.lock().await.clone()
+    }
+
+    /// Get current configuration (sync, clones under lock)
+    pub fn get_config(&self) -> PoolConfig {
+        // Use try_lock for sync access; fallback to default if locked
+        self.config.try_lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    /// Clear all connections and reset statistics
+    pub async fn clear(&self) {
+        let config = self.config().await;
+        let mut conns = self.connections.lock().await;
+        conns.clear();
+
+        if config.dns_cache_enabled {
+            let mut cache = self.dns_cache.lock().await;
+            cache.clear();
+        }
+
+        let mut stats = self.stats.lock().await;
+        *stats = PoolStats::default();
     }
 }
 
@@ -394,12 +554,56 @@ pub enum PoolError {
 }
 
 /// Connection pool statistics
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolStats {
     pub total_addresses: usize,
     pub total_connections: usize,
     pub healthy_connections: usize,
     pub dns_cache_size: usize,
+    /// Total connections created since pool start
+    pub total_created: u64,
+    /// Total connections reused from pool
+    pub total_reused: u64,
+    /// Total connections discarded (expired/unhealthy)
+    pub total_discarded: u64,
+    /// Total DNS cache hits
+    pub dns_cache_hits: u64,
+    /// Total DNS cache misses
+    pub dns_cache_misses: u64,
+}
+
+impl Default for PoolStats {
+    fn default() -> Self {
+        Self {
+            total_addresses: 0,
+            total_connections: 0,
+            healthy_connections: 0,
+            dns_cache_size: 0,
+            total_created: 0,
+            total_reused: 0,
+            total_discarded: 0,
+            dns_cache_hits: 0,
+            dns_cache_misses: 0,
+        }
+    }
+}
+
+/// Per-domain connection information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainConnectionInfo {
+    pub domain: String,
+    pub current_connections: usize,
+    pub connection_limit: Option<usize>,
+    pub utilization_percent: f64,
+}
+
+/// Detailed pool status for API/CLI
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolStatus {
+    pub config: PoolConfig,
+    pub stats: PoolStats,
+    pub domain_connections: Vec<DomainConnectionInfo>,
+    pub uptime_secs: u64,
 }
 
 #[cfg(test)]
@@ -411,8 +615,11 @@ mod tests {
     async fn test_pool_config_default() {
         let config = PoolConfig::default();
         assert_eq!(config.max_connections_per_addr, 4);
-        assert_eq!(config.max_age.as_secs(), 300);
-        assert_eq!(config.max_idle.as_secs(), 60);
+        assert_eq!(config.max_age_secs, 300);
+        assert_eq!(config.max_idle_secs, 60);
+        assert_eq!(config.connect_timeout_secs, 10);
+        assert!(config.tcp_nodelay);
+        assert!(config.dns_cache_enabled);
     }
 
     #[tokio::test]

@@ -1083,6 +1083,8 @@ pub struct DownloadManager {
     bandwidth_qos: Arc<Mutex<bandwidth_qos::BandwidthQosManager>>,
     /// URL blacklist for blocking unwanted downloads (Phase 153)
     url_blacklist: Arc<tokio::sync::RwLock<url_blacklist::BlacklistConfig>>,
+    /// Connection pool for TCP connection reuse and DNS caching (Phase 157)
+    connection_pool: Arc<connection_pool::ConnectionPool>,
 }
 
 impl DownloadManager {
@@ -1190,6 +1192,7 @@ impl DownloadManager {
             url_blacklist: Arc::new(tokio::sync::RwLock::new(
                 url_blacklist::BlacklistConfig::default(),
             )),
+            connection_pool: Arc::new(connection_pool::ConnectionPool::new()),
             task_snooze: Arc::new(Mutex::new(task_snooze::TaskSnoozeManager::new())),
             task_scheduler: Arc::new(Mutex::new(task_scheduler::TaskSchedulerManager::new())),
             progress_milestone: Arc::new(Mutex::new(
@@ -1487,6 +1490,7 @@ impl DownloadManager {
             url_blacklist: Arc::new(tokio::sync::RwLock::new(
                 url_blacklist::BlacklistConfig::default(),
             )),
+            connection_pool: Arc::new(connection_pool::ConnectionPool::new()),
             speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
             speed_anomaly: Arc::new(Mutex::new(speed_anomaly::SpeedAnomalyDetector::new(
                 speed_anomaly::AnomalyConfig::default(),
@@ -13763,6 +13767,61 @@ impl DownloadManager {
     pub async fn check_url_blocked(&self, url: &str) -> url_blacklist::BlacklistCheckResult {
         let config = self.url_blacklist.read().await.clone();
         url_blacklist::check_url_blacklist(url, &config)
+    }
+
+    // ========== Phase 157: Connection Pool Monitoring & Management ==========
+
+    /// Get connection pool status including stats and domain connections.
+    pub async fn get_connection_pool_status(&self) -> connection_pool::PoolStatus {
+        self.connection_pool.status().await
+    }
+
+    /// Get connection pool statistics.
+    pub async fn get_connection_pool_stats(&self) -> connection_pool::PoolStats {
+        self.connection_pool.stats().await
+    }
+
+    /// Get connection pool configuration.
+    pub async fn get_connection_pool_config(&self) -> connection_pool::PoolConfig {
+        self.connection_pool.get_config_async().await
+    }
+
+    /// Update connection pool configuration.
+    pub async fn set_connection_pool_config(&self, config: connection_pool::PoolConfig) {
+        self.connection_pool.update_config(config).await;
+    }
+
+    /// Clean up expired/idle connections from the pool.
+    pub async fn cleanup_connection_pool(&self) {
+        self.connection_pool.cleanup().await;
+    }
+
+    /// Clear all connections and reset statistics.
+    pub async fn clear_connection_pool(&self) {
+        self.connection_pool.clear().await;
+    }
+
+    /// Get per-domain connection information.
+    pub async fn get_connection_pool_domains(&self) -> Vec<connection_pool::DomainConnectionInfo> {
+        self.connection_pool.get_domain_connections().await
+    }
+
+    /// Set per-domain connection limit.
+    pub async fn set_connection_pool_domain_limit(&self, domain: &str, limit: usize) {
+        self.connection_pool.set_domain_limit(domain, limit).await;
+    }
+
+    /// Save connection pool configuration to disk.
+    pub async fn save_connection_pool_config(&self) -> Result<(), std::io::Error> {
+        let config = self.connection_pool.get_config_async().await;
+        connection_pool::save_pool_config(&config, &self.data_dir)
+    }
+
+    /// Load connection pool configuration from disk.
+    pub async fn load_connection_pool_config(&self) -> Result<(), std::io::Error> {
+        let config = connection_pool::load_pool_config(&self.data_dir)?;
+        self.connection_pool.update_config(config).await;
+        Ok(())
     }
 
     // ========== Phase 106: Per-Task Proxy Override ==========
