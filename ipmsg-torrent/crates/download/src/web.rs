@@ -1351,10 +1351,22 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/save-path", get(get_save_path_config_handler))
         .route("/api/save-path", post(set_save_path_config_handler))
         .route("/api/save-path/validate", get(validate_save_path_handler))
-        .route("/api/save-path/predict/:filename", get(predict_save_path_handler))
-        .route("/api/save-path/category-dirs", get(get_category_dirs_handler))
-        .route("/api/save-path/category-dirs", post(set_category_dir_handler))
-        .route("/api/save-path/category-dirs/:category", axum::routing::delete(remove_category_dir_handler))
+        .route(
+            "/api/save-path/predict/:filename",
+            get(predict_save_path_handler),
+        )
+        .route(
+            "/api/save-path/category-dirs",
+            get(get_category_dirs_handler),
+        )
+        .route(
+            "/api/save-path/category-dirs",
+            post(set_category_dir_handler),
+        )
+        .route(
+            "/api/save-path/category-dirs/:category",
+            axum::routing::delete(remove_category_dir_handler),
+        )
         // ── Dependency Visualization API (Phase 154) ──
         .route("/api/dependency-visualization", get(get_dep_viz_handler))
         .route(
@@ -12067,9 +12079,7 @@ async fn clear_url_intelligence_cache(
 // ── Save Path Manager Handlers (Phase 162) ──────────────────────────────
 
 /// GET /api/save-path - Get save path configuration
-async fn get_save_path_config_handler(
-    State(state): State<Arc<WebState>>,
-) -> Json<SavePathConfig> {
+async fn get_save_path_config_handler(State(state): State<Arc<WebState>>) -> Json<SavePathConfig> {
     let config = state.manager.get_save_path_config().await;
     Json(config)
 }
@@ -12084,9 +12094,7 @@ async fn set_save_path_config_handler(
 }
 
 /// GET /api/save-path/validate - Validate base save path
-async fn validate_save_path_handler(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn validate_save_path_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let result = state.manager.validate_save_path_base().await;
     Json(result)
 }
@@ -12105,9 +12113,7 @@ async fn predict_save_path_handler(
 }
 
 /// GET /api/save-path/category-dirs - Get custom category directories
-async fn get_category_dirs_handler(
-    State(state): State<Arc<WebState>>,
-) -> Json<serde_json::Value> {
+async fn get_category_dirs_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let config = state.manager.get_save_path_config().await;
     let dirs: serde_json::Map<String, serde_json::Value> = config
         .category_dirs
@@ -12140,7 +12146,10 @@ async fn set_category_dir_handler(
         _ => return Json(serde_json::json!({"error": "invalid category"})),
     };
 
-    state.manager.set_category_dir(category, dir_name.to_string()).await;
+    state
+        .manager
+        .set_category_dir(category, dir_name.to_string())
+        .await;
     Json(serde_json::json!({"status": "ok"}))
 }
 

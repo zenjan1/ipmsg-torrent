@@ -4286,7 +4286,11 @@ async fn handle_command(
                          ✅ Path Exists: {}\n\
                          ✅ Path Writable: {}",
                         config.base_dir.display(),
-                        if config.auto_organize { "Enabled" } else { "Disabled" },
+                        if config.auto_organize {
+                            "Enabled"
+                        } else {
+                            "Disabled"
+                        },
                         config.category_dirs.len(),
                         validation["exists"].as_bool().unwrap_or(false),
                         validation["writable"].as_bool().unwrap_or(false)
@@ -4307,7 +4311,9 @@ async fn handle_command(
                         if config.category_dirs.is_empty() {
                             "  (none)".to_string()
                         } else {
-                            config.category_dirs.iter()
+                            config
+                                .category_dirs
+                                .iter()
                                 .map(|(k, v)| format!("  {:?}: {}", k, v))
                                 .collect::<Vec<_>>()
                                 .join("\n")
@@ -4319,23 +4325,39 @@ async fn handle_command(
                 "set-base" => {
                     if args.is_empty() {
                         let mut s = state.lock().await;
-                        s.add_system_message("main", "❌ Usage: /dlspath set-base <path>".to_string());
+                        s.add_system_message(
+                            "main",
+                            "❌ Usage: /dlspath set-base <path>".to_string(),
+                        );
                     } else {
                         let path = std::path::PathBuf::from(&args[0]);
                         download_manager.set_save_path(path.clone()).await;
                         let mut s = state.lock().await;
-                        s.add_system_message("main", format!("✅ Base directory set to: {}", path.display()));
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Base directory set to: {}", path.display()),
+                        );
                     }
                 }
                 "organize" => {
                     if args.is_empty() {
                         let mut s = state.lock().await;
-                        s.add_system_message("main", "❌ Usage: /dlspath organize <on|off>".to_string());
+                        s.add_system_message(
+                            "main",
+                            "❌ Usage: /dlspath organize <on|off>".to_string(),
+                        );
                     } else {
-                        let enable = matches!(args[0].to_lowercase().as_str(), "on" | "true" | "1" | "yes");
+                        let enable =
+                            matches!(args[0].to_lowercase().as_str(), "on" | "true" | "1" | "yes");
                         download_manager.set_auto_organize(enable).await;
                         let mut s = state.lock().await;
-                        s.add_system_message("main", format!("✅ Auto-organize {}", if enable { "enabled" } else { "disabled" }));
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "✅ Auto-organize {}",
+                                if enable { "enabled" } else { "disabled" }
+                            ),
+                        );
                     }
                 }
                 "category" => {
@@ -4357,15 +4379,23 @@ async fn handle_command(
                                 return;
                             }
                         };
-                        download_manager.set_category_dir(category, args[1].clone()).await;
+                        download_manager
+                            .set_category_dir(category, args[1].clone())
+                            .await;
                         let mut s = state.lock().await;
-                        s.add_system_message("main", format!("✅ Category {:?} directory set to: {}", category, args[1]));
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Category {:?} directory set to: {}", category, args[1]),
+                        );
                     }
                 }
                 "predict" => {
                     if args.is_empty() {
                         let mut s = state.lock().await;
-                        s.add_system_message("main", "❌ Usage: /dlspath predict <filename>".to_string());
+                        s.add_system_message(
+                            "main",
+                            "❌ Usage: /dlspath predict <filename>".to_string(),
+                        );
                     } else {
                         let filename = &args[0];
                         let path = download_manager.predict_save_path(filename).await;
@@ -12835,13 +12865,7 @@ async fn handle_command(
                         Ok(tasks) => {
                             let count = tasks.len();
                             let mut s = state.lock().await;
-                            s.add_system_message(
-                                "main",
-                                format!(
-                                    "✅ Exported {} tasks",
-                                    count
-                                ),
-                            );
+                            s.add_system_message("main", format!("✅ Exported {} tasks", count));
                         }
                         Err(e) => {
                             let mut s = state.lock().await;
