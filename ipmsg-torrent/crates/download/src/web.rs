@@ -529,6 +529,19 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/history-analytics/clear",
             post(clear_history_analytics),
         )
+        .route(
+            "/api/url-normalizer",
+            get(get_url_normalizer_config_handler),
+        )
+        .route(
+            "/api/url-normalizer",
+            post(set_url_normalizer_config_handler),
+        )
+        .route("/api/url-normalizer/normalize", post(normalize_url_handler))
+        .route(
+            "/api/url-normalizer/equivalent",
+            post(check_url_equivalent_handler),
+        )
         .route("/api/url-intelligence", get(get_url_intelligence_config))
         .route("/api/url-intelligence", post(set_url_intelligence_config))
         .route("/api/url-intelligence/analyze", post(analyze_url_handler))
@@ -13204,6 +13217,57 @@ async fn set_url_intelligence_config(
     Json(serde_json::json!({"status": "ok"}))
 }
 
+// ── URL Normalizer Handlers (Phase 168) ──────────────────────────────────
+
+/// GET /api/url-normalizer - Get URL normalizer configuration
+async fn get_url_normalizer_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::url_normalizer::UrlNormalizerConfig> {
+    let config = state.manager.get_url_normalizer_config().await;
+    Json(config)
+}
+
+/// POST /api/url-normalizer - Update URL normalizer configuration
+async fn set_url_normalizer_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::url_normalizer::UrlNormalizerConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_url_normalizer_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/url-normalizer/normalize - Normalize a URL
+async fn normalize_url_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<crate::url_normalizer::NormalizationResult>, StatusCode> {
+    let url = req
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let result = state.manager.normalize_url(url).await;
+    Ok(Json(result))
+}
+
+/// POST /api/url-normalizer/equivalent - Check if two URLs are equivalent
+async fn check_url_equivalent_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let url1 = req
+        .get("url1")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let url2 = req
+        .get("url2")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let equivalent = state.manager.are_urls_equivalent(url1, url2).await;
+    Ok(Json(
+        serde_json::json!({"equivalent": equivalent, "url1": url1, "url2": url2}),
+    ))
+}
+
 /// POST /api/url-intelligence/analyze - Analyze a URL for download recommendations
 async fn analyze_url_handler(
     State(state): State<Arc<WebState>>,
@@ -13380,9 +13444,7 @@ async fn set_dynamic_priority_enabled_handler(
 }
 
 /// POST /api/dynamic-priority/run - Run dynamic priority adjustment
-async fn run_dynamic_priority_handler(
-    State(state): State<Arc<WebState>>,
-) -> impl IntoResponse {
+async fn run_dynamic_priority_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let adjustments = state.manager.run_dynamic_priority_adjustment().await;
     Json(serde_json::json!({
         "status": "ok",
@@ -13392,9 +13454,7 @@ async fn run_dynamic_priority_handler(
 }
 
 /// POST /api/dynamic-priority/clear - Clear dynamic priority history
-async fn clear_dynamic_priority_handler(
-    State(state): State<Arc<WebState>>,
-) -> impl IntoResponse {
+async fn clear_dynamic_priority_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     state.manager.clear_dynamic_priority_history().await;
     Json(serde_json::json!({"status": "ok"}))
 }

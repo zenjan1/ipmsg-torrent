@@ -255,6 +255,12 @@ enum Command {
         /// "analyze <url>", "config", "cache", "clear"
         args: Vec<String>,
     },
+    /// URL normalizer - normalize and clean URLs, remove tracking parameters (Phase 168)
+    DlUrlNormalizer {
+        /// "status", "config", "normalize <url>", "equivalent <url1> <url2>"
+        action: String,
+        args: Vec<String>,
+    },
     /// Bandwidth forecast - predict download speeds based on historical data (Phase 136)
     DlBandwidthForecast {
         /// "status", "config", "predict", "summary", "clear", "remove"
@@ -1300,6 +1306,18 @@ fn parse_command(input: &str) -> Command {
         "dlui" | "dl-url-intelligence" | "dlurlintel" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlUrlIntelligence { args }
+        }
+        "dlnorm" | "dl-url-normalizer" | "dlnormalize" => {
+            if parts.len() < 2 {
+                Command::DlUrlNormalizer {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlUrlNormalizer { action, args }
+            }
         }
         "dlbwforecast" | "dl-bwforecast" | "dlforecast" => {
             if parts.len() < 2 {
@@ -3160,6 +3178,7 @@ fn command_help() -> String {
         "/dlgroups           - List all download groups",
         "/dlclone <id>       - Clone (duplicate) a download task",
         "/dltp [cmd]         - Per-task proxy override (status|list|set|remove|enable|disable|notes|clear)",
+        "/dlnorm [cmd]       - URL normalizer (status|config|normalize <url>|equivalent <url1> <url2>)",
         "/dlmirror <id> <urls> - Set mirror URLs (comma-separated, 'clear' to remove)",
         "/dlmirrors <id>     - List mirrors for a task",
         "/dlchecksum <id> <hash> [algo] - Set checksum for verification (algo: md5/sha1/sha256/ed2k)",
@@ -6264,8 +6283,7 @@ async fn handle_command(
             match sub {
                 "status" => {
                     let config = download_manager.get_source_benchmark_config().await;
-                    let cache_summary =
-                        download_manager.get_source_benchmark_cache_summary().await;
+                    let cache_summary = download_manager.get_source_benchmark_cache_summary().await;
                     println!("Source Benchmark Status:");
                     println!("  Enabled: {}", config.enabled);
                     println!("  Test Size: {} bytes", config.test_size_bytes);
@@ -6355,8 +6373,7 @@ async fn handle_command(
                     }
                 }
                 "cache" => {
-                    let cache_summary =
-                        download_manager.get_source_benchmark_cache_summary().await;
+                    let cache_summary = download_manager.get_source_benchmark_cache_summary().await;
                     println!("Source Benchmark Cache:");
                     println!("  Cached Domains: {}", cache_summary.total_domains);
                     println!("  Fast Domains (>1MB/s): {}", cache_summary.fast_domains);
@@ -6370,10 +6387,7 @@ async fn handle_command(
                         match download_manager.get_cached_domain_benchmark(domain).await {
                             Some(cached) => {
                                 println!("Domain: {}", cached.domain);
-                                println!(
-                                    "  Avg Speed: {:.2} KB/s",
-                                    cached.avg_speed_bps / 1024.0
-                                );
+                                println!("  Avg Speed: {:.2} KB/s", cached.avg_speed_bps / 1024.0);
                                 println!("  Samples: {}", cached.sample_count);
                                 println!("  Last Tested: {}", cached.last_tested_at);
                                 println!(
@@ -6397,16 +6411,14 @@ async fn handle_command(
                     download_manager.clear_source_benchmark_cache().await;
                     println!("✅ Source benchmark cache cleared.");
                 }
-                "save" => {
-                    match download_manager.save_source_benchmark_cache().await {
-                        Ok(_) => {
-                            println!("✅ Source benchmark cache saved to disk.");
-                        }
-                        Err(e) => {
-                            println!("❌ Failed to save cache: {}", e);
-                        }
+                "save" => match download_manager.save_source_benchmark_cache().await {
+                    Ok(_) => {
+                        println!("✅ Source benchmark cache saved to disk.");
                     }
-                }
+                    Err(e) => {
+                        println!("❌ Failed to save cache: {}", e);
+                    }
+                },
                 _ => {
                     println!(
                         "Unknown subcommand. Use: status, config, run, select, cache, domain, clear, save"
@@ -8924,6 +8936,135 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Usage: /dlui [analyze <url>|config|cache|clear]".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlUrlNormalizer { action, args } => {
+            let s = state.lock().await;
+            let dm = s.download_manager.clone();
+            drop(s);
+
+            match action.as_str() {
+                "status" => {
+                    let cfg = dm.get_url_normalizer_config().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "🔗 URL Normalizer\n  Enabled: {}\n  Remove WWW: {}\n  Prefer HTTPS: {}\n  Remove Tracking Params: {}\n  Sort Query Params: {}\n  Remove Trailing Slash: {}\n  Extra Tracking Params: {}\n  Preserve Params: {}",
+                            cfg.enabled,
+                            cfg.remove_www,
+                            cfg.prefer_https,
+                            cfg.remove_tracking_params,
+                            cfg.sort_query_params,
+                            cfg.remove_trailing_slash,
+                            cfg.extra_tracking_params.len(),
+                            cfg.preserve_params.len()
+                        ),
+                    );
+                }
+                "config" => {
+                    if args.len() < 2 {
+                        let cfg = dm.get_url_normalizer_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "🔗 URL Normalizer Config:\n  enabled: {}\n  remove_www: {}\n  prefer_https: {}\n  remove_tracking_params: {}\n  sort_query_params: {}\n  remove_trailing_slash: {}",
+                                cfg.enabled,
+                                cfg.remove_www,
+                                cfg.prefer_https,
+                                cfg.remove_tracking_params,
+                                cfg.sort_query_params,
+                                cfg.remove_trailing_slash
+                            ),
+                        );
+                    } else {
+                        let mut cfg = dm.get_url_normalizer_config().await;
+                        match args[0].as_str() {
+                            "enabled" => {
+                                cfg.enabled = args[1].parse().unwrap_or(true);
+                            }
+                            "remove_www" => {
+                                cfg.remove_www = args[1].parse().unwrap_or(true);
+                            }
+                            "prefer_https" => {
+                                cfg.prefer_https = args[1].parse().unwrap_or(false);
+                            }
+                            "remove_tracking_params" => {
+                                cfg.remove_tracking_params = args[1].parse().unwrap_or(true);
+                            }
+                            "sort_query_params" => {
+                                cfg.sort_query_params = args[1].parse().unwrap_or(true);
+                            }
+                            "remove_trailing_slash" => {
+                                cfg.remove_trailing_slash = args[1].parse().unwrap_or(true);
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dlnorm config <field> <value>\nFields: enabled, remove_www, prefer_https, remove_tracking_params, sort_query_params, remove_trailing_slash"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                        }
+                        dm.set_url_normalizer_config(cfg).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "✅ URL normalizer config updated".to_string(),
+                        );
+                    }
+                }
+                "normalize" => {
+                    if let Some(url) = args.first() {
+                        let result = dm.normalize_url(url).await;
+                        let mut msg = format!("🔗 Normalize: {}\n", url);
+                        msg.push_str(&format!("  Result: {}\n", result.normalized_url));
+                        msg.push_str(&format!("  Modified: {}\n", result.was_modified));
+                        if !result.changes.is_empty() {
+                            msg.push_str("  Changes:\n");
+                            for change in &result.changes {
+                                msg.push_str(&format!("    - {:?}\n", change));
+                            }
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlnorm normalize <url>".to_string());
+                    }
+                }
+                "equivalent" => {
+                    if args.len() >= 2 {
+                        let equivalent = dm.are_urls_equivalent(&args[0], &args[1]).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "🔗 URL Equivalence Check:\n  URL1: {}\n  URL2: {}\n  Equivalent: {}",
+                                args[0],
+                                args[1],
+                                if equivalent { "✅ Yes" } else { "❌ No" }
+                            ),
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlnorm equivalent <url1> <url2>".to_string(),
+                        );
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlnorm [status|config <field> <value>|normalize <url>|equivalent <url1> <url2>]"
+                            .to_string(),
                     );
                 }
             }
@@ -24786,7 +24927,8 @@ mod save_path_tests {
 
     #[test]
     fn test_parse_dlsrcbench_run() {
-        let cmd = parse_command("/dlsrcbench run http://example.com/file.zip http://mirror.com/file.zip");
+        let cmd =
+            parse_command("/dlsrcbench run http://example.com/file.zip http://mirror.com/file.zip");
         match cmd {
             Command::DlSrcBench { args } => {
                 assert_eq!(args.len(), 3);
@@ -24891,5 +25033,82 @@ mod save_path_tests {
     fn test_help_contains_dlsrcbench() {
         let help = command_help();
         assert!(help.contains("/dlsrcbench"));
+    }
+
+    #[test]
+    fn test_parse_dlnorm_status() {
+        let cmd = parse_command("/dlnorm status");
+        match cmd {
+            Command::DlUrlNormalizer { action, args } => {
+                assert_eq!(action, "status");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlUrlNormalizer, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlnorm_config() {
+        let cmd = parse_command("/dlnorm config enabled true");
+        match cmd {
+            Command::DlUrlNormalizer { action, args } => {
+                assert_eq!(action, "config");
+                assert_eq!(args, vec!["enabled", "true"]);
+            }
+            other => panic!("Expected DlUrlNormalizer, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlnorm_normalize() {
+        let cmd = parse_command("/dlnorm normalize http://example.com/file?utm_source=test");
+        match cmd {
+            Command::DlUrlNormalizer { action, args } => {
+                assert_eq!(action, "normalize");
+                assert_eq!(args.len(), 1);
+                assert!(args[0].contains("example.com"));
+            }
+            other => panic!("Expected DlUrlNormalizer, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlnorm_equivalent() {
+        let cmd = parse_command("/dlnorm equivalent http://example.com/a http://example.com/b");
+        match cmd {
+            Command::DlUrlNormalizer { action, args } => {
+                assert_eq!(action, "equivalent");
+                assert_eq!(args.len(), 2);
+            }
+            other => panic!("Expected DlUrlNormalizer, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlnorm_alias() {
+        let cmd = parse_command("/dlnormalize status");
+        match cmd {
+            Command::DlUrlNormalizer { action, .. } => {
+                assert_eq!(action, "status");
+            }
+            other => panic!("Expected DlUrlNormalizer, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlnorm_no_args() {
+        let cmd = parse_command("/dlnorm");
+        match cmd {
+            Command::DlUrlNormalizer { action, .. } => {
+                assert_eq!(action, "status");
+            }
+            other => panic!("Expected DlUrlNormalizer, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_dlnorm() {
+        let help = command_help();
+        assert!(help.contains("/dlnorm"));
     }
 }
