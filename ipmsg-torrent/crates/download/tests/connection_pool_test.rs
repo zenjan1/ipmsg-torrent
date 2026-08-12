@@ -22,7 +22,7 @@ async fn test_connection_pool_connect_and_return() {
 
     // Connect to server
     let stream = pool.get_or_connect(addr).await.unwrap();
-    
+
     // Return to pool
     pool.return_connection(stream, addr).await;
 
@@ -92,7 +92,7 @@ async fn test_connection_pool_dns_cache() {
 #[tokio::test]
 async fn test_connection_pool_config_update() {
     let pool = ConnectionPool::new();
-    
+
     let config = pool.get_config_async().await;
     assert_eq!(config.max_connections_per_addr, 4);
 

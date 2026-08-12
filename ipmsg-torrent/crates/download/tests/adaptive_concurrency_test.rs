@@ -13,7 +13,7 @@ async fn test_adaptive_concurrency_default() {
 #[tokio::test]
 async fn test_adaptive_concurrency_rtt_update() {
     let manager = AdaptiveConcurrencyManager::new();
-    
+
     // Simulate RTT samples
     manager.record_rtt(50.0).await;
     manager.record_rtt(60.0).await;
@@ -27,7 +27,7 @@ async fn test_adaptive_concurrency_rtt_update() {
 #[tokio::test]
 async fn test_adaptive_concurrency_recommendation() {
     let manager = AdaptiveConcurrencyManager::new();
-    
+
     // Record good RTT (low latency)
     for _ in 0..10 {
         manager.record_rtt(20.0).await;
@@ -40,7 +40,7 @@ async fn test_adaptive_concurrency_recommendation() {
 #[tokio::test]
 async fn test_adaptive_concurrency_high_rtt() {
     let manager = AdaptiveConcurrencyManager::new();
-    
+
     // Record high RTT (congestion)
     for _ in 0..10 {
         manager.record_rtt(500.0).await;
@@ -54,7 +54,7 @@ async fn test_adaptive_concurrency_high_rtt() {
 #[tokio::test]
 async fn test_adaptive_concurrency_config_update() {
     let manager = AdaptiveConcurrencyManager::new();
-    
+
     let new_config = ConcurrencyConfig {
         min_connections: 2,
         max_connections: 20,

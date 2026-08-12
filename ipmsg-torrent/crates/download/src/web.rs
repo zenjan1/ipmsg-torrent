@@ -198,6 +198,45 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/notification-center/event-prefs/remove",
             post(remove_event_preference_handler),
         )
+        .route(
+            "/api/notification-preferences",
+            get(get_notification_preferences_config_handler)
+                .post(set_notification_preferences_config_handler),
+        )
+        .route(
+            "/api/notification-preferences/summary",
+            get(get_notification_preferences_summary_handler),
+        )
+        .route(
+            "/api/notification-preferences/tasks",
+            get(list_notification_preferences_tasks_handler),
+        )
+        .route(
+            "/api/notification-preferences/task/:task_id",
+            get(get_task_notification_preferences_handler)
+                .post(set_task_notification_preferences_handler)
+                .delete(remove_task_notification_preferences_handler),
+        )
+        .route(
+            "/api/notification-preferences/task/:task_id/enable",
+            post(enable_task_notifications_handler),
+        )
+        .route(
+            "/api/notification-preferences/task/:task_id/disable",
+            post(disable_task_notifications_handler),
+        )
+        .route(
+            "/api/notification-preferences/cooldown/clear",
+            post(clear_notification_cooldowns_handler),
+        )
+        .route(
+            "/api/notification-preferences/cooldown/clear/:task_id",
+            post(clear_task_notification_cooldown_handler),
+        )
+        .route(
+            "/api/notification-preferences/check",
+            post(check_notification_handler),
+        )
         .route("/api/expiry", get(get_expiry_config_handler))
         .route("/api/expiry", post(set_expiry_config_handler))
         .route("/api/expiry/summary", get(get_expiry_summary_handler))
@@ -10837,6 +10876,138 @@ async fn remove_event_preference_handler(
         .remove_notification_event_preference(event)
         .await;
     Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+// ========== Notification Preferences API (Phase 161) ==========
+
+/// GET /api/notification-preferences - Get notification preferences configuration
+async fn get_notification_preferences_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_notification_preferences_config().await;
+    Json(serde_json::to_value(config).unwrap_or_default())
+}
+
+/// POST /api/notification-preferences - Update notification preferences configuration
+async fn set_notification_preferences_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::notification_preferences::NotificationPreferencesConfig>,
+) -> Json<serde_json::Value> {
+    state
+        .manager
+        .set_notification_preferences_config(config)
+        .await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/notification-preferences/summary - Get notification preferences summary
+async fn get_notification_preferences_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let summary = state.manager.get_notification_preferences_summary().await;
+    Json(serde_json::to_value(summary).unwrap_or_default())
+}
+
+/// GET /api/notification-preferences/tasks - List all task notification configs
+async fn list_notification_preferences_tasks_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let tasks = state.manager.list_task_notification_configs().await;
+    Json(serde_json::to_value(tasks).unwrap_or_default())
+}
+
+/// GET /api/notification-preferences/task/:task_id - Get task notification config
+async fn get_task_notification_preferences_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.manager.get_task_notification_config(&task_id).await {
+        Some(config) => Ok(Json(serde_json::to_value(config).unwrap_or_default())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// POST /api/notification-preferences/task/:task_id - Set task notification config
+async fn set_task_notification_preferences_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+    Json(mut config): Json<crate::notification_preferences::TaskNotificationConfig>,
+) -> Json<serde_json::Value> {
+    config.task_id = task_id;
+    state.manager.set_task_notification_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// DELETE /api/notification-preferences/task/:task_id - Remove task notification config
+async fn remove_task_notification_preferences_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let removed = state
+        .manager
+        .remove_task_notification_config(&task_id)
+        .await;
+    Json(serde_json::json!({"removed": removed}))
+}
+
+/// POST /api/notification-preferences/task/:task_id/enable - Enable notifications for task
+async fn enable_task_notifications_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Json<serde_json::Value> {
+    state.manager.enable_task_notifications(&task_id).await;
+    Json(serde_json::json!({"status": "enabled"}))
+}
+
+/// POST /api/notification-preferences/task/:task_id/disable - Disable notifications for task
+async fn disable_task_notifications_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Json<serde_json::Value> {
+    state.manager.disable_task_notifications(&task_id).await;
+    Json(serde_json::json!({"status": "disabled"}))
+}
+
+/// POST /api/notification-preferences/cooldown/clear - Clear all notification cooldowns
+async fn clear_notification_cooldowns_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    state.manager.clear_all_notification_cooldowns().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/notification-preferences/cooldown/clear/:task_id - Clear task cooldown
+async fn clear_task_notification_cooldown_handler(
+    State(state): State<Arc<WebState>>,
+    Path(task_id): Path<String>,
+) -> Json<serde_json::Value> {
+    state
+        .manager
+        .clear_task_notification_cooldown(&task_id)
+        .await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/notification-preferences/check - Check if notification should be sent
+async fn check_notification_handler(
+    State(state): State<Arc<WebState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let task_id = payload
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let event_str = payload
+        .get("event")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let event: crate::notification_preferences::TaskNotificationEvent =
+        serde_json::from_str(&format!("\"{}\"", event_str)).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let should_send = state
+        .manager
+        .should_send_notification(task_id, &event)
+        .await;
+    Ok(Json(serde_json::json!({"should_send": should_send})))
 }
 
 // ========== Download Expiry API (Phase 148) ==========

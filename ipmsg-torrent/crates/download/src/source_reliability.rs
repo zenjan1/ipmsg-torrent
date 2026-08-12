@@ -902,7 +902,7 @@ mod integration_tests {
         let mut tracker = SourceReliabilityTracker::new();
         tracker.record_success("example.com", 1_000_000, 10_000_000);
         tracker.record_success("example.com", 2_000_000, 20_000_000);
-        
+
         let domain = tracker.get_domain("example.com").unwrap();
         assert_eq!(format!("{}", domain.tier()), "Excellent");
     }
@@ -912,7 +912,7 @@ mod integration_tests {
         let mut tracker = SourceReliabilityTracker::new();
         tracker.record_success("good.com", 5_000_000, 50_000_000);
         tracker.record_failure("bad.com", "Connection timeout");
-        
+
         let summary = tracker.get_summary();
         assert_eq!(summary.total_domains, 2);
         assert!(summary.total_samples >= 2);
@@ -923,7 +923,7 @@ mod integration_tests {
     fn test_format_summary_output() {
         let mut tracker = SourceReliabilityTracker::new();
         tracker.record_success("example.com", 1_000_000, 10_000_000);
-        
+
         let report = tracker.format_summary();
         assert!(report.contains("Source Reliability Summary"));
         assert!(report.contains("Total domains tracked"));
@@ -935,7 +935,7 @@ mod integration_tests {
         let mut tracker = SourceReliabilityTracker::new();
         tracker.record_success("keep.com", 1_000_000, 10_000_000);
         tracker.record_success("remove.com", 2_000_000, 20_000_000);
-        
+
         tracker.clear_domain("remove.com");
         assert!(tracker.get_domain("keep.com").is_some());
         assert!(tracker.get_domain("remove.com").is_none());
@@ -945,12 +945,12 @@ mod integration_tests {
     fn test_prune_old_samples() {
         let mut tracker = SourceReliabilityTracker::new();
         tracker.record_success("example.com", 1_000_000, 10_000_000);
-        
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         tracker.prune_old_samples(now + 1000); // prune future timestamp
         let domain = tracker.get_domain("example.com").unwrap();
         assert!(domain.samples.is_empty());

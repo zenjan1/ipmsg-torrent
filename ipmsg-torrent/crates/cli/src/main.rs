@@ -401,6 +401,13 @@ enum Command {
         /// Arguments for the subcommand
         args: Vec<String>,
     },
+    /// Notification preferences management (per-task notification control)
+    DlNpref {
+        /// Subcommand: status, config, list, get <task_id>, set <task_id>, remove <task_id>, enable <task_id>, disable <task_id>, cooldown-clear [task_id], check <task_id> <event>
+        subcmd: String,
+        /// Arguments for the subcommand
+        args: Vec<String>,
+    },
     /// Download expiry management (set/remove expiry, refresh, cleanup)
     DlExpiry {
         /// Subcommand: status, set <task_id> <duration_secs>, remove <task_id>, refresh, cleanup, clear, report
@@ -1548,6 +1555,23 @@ fn parse_command(input: &str) -> Command {
             } else {
                 Command::Unknown(
                     "/dlnc <status|config|history|analytics|flush|clear|quiet-hours|batch>"
+                        .to_string(),
+                )
+            }
+        }
+        "dlnpref" | "dl-npref" | "dlnp" => {
+            // /dlnpref <subcommand> [args...]
+            let args: Vec<&str> = input.split_whitespace().collect();
+            if args.len() >= 2 {
+                let subcmd = args[1].to_string();
+                let sub_args: Vec<String> = args[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlNpref {
+                    subcmd,
+                    args: sub_args,
+                }
+            } else {
+                Command::Unknown(
+                    "/dlnpref <status|config|list|get|set|remove|enable|disable|cooldown-clear|check>"
                         .to_string(),
                 )
             }
@@ -2947,6 +2971,7 @@ fn command_help() -> String {
         "/dlautoshutdown <disabled|exit|shell:<cmd>> - Auto-shutdown when all downloads complete",
         "/dlnotify <action> [value] - Configure notifications (enable/disable/desktop/shell/log/webhook/status)",
         "/dlnc [cmd]         - Notification center (status|config|history|analytics|flush|clear|quiet-hours|batch)",
+        "/dlnpref [cmd]      - Notification preferences (status|config|list|get|set|remove|enable|disable|cooldown-clear|check)",
         "/dlexpiry [cmd]     - Download expiry management (status|set|remove|refresh|cleanup|clear|report)",
         "/dlactivity [cmd]   - Task activity logs (list|show|clear)",
         "/dlhcl [cmd]         - Host connection limiter (status|config|summary|host|override|remove|clear|cleanup)",
@@ -10327,6 +10352,347 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "Unknown subcommand. Use: status, config, history, analytics, flush, clear, quiet-hours, batch".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlNpref { subcmd, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcmd.as_str() {
+                "status" => {
+                    let summary = download_manager
+                        .get_notification_preferences_summary()
+                        .await;
+                    let config = download_manager.get_notification_preferences_config().await;
+                    let output = format!(
+                        "Notification Preferences:\n  Enabled: {}\n  Tasks with custom prefs: {}\n  Tasks enabled: {}\n  Tasks disabled: {}\n  Notifications sent: {}\n  Notifications suppressed: {}\n  Default cooldown: {}s\n  Default min priority: {:?}\n  Dedup enabled: {} (window: {}s)",
+                        config.enabled,
+                        summary.tasks_with_custom_prefs,
+                        summary.tasks_enabled,
+                        summary.tasks_disabled,
+                        summary.total_notifications_sent,
+                        summary.total_notifications_suppressed,
+                        config.default_cooldown_secs,
+                        config.default_min_priority,
+                        config.dedup_enabled,
+                        config.dedup_window_secs,
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", output);
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_notification_preferences_config().await;
+                        let output = format!(
+                            "Config:\n  enabled: {}\n  default_enabled_events: {:?}\n  default_min_priority: {:?}\n  default_cooldown_secs: {}\n  max_history_per_task: {}\n  dedup_enabled: {}\n  dedup_window_secs: {}",
+                            config.enabled,
+                            config
+                                .default_enabled_events
+                                .iter()
+                                .map(|e| e.label())
+                                .collect::<Vec<_>>(),
+                            config.default_min_priority,
+                            config.default_cooldown_secs,
+                            config.max_history_per_task,
+                            config.dedup_enabled,
+                            config.dedup_window_secs,
+                        );
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", output);
+                    } else {
+                        let mut config =
+                            download_manager.get_notification_preferences_config().await;
+                        match args[0].as_str() {
+                            "enabled" => {
+                                config.enabled = args
+                                    .get(1)
+                                    .map(|v| v == "true" || v == "on")
+                                    .unwrap_or(!config.enabled);
+                                download_manager
+                                    .set_notification_preferences_config(config)
+                                    .await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Enabled: {}", config.enabled),
+                                );
+                            }
+                            "cooldown" => {
+                                if let Some(secs) = args.get(1).and_then(|v| v.parse::<u64>().ok())
+                                {
+                                    config.default_cooldown_secs = secs;
+                                    download_manager
+                                        .set_notification_preferences_config(config)
+                                        .await;
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("✅ Default cooldown: {}s", secs),
+                                    );
+                                } else {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "Usage: /dlnpref config cooldown <seconds>".to_string(),
+                                    );
+                                }
+                            }
+                            "min_priority" => {
+                                if let Some(val) = args.get(1) {
+                                    let priority = match val.as_str() {
+                                        "low" => ipmsg_download::notification_preferences::MinimumPriority::Low,
+                                        "normal" => ipmsg_download::notification_preferences::MinimumPriority::Normal,
+                                        "high" => ipmsg_download::notification_preferences::MinimumPriority::High,
+                                        "critical" => ipmsg_download::notification_preferences::MinimumPriority::Critical,
+                                        "none" => ipmsg_download::notification_preferences::MinimumPriority::None,
+                                        _ => {
+                                            let mut s = state.lock().await;
+                                            s.add_system_message("main", "Invalid priority. Use: low, normal, high, critical, none".to_string());
+                                            return;
+                                        }
+                                    };
+                                    config.default_min_priority = priority;
+                                    download_manager
+                                        .set_notification_preferences_config(config)
+                                        .await;
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("✅ Default min priority: {:?}", priority),
+                                    );
+                                } else {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message("main", "Usage: /dlnpref config min_priority <low|normal|high|critical|none>".to_string());
+                                }
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", "Usage: /dlnpref config [enabled <true|false>] [cooldown <secs>] [min_priority <level>]".to_string());
+                            }
+                        }
+                    }
+                }
+                "list" => {
+                    let tasks = download_manager.list_task_notification_configs().await;
+                    if tasks.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "No tasks with custom notification preferences.".to_string(),
+                        );
+                    } else {
+                        let mut output = format!(
+                            "Tasks with custom notification preferences ({}):\n",
+                            tasks.len()
+                        );
+                        for task in tasks {
+                            output.push_str(&format!(
+                                "  {} - enabled: {}, events: {:?}, min_priority: {:?}\n",
+                                task.task_id,
+                                task.enabled,
+                                task.enabled_events
+                                    .iter()
+                                    .map(|e| e.label())
+                                    .collect::<Vec<_>>(),
+                                task.min_priority,
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", output);
+                    }
+                }
+                "get" => {
+                    if let Some(task_id) = args.first() {
+                        match download_manager.get_task_notification_config(task_id).await {
+                            Some(config) => {
+                                let output = format!(
+                                    "Task {} notification preferences:\n  enabled: {}\n  events: {:?}\n  min_priority: {:?}\n  cooldown_secs: {}",
+                                    config.task_id,
+                                    config.enabled,
+                                    config
+                                        .enabled_events
+                                        .iter()
+                                        .map(|e| e.label())
+                                        .collect::<Vec<_>>(),
+                                    config.min_priority,
+                                    config.cooldown_secs,
+                                );
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", output);
+                            }
+                            None => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("No custom preferences for task {}", task_id),
+                                );
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "Usage: /dlnpref get <task_id>".to_string());
+                    }
+                }
+                "set" => {
+                    if let Some(task_id) = args.first() {
+                        let task_id = task_id.to_string();
+                        let mut config =
+                            ipmsg_download::notification_preferences::TaskNotificationConfig::new(
+                                task_id.clone(),
+                            );
+                        if let Some(enabled_str) = args.get(1) {
+                            config.enabled = enabled_str == "true" || enabled_str == "on";
+                        }
+                        download_manager.set_task_notification_config(config).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Set notification preferences for task {}", task_id),
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlnpref set <task_id> [true|false]".to_string(),
+                        );
+                    }
+                }
+                "remove" => {
+                    if let Some(task_id) = args.first() {
+                        let removed = download_manager
+                            .remove_task_notification_config(task_id)
+                            .await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            if removed {
+                                format!("✅ Removed notification preferences for task {}", task_id)
+                            } else {
+                                format!("No custom preferences found for task {}", task_id)
+                            },
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlnpref remove <task_id>".to_string(),
+                        );
+                    }
+                }
+                "enable" => {
+                    if let Some(task_id) = args.first() {
+                        download_manager.enable_task_notifications(task_id).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Enabled notifications for task {}", task_id),
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlnpref enable <task_id>".to_string(),
+                        );
+                    }
+                }
+                "disable" => {
+                    if let Some(task_id) = args.first() {
+                        download_manager.disable_task_notifications(task_id).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Disabled notifications for task {}", task_id),
+                        );
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlnpref disable <task_id>".to_string(),
+                        );
+                    }
+                }
+                "cooldown-clear" => {
+                    if let Some(task_id) = args.first() {
+                        download_manager
+                            .clear_task_notification_cooldown(task_id)
+                            .await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!("✅ Cleared cooldown for task {}", task_id),
+                        );
+                    } else {
+                        download_manager.clear_all_notification_cooldowns().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "✅ Cleared all notification cooldowns".to_string(),
+                        );
+                    }
+                }
+                "check" => {
+                    if args.len() >= 2 {
+                        let task_id = &args[0];
+                        let event_str = &args[1];
+                        let event: Option<ipmsg_download::notification_preferences::TaskNotificationEvent> =
+                            match event_str.as_str() {
+                                "started" => Some(ipmsg_download::notification_preferences::TaskNotificationEvent::Started),
+                                "completed" => Some(ipmsg_download::notification_preferences::TaskNotificationEvent::Completed),
+                                "failed" => Some(ipmsg_download::notification_preferences::TaskNotificationEvent::Failed),
+                                "paused" => Some(ipmsg_download::notification_preferences::TaskNotificationEvent::Paused),
+                                "resumed" => Some(ipmsg_download::notification_preferences::TaskNotificationEvent::Resumed),
+                                "progress_milestone" => Some(ipmsg_download::notification_preferences::TaskNotificationEvent::ProgressMilestone),
+                                "speed_alert" => Some(ipmsg_download::notification_preferences::TaskNotificationEvent::SpeedAlert),
+                                "eta_changed" => Some(ipmsg_download::notification_preferences::TaskNotificationEvent::EtaChanged),
+                                "added" => Some(ipmsg_download::notification_preferences::TaskNotificationEvent::Added),
+                                "removed" => Some(ipmsg_download::notification_preferences::TaskNotificationEvent::Removed),
+                                _ => None,
+                            };
+                        match event {
+                            Some(ev) => {
+                                let should_send = download_manager
+                                    .should_send_notification(task_id, &ev)
+                                    .await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "Should send notification for task {} event '{}': {}",
+                                        task_id,
+                                        event_str,
+                                        if should_send { "YES" } else { "NO" }
+                                    ),
+                                );
+                            }
+                            None => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!(
+                                    "Invalid event '{}'. Valid events: {}",
+                                    event_str,
+                                    ipmsg_download::notification_preferences::TaskNotificationEvent::all()
+                                        .iter()
+                                        .map(|e| e.label())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ));
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlnpref check <task_id> <event>".to_string(),
+                        );
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Unknown subcommand. Use: status, config, list, get, set, remove, enable, disable, cooldown-clear, check".to_string(),
                     );
                 }
             }
