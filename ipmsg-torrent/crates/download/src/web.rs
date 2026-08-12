@@ -2037,6 +2037,31 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/duplicate-detection/clear",
             post(clear_duplicates_handler),
         )
+        // Phase 170: Speed Profiles REST API
+        .route(
+            "/api/speed-profiles",
+            get(list_speed_profiles_handler).post(create_speed_profile_handler),
+        )
+        .route(
+            "/api/speed-profiles/summary",
+            get(get_speed_profiles_summary_handler),
+        )
+        .route(
+            "/api/speed-profiles/active",
+            get(get_active_speed_profile_handler),
+        )
+        .route(
+            "/api/speed-profiles/deactivate",
+            post(deactivate_speed_profile_handler),
+        )
+        .route(
+            "/api/speed-profiles/:id",
+            get(get_speed_profile_handler).delete(delete_speed_profile_handler),
+        )
+        .route(
+            "/api/speed-profiles/:id/activate",
+            post(activate_speed_profile_handler),
+        )
         .route("/api/ws", get(ws_handler))
         .route("/", get(index_html))
         .with_state(state)
@@ -13582,6 +13607,123 @@ async fn clear_duplicates_handler(State(state): State<Arc<WebState>>) -> impl In
     Json(serde_json::json!({"status": "ok"}))
 }
 
+// ── Phase 170: Speed Profiles REST API Handlers ───────────────────────────
+
+/// GET /api/speed-profiles - List all speed profiles
+async fn list_speed_profiles_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let profiles = state.manager.list_speed_profiles().await;
+    Json(profiles)
+}
+
+/// POST /api/speed-profiles - Create a new speed profile
+async fn create_speed_profile_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let speed_limit = body
+        .get("speed_limit_bps")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let description = body.get("description").and_then(|v| v.as_str());
+
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "name is required"})),
+        );
+    }
+
+    match state
+        .manager
+        .create_speed_profile(name, speed_limit, description)
+        .await
+    {
+        Ok(id) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"status": "ok", "id": id})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// GET /api/speed-profiles/summary - Get speed profiles summary
+async fn get_speed_profiles_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl IntoResponse {
+    let summary = state.manager.get_speed_profiles_summary().await;
+    Json(summary)
+}
+
+/// GET /api/speed-profiles/active - Get active speed profile
+async fn get_active_speed_profile_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let profile = state.manager.get_active_speed_profile().await;
+    match profile {
+        Some(p) => (StatusCode::OK, Json(serde_json::to_value(p).unwrap())),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no active profile"})),
+        ),
+    }
+}
+
+/// POST /api/speed-profiles/deactivate - Deactivate current speed profile
+async fn deactivate_speed_profile_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    match state.manager.deactivate_speed_profile().await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// GET /api/speed-profiles/:id - Get a specific speed profile
+async fn get_speed_profile_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let profile = state.manager.get_speed_profile(&id).await;
+    match profile {
+        Some(p) => (StatusCode::OK, Json(serde_json::to_value(p).unwrap())),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "profile not found"})),
+        ),
+    }
+}
+
+/// DELETE /api/speed-profiles/:id - Delete a speed profile
+async fn delete_speed_profile_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.manager.delete_speed_profile(&id).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// POST /api/speed-profiles/:id/activate - Activate a speed profile
+async fn activate_speed_profile_handler(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.manager.activate_speed_profile(&id).await {
+        Ok(profile) => (StatusCode::OK, Json(serde_json::to_value(profile).unwrap())),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod phase161_tests {
     use super::*;
@@ -13903,5 +14045,150 @@ mod phase169_tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "ok");
+    }
+}
+
+#[cfg(test)]
+mod phase170_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_state() -> Arc<WebState> {
+        let manager = Arc::new(DownloadManager::new(std::path::PathBuf::from(
+            "/tmp/test_phase170",
+        )));
+        Arc::new(WebState::new(manager))
+    }
+
+    #[tokio::test]
+    async fn test_list_speed_profiles_empty() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-profiles")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_create_speed_profile() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/speed-profiles")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"Night Unlimited","speed_limit_bps":1048576,"description":"Night download profile"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert!(json.get("id").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_create_speed_profile_missing_name() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/speed-profiles")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"speed_limit_bps":1024}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_get_speed_profiles_summary_empty() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-profiles/summary")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["total_profiles"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_active_speed_profile_none() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-profiles/active")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_speed_profile_not_found() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/speed-profiles/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
