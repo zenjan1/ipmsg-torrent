@@ -535,6 +535,46 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             get(get_speed_benchmark_summary),
         )
         .route("/api/speed-benchmark/clear", post(clear_speed_benchmark))
+        .route(
+            "/api/speed-distribution",
+            get(get_speed_distribution_config),
+        )
+        .route(
+            "/api/speed-distribution",
+            post(set_speed_distribution_config),
+        )
+        .route(
+            "/api/speed-distribution/summary",
+            get(get_speed_distribution_summary),
+        )
+        .route(
+            "/api/speed-distribution/report",
+            get(get_speed_distribution_report),
+        )
+        .route(
+            "/api/speed-distribution/domain/:domain",
+            get(get_domain_speed_stats),
+        )
+        .route(
+            "/api/speed-distribution/protocol/:protocol",
+            get(get_protocol_speed_stats),
+        )
+        .route(
+            "/api/speed-distribution/hourly/:hour",
+            get(get_hourly_speed_stats),
+        )
+        .route(
+            "/api/speed-distribution/domains",
+            get(get_tracked_speed_domains),
+        )
+        .route(
+            "/api/speed-distribution/domain/:domain/remove",
+            post(remove_speed_domain),
+        )
+        .route(
+            "/api/speed-distribution/clear",
+            post(clear_speed_distribution),
+        )
         .route("/api/stats/download", get(get_download_stats))
         .route("/api/stats/download/reset", post(reset_download_stats))
         .route("/api/report/download", get(get_download_report))
@@ -1600,6 +1640,39 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             post(clear_all_sla_history_handler),
         )
         .route("/api/sla-compliance/report", get(get_sla_report_handler))
+        // Phase 164: Connection Pool REST API
+        .route(
+            "/api/connection-pool",
+            get(get_connection_pool_status_handler).post(set_connection_pool_config_handler),
+        )
+        .route(
+            "/api/connection-pool/stats",
+            get(get_connection_pool_stats_handler),
+        )
+        .route(
+            "/api/connection-pool/config",
+            get(get_connection_pool_config_handler),
+        )
+        .route(
+            "/api/connection-pool/domains",
+            get(get_connection_pool_domains_handler),
+        )
+        .route(
+            "/api/connection-pool/domain/:domain",
+            post(set_connection_pool_domain_limit_handler),
+        )
+        .route(
+            "/api/connection-pool/cleanup",
+            post(cleanup_connection_pool_handler),
+        )
+        .route(
+            "/api/connection-pool/clear",
+            post(clear_connection_pool_handler),
+        )
+        .route(
+            "/api/connection-pool/save",
+            post(save_connection_pool_config_handler),
+        )
         .route(
             "/api/source-reliability",
             get(get_source_reliability_config_handler).post(set_source_reliability_config_handler),
@@ -2369,6 +2442,115 @@ async fn get_speed_benchmark_summary(
 async fn clear_speed_benchmark(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     state.manager.clear_benchmarks().await;
     Json(serde_json::json!({"success": true}))
+}
+
+// ========== Speed Distribution API Handlers ==========
+
+/// GET /api/speed-distribution - Get speed distribution configuration
+async fn get_speed_distribution_config(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::speed_distribution::SpeedDistributionConfig> {
+    let config = state.manager.get_speed_distribution_config().await;
+    Json(config)
+}
+
+/// POST /api/speed-distribution - Update speed distribution configuration
+async fn set_speed_distribution_config(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::speed_distribution::SpeedDistributionConfig>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state
+        .manager
+        .set_speed_distribution_config(config)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"success": true})))
+}
+
+/// GET /api/speed-distribution/summary - Get speed distribution summary
+async fn get_speed_distribution_summary(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::speed_distribution::SpeedDistributionSummary> {
+    let summary = state.manager.get_speed_distribution_summary().await;
+    Json(summary)
+}
+
+/// GET /api/speed-distribution/report - Get formatted speed distribution report
+async fn get_speed_distribution_report(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let report = state.manager.format_speed_distribution_report().await;
+    Json(serde_json::json!({"report": report}))
+}
+
+/// GET /api/speed-distribution/domain/:domain - Get speed stats for a specific domain
+async fn get_domain_speed_stats(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> Result<Json<crate::speed_distribution::SpeedStats>, StatusCode> {
+    state
+        .manager
+        .get_domain_speed_stats(&domain)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// GET /api/speed-distribution/protocol/:protocol - Get speed stats for a specific protocol
+async fn get_protocol_speed_stats(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(protocol): axum::extract::Path<String>,
+) -> Result<Json<crate::speed_distribution::SpeedStats>, StatusCode> {
+    let proto = crate::speed_distribution::SpeedProtocol::from_str(&protocol);
+    state
+        .manager
+        .get_protocol_speed_stats(proto)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// GET /api/speed-distribution/hourly/:hour - Get speed stats for a specific hour
+async fn get_hourly_speed_stats(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(hour): axum::extract::Path<u8>,
+) -> Result<Json<crate::speed_distribution::SpeedStats>, StatusCode> {
+    if hour > 23 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    state
+        .manager
+        .get_hourly_speed_stats(hour)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// GET /api/speed-distribution/domains - Get list of tracked domains
+async fn get_tracked_speed_domains(State(state): State<Arc<WebState>>) -> Json<Vec<String>> {
+    let domains = state.manager.get_tracked_speed_domains().await;
+    Json(domains)
+}
+
+/// POST /api/speed-distribution/domain/:domain/remove - Remove a domain from tracking
+async fn remove_speed_domain(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(domain): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let removed = state.manager.remove_speed_domain(&domain).await;
+    Json(serde_json::json!({"removed": removed}))
+}
+
+/// POST /api/speed-distribution/clear - Clear all speed distribution data
+async fn clear_speed_distribution(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    state
+        .manager
+        .clear_speed_distribution()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"success": true})))
 }
 
 /// Get download statistics
@@ -10788,6 +10970,83 @@ async fn clear_all_sla_history_handler(
 async fn get_sla_report_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
     let report = state.manager.format_sla_report().await;
     Json(serde_json::json!({"report": report}))
+}
+
+// ========== Connection Pool API (Phase 164) ==========
+
+/// GET /api/connection-pool - Get connection pool status (detailed)
+async fn get_connection_pool_status_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::connection_pool::PoolStatus> {
+    let status = state.manager.get_connection_pool_status().await;
+    Json(status)
+}
+
+/// POST /api/connection-pool - Update connection pool configuration
+async fn set_connection_pool_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::connection_pool::PoolConfig>,
+) -> StatusCode {
+    state.manager.set_connection_pool_config(config).await;
+    StatusCode::OK
+}
+
+/// GET /api/connection-pool/stats - Get connection pool statistics
+async fn get_connection_pool_stats_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::connection_pool::PoolStats> {
+    let stats = state.manager.get_connection_pool_stats().await;
+    Json(stats)
+}
+
+/// GET /api/connection-pool/config - Get connection pool configuration
+async fn get_connection_pool_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::connection_pool::PoolConfig> {
+    let config = state.manager.get_connection_pool_config().await;
+    Json(config)
+}
+
+/// GET /api/connection-pool/domains - Get per-domain connection information
+async fn get_connection_pool_domains_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::connection_pool::DomainConnectionInfo>> {
+    let domains = state.manager.get_connection_pool_domains().await;
+    Json(domains)
+}
+
+/// POST /api/connection-pool/domain/:domain - Set per-domain connection limit
+async fn set_connection_pool_domain_limit_handler(
+    State(state): State<Arc<WebState>>,
+    Path(domain): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> StatusCode {
+    let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    state
+        .manager
+        .set_connection_pool_domain_limit(&domain, limit)
+        .await;
+    StatusCode::OK
+}
+
+/// POST /api/connection-pool/cleanup - Remove expired connections
+async fn cleanup_connection_pool_handler(State(state): State<Arc<WebState>>) -> StatusCode {
+    state.manager.cleanup_connection_pool().await;
+    StatusCode::OK
+}
+
+/// POST /api/connection-pool/clear - Clear all connections and reset statistics
+async fn clear_connection_pool_handler(State(state): State<Arc<WebState>>) -> StatusCode {
+    state.manager.clear_connection_pool().await;
+    StatusCode::OK
+}
+
+/// POST /api/connection-pool/save - Save connection pool configuration to disk
+async fn save_connection_pool_config_handler(State(state): State<Arc<WebState>>) -> StatusCode {
+    match state.manager.save_connection_pool_config().await {
+        Ok(_) => StatusCode::OK,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 // ========== Source Reliability Tracker API (Phase 163) ==========

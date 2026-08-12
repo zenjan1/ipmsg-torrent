@@ -110,6 +110,7 @@ pub mod speed_anomaly;
 pub mod speed_benchmark;
 pub mod speed_boost;
 pub mod speed_burst;
+pub mod speed_distribution;
 pub mod speed_heatmap;
 pub mod speed_history;
 pub mod speed_prediction;
@@ -1043,6 +1044,8 @@ pub struct DownloadManager {
     history_analytics: Arc<Mutex<download_history_analytics::HistoryAnalyticsManager>>,
     /// Speed benchmark manager for pre-download URL speed testing
     speed_benchmark: Arc<Mutex<speed_benchmark::SpeedBenchmarkManager>>,
+    /// Speed distribution analyzer for per-domain/protocol/hourly speed statistics
+    speed_distribution: Arc<tokio::sync::RwLock<speed_distribution::SpeedDistributionManager>>,
     /// Event webhook manager for sending HTTP notifications on download events
     event_webhook: Arc<Mutex<event_webhook::WebhookManager>>,
     /// Path organizer manager for automatic file organization by extension
@@ -1315,6 +1318,9 @@ impl DownloadManager {
                 download_history_analytics::HistoryAnalyticsManager::new(),
             )),
             speed_benchmark: Arc::new(Mutex::new(speed_benchmark::SpeedBenchmarkManager::new())),
+            speed_distribution: Arc::new(tokio::sync::RwLock::new(
+                speed_distribution::SpeedDistributionManager::new(data_dir.clone()),
+            )),
             event_webhook: Arc::new(Mutex::new(event_webhook::WebhookManager::new(
                 data_dir.clone(),
             ))),
@@ -1716,6 +1722,9 @@ impl DownloadManager {
                 download_history_analytics::HistoryAnalyticsManager::new(),
             )),
             speed_benchmark: Arc::new(Mutex::new(speed_benchmark::SpeedBenchmarkManager::new())),
+            speed_distribution: Arc::new(tokio::sync::RwLock::new(
+                speed_distribution::SpeedDistributionManager::new(data_dir.clone()),
+            )),
             event_webhook: Arc::new(Mutex::new(event_webhook::WebhookManager::new(
                 data_dir.clone(),
             ))),
@@ -7941,6 +7950,7 @@ impl DownloadManager {
         let cost_tracker = self.cost_tracker.clone();
         let bandwidth_forecast = self.bandwidth_forecast.clone();
         let _bandwidth_usage = self.bandwidth_usage.clone();
+        let speed_distribution = self.speed_distribution.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -8090,6 +8100,48 @@ impl DownloadManager {
                         let mut anomaly = speed_anomaly.lock().await;
                         anomaly.record_speed(&task_id, avg_speed);
                         let _anomaly_detected = anomaly.check_for_anomalies(&task_id, avg_speed);
+                    }
+
+                    // Record speed distribution (Phase 164)
+                    {
+                        let (domain, protocol) = {
+                            let t = tasks.lock().await;
+                            t.iter()
+                                .find(|t| t.id == task_id)
+                                .map(|t| {
+                                    let d = t
+                                        .source_url
+                                        .as_ref()
+                                        .and_then(|u| {
+                                            url::Url::parse(u)
+                                                .ok()
+                                                .and_then(|u| u.host_str().map(|h| h.to_string()))
+                                        })
+                                        .unwrap_or_default();
+                                    let p = match t.protocol {
+                                        DownloadProtocol::Torrent => {
+                                            speed_distribution::SpeedProtocol::Torrent
+                                        }
+                                        DownloadProtocol::Ed2k => {
+                                            speed_distribution::SpeedProtocol::Ed2k
+                                        }
+                                        DownloadProtocol::P2P => {
+                                            speed_distribution::SpeedProtocol::P2p
+                                        }
+                                        _ => speed_distribution::SpeedProtocol::Http,
+                                    };
+                                    (d, p)
+                                })
+                                .unwrap_or_default()
+                        };
+                        if !domain.is_empty() && avg_speed > 0.0 {
+                            let bytes_tick = (avg_speed * 2.0) as u64;
+                            speed_distribution
+                                .write()
+                                .await
+                                .record_speed(&domain, protocol, avg_speed, bytes_tick)
+                                .await;
+                        }
                     }
 
                     // Record cost for this tick (Phase 127)
@@ -11033,6 +11085,98 @@ impl DownloadManager {
     /// Format benchmark summary for display
     pub async fn format_benchmark_summary(&self) -> String {
         self.speed_benchmark.lock().await.format_summary()
+    }
+
+    // ========== Speed Distribution API ==========
+
+    /// Get speed distribution configuration
+    pub async fn get_speed_distribution_config(
+        &self,
+    ) -> speed_distribution::SpeedDistributionConfig {
+        self.speed_distribution.read().await.get_config().clone()
+    }
+
+    /// Set speed distribution configuration
+    pub async fn set_speed_distribution_config(
+        &self,
+        config: speed_distribution::SpeedDistributionConfig,
+    ) -> std::io::Result<()> {
+        self.speed_distribution
+            .write()
+            .await
+            .set_config(config)
+            .await
+    }
+
+    /// Record a speed sample for distribution analysis
+    pub async fn record_speed_distribution(
+        &self,
+        domain: &str,
+        protocol: speed_distribution::SpeedProtocol,
+        speed_bps: f64,
+        bytes: u64,
+    ) {
+        self.speed_distribution
+            .write()
+            .await
+            .record_speed(domain, protocol, speed_bps, bytes)
+            .await;
+    }
+
+    /// Get speed distribution summary
+    pub async fn get_speed_distribution_summary(
+        &self,
+    ) -> speed_distribution::SpeedDistributionSummary {
+        self.speed_distribution.read().await.get_summary()
+    }
+
+    /// Get statistics for a specific domain
+    pub async fn get_domain_speed_stats(
+        &self,
+        domain: &str,
+    ) -> Option<speed_distribution::SpeedStats> {
+        self.speed_distribution.read().await.domain_stats(domain)
+    }
+
+    /// Get statistics for a specific protocol
+    pub async fn get_protocol_speed_stats(
+        &self,
+        protocol: speed_distribution::SpeedProtocol,
+    ) -> Option<speed_distribution::SpeedStats> {
+        self.speed_distribution
+            .read()
+            .await
+            .protocol_stats(protocol)
+    }
+
+    /// Get hourly speed statistics
+    pub async fn get_hourly_speed_stats(&self, hour: u8) -> Option<speed_distribution::SpeedStats> {
+        self.speed_distribution.read().await.hourly_stats(hour)
+    }
+
+    /// Get list of all tracked domains
+    pub async fn get_tracked_speed_domains(&self) -> Vec<String> {
+        self.speed_distribution.read().await.tracked_domains()
+    }
+
+    /// Remove a domain from speed tracking
+    pub async fn remove_speed_domain(&self, domain: &str) -> bool {
+        self.speed_distribution.write().await.remove_domain(domain)
+    }
+
+    /// Clear all speed distribution data
+    pub async fn clear_speed_distribution(&self) -> std::io::Result<()> {
+        self.speed_distribution.write().await.clear().await
+    }
+
+    /// Format speed distribution report
+    pub async fn format_speed_distribution_report(&self) -> String {
+        self.speed_distribution.read().await.format_report()
+    }
+
+    /// Load speed distribution data from disk
+    pub async fn load_speed_distribution_data(&self) -> std::io::Result<()> {
+        self.speed_distribution.write().await.load().await
     }
 
     // ========== Event Webhook API ==========

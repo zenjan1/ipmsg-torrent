@@ -171,6 +171,11 @@ enum Command {
         /// "status", "config", "run <url1> [url2...]", "summary", "clear"
         args: Vec<String>,
     },
+    /// Speed distribution analysis (Phase 164)
+    DlSpeedDist {
+        /// "status", "summary", "report", "domain <name>", "protocol <name>", "hour <0-23>", "domains", "remove <domain>", "clear", "config"
+        args: Vec<String>,
+    },
     /// Download backup management
     DlBackup {
         /// "list", "create [description]", "show <path>", "delete <path>"
@@ -793,6 +798,11 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    DlConnectionPool {
+        /// Subcommand: status|stats|config|domains|domain|cleanup|clear|save
+        subcommand: String,
+        args: Vec<String>,
+    },
     DlTtl {
         /// Subcommand: status|enable|disable|set|task|summary
         subcommand: String,
@@ -871,6 +881,12 @@ enum Command {
     /// Per-task schedule windows (status|add|remove|list|check|config)
     DlScheduleWindows {
         /// Subcommand: status|add|remove|list|check|config
+        subcommand: String,
+        args: Vec<String>,
+    },
+    /// Task scheduler (status|config|rules|add|remove|enable|disable|evaluate)
+    DlTaskScheduler {
+        /// Subcommand: status|config|rules|add|remove|enable|disable|evaluate
         subcommand: String,
         args: Vec<String>,
     },
@@ -1136,6 +1152,10 @@ fn parse_command(input: &str) -> Command {
         "dlspeedbench" | "dl-speedbench" | "dlsbench" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             Command::DlSpeedBench { args }
+        }
+        "dlspeeddist" | "dl-speeddist" | "dlsdist" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            Command::DlSpeedDist { args }
         }
         "dlbackup" | "dl-backup" | "dlbk" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
@@ -2507,6 +2527,25 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlpool" | "dl-pool" | "dlconnpool" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlpool <status|stats|config|domains|domain|cleanup|clear|save>".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlConnectionPool {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlttl" | "dl-ttl" | "dlt" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
@@ -3055,6 +3094,7 @@ fn command_help() -> String {
         "/dlburst [cmd]     - Speed burst (status|start <task_id> [duration] [multiplier]|stop <task_id>|config)",
         "/dlnetwork [cmd]  - Network-aware download (status|enable|disable|config|summary|probe|paused|clear|reset)",
         "/dlretryquota [cmd] - Retry quota (status|enable|disable|set <max> [window_secs]|reset)",
+        "/dlpool [cmd]    - Connection pool (status|stats|config|domains|domain <name> <limit>|cleanup|clear|save)",
         "/dlintegrity [cmd] - File integrity verification (status|verify <id>|verify-all|summary|clear|config)",
         "/dldisk [cmd]     - Disk space monitor (status|config|check|start|stop)",
         "/dlbudget [cmd]   - Global download budget (status|set <weekly_mb> <monthly_mb> [pct]|reset|resume)",
@@ -5722,6 +5762,183 @@ async fn handle_command(
                 }
                 _ => {
                     println!("Unknown subcommand. Use: status, config, run, summary, clear");
+                }
+            }
+        }
+        Command::DlSpeedDist { args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+            match sub {
+                "status" | "summary" => {
+                    let summary = download_manager.get_speed_distribution_summary().await;
+                    println!("Speed Distribution Summary:");
+                    println!("  Total Samples: {}", summary.total_samples);
+                    println!("  Tracked Domains: {}", summary.tracked_domains);
+                    println!("  Global Mean: {:.2} B/s", summary.global_stats.mean_bps);
+                    println!(
+                        "  Global Median: {:.2} B/s",
+                        summary.global_stats.median_bps
+                    );
+                    println!("  Global P95: {:.2} B/s", summary.global_stats.p95_bps);
+                    println!("  Global Max: {:.2} B/s", summary.global_stats.max_bps);
+                    if let Some(best) = &summary.best_hour {
+                        println!("  Best Hour: {} ({:.2} B/s)", best.hour, best.median_bps);
+                    }
+                    if let Some(worst) = &summary.worst_hour {
+                        println!("  Worst Hour: {} ({:.2} B/s)", worst.hour, worst.median_bps);
+                    }
+                    if !summary.top_domains.is_empty() {
+                        println!("\nTop Domains:");
+                        for (i, ds) in summary.top_domains.iter().enumerate() {
+                            println!(
+                                "  {}. {} - mean: {:.2} B/s, samples: {}",
+                                i + 1,
+                                ds.domain,
+                                ds.mean_bps,
+                                ds.sample_count
+                            );
+                        }
+                    }
+                    if !summary.protocol_stats.is_empty() {
+                        println!("\nProtocol Stats:");
+                        for ps in &summary.protocol_stats {
+                            println!(
+                                "  {} - mean: {:.2} B/s, samples: {}",
+                                ps.protocol, ps.mean_bps, ps.sample_count
+                            );
+                        }
+                    }
+                }
+                "report" => {
+                    let report = download_manager.format_speed_distribution_report().await;
+                    println!("{}", report);
+                }
+                "domain" => {
+                    if args.len() < 2 {
+                        println!("Usage: /dlspeeddist domain <domain_name>");
+                    } else {
+                        let domain = &args[1];
+                        if let Some(stats) = download_manager.get_domain_speed_stats(domain).await {
+                            println!("Speed Stats for {}:", domain);
+                            println!("  Samples: {}", stats.sample_count);
+                            println!("  Mean: {:.2} B/s", stats.mean_bps);
+                            println!("  Median: {:.2} B/s", stats.median_bps);
+                            println!("  P95: {:.2} B/s", stats.p95_bps);
+                            println!("  Min: {:.2} B/s", stats.min_bps);
+                            println!("  Max: {:.2} B/s", stats.max_bps);
+                        } else {
+                            println!("No data for domain: {}", domain);
+                        }
+                    }
+                }
+                "protocol" => {
+                    if args.len() < 2 {
+                        println!("Usage: /dlspeeddist protocol <http|torrent|ed2k|p2p>");
+                    } else {
+                        let protocol_str = &args[1];
+                        let protocol = match protocol_str.to_lowercase().as_str() {
+                            "http" => ipmsg_download::speed_distribution::SpeedProtocol::Http,
+                            "torrent" => ipmsg_download::speed_distribution::SpeedProtocol::Torrent,
+                            "ed2k" => ipmsg_download::speed_distribution::SpeedProtocol::Ed2k,
+                            "p2p" => ipmsg_download::speed_distribution::SpeedProtocol::P2p,
+                            _ => {
+                                println!("Unknown protocol. Use: http, torrent, ed2k, p2p");
+                                return;
+                            }
+                        };
+                        if let Some(stats) =
+                            download_manager.get_protocol_speed_stats(protocol).await
+                        {
+                            println!("Speed Stats for {:?}:", protocol);
+                            println!("  Samples: {}", stats.sample_count);
+                            println!("  Mean: {:.2} B/s", stats.mean_bps);
+                            println!("  Median: {:.2} B/s", stats.median_bps);
+                            println!("  P95: {:.2} B/s", stats.p95_bps);
+                            println!("  Min: {:.2} B/s", stats.min_bps);
+                            println!("  Max: {:.2} B/s", stats.max_bps);
+                        } else {
+                            println!("No data for protocol: {:?}", protocol);
+                        }
+                    }
+                }
+                "hour" => {
+                    if args.len() < 2 {
+                        println!("Usage: /dlspeeddist hour <0-23>");
+                    } else {
+                        match args[1].parse::<u8>() {
+                            Ok(hour) if hour < 24 => {
+                                if let Some(stats) =
+                                    download_manager.get_hourly_speed_stats(hour).await
+                                {
+                                    println!("Speed Stats for Hour {}:", hour);
+                                    println!("  Samples: {}", stats.sample_count);
+                                    println!("  Mean: {:.2} B/s", stats.mean_bps);
+                                    println!("  Median: {:.2} B/s", stats.median_bps);
+                                    println!("  P95: {:.2} B/s", stats.p95_bps);
+                                    println!("  Min: {:.2} B/s", stats.min_bps);
+                                    println!("  Max: {:.2} B/s", stats.max_bps);
+                                } else {
+                                    println!("No data for hour: {}", hour);
+                                }
+                            }
+                            _ => {
+                                println!("Invalid hour. Use: 0-23");
+                            }
+                        }
+                    }
+                }
+                "domains" => {
+                    let domains = download_manager.get_tracked_speed_domains().await;
+                    if domains.is_empty() {
+                        println!("No domains tracked.");
+                    } else {
+                        println!("Tracked Domains ({}):", domains.len());
+                        for domain in domains {
+                            println!("  - {}", domain);
+                        }
+                    }
+                }
+                "remove" => {
+                    if args.len() < 2 {
+                        println!("Usage: /dlspeeddist remove <domain_name>");
+                    } else {
+                        let domain = &args[1];
+                        let removed = download_manager.remove_speed_domain(domain).await;
+                        if removed {
+                            println!("Removed domain: {}", domain);
+                        } else {
+                            println!("Domain not found: {}", domain);
+                        }
+                    }
+                }
+                "clear" => {
+                    if let Err(e) = download_manager.clear_speed_distribution().await {
+                        println!("Error clearing data: {}", e);
+                    } else {
+                        println!("Speed distribution data cleared.");
+                    }
+                }
+                "config" => {
+                    let config = download_manager.get_speed_distribution_config().await;
+                    println!("Speed Distribution Config:");
+                    println!("  Enabled: {}", config.enabled);
+                    println!("  Max Domain Samples: {}", config.max_domain_samples);
+                    println!("  Max Hourly Samples: {}", config.max_hourly_samples);
+                    println!("  Max Tracked Domains: {}", config.max_tracked_domains);
+                    println!("  Track Protocol Stats: {}", config.track_protocol_stats);
+                    println!(
+                        "  Track Hourly Distribution: {}",
+                        config.track_hourly_distribution
+                    );
+                    println!("  Track Histogram: {}", config.track_histogram);
+                }
+                _ => {
+                    println!(
+                        "Unknown subcommand. Use: status, summary, report, domain, protocol, hour, domains, remove, clear, config"
+                    );
                 }
             }
         }
@@ -18982,6 +19199,163 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlConnectionPool { subcommand, args } => {
+            let download_manager = {
+                let s = state.lock().await;
+                s.download_manager.clone()
+            };
+            let mut s = state.lock().await;
+            match subcommand.as_str() {
+                "status" => {
+                    let status = download_manager.get_connection_pool_status().await;
+                    let mut msg = format!(
+                        "Connection Pool Status:\n  Uptime: {}s\n  Addresses: {}\n  Connections: {}/{} (healthy/total)\n  DNS Cache: {} entries",
+                        status.uptime_secs,
+                        status.stats.total_addresses,
+                        status.stats.healthy_connections,
+                        status.stats.total_connections,
+                        status.stats.dns_cache_size,
+                    );
+                    msg.push_str(&format!(
+                        "\n  Created: {} | Reused: {} | Discarded: {}",
+                        status.stats.total_created,
+                        status.stats.total_reused,
+                        status.stats.total_discarded
+                    ));
+                    msg.push_str(&format!(
+                        "\n  DNS Hits: {} | Misses: {}",
+                        status.stats.dns_cache_hits, status.stats.dns_cache_misses
+                    ));
+                    if !status.domain_connections.is_empty() {
+                        msg.push_str(&format!(
+                            "\n  Domains ({}):",
+                            status.domain_connections.len()
+                        ));
+                        for dc in status.domain_connections.iter().take(10) {
+                            let limit_str = dc
+                                .connection_limit
+                                .map(|l| format!("/{}", l))
+                                .unwrap_or_default();
+                            msg.push_str(&format!(
+                                "\n    {} - {}{} ({:.1}%)",
+                                dc.domain,
+                                dc.current_connections,
+                                limit_str,
+                                dc.utilization_percent
+                            ));
+                        }
+                    }
+                    s.add_system_message("main", msg);
+                }
+                "stats" => {
+                    let stats = download_manager.get_connection_pool_stats().await;
+                    let reuse_rate = if stats.total_created + stats.total_reused > 0 {
+                        (stats.total_reused as f64
+                            / (stats.total_created + stats.total_reused) as f64)
+                            * 100.0
+                    } else {
+                        0.0
+                    };
+                    let msg = format!(
+                        "Connection Pool Statistics:\n  Addresses: {}\n  Connections: {}/{} (healthy/total)\n  DNS Cache: {} entries\n  Created: {}\n  Reused: {} ({:.1}%)\n  Discarded: {}\n  DNS Hits: {}\n  DNS Misses: {}",
+                        stats.total_addresses,
+                        stats.healthy_connections,
+                        stats.total_connections,
+                        stats.dns_cache_size,
+                        stats.total_created,
+                        stats.total_reused,
+                        reuse_rate,
+                        stats.total_discarded,
+                        stats.dns_cache_hits,
+                        stats.dns_cache_misses
+                    );
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    let config = download_manager.get_connection_pool_config().await;
+                    let msg = format!(
+                        "Connection Pool Configuration:\n  Max connections per address: {}\n  Max age: {}s\n  Max idle: {}s\n  Connect timeout: {}s\n  TCP send buffer: {} KB\n  TCP recv buffer: {} KB\n  TCP nodelay: {}\n  DNS cache enabled: {}\n  DNS cache TTL: {}s\n  Health check: {}",
+                        config.max_connections_per_addr,
+                        config.max_age_secs,
+                        config.max_idle_secs,
+                        config.connect_timeout_secs,
+                        config.tcp_send_buffer_size / 1024,
+                        config.tcp_recv_buffer_size / 1024,
+                        config.tcp_nodelay,
+                        config.dns_cache_enabled,
+                        config.dns_cache_ttl_secs,
+                        config.health_check_enabled
+                    );
+                    s.add_system_message("main", msg);
+                }
+                "domains" => {
+                    let domains = download_manager.get_connection_pool_domains().await;
+                    if domains.is_empty() {
+                        s.add_system_message("main", "No domain connections tracked".to_string());
+                    } else {
+                        let mut msg = format!("Domain Connections ({}):", domains.len());
+                        for dc in domains.iter().take(20) {
+                            let limit_str = dc
+                                .connection_limit
+                                .map(|l| format!("/{}", l))
+                                .unwrap_or_default();
+                            msg.push_str(&format!(
+                                "\n  {} - {}{} ({:.1}%)",
+                                dc.domain,
+                                dc.current_connections,
+                                limit_str,
+                                dc.utilization_percent
+                            ));
+                        }
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "domain" => {
+                    if args.len() < 2 {
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpool domain <name> <limit>".to_string(),
+                        );
+                        return;
+                    }
+                    let domain = &args[0];
+                    let limit = match args[1].parse::<usize>() {
+                        Ok(v) => v,
+                        Err(_) => {
+                            s.add_system_message("main", "Invalid limit value".to_string());
+                            return;
+                        }
+                    };
+                    download_manager
+                        .set_connection_pool_domain_limit(domain, limit)
+                        .await;
+                    s.add_system_message(
+                        "main",
+                        format!("Domain '{}' connection limit set to {}", domain, limit),
+                    );
+                }
+                "cleanup" => {
+                    download_manager.cleanup_connection_pool().await;
+                    s.add_system_message("main", "Connection pool cleanup complete".to_string());
+                }
+                "clear" => {
+                    download_manager.clear_connection_pool().await;
+                    s.add_system_message("main", "Connection pool cleared".to_string());
+                }
+                "save" => match download_manager.save_connection_pool_config().await {
+                    Ok(_) => {
+                        s.add_system_message("main", "Connection pool config saved".to_string())
+                    }
+                    Err(e) => s.add_system_message("main", format!("Failed to save config: {}", e)),
+                },
+                _ => {
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlpool <status|stats|config|domains|domain <name> <limit>|cleanup|clear|save>".to_string(),
+                    );
+                }
+            }
+        }
         Command::DlTtl { subcommand, args } => {
             let download_manager = {
                 let s = state.lock().await;
@@ -20853,15 +21227,25 @@ async fn handle_command(
             match action.as_str() {
                 "status" | "config" => {
                     let config = download_manager.get_prediction_config().await;
+                    let accuracy = download_manager.get_prediction_accuracy().await;
                     let msg = format!(
-                        "🔮 Progress Prediction Config:\n\
+                        "🔮 Progress Prediction Status:\n\
                          Enabled: {}\n\
                          Min Samples: {}\n\
                          Max Samples: {}\n\
                          Smoothing Factor: {:.2}\n\
                          High Confidence Min Samples: {}\n\
                          Medium Confidence Min Samples: {}\n\
-                         Track Accuracy: {}",
+                         Track Accuracy: {}\n\
+                         \n\
+                         Accuracy Summary:\n\
+                         Total Predictions: {}\n\
+                         Completed: {}\n\
+                         Avg Error: {:.1}%\n\
+                         MAPE: {:.1}%\n\
+                         Within 10%: {}\n\
+                         Within 25%: {}\n\
+                         Over 50%: {}",
                         config.enabled,
                         config.min_samples,
                         config.max_samples,
@@ -20869,6 +21253,13 @@ async fn handle_command(
                         config.high_confidence_min_samples,
                         config.medium_confidence_min_samples,
                         config.track_accuracy,
+                        accuracy.total_predictions,
+                        accuracy.completed_predictions,
+                        accuracy.avg_error_percentage,
+                        accuracy.mape,
+                        accuracy.within_10_percent,
+                        accuracy.within_25_percent,
+                        accuracy.over_50_percent,
                     );
                     let mut s = state.lock().await;
                     s.add_system_message("main", msg);
