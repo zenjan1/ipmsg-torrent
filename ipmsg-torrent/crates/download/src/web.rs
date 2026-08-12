@@ -2,6 +2,7 @@
 //!
 //! Provides a REST API, WebSocket real-time updates, and HTML frontend.
 
+use crate::save_path_manager::{FileCategory, SavePathConfig, SavePathManager};
 use crate::sla_compliance;
 use crate::{DownloadManager, DownloadState, DownloadTask};
 use axum::{
@@ -1346,6 +1347,14 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             post(clear_all_retry_budget_handler),
         )
         .route("/api/uptime", get(get_uptime_handler))
+        // ── Save Path Manager API (Phase 162) ──
+        .route("/api/save-path", get(get_save_path_config_handler))
+        .route("/api/save-path", post(set_save_path_config_handler))
+        .route("/api/save-path/validate", get(validate_save_path_handler))
+        .route("/api/save-path/predict/:filename", get(predict_save_path_handler))
+        .route("/api/save-path/category-dirs", get(get_category_dirs_handler))
+        .route("/api/save-path/category-dirs", post(set_category_dir_handler))
+        .route("/api/save-path/category-dirs/:category", axum::routing::delete(remove_category_dir_handler))
         // ── Dependency Visualization API (Phase 154) ──
         .route("/api/dependency-visualization", get(get_dep_viz_handler))
         .route(
@@ -12052,6 +12061,108 @@ async fn clear_url_intelligence_cache(
     State(state): State<Arc<WebState>>,
 ) -> Json<serde_json::Value> {
     state.manager.clear_url_intelligence_cache().await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+// ── Save Path Manager Handlers (Phase 162) ──────────────────────────────
+
+/// GET /api/save-path - Get save path configuration
+async fn get_save_path_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<SavePathConfig> {
+    let config = state.manager.get_save_path_config().await;
+    Json(config)
+}
+
+/// POST /api/save-path - Update save path configuration
+async fn set_save_path_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<SavePathConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.save_path_manager().set_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/save-path/validate - Validate base save path
+async fn validate_save_path_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let result = state.manager.validate_save_path_base().await;
+    Json(result)
+}
+
+/// GET /api/save-path/predict/:filename - Predict save path for a filename
+async fn predict_save_path_handler(
+    State(state): State<Arc<WebState>>,
+    Path(filename): Path<String>,
+) -> Json<serde_json::Value> {
+    let path = state.manager.predict_save_path(&filename).await;
+    Json(serde_json::json!({
+        "filename": filename,
+        "predicted_path": path.display().to_string(),
+        "category": format!("{:?}", SavePathManager::detect_category(&filename)),
+    }))
+}
+
+/// GET /api/save-path/category-dirs - Get custom category directories
+async fn get_category_dirs_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<serde_json::Value> {
+    let config = state.manager.get_save_path_config().await;
+    let dirs: serde_json::Map<String, serde_json::Value> = config
+        .category_dirs
+        .into_iter()
+        .map(|(k, v)| (format!("{:?}", k), serde_json::Value::String(v)))
+        .collect();
+    Json(serde_json::Value::Object(dirs))
+}
+
+/// POST /api/save-path/category-dirs - Set custom category directory
+async fn set_category_dir_handler(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let category_str = body.get("category").and_then(|v| v.as_str()).unwrap_or("");
+    let dir_name = body.get("dir_name").and_then(|v| v.as_str()).unwrap_or("");
+
+    if category_str.is_empty() || dir_name.is_empty() {
+        return Json(serde_json::json!({"error": "category and dir_name required"}));
+    }
+
+    let category = match category_str {
+        "video" => FileCategory::Video,
+        "music" => FileCategory::Music,
+        "document" => FileCategory::Document,
+        "image" => FileCategory::Image,
+        "archive" => FileCategory::Archive,
+        "program" => FileCategory::Program,
+        "other" => FileCategory::Other,
+        _ => return Json(serde_json::json!({"error": "invalid category"})),
+    };
+
+    state.manager.set_category_dir(category, dir_name.to_string()).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// DELETE /api/save-path/category-dirs/:category - Remove custom category directory
+async fn remove_category_dir_handler(
+    State(state): State<Arc<WebState>>,
+    Path(category_str): Path<String>,
+) -> Json<serde_json::Value> {
+    let category = match category_str.as_str() {
+        "video" => FileCategory::Video,
+        "music" => FileCategory::Music,
+        "document" => FileCategory::Document,
+        "image" => FileCategory::Image,
+        "archive" => FileCategory::Archive,
+        "program" => FileCategory::Program,
+        "other" => FileCategory::Other,
+        _ => return Json(serde_json::json!({"error": "invalid category"})),
+    };
+
+    let mut config = state.manager.get_save_path_config().await;
+    config.category_dirs.remove(&category);
+    state.manager.save_path_manager().set_config(config).await;
     Json(serde_json::json!({"status": "ok"}))
 }
 

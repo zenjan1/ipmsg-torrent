@@ -6514,6 +6514,37 @@ impl DownloadManager {
             save_save_path_config(&self.data_dir, &self.save_path_manager.get_config().await).await;
     }
 
+    /// Get full save path configuration (for REST API / CLI).
+    pub async fn get_save_path_config(&self) -> SavePathConfig {
+        self.save_path_manager.get_config().await
+    }
+
+    /// Predict the save path for a given filename without actually downloading.
+    pub async fn predict_save_path(&self, file_name: &str) -> PathBuf {
+        self.save_path_manager.get_save_path(file_name).await
+    }
+
+    /// Validate the current base save path (check existence and writability).
+    pub async fn validate_save_path_base(&self) -> serde_json::Value {
+        let config = self.save_path_manager.get_config().await;
+        let base = &config.base_dir;
+        let exists = base.exists();
+        let is_dir = base.is_dir();
+        let writable = if exists && is_dir {
+            SavePathManager::check_writable(base).await.unwrap_or(false)
+        } else {
+            false
+        };
+        serde_json::json!({
+            "base_dir": base.display().to_string(),
+            "exists": exists,
+            "is_dir": is_dir,
+            "writable": writable,
+            "auto_organize": config.auto_organize,
+            "category_count": config.category_dirs.len(),
+        })
+    }
+
     /// Set a time window schedule for a download task.
     /// The task will only download during the specified time window.
     /// Pass None to remove the schedule and allow continuous downloading.

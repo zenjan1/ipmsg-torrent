@@ -291,6 +291,12 @@ enum Command {
     },
     /// System uptime - view how long the system has been running (Phase 143)
     DlUptime,
+    /// Save path manager - configure download directory and auto-organize (Phase 162)
+    DlSavePath {
+        /// "status", "config", "set-base", "organize", "category", "predict", "validate"
+        action: String,
+        args: Vec<String>,
+    },
     /// Download diagnostics - run diagnostic checks and view findings (Phase 156)
     DlDiagnostics {
         /// "status", "run", "report", "config"
@@ -1306,6 +1312,18 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dluptime" | "dl-uptime" | "dlupt" => Command::DlUptime,
+        "dlspath" | "dl-savepath" | "dlsavepath" => {
+            if parts.len() < 2 {
+                Command::DlSavePath {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlSavePath { action, args }
+            }
+        }
         "dldiag" | "dl-diag" | "dldiagnostics" | "dl-diagnostics" => {
             if parts.len() < 2 {
                 Command::DlDiagnostics {
@@ -2965,6 +2983,7 @@ fn command_help() -> String {
         "/dlspeedtest [cmd] - Speed test (status|run <url>|summary|history|latest|clear|config)",
         "/dlspdtrend [cmd] - Speed trend analysis (status|summary|trends|degrading|improving|clear|config)",
         "/dluptime       - Show system uptime (how long since startup)",
+        "/dlspath [cmd]  - Save path manager (status|config|set-base|organize|category|predict|validate)",
         "/dldiag         - Download diagnostics (status|run|report|config)",
         "/dldepviz [cmd]   - Dependency visualization (graph|stats|config|cycles|roots|leaves|text|dot)",
         "/dlheatmap [cmd]  - Speed heatmap by hour/day (status|report|hour|day|quality|config|prune|reset)",
@@ -4249,6 +4268,144 @@ async fn handle_command(
             );
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
+        }
+        Command::DlSavePath { action, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+            match action.as_str() {
+                "status" => {
+                    let config = download_manager.get_save_path_config().await;
+                    let validation = download_manager.validate_save_path_base().await;
+                    let msg = format!(
+                        "📁 Save Path Manager\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         📂 Base Directory: {}\n\
+                         🔄 Auto-Organize: {}\n\
+                         📊 Custom Categories: {}\n\
+                         ✅ Path Exists: {}\n\
+                         ✅ Path Writable: {}",
+                        config.base_dir.display(),
+                        if config.auto_organize { "Enabled" } else { "Disabled" },
+                        config.category_dirs.len(),
+                        validation["exists"].as_bool().unwrap_or(false),
+                        validation["writable"].as_bool().unwrap_or(false)
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    let config = download_manager.get_save_path_config().await;
+                    let msg = format!(
+                        "📁 Save Path Configuration\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         Base: {}\n\
+                         Auto-Organize: {}\n\
+                         Custom Categories:\n{}",
+                        config.base_dir.display(),
+                        if config.auto_organize { "Yes" } else { "No" },
+                        if config.category_dirs.is_empty() {
+                            "  (none)".to_string()
+                        } else {
+                            config.category_dirs.iter()
+                                .map(|(k, v)| format!("  {:?}: {}", k, v))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "set-base" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "❌ Usage: /dlspath set-base <path>".to_string());
+                    } else {
+                        let path = std::path::PathBuf::from(&args[0]);
+                        download_manager.set_save_path(path.clone()).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("✅ Base directory set to: {}", path.display()));
+                    }
+                }
+                "organize" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "❌ Usage: /dlspath organize <on|off>".to_string());
+                    } else {
+                        let enable = matches!(args[0].to_lowercase().as_str(), "on" | "true" | "1" | "yes");
+                        download_manager.set_auto_organize(enable).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("✅ Auto-organize {}", if enable { "enabled" } else { "disabled" }));
+                    }
+                }
+                "category" => {
+                    if args.len() < 2 {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "❌ Usage: /dlspath category <video|music|document|image|archive|program|other> <dirname>".to_string());
+                    } else {
+                        let category = match args[0].to_lowercase().as_str() {
+                            "video" => ipmsg_download::FileCategory::Video,
+                            "music" => ipmsg_download::FileCategory::Music,
+                            "document" => ipmsg_download::FileCategory::Document,
+                            "image" => ipmsg_download::FileCategory::Image,
+                            "archive" => ipmsg_download::FileCategory::Archive,
+                            "program" => ipmsg_download::FileCategory::Program,
+                            "other" => ipmsg_download::FileCategory::Other,
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", "❌ Invalid category. Use: video, music, document, image, archive, program, other".to_string());
+                                return;
+                            }
+                        };
+                        download_manager.set_category_dir(category, args[1].clone()).await;
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("✅ Category {:?} directory set to: {}", category, args[1]));
+                    }
+                }
+                "predict" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", "❌ Usage: /dlspath predict <filename>".to_string());
+                    } else {
+                        let filename = &args[0];
+                        let path = download_manager.predict_save_path(filename).await;
+                        let category = ipmsg_download::SavePathManager::detect_category(filename);
+                        let msg = format!(
+                            "🔮 Predicted Save Path\n\
+                             ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                             Filename: {}\n\
+                             Category: {:?}\n\
+                             Path: {}",
+                            filename,
+                            category,
+                            path.display()
+                        );
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "validate" => {
+                    let validation = download_manager.validate_save_path_base().await;
+                    let msg = format!(
+                        "🔍 Save Path Validation\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         Path: {}\n\
+                         Exists: {}\n\
+                         Is Directory: {}\n\
+                         Writable: {}",
+                        validation["base_dir"].as_str().unwrap_or("unknown"),
+                        validation["exists"].as_bool().unwrap_or(false),
+                        validation["is_dir"].as_bool().unwrap_or(false),
+                        validation["writable"].as_bool().unwrap_or(false)
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", "❌ Unknown action. Use: status, config, set-base, organize, category, predict, validate".to_string());
+                }
+            }
         }
         Command::DlDiagnostics { action, args } => {
             let s = state.lock().await;
@@ -12677,14 +12834,12 @@ async fn handle_command(
                     match download_manager.export_tasks_json(filter).await {
                         Ok(tasks) => {
                             let count = tasks.len();
-                            let json = serde_json::to_string_pretty(&tasks).unwrap_or_default();
                             let mut s = state.lock().await;
                             s.add_system_message(
                                 "main",
                                 format!(
-                                    "✅ Exported {} tasks to JSON ({} bytes)",
-                                    count,
-                                    json.len()
+                                    "✅ Exported {} tasks",
+                                    count
                                 ),
                             );
                         }
