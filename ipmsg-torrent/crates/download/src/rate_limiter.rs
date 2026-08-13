@@ -315,4 +315,334 @@ mod tests {
             got
         );
     }
+
+    // ── Phase 185: Comprehensive test coverage ──
+
+    #[tokio::test]
+    async fn test_acquire_zero_bytes() {
+        // Acquiring 0 bytes should return immediately even when limited
+        let limiter = RateLimiter::new(1000);
+        let start = Instant::now();
+        limiter.acquire(0).await;
+        assert!(start.elapsed().as_millis() < 50);
+    }
+
+    #[tokio::test]
+    async fn test_try_acquire_zero_bytes() {
+        let limiter = RateLimiter::new(1000);
+        let got = limiter.try_acquire(0).await;
+        assert_eq!(got, 0);
+    }
+
+    #[tokio::test]
+    async fn test_burst_minimum_is_1024() {
+        // When bytes_per_sec < 1024, burst should be 1024
+        let limiter = RateLimiter::new(100); // 100 B/s, burst = max(100, 1024) = 1024
+        assert_eq!(limiter.speed_limit().await, 100);
+
+        // Should be able to acquire 1024 bytes immediately (burst capacity)
+        let start = Instant::now();
+        limiter.acquire(1024).await;
+        assert!(
+            start.elapsed().as_millis() < 50,
+            "burst should be immediate"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_burst_equals_bytes_per_sec_when_large() {
+        // When bytes_per_sec > 1024, burst = bytes_per_sec
+        let limiter = RateLimiter::new(5000);
+        // Burst should be 5000, so acquiring 5000 should be immediate
+        let start = Instant::now();
+        limiter.acquire(5000).await;
+        assert!(start.elapsed().as_millis() < 50);
+    }
+
+    #[tokio::test]
+    async fn test_set_speed_resets_tokens() {
+        let limiter = RateLimiter::new(10_000);
+        // Drain the burst
+        limiter.acquire(10_000).await;
+
+        // Tokens should be nearly depleted
+        let got_before = limiter.try_acquire(10_000).await;
+        assert!(got_before < 1000, "should be depleted");
+
+        // set_speed resets tokens to new burst capacity
+        limiter.set_speed(10_000).await;
+        let got_after = limiter.try_acquire(10_000).await;
+        assert_eq!(got_after, 10_000, "tokens should be fully reset");
+    }
+
+    #[tokio::test]
+    async fn test_set_speed_changes_burst() {
+        let limiter = RateLimiter::new(1000);
+        assert_eq!(limiter.speed_limit().await, 1000);
+
+        // Change to higher speed
+        limiter.set_speed(50_000).await;
+        assert_eq!(limiter.speed_limit().await, 50_000);
+
+        // Burst should now be 50_000 (immediate acquire)
+        let start = Instant::now();
+        limiter.acquire(50_000).await;
+        assert!(start.elapsed().as_millis() < 50);
+    }
+
+    #[tokio::test]
+    async fn test_set_speed_to_unlimited() {
+        let limiter = RateLimiter::new(1000);
+        assert!(limiter.is_limited().await);
+
+        limiter.set_speed(0).await;
+        assert!(!limiter.is_limited().await);
+        assert_eq!(limiter.speed_limit().await, 0);
+
+        // Should acquire immediately
+        let start = Instant::now();
+        limiter.acquire(1_000_000).await;
+        assert!(start.elapsed().as_millis() < 50);
+    }
+
+    #[tokio::test]
+    async fn test_is_limited_boundary() {
+        // Exactly 0 = unlimited
+        let zero = RateLimiter::new(0);
+        assert!(!zero.is_limited().await);
+
+        // 1 bps = limited
+        let one = RateLimiter::new(1);
+        assert!(one.is_limited().await);
+    }
+
+    #[tokio::test]
+    async fn test_try_acquire_capped_at_available() {
+        // try_acquire should return min(available, requested)
+        let limiter = RateLimiter::new(10_000);
+        // burst = 10_000, tokens start at 10_000
+        // Request more than available
+        let got = limiter.try_acquire(20_000).await;
+        assert_eq!(got, 10_000, "should be capped at burst capacity");
+    }
+
+    #[tokio::test]
+    async fn test_try_acquire_depletes_tokens() {
+        let limiter = RateLimiter::new(10_000);
+        // burst = 10_000
+
+        // First acquire gets full amount
+        let got1 = limiter.try_acquire(6000).await;
+        assert_eq!(got1, 6000);
+
+        // Second acquire gets remaining (minus tiny refill)
+        let got2 = limiter.try_acquire(6000).await;
+        assert!(
+            got2 >= 3500 && got2 <= 4100,
+            "expected ~4000 remaining, got {}",
+            got2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_controller_global_accessor() {
+        let ctrl = DownloadRateController::new(10_000, 5_000);
+        // global() returns a reference to the inner RateLimiter
+        let global = ctrl.global();
+        assert_eq!(global.speed_limit().await, 10_000);
+    }
+
+    #[tokio::test]
+    async fn test_controller_per_task_accessor() {
+        let ctrl = DownloadRateController::new(10_000, 5_000);
+        let per_task = ctrl.per_task();
+        assert_eq!(per_task.speed_limit().await, 5_000);
+    }
+
+    #[tokio::test]
+    async fn test_controller_acquire_both_limited() {
+        // Both global and per-task limited
+        let ctrl = DownloadRateController::new(10_000, 5_000);
+
+        // First burst from per-task (5000) should be immediate
+        let start = Instant::now();
+        ctrl.acquire(5_000).await;
+        assert!(
+            start.elapsed().as_millis() < 50,
+            "burst should be immediate"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_controller_set_both_to_unlimited() {
+        let ctrl = DownloadRateController::new(10_000, 5_000);
+        assert!(ctrl.is_limited().await);
+
+        ctrl.set_global_limit(0).await;
+        ctrl.set_task_limit(0).await;
+        assert!(!ctrl.is_limited().await);
+    }
+
+    #[tokio::test]
+    async fn test_controller_only_global_limited() {
+        let ctrl = DownloadRateController::new(10_000, 0);
+        assert!(ctrl.is_limited().await);
+        assert_eq!(ctrl.global_limit().await, 10_000);
+        assert_eq!(ctrl.task_limit().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_controller_only_task_limited() {
+        let ctrl = DownloadRateController::new(0, 5_000);
+        assert!(ctrl.is_limited().await);
+        assert_eq!(ctrl.global_limit().await, 0);
+        assert_eq!(ctrl.task_limit().await, 5_000);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_set_speed_calls() {
+        let limiter = RateLimiter::new(1000);
+        limiter.set_speed(2000).await;
+        assert_eq!(limiter.speed_limit().await, 2000);
+        limiter.set_speed(3000).await;
+        assert_eq!(limiter.speed_limit().await, 3000);
+        limiter.set_speed(0).await;
+        assert!(!limiter.is_limited().await);
+        limiter.set_speed(500).await;
+        assert!(limiter.is_limited().await);
+        assert_eq!(limiter.speed_limit().await, 500);
+    }
+
+    #[tokio::test]
+    async fn test_burst_at_exact_1024() {
+        // bytes_per_sec = 1024, burst = max(1024, 1024) = 1024
+        let limiter = RateLimiter::new(1024);
+        assert_eq!(limiter.speed_limit().await, 1024);
+
+        let start = Instant::now();
+        limiter.acquire(1024).await;
+        assert!(start.elapsed().as_millis() < 50);
+    }
+
+    #[tokio::test]
+    async fn test_acquire_small_amount_limited() {
+        // Acquiring small amounts from a limited limiter
+        let limiter = RateLimiter::new(10_000);
+        // burst = 10_000
+        limiter.acquire(1).await;
+        limiter.acquire(1).await;
+        limiter.acquire(1).await;
+        // Should still have plenty of tokens
+        let got = limiter.try_acquire(1000).await;
+        assert!(got >= 900, "should have ~9997 tokens left, got {}", got);
+    }
+
+    #[tokio::test]
+    async fn test_try_acquire_exact_burst() {
+        let limiter = RateLimiter::new(5000);
+        // burst = 5000, tokens = 5000
+        let got = limiter.try_acquire(5000).await;
+        assert_eq!(got, 5000);
+
+        // Immediately after, should get very little
+        let got2 = limiter.try_acquire(5000).await;
+        assert!(got2 < 100, "should be depleted, got {}", got2);
+    }
+
+    #[tokio::test]
+    async fn test_refill_produces_tokens_after_drain() {
+        let limiter = RateLimiter::new(10_000); // 10KB/s, burst=10KB
+        // Drain completely
+        limiter.acquire(10_000).await;
+        let depleted = limiter.try_acquire(10_000).await;
+        assert!(depleted < 100);
+
+        // Wait 200ms → should refill ~2000 bytes
+        tokio::time::sleep(Duration::from_millis(210)).await;
+        let got = limiter.try_acquire(3000).await;
+        assert!(
+            got >= 1500 && got <= 2200,
+            "expected ~2000 refilled, got {}",
+            got
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tokens_capped_at_burst() {
+        // Tokens should never exceed burst capacity
+        let limiter = RateLimiter::new(1000); // burst = 1024
+        // Wait a long time so refill would overfill
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // try_acquire should still be capped at burst (1024)
+        let got = limiter.try_acquire(5000).await;
+        assert!(got <= 1100, "tokens should be capped at ~1024, got {}", got);
+    }
+
+    #[tokio::test]
+    async fn test_new_limiter_starts_full() {
+        let limiter = RateLimiter::new(10_000);
+        // New limiter should have full burst tokens
+        let got = limiter.try_acquire(10_000).await;
+        assert_eq!(got, 10_000, "new limiter should start with full burst");
+    }
+
+    #[tokio::test]
+    async fn test_new_limiter_zero_starts_full_unlimited() {
+        let limiter = RateLimiter::new(0);
+        assert!(!limiter.is_limited().await);
+        // Unlimited limiter should always return full amount
+        let got = limiter.try_acquire(u64::MAX / 2).await;
+        assert_eq!(got, u64::MAX / 2);
+    }
+
+    #[tokio::test]
+    async fn test_controller_clone_shares_state() {
+        let ctrl = DownloadRateController::new(10_000, 5_000);
+        let ctrl2 = ctrl.clone();
+
+        // Modify via clone
+        ctrl2.set_global_limit(20_000).await;
+        ctrl2.set_task_limit(15_000).await;
+
+        // Original should see the changes
+        assert_eq!(ctrl.global_limit().await, 20_000);
+        assert_eq!(ctrl.task_limit().await, 15_000);
+    }
+
+    #[tokio::test]
+    async fn test_acquire_timing_precision() {
+        // Test that rate limiting is approximately correct over multiple iterations
+        let limiter = RateLimiter::new(10_000); // 10KB/s
+
+        // Drain initial burst
+        limiter.acquire(10_000).await;
+
+        // Now acquire 5000 bytes, should wait ~500ms
+        let start = Instant::now();
+        limiter.acquire(5000).await;
+        let elapsed = start.elapsed();
+
+        // Should wait between 300ms and 800ms (allowing for timing imprecision)
+        let ms = elapsed.as_millis();
+        assert!(ms >= 300 && ms <= 800, "expected ~500ms wait, got {}ms", ms);
+    }
+
+    #[tokio::test]
+    async fn test_sequential_try_acquire_drain() {
+        let limiter = RateLimiter::new(1000); // burst = 1024
+        let mut total = 0u64;
+
+        // Drain via try_acquire until depleted
+        for _ in 0..20 {
+            let got = limiter.try_acquire(100).await;
+            total += got;
+        }
+
+        // Total should be approximately 1024 (burst), allowing for tiny refills
+        assert!(
+            total >= 1000 && total <= 1200,
+            "expected ~1024 total from burst, got {}",
+            total
+        );
+    }
 }
