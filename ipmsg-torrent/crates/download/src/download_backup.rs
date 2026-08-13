@@ -833,4 +833,953 @@ mod tests {
             crate::conflict_detection::ConflictStrategy::Rename
         );
     }
+
+    // ==================== Phase 207: Comprehensive Test Coverage ====================
+
+    // --- Constants ---
+
+    #[test]
+    fn test_backup_version_value() {
+        assert_eq!(BACKUP_VERSION, 1);
+    }
+
+    // --- DownloadBackup serialization ---
+
+    #[test]
+    fn test_download_backup_serde_roundtrip() {
+        let backup = DownloadBackup {
+            version: 1,
+            created_at: Utc::now(),
+            description: Some("test".to_string()),
+            source: "ipmsg-torrent".to_string(),
+            tasks: BackupTasks::default(),
+            configs: BackupConfigs::default(),
+        };
+        let json = serde_json::to_string(&backup).unwrap();
+        let loaded: DownloadBackup = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.source, "ipmsg-torrent");
+        assert_eq!(loaded.description, Some("test".to_string()));
+    }
+
+    #[test]
+    fn test_download_backup_pretty_json() {
+        let backup = DownloadBackup {
+            version: 1,
+            created_at: Utc::now(),
+            description: None,
+            source: "ipmsg-torrent".to_string(),
+            tasks: BackupTasks::default(),
+            configs: BackupConfigs::default(),
+        };
+        let pretty = serde_json::to_string_pretty(&backup).unwrap();
+        assert!(pretty.contains('\n'));
+        assert!(pretty.contains("\"version\": 1"));
+    }
+
+    #[test]
+    fn test_download_backup_extra_fields_ignored() {
+        let json = r#"{
+            "version": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "source": "test",
+            "tasks": {"tasks": [], "generations": {}},
+            "configs": {},
+            "unknown_field": "should be ignored",
+            "another_extra": 42
+        }"#;
+        let backup: DownloadBackup = serde_json::from_str(json).unwrap();
+        assert_eq!(backup.version, 1);
+        assert_eq!(backup.source, "test");
+    }
+
+    #[test]
+    fn test_download_backup_optional_description() {
+        // With description
+        let json_with = r#"{
+            "version": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "description": "my backup",
+            "source": "test",
+            "tasks": {"tasks": [], "generations": {}},
+            "configs": {}
+        }"#;
+        let b1: DownloadBackup = serde_json::from_str(json_with).unwrap();
+        assert_eq!(b1.description, Some("my backup".to_string()));
+
+        // Without description (missing field)
+        let json_without = r#"{
+            "version": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "source": "test",
+            "tasks": {"tasks": [], "generations": {}},
+            "configs": {}
+        }"#;
+        let b2: DownloadBackup = serde_json::from_str(json_without).unwrap();
+        assert_eq!(b2.description, None);
+    }
+
+    #[test]
+    fn test_download_backup_unicode_description() {
+        let backup = DownloadBackup {
+            version: 1,
+            created_at: Utc::now(),
+            description: Some("备份文件 🗂️ 中文".to_string()),
+            source: "ipmsg-torrent".to_string(),
+            tasks: BackupTasks::default(),
+            configs: BackupConfigs::default(),
+        };
+        let json = serde_json::to_string(&backup).unwrap();
+        let loaded: DownloadBackup = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.description, Some("备份文件 🗂️ 中文".to_string()));
+    }
+
+    // --- BackupTasks ---
+
+    #[test]
+    fn test_backup_tasks_default() {
+        let bt = BackupTasks::default();
+        assert!(bt.tasks.is_empty());
+        assert!(bt.generations.is_empty());
+    }
+
+    #[test]
+    fn test_backup_tasks_serde_roundtrip() {
+        let mut generations = HashMap::new();
+        generations.insert("gen1".to_string(), 10);
+        generations.insert("gen2".to_string(), 20);
+        let bt = BackupTasks {
+            tasks: vec![],
+            generations,
+        };
+        let json = serde_json::to_string(&bt).unwrap();
+        let loaded: BackupTasks = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.generations.get("gen1"), Some(&10));
+        assert_eq!(loaded.generations.get("gen2"), Some(&20));
+    }
+
+    #[test]
+    fn test_backup_tasks_with_exported_tasks() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let tasks = vec![
+            make_test_task("t1", "file1.txt"),
+            make_test_task("t2", "file2.mp4"),
+            make_test_task("t3", "file3.zip"),
+        ];
+        let exported: Vec<crate::task_export::ExportedTask> = tasks
+            .into_iter()
+            .map(crate::task_export::ExportedTask::from)
+            .collect();
+
+        let configs = BackupConfigs::default();
+        let backup_path = manager
+            .create_backup(None, exported, HashMap::new(), configs)
+            .unwrap();
+
+        let loaded = manager.load_backup(&backup_path).unwrap();
+        assert_eq!(loaded.tasks.tasks.len(), 3);
+    }
+
+    #[test]
+    fn test_backup_tasks_generations_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let mut generations = HashMap::new();
+        generations.insert("queue".to_string(), 42);
+        generations.insert("archive".to_string(), 7);
+
+        let configs = BackupConfigs::default();
+        let backup_path = manager
+            .create_backup(None, vec![], generations, configs)
+            .unwrap();
+
+        let loaded = manager.load_backup(&backup_path).unwrap();
+        assert_eq!(loaded.tasks.generations.get("queue"), Some(&42));
+        assert_eq!(loaded.tasks.generations.get("archive"), Some(&7));
+    }
+
+    // --- BackupConfigs ---
+
+    #[test]
+    fn test_backup_configs_default_all_none() {
+        let configs = BackupConfigs::default();
+        assert_eq!(configs.count_some(), 0);
+        assert!(configs.auto_cleanup.is_none());
+        assert!(configs.auto_pause.is_none());
+        assert!(configs.automation_rules.is_none());
+        assert!(configs.bandwidth_allocation.is_none());
+        assert!(configs.bandwidth_schedule.is_none());
+        assert!(configs.categorize_rules.is_none());
+        assert!(configs.conflict_strategy.is_none());
+        assert!(configs.cooldown.is_none());
+        assert!(configs.data_cap.is_none());
+        assert!(configs.dependency_graph.is_none());
+        assert!(configs.disk_monitor.is_none());
+        assert!(configs.domain_limit.is_none());
+        assert!(configs.download_analytics.is_none());
+        assert!(configs.download_budget.is_none());
+        assert!(configs.download_deadline.is_none());
+        assert!(configs.download_presets.is_none());
+        assert!(configs.download_quota.is_none());
+        assert!(configs.download_time_limit.is_none());
+        assert!(configs.duplicate_detection.is_none());
+        assert!(configs.error_recovery.is_none());
+        assert!(configs.global_budget.is_none());
+        assert!(configs.integrity.is_none());
+        assert!(configs.network_aware.is_none());
+        assert!(configs.path_rules.is_none());
+        assert!(configs.path_template.is_none());
+        assert!(configs.priority_aging.is_none());
+        assert!(configs.protocol_limits.is_none());
+        assert!(configs.queue_completion.is_none());
+        assert!(configs.queue_staleness.is_none());
+        assert!(configs.recycle_bin.is_none());
+        assert!(configs.resume_policy.is_none());
+        assert!(configs.save_path.is_none());
+        assert!(configs.speed_alert.is_none());
+        assert!(configs.speed_profiles.is_none());
+        assert!(configs.task_chains.is_none());
+        assert!(configs.task_schedule_windows.is_none());
+        assert!(configs.url_allowlist.is_none());
+        assert!(configs.url_bookmarks.is_none());
+        assert!(configs.url_dedup.is_none());
+        assert!(configs.url_normalizer.is_none());
+        assert!(configs.url_rewrite.is_none());
+        assert!(configs.watch_folder.is_none());
+    }
+
+    #[test]
+    fn test_backup_configs_count_some_all_fields() {
+        let configs = BackupConfigs {
+            auto_cleanup: Some(crate::auto_cleanup::AutoCleanupConfig::default()),
+            auto_pause: Some(crate::auto_pause::AutoPauseConfig::default()),
+            automation_rules: Some(crate::automation_rules::AutomationConfig::default()),
+            bandwidth_allocation: Some(crate::bandwidth_allocation::AllocationConfig::default()),
+            bandwidth_schedule: Some(vec![]),
+            categorize_rules: Some(vec![]),
+            conflict_strategy: Some(crate::conflict_detection::ConflictStrategy::default()),
+            cooldown: Some(crate::download_cooldown::CooldownConfig::default()),
+            data_cap: Some(crate::data_cap::DataCapConfig::default()),
+            dependency_graph: Some(crate::dependency_graph::DependencyGraphConfig::default()),
+            disk_monitor: Some(crate::disk_monitor::DiskMonitorConfig::default()),
+            domain_limit: Some(crate::domain_limit::DomainLimitConfig::default()),
+            download_analytics: Some(crate::download_analytics::AnalyticsConfig::default()),
+            download_budget: Some(crate::download_budget::BudgetConfig::default()),
+            download_deadline: Some(crate::download_deadline::DeadlineConfig::default()),
+            download_presets: Some(vec![]),
+            download_quota: Some(crate::download_quota::QuotaSystemConfig::default()),
+            download_time_limit: Some(
+                crate::download_time_limit::DownloadTimeLimitConfig::default(),
+            ),
+            duplicate_detection: Some(
+                crate::duplicate_detection::DuplicateDetectionConfig::default(),
+            ),
+            error_recovery: Some(crate::error_recovery::ErrorRecoveryConfig::default()),
+            global_budget: Some(crate::global_budget::GlobalBudgetConfig::default()),
+            integrity: Some(crate::integrity_verification::IntegrityConfig::default()),
+            network_aware: Some(crate::network_aware::NetworkAwareConfig::default()),
+            path_rules: Some(vec![]),
+            path_template: Some(crate::path_template::PathTemplateConfig::default()),
+            priority_aging: Some(crate::priority_aging::PriorityAgingConfig::default()),
+            protocol_limits: Some(crate::protocol_limits::ProtocolLimitsConfig::new()),
+            queue_completion: Some(crate::queue_completion::QueueCompletionConfig::default()),
+            queue_staleness: Some(crate::queue_staleness::StalenessConfig::default()),
+            recycle_bin: Some(crate::recycle_bin::RecycleBinConfig::default()),
+            resume_policy: Some(crate::resume_policy::ResumePolicyConfig::default()),
+            save_path: Some(crate::save_path_manager::SavePathConfig::default()),
+            speed_alert: Some(crate::speed_alert::SpeedAlertConfig::default()),
+            speed_profiles: Some(vec![]),
+            task_chains: Some(vec![]),
+            task_schedule_windows: Some(vec![]),
+            url_allowlist: Some(crate::url_allowlist::AllowlistConfig::default()),
+            url_bookmarks: Some(vec![]),
+            url_dedup: Some(crate::url_dedup::DedupConfig::default()),
+            url_normalizer: Some(crate::url_normalizer::UrlNormalizerConfig::default()),
+            url_rewrite: Some(vec![]),
+            watch_folder: Some(crate::watch_folder::WatchFolderAutoScanConfig::default()),
+        };
+        // All 42 fields should be Some
+        assert_eq!(configs.count_some(), 42);
+    }
+
+    #[test]
+    fn test_backup_configs_serde_roundtrip() {
+        let mut configs = BackupConfigs::default();
+        configs.auto_cleanup = Some(crate::auto_cleanup::AutoCleanupConfig::default());
+        configs.domain_limit = Some(crate::domain_limit::DomainLimitConfig::default());
+
+        let json = serde_json::to_string(&configs).unwrap();
+        let loaded: BackupConfigs = serde_json::from_str(&json).unwrap();
+        assert!(loaded.auto_cleanup.is_some());
+        assert!(loaded.domain_limit.is_some());
+        assert!(loaded.auto_pause.is_none());
+    }
+
+    #[test]
+    fn test_backup_configs_extra_fields_ignored() {
+        let json = r#"{"future_config": 42, "another": true}"#;
+        let configs: BackupConfigs = serde_json::from_str(json).unwrap();
+        assert_eq!(configs.count_some(), 0);
+    }
+
+    // --- BackupError ---
+
+    #[test]
+    fn test_backup_error_io_display() {
+        let err = BackupError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file missing",
+        ));
+        let msg = format!("{}", err);
+        assert!(msg.contains("IO error"));
+    }
+
+    #[test]
+    fn test_backup_error_serialize_display() {
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err = BackupError::Serialize(json_err);
+        let msg = format!("{}", err);
+        assert!(msg.contains("serialize"));
+    }
+
+    #[test]
+    fn test_backup_error_unsupported_version_display() {
+        let err = BackupError::UnsupportedVersion(99);
+        let msg = format!("{}", err);
+        assert!(msg.contains("99"));
+        assert!(msg.contains("unsupported"));
+    }
+
+    #[test]
+    fn test_backup_error_invalid_file_display() {
+        let err = BackupError::InvalidFile("corrupt data".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("corrupt data"));
+    }
+
+    #[test]
+    fn test_backup_error_already_exists_display() {
+        let path = PathBuf::from("/tmp/backup.json");
+        let err = BackupError::AlreadyExists(path);
+        let msg = format!("{}", err);
+        assert!(msg.contains("already exists"));
+    }
+
+    #[test]
+    fn test_backup_error_io_debug() {
+        let err = BackupError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "no access",
+        ));
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Io"));
+    }
+
+    #[test]
+    fn test_backup_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        let err: BackupError = BackupError::from(io_err);
+        assert!(matches!(err, BackupError::Io(_)));
+    }
+
+    #[test]
+    fn test_backup_error_from_serde() {
+        let serde_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let err: BackupError = BackupError::from(serde_err);
+        assert!(matches!(err, BackupError::Serialize(_)));
+    }
+
+    // --- BackupManager: create_backup ---
+
+    #[test]
+    fn test_create_backup_no_description() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let configs = BackupConfigs::default();
+        let backup_path = manager
+            .create_backup(None, vec![], HashMap::new(), configs)
+            .unwrap();
+
+        let loaded = manager.load_backup(&backup_path).unwrap();
+        assert_eq!(loaded.description, None);
+        assert_eq!(loaded.source, "ipmsg-torrent");
+    }
+
+    #[test]
+    fn test_create_backup_with_description() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let configs = BackupConfigs::default();
+        let backup_path = manager
+            .create_backup(
+                Some("weekly backup".to_string()),
+                vec![],
+                HashMap::new(),
+                configs,
+            )
+            .unwrap();
+
+        let loaded = manager.load_backup(&backup_path).unwrap();
+        assert_eq!(loaded.description, Some("weekly backup".to_string()));
+    }
+
+    #[test]
+    fn test_create_backup_filename_format() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let configs = BackupConfigs::default();
+        let backup_path = manager
+            .create_backup(None, vec![], HashMap::new(), configs)
+            .unwrap();
+
+        let filename = backup_path.file_name().unwrap().to_str().unwrap();
+        assert!(filename.starts_with("backup_"));
+        assert!(filename.ends_with(".json"));
+        // Should contain timestamp like backup_20260814_034300.json
+        assert!(filename.len() > "backup_.json".len());
+    }
+
+    #[test]
+    fn test_create_backup_empty_tasks() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let configs = BackupConfigs::default();
+        let backup_path = manager
+            .create_backup(None, vec![], HashMap::new(), configs)
+            .unwrap();
+
+        let loaded = manager.load_backup(&backup_path).unwrap();
+        assert!(loaded.tasks.tasks.is_empty());
+        assert!(loaded.tasks.generations.is_empty());
+    }
+
+    #[test]
+    fn test_create_backup_preserves_task_data() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let task = make_test_task("abc-123", "测试文件.mp4");
+        let exported = crate::task_export::ExportedTask::from(task);
+
+        let configs = BackupConfigs::default();
+        let backup_path = manager
+            .create_backup(None, vec![exported], HashMap::new(), configs)
+            .unwrap();
+
+        let loaded = manager.load_backup(&backup_path).unwrap();
+        assert_eq!(loaded.tasks.tasks.len(), 1);
+        assert_eq!(loaded.tasks.tasks[0].id, "abc-123");
+        assert_eq!(loaded.tasks.tasks[0].name, "测试文件.mp4");
+    }
+
+    // --- BackupManager: load_backup ---
+
+    #[test]
+    fn test_load_backup_file_not_found() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let fake_path = temp_dir.path().join("does_not_exist.json");
+        let result = manager.load_backup(&fake_path);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), BackupError::Io(_)));
+    }
+
+    #[test]
+    fn test_load_backup_empty_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let empty_path = temp_dir.path().join("empty.json");
+        std::fs::write(&empty_path, "").unwrap();
+
+        let result = manager.load_backup(&empty_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_backup_version_zero() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let path = temp_dir.path().join("v0.json");
+        let content = r#"{"version":0,"created_at":"2026-01-01T00:00:00Z","source":"test","tasks":{"tasks":[],"generations":{}},"configs":{}}"#;
+        std::fs::write(&path, content).unwrap();
+
+        let result = manager.load_backup(&path);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            BackupError::UnsupportedVersion(0)
+        ));
+    }
+
+    #[test]
+    fn test_load_backup_valid_version_1() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let path = temp_dir.path().join("v1.json");
+        let content = r#"{"version":1,"created_at":"2026-01-01T00:00:00Z","source":"test","tasks":{"tasks":[],"generations":{}},"configs":{}}"#;
+        std::fs::write(&path, content).unwrap();
+
+        let backup = manager.load_backup(&path).unwrap();
+        assert_eq!(backup.version, 1);
+    }
+
+    // --- BackupManager: list_backups ---
+
+    #[test]
+    fn test_list_backups_nonexistent_dir() {
+        let manager = BackupManager::new(PathBuf::from("/nonexistent/path/that/does/not/exist"));
+        let backups = manager.list_backups().unwrap();
+        assert!(backups.is_empty());
+    }
+
+    #[test]
+    fn test_list_backups_ignores_non_backup_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        // Create non-backup JSON files
+        std::fs::write(temp_dir.path().join("config.json"), r#"{"key": "value"}"#).unwrap();
+        std::fs::write(temp_dir.path().join("data.json"), r#"[1,2,3]"#).unwrap();
+
+        let backups = manager.list_backups().unwrap();
+        assert!(backups.is_empty());
+    }
+
+    #[test]
+    fn test_list_backups_sorted_newest_first() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        // Create first backup
+        let configs = BackupConfigs::default();
+        manager
+            .create_backup(
+                Some("first".to_string()),
+                vec![],
+                HashMap::new(),
+                configs.clone(),
+            )
+            .unwrap();
+
+        // Wait a second to ensure different timestamp
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Create second backup
+        manager
+            .create_backup(Some("second".to_string()), vec![], HashMap::new(), configs)
+            .unwrap();
+
+        let backups = manager.list_backups().unwrap();
+        assert_eq!(backups.len(), 2);
+        // Newest first
+        assert!(backups[0].created_at >= backups[1].created_at);
+    }
+
+    #[test]
+    fn test_list_backups_info_fields() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let task = make_test_task("t1", "file1.txt");
+        let exported = crate::task_export::ExportedTask::from(task);
+
+        let mut configs = BackupConfigs::default();
+        configs.auto_cleanup = Some(crate::auto_cleanup::AutoCleanupConfig::default());
+
+        let backup_path = manager
+            .create_backup(
+                Some("info test".to_string()),
+                vec![exported],
+                HashMap::new(),
+                configs,
+            )
+            .unwrap();
+
+        let backups = manager.list_backups().unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].path, backup_path);
+        assert_eq!(backups[0].task_count, 1);
+        assert_eq!(backups[0].config_count, 1);
+        assert_eq!(backups[0].description, Some("info test".to_string()));
+    }
+
+    #[test]
+    fn test_list_backups_skips_corrupt_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        // Create a corrupt backup file
+        let corrupt_path = temp_dir.path().join("backup_corrupt.json");
+        std::fs::write(&corrupt_path, "not valid json").unwrap();
+
+        // Create a valid backup
+        let configs = BackupConfigs::default();
+        manager
+            .create_backup(None, vec![], HashMap::new(), configs)
+            .unwrap();
+
+        // Should only list the valid one
+        let backups = manager.list_backups().unwrap();
+        assert_eq!(backups.len(), 1);
+    }
+
+    // --- BackupManager: delete_backup ---
+
+    #[test]
+    fn test_delete_backup_removes_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let configs = BackupConfigs::default();
+        let backup_path = manager
+            .create_backup(None, vec![], HashMap::new(), configs)
+            .unwrap();
+
+        assert!(backup_path.exists());
+        manager.delete_backup(&backup_path).unwrap();
+        assert!(!backup_path.exists());
+    }
+
+    #[test]
+    fn test_delete_backup_twice_fails() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let configs = BackupConfigs::default();
+        let backup_path = manager
+            .create_backup(None, vec![], HashMap::new(), configs)
+            .unwrap();
+
+        manager.delete_backup(&backup_path).unwrap();
+        let result = manager.delete_backup(&backup_path);
+        assert!(result.is_err());
+    }
+
+    // --- BackupConfigs: individual field tests ---
+
+    #[test]
+    fn test_backup_configs_each_field_individually() {
+        // Test that each config field can be set and counted independently
+        let fields: Vec<(&str, Box<dyn Fn(&mut BackupConfigs)>)> = vec![
+            (
+                "auto_cleanup",
+                Box::new(|c| {
+                    c.auto_cleanup = Some(crate::auto_cleanup::AutoCleanupConfig::default())
+                }),
+            ),
+            (
+                "auto_pause",
+                Box::new(|c| c.auto_pause = Some(crate::auto_pause::AutoPauseConfig::default())),
+            ),
+            (
+                "cooldown",
+                Box::new(|c| {
+                    c.cooldown = Some(crate::download_cooldown::CooldownConfig::default())
+                }),
+            ),
+            (
+                "data_cap",
+                Box::new(|c| c.data_cap = Some(crate::data_cap::DataCapConfig::default())),
+            ),
+            (
+                "domain_limit",
+                Box::new(|c| {
+                    c.domain_limit = Some(crate::domain_limit::DomainLimitConfig::default())
+                }),
+            ),
+            (
+                "error_recovery",
+                Box::new(|c| {
+                    c.error_recovery = Some(crate::error_recovery::ErrorRecoveryConfig::default())
+                }),
+            ),
+            (
+                "network_aware",
+                Box::new(|c| {
+                    c.network_aware = Some(crate::network_aware::NetworkAwareConfig::default())
+                }),
+            ),
+            (
+                "priority_aging",
+                Box::new(|c| {
+                    c.priority_aging = Some(crate::priority_aging::PriorityAgingConfig::default())
+                }),
+            ),
+            (
+                "queue_completion",
+                Box::new(|c| {
+                    c.queue_completion =
+                        Some(crate::queue_completion::QueueCompletionConfig::default())
+                }),
+            ),
+            (
+                "recycle_bin",
+                Box::new(|c| c.recycle_bin = Some(crate::recycle_bin::RecycleBinConfig::default())),
+            ),
+            (
+                "resume_policy",
+                Box::new(|c| {
+                    c.resume_policy = Some(crate::resume_policy::ResumePolicyConfig::default())
+                }),
+            ),
+            (
+                "speed_alert",
+                Box::new(|c| c.speed_alert = Some(crate::speed_alert::SpeedAlertConfig::default())),
+            ),
+            (
+                "url_dedup",
+                Box::new(|c| c.url_dedup = Some(crate::url_dedup::DedupConfig::default())),
+            ),
+        ];
+
+        for (name, setter) in &fields {
+            let mut configs = BackupConfigs::default();
+            setter(&mut configs);
+            assert_eq!(
+                configs.count_some(),
+                1,
+                "Field '{}' should make count_some() == 1",
+                name
+            );
+        }
+    }
+
+    // --- BackupInfo serialization ---
+
+    #[test]
+    fn test_backup_info_serde_roundtrip() {
+        let info = BackupInfo {
+            path: PathBuf::from("/tmp/backup_20260101.json"),
+            created_at: Utc::now(),
+            description: Some("test info".to_string()),
+            task_count: 5,
+            config_count: 10,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let loaded: BackupInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.path, PathBuf::from("/tmp/backup_20260101.json"));
+        assert_eq!(loaded.task_count, 5);
+        assert_eq!(loaded.config_count, 10);
+        assert_eq!(loaded.description, Some("test info".to_string()));
+    }
+
+    // --- Clone/Debug traits ---
+
+    #[test]
+    fn test_download_backup_clone() {
+        let backup = DownloadBackup {
+            version: 1,
+            created_at: Utc::now(),
+            description: Some("cloneable".to_string()),
+            source: "test".to_string(),
+            tasks: BackupTasks::default(),
+            configs: BackupConfigs::default(),
+        };
+        let cloned = backup.clone();
+        assert_eq!(cloned.version, 1);
+        assert_eq!(cloned.source, "test");
+        assert_eq!(cloned.description, Some("cloneable".to_string()));
+    }
+
+    #[test]
+    fn test_download_backup_debug() {
+        let backup = DownloadBackup {
+            version: 1,
+            created_at: Utc::now(),
+            description: None,
+            source: "test".to_string(),
+            tasks: BackupTasks::default(),
+            configs: BackupConfigs::default(),
+        };
+        let debug = format!("{:?}", backup);
+        assert!(debug.contains("DownloadBackup"));
+        assert!(debug.contains("version: 1"));
+    }
+
+    #[test]
+    fn test_backup_tasks_clone() {
+        let mut bt = BackupTasks::default();
+        bt.generations.insert("g1".to_string(), 5);
+        let cloned = bt.clone();
+        assert_eq!(cloned.generations.get("g1"), Some(&5));
+    }
+
+    #[test]
+    fn test_backup_configs_clone() {
+        let mut configs = BackupConfigs::default();
+        configs.auto_cleanup = Some(crate::auto_cleanup::AutoCleanupConfig::default());
+        let cloned = configs.clone();
+        assert!(cloned.auto_cleanup.is_some());
+    }
+
+    #[test]
+    fn test_backup_info_clone() {
+        let info = BackupInfo {
+            path: PathBuf::from("/test/path.json"),
+            created_at: Utc::now(),
+            description: None,
+            task_count: 3,
+            config_count: 7,
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.task_count, 3);
+        assert_eq!(cloned.config_count, 7);
+    }
+
+    // --- Edge cases ---
+
+    #[test]
+    fn test_backup_many_tasks() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let tasks: Vec<crate::task_export::ExportedTask> = (0..50)
+            .map(|i| make_test_task(&format!("task-{}", i), &format!("file{}.txt", i)))
+            .map(crate::task_export::ExportedTask::from)
+            .collect();
+
+        let configs = BackupConfigs::default();
+        let backup_path = manager
+            .create_backup(None, tasks, HashMap::new(), configs)
+            .unwrap();
+
+        let loaded = manager.load_backup(&backup_path).unwrap();
+        assert_eq!(loaded.tasks.tasks.len(), 50);
+    }
+
+    #[test]
+    fn test_backup_overwrite_after_delete() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let configs = BackupConfigs::default();
+        let backup_path = manager
+            .create_backup(None, vec![], HashMap::new(), configs.clone())
+            .unwrap();
+
+        // Delete and recreate
+        manager.delete_backup(&backup_path).unwrap();
+
+        // Wait for different timestamp
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        let new_path = manager
+            .create_backup(
+                Some("new version".to_string()),
+                vec![],
+                HashMap::new(),
+                configs,
+            )
+            .unwrap();
+
+        let loaded = manager.load_backup(&new_path).unwrap();
+        assert_eq!(loaded.description, Some("new version".to_string()));
+    }
+
+    #[test]
+    fn test_backup_empty_json_object() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        // Minimal valid JSON that can deserialize as DownloadBackup
+        let path = temp_dir.path().join("minimal.json");
+        let content = r#"{"version":1,"created_at":"2026-01-01T00:00:00Z","source":"test","tasks":{"tasks":[],"generations":{}},"configs":{}}"#;
+        std::fs::write(&path, content).unwrap();
+
+        let backup = manager.load_backup(&path).unwrap();
+        assert_eq!(backup.version, 1);
+        assert!(backup.tasks.tasks.is_empty());
+        assert_eq!(backup.configs.count_some(), 0);
+    }
+
+    #[test]
+    fn test_backup_special_characters_in_description() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let desc = "Special chars: \"quotes\" \\slashes\" \n\ttabs 日本語 한국어 العربية";
+        let configs = BackupConfigs::default();
+        let backup_path = manager
+            .create_backup(Some(desc.to_string()), vec![], HashMap::new(), configs)
+            .unwrap();
+
+        let loaded = manager.load_backup(&backup_path).unwrap();
+        assert_eq!(loaded.description, Some(desc.to_string()));
+    }
+
+    #[test]
+    fn test_backup_manager_new() {
+        let manager = BackupManager::new(PathBuf::from("/test/dir"));
+        assert_eq!(manager.data_dir, PathBuf::from("/test/dir"));
+    }
+
+    #[test]
+    fn test_list_backups_empty_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let backups = manager.list_backups().unwrap();
+        assert!(backups.is_empty());
+    }
+
+    #[test]
+    fn test_backup_no_tmp_leftover() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = BackupManager::new(temp_dir.path().to_path_buf());
+
+        let configs = BackupConfigs::default();
+        let _backup_path = manager
+            .create_backup(None, vec![], HashMap::new(), configs)
+            .unwrap();
+
+        // Check no .tmp files in directory
+        for entry in std::fs::read_dir(temp_dir.path()).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let name_str = name.to_str().unwrap();
+            assert!(
+                !name_str.ends_with(".tmp"),
+                "Found leftover temp file: {}",
+                name_str
+            );
+        }
+    }
+
+    #[test]
+    fn test_backup_info_debug() {
+        let info = BackupInfo {
+            path: PathBuf::from("/test.json"),
+            created_at: Utc::now(),
+            description: None,
+            task_count: 0,
+            config_count: 0,
+        };
+        let debug = format!("{:?}", info);
+        assert!(debug.contains("BackupInfo"));
+    }
+
+    #[test]
+    fn test_backup_tasks_debug() {
+        let bt = BackupTasks::default();
+        let debug = format!("{:?}", bt);
+        assert!(debug.contains("BackupTasks"));
+    }
+
+    #[test]
+    fn test_backup_configs_debug() {
+        let configs = BackupConfigs::default();
+        let debug = format!("{:?}", configs);
+        assert!(debug.contains("BackupConfigs"));
+    }
 }
