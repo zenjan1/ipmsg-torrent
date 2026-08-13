@@ -719,14 +719,23 @@ mod tests {
         let config = PoolConfig::default();
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: PoolConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.max_connections_per_addr, config.max_connections_per_addr);
+        assert_eq!(
+            deserialized.max_connections_per_addr,
+            config.max_connections_per_addr
+        );
         assert_eq!(deserialized.max_age_secs, config.max_age_secs);
         assert_eq!(deserialized.max_idle_secs, config.max_idle_secs);
-        assert_eq!(deserialized.connect_timeout_secs, config.connect_timeout_secs);
+        assert_eq!(
+            deserialized.connect_timeout_secs,
+            config.connect_timeout_secs
+        );
         assert_eq!(deserialized.tcp_nodelay, config.tcp_nodelay);
         assert_eq!(deserialized.dns_cache_enabled, config.dns_cache_enabled);
         assert_eq!(deserialized.dns_cache_ttl_secs, config.dns_cache_ttl_secs);
-        assert_eq!(deserialized.health_check_enabled, config.health_check_enabled);
+        assert_eq!(
+            deserialized.health_check_enabled,
+            config.health_check_enabled
+        );
     }
 
     #[test]
@@ -770,7 +779,10 @@ mod tests {
     fn test_pool_config_load_default_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         let loaded = load_pool_config(dir.path()).unwrap();
-        assert_eq!(loaded.max_connections_per_addr, PoolConfig::default().max_connections_per_addr);
+        assert_eq!(
+            loaded.max_connections_per_addr,
+            PoolConfig::default().max_connections_per_addr
+        );
     }
 
     #[test]
@@ -1110,7 +1122,10 @@ mod tests {
         pool.record_domain_connection("nolimit.com").await;
 
         let domain_info = pool.get_domain_connections().await;
-        let info = domain_info.iter().find(|d| d.domain == "nolimit.com").unwrap();
+        let info = domain_info
+            .iter()
+            .find(|d| d.domain == "nolimit.com")
+            .unwrap();
         assert_eq!(info.connection_limit, None);
         assert_eq!(info.utilization_percent, 0.0);
     }

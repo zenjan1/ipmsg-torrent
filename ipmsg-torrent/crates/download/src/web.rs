@@ -586,6 +586,17 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             "/api/url-normalizer/equivalent",
             post(check_url_equivalent_handler),
         )
+        .route("/api/url-pattern", get(get_url_pattern_config_handler))
+        .route("/api/url-pattern", post(set_url_pattern_config_handler))
+        .route("/api/url-pattern/expand", post(expand_url_pattern_handler))
+        .route(
+            "/api/url-pattern/validate",
+            post(validate_url_pattern_handler),
+        )
+        .route(
+            "/api/url-pattern/estimate",
+            post(estimate_url_pattern_count_handler),
+        )
         .route("/api/url-intelligence", get(get_url_intelligence_config))
         .route("/api/url-intelligence", post(set_url_intelligence_config))
         .route("/api/url-intelligence/analyze", post(analyze_url_handler))
@@ -13788,6 +13799,90 @@ async fn check_url_equivalent_handler(
     Ok(Json(
         serde_json::json!({"equivalent": equivalent, "url1": url1, "url2": url2}),
     ))
+}
+
+// ── URL Pattern Handlers (Phase 181) ──────────────────────────────────
+
+/// GET /api/url-pattern - Get URL pattern configuration
+async fn get_url_pattern_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::url_pattern::PatternConfig> {
+    let config = state.manager.get_url_pattern_config().await;
+    Json(config)
+}
+
+/// POST /api/url-pattern - Update URL pattern configuration
+async fn set_url_pattern_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::url_pattern::PatternConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_url_pattern_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// POST /api/url-pattern/expand - Expand a URL pattern into individual URLs
+async fn expand_url_pattern_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let pattern = req
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    match state.manager.expand_url_pattern(pattern).await {
+        Ok(urls) => Ok(Json(serde_json::json!({
+            "pattern": pattern,
+            "urls": urls,
+            "count": urls.len()
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "error": e.to_string(),
+            "pattern": pattern
+        }))),
+    }
+}
+
+/// POST /api/url-pattern/validate - Validate a URL pattern
+async fn validate_url_pattern_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let pattern = req
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    match state.manager.validate_url_pattern(pattern).await {
+        Ok(()) => Ok(Json(serde_json::json!({
+            "valid": true,
+            "pattern": pattern
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "valid": false,
+            "pattern": pattern,
+            "error": e.to_string()
+        }))),
+    }
+}
+
+/// POST /api/url-pattern/estimate - Estimate the number of URLs a pattern would generate
+async fn estimate_url_pattern_count_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let pattern = req
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    match state.manager.estimate_url_pattern_count(pattern).await {
+        Ok(count) => Ok(Json(serde_json::json!({
+            "pattern": pattern,
+            "count": count
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "error": e.to_string(),
+            "pattern": pattern
+        }))),
+    }
 }
 
 /// POST /api/url-intelligence/analyze - Analyze a URL for download recommendations

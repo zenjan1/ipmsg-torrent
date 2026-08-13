@@ -16,6 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::path::Path;
 
 /// Error type for URL pattern expansion
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,6 +330,22 @@ fn generate_combinations(
 /// Check if a string contains URL patterns
 pub fn contains_pattern(s: &str) -> bool {
     s.contains('{') && s.contains('}')
+}
+
+/// Save pattern configuration to disk (atomic write)
+pub fn save_pattern_config(config: &PatternConfig, data_dir: &Path) -> Result<(), String> {
+    let path = data_dir.join("url_pattern_config.json");
+    let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+/// Load pattern configuration from disk
+pub fn load_pattern_config(data_dir: &Path) -> PatternConfig {
+    let path = data_dir.join("url_pattern_config.json");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => PatternConfig::default(),
+    }
 }
 
 /// Validate a URL pattern without expanding it

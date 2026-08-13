@@ -268,6 +268,12 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
+    /// URL pattern batch expansion (Phase 181)
+    DlUrlPattern {
+        /// "status", "config", "expand <pattern>", "validate <pattern>", "estimate <pattern>"
+        action: String,
+        args: Vec<String>,
+    },
     /// Bandwidth forecast - predict download speeds based on historical data (Phase 136)
     DlBandwidthForecast {
         /// "status", "config", "predict", "summary", "clear", "remove"
@@ -1362,6 +1368,18 @@ fn parse_command(input: &str) -> Command {
                 let action = parts[1].to_string();
                 let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
                 Command::DlUrlNormalizer { action, args }
+            }
+        }
+        "dlpattern" | "dl-url-pattern" | "dlpat" => {
+            if parts.len() < 2 {
+                Command::DlUrlPattern {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlUrlPattern { action, args }
             }
         }
         "dlbwforecast" | "dl-bwforecast" | "dlforecast" => {
@@ -3295,6 +3313,7 @@ fn command_help() -> String {
         "/dlclone <id>       - Clone (duplicate) a download task",
         "/dltp [cmd]         - Per-task proxy override (status|list|set|remove|enable|disable|notes|clear)",
         "/dlnorm [cmd]       - URL normalizer (status|config|normalize <url>|equivalent <url1> <url2>)",
+        "/dlpattern [cmd]    - URL pattern batch expansion (status|config|expand <pattern>|validate <pattern>|estimate <pattern>)",
         "/dlmirror <id> <urls> - Set mirror URLs (comma-separated, 'clear' to remove)",
         "/dlmirrors <id>     - List mirrors for a task",
         "/dlchecksum <id> <hash> [algo] - Set checksum for verification (algo: md5/sha1/sha256/ed2k)",
@@ -9701,6 +9720,192 @@ async fn handle_command(
                         "main",
                         "Usage: /dlnorm [status|config <field> <value>|normalize <url>|equivalent <url1> <url2>]"
                             .to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlUrlPattern { action, args } => {
+            let s = state.lock().await;
+            let dm = s.download_manager.clone();
+            drop(s);
+
+            match action.as_str() {
+                "status" => {
+                    let cfg = dm.get_url_pattern_config().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!(
+                            "🔗 URL Pattern Configuration\n  Max URLs: {}\n  Default Step: {}",
+                            cfg.max_urls, cfg.default_step
+                        ),
+                    );
+                }
+                "config" => {
+                    if args.len() >= 2 {
+                        let field = &args[0];
+                        let value = &args[1];
+                        let mut cfg = dm.get_url_pattern_config().await;
+                        match field.as_str() {
+                            "max_urls" => {
+                                if let Ok(v) = value.parse::<usize>() {
+                                    cfg.max_urls = v;
+                                    dm.set_url_pattern_config(cfg).await;
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("✅ Max URLs set to {}", v),
+                                    );
+                                } else {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "❌ Invalid value for max_urls".to_string(),
+                                    );
+                                }
+                            }
+                            "default_step" => {
+                                if let Ok(v) = value.parse::<u64>() {
+                                    cfg.default_step = v;
+                                    dm.set_url_pattern_config(cfg).await;
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("✅ Default step set to {}", v),
+                                    );
+                                } else {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "❌ Invalid value for default_step".to_string(),
+                                    );
+                                }
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dlpattern config <max_urls|default_step> <value>"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    } else {
+                        let cfg = dm.get_url_pattern_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "🔗 URL Pattern Configuration\n  Max URLs: {}\n  Default Step: {}\n\nUsage: /dlpattern config <field> <value>\nFields: max_urls, default_step",
+                                cfg.max_urls,
+                                cfg.default_step
+                            ),
+                        );
+                    }
+                }
+                "expand" => {
+                    if !args.is_empty() {
+                        let pattern = args.join(" ");
+                        match dm.expand_url_pattern(&pattern).await {
+                            Ok(urls) => {
+                                let mut s = state.lock().await;
+                                if urls.is_empty() {
+                                    s.add_system_message(
+                                        "main",
+                                        "⚠️ Pattern generated 0 URLs".to_string(),
+                                    );
+                                } else {
+                                    let preview = urls
+                                        .iter()
+                                        .take(10)
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    let more = if urls.len() > 10 {
+                                        format!("\n... and {} more", urls.len() - 10)
+                                    } else {
+                                        String::new()
+                                    };
+                                    s.add_system_message(
+                                        "main",
+                                        format!(
+                                            "✅ Pattern expanded to {} URLs:\n{}{}",
+                                            urls.len(),
+                                            preview,
+                                            more
+                                        ),
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Pattern error: {}", e));
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpattern expand <pattern>".to_string(),
+                        );
+                    }
+                }
+                "validate" => {
+                    if !args.is_empty() {
+                        let pattern = args.join(" ");
+                        match dm.validate_url_pattern(&pattern).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ Pattern is valid: {}", pattern),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Pattern error: {}", e));
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpattern validate <pattern>".to_string(),
+                        );
+                    }
+                }
+                "estimate" => {
+                    if !args.is_empty() {
+                        let pattern = args.join(" ");
+                        match dm.estimate_url_pattern_count(&pattern).await {
+                            Ok(count) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!(
+                                        "🔢 Pattern would generate {} URLs: {}",
+                                        count, pattern
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ Pattern error: {}", e));
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlpattern estimate <pattern>".to_string(),
+                        );
+                    }
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlpattern [status|config <field> <value>|expand <pattern>|validate <pattern>|estimate <pattern>]".to_string(),
                     );
                 }
             }

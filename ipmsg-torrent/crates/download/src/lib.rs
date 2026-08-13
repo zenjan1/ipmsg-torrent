@@ -928,6 +928,8 @@ pub struct DownloadManager {
     task_archive: Arc<tokio::sync::RwLock<task_archive::ArchiveState>>,
     /// URL normalizer for cleaning and deduplicating download URLs
     url_normalizer: Arc<tokio::sync::RwLock<url_normalizer::UrlNormalizer>>,
+    /// URL pattern configuration for batch URL expansion (Phase 181)
+    url_pattern_config: Arc<tokio::sync::RwLock<url_pattern::PatternConfig>>,
     /// URL intelligence system for pre-download analysis and optimization (Phase 161)
     url_intelligence: Arc<tokio::sync::RwLock<url_intelligence::UrlIntelligenceManager>>,
     /// Priority aging configuration for automatic priority boosting
@@ -1194,6 +1196,9 @@ impl DownloadManager {
             )),
             url_normalizer: Arc::new(tokio::sync::RwLock::new(
                 url_normalizer::UrlNormalizer::new(),
+            )),
+            url_pattern_config: Arc::new(tokio::sync::RwLock::new(
+                url_pattern::load_pattern_config(&data_dir),
             )),
             url_intelligence: Arc::new(tokio::sync::RwLock::new(
                 url_intelligence::UrlIntelligenceManager::new(),
@@ -1623,6 +1628,9 @@ impl DownloadManager {
             )),
             url_normalizer: Arc::new(tokio::sync::RwLock::new(
                 url_normalizer::UrlNormalizer::new(),
+            )),
+            url_pattern_config: Arc::new(tokio::sync::RwLock::new(
+                url_pattern::load_pattern_config(&data_dir),
             )),
             priority_aging: Arc::new(tokio::sync::RwLock::new(
                 priority_aging::PriorityAgingConfig::default(),
@@ -6234,6 +6242,55 @@ impl DownloadManager {
     pub async fn get_url_normalizer_config(&self) -> url_normalizer::UrlNormalizerConfig {
         let normalizer = self.url_normalizer.read().await;
         normalizer.config().clone()
+    }
+
+    // ---- URL Pattern (Phase 181) ----
+
+    /// Get the current URL pattern configuration.
+    pub async fn get_url_pattern_config(&self) -> url_pattern::PatternConfig {
+        let config = self.url_pattern_config.read().await;
+        config.clone()
+    }
+
+    /// Set the URL pattern configuration and persist to disk.
+    pub async fn set_url_pattern_config(&self, config: url_pattern::PatternConfig) {
+        let mut current = self.url_pattern_config.write().await;
+        *current = config.clone();
+        drop(current);
+
+        if let Err(e) = url_pattern::save_pattern_config(&config, &self.data_dir) {
+            tracing::warn!(error = %e, "Failed to persist URL pattern config");
+        }
+    }
+
+    /// Expand a URL pattern into individual URLs.
+    pub async fn expand_url_pattern(
+        &self,
+        pattern: &str,
+    ) -> Result<Vec<String>, url_pattern::PatternError> {
+        let config = self.url_pattern_config.read().await;
+        url_pattern::expand_pattern_with_config(pattern, &config)
+    }
+
+    /// Validate a URL pattern without expanding it.
+    pub async fn validate_url_pattern(
+        &self,
+        pattern: &str,
+    ) -> Result<(), url_pattern::PatternError> {
+        url_pattern::validate_pattern(pattern)
+    }
+
+    /// Estimate the number of URLs a pattern would generate.
+    pub async fn estimate_url_pattern_count(
+        &self,
+        pattern: &str,
+    ) -> Result<usize, url_pattern::PatternError> {
+        url_pattern::estimate_count(pattern)
+    }
+
+    /// Check if a string contains URL patterns.
+    pub async fn contains_url_pattern(&self, s: &str) -> bool {
+        url_pattern::contains_pattern(s)
     }
 
     // ---- URL Intelligence (Phase 161) ----
