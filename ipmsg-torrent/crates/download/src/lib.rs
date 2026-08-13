@@ -1099,6 +1099,8 @@ pub struct DownloadManager {
     completion_probability: Arc<Mutex<completion_probability::CompletionProbabilityEstimator>>,
     /// Queue health monitor configuration (Phase 166)
     queue_health_config: Arc<tokio::sync::RwLock<queue_health::HealthMonitorConfig>>,
+    /// Health dashboard configuration (Phase 174)
+    health_dashboard_config: Arc<tokio::sync::RwLock<health_dashboard::HealthDashboardConfig>>,
 }
 
 impl DownloadManager {
@@ -1218,6 +1220,9 @@ impl DownloadManager {
             )),
             queue_health_config: Arc::new(tokio::sync::RwLock::new(
                 queue_health::HealthMonitorConfig::default(),
+            )),
+            health_dashboard_config: Arc::new(tokio::sync::RwLock::new(
+                health_dashboard::HealthDashboardConfig::default(),
             )),
             task_snooze: Arc::new(Mutex::new(task_snooze::TaskSnoozeManager::new())),
             task_scheduler: Arc::new(Mutex::new(task_scheduler::TaskSchedulerManager::new())),
@@ -1525,6 +1530,9 @@ impl DownloadManager {
             )),
             queue_health_config: Arc::new(tokio::sync::RwLock::new(
                 queue_health::HealthMonitorConfig::default(),
+            )),
+            health_dashboard_config: Arc::new(tokio::sync::RwLock::new(
+                health_dashboard::HealthDashboardConfig::default(),
             )),
             speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
             speed_anomaly: Arc::new(Mutex::new(speed_anomaly::SpeedAnomalyDetector::new(
@@ -2109,6 +2117,8 @@ impl DownloadManager {
         {
             *dm.retry_quota.lock().await = loaded;
         }
+        // Restore health dashboard config from disk (Phase 174)
+        let _ = dm.load_health_dashboard_config().await;
         // Restore download templates from disk
         if let Ok(templates) = download_templates::load_templates(&dm.data_dir) {
             let mut mgr = dm.download_templates.lock().await;
@@ -9585,6 +9595,38 @@ impl DownloadManager {
         if let Some(config) = queue_health::load_health_monitor_config(&path).await {
             let mut current = self.queue_health_config.write().await;
             *current = config;
+        }
+        Ok(())
+    }
+
+    /// Set health dashboard configuration and persist to disk
+    pub async fn set_health_dashboard_config(
+        &self,
+        config: health_dashboard::HealthDashboardConfig,
+    ) {
+        let mut current = self.health_dashboard_config.write().await;
+        *current = config.clone();
+        drop(current);
+
+        // Persist to disk
+        let path = self.data_dir.join("health_dashboard_config.json");
+        let config_json = serde_json::to_string(&config).unwrap_or_default();
+        let _ = tokio::fs::write(&path, config_json).await;
+    }
+
+    /// Get health dashboard configuration
+    pub async fn get_health_dashboard_config(&self) -> health_dashboard::HealthDashboardConfig {
+        self.health_dashboard_config.read().await.clone()
+    }
+
+    /// Load health dashboard config from disk
+    pub async fn load_health_dashboard_config(&self) -> Result<(), std::io::Error> {
+        let path = self.data_dir.join("health_dashboard_config.json");
+        if let Ok(data) = tokio::fs::read_to_string(&path).await {
+            if let Ok(config) = serde_json::from_str(&data) {
+                let mut current = self.health_dashboard_config.write().await;
+                *current = config;
+            }
         }
         Ok(())
     }

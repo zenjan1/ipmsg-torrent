@@ -312,6 +312,12 @@ enum Command {
     },
     /// System uptime - view how long the system has been running (Phase 143)
     DlUptime,
+    /// Health dashboard - view unified system health status (Phase 174)
+    DlHealthDash {
+        /// Subcommand: status|config|report
+        subcommand: String,
+        args: Vec<String>,
+    },
     /// Sequential download mode - toggle per-task sequential piece downloading (Phase 165)
     DlSeq {
         /// Subcommand: get|set|list
@@ -1427,6 +1433,19 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dluptime" | "dl-uptime" | "dlupt" => Command::DlUptime,
+        "dlhealthdash" | "dl-healthdash" | "dlhd" => {
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() < 2 {
+                Command::DlHealthDash {
+                    subcommand: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let subcommand = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlHealthDash { subcommand, args }
+            }
+        }
         "dlseq" | "dl-seq" | "dlseqmode" => {
             if parts.len() < 2 {
                 Command::DlSeq {
@@ -3272,6 +3291,7 @@ fn command_help() -> String {
         "/dlspeedtest [cmd] - Speed test (status|run <url>|summary|history|latest|clear|config)",
         "/dlspdtrend [cmd] - Speed trend analysis (status|summary|trends|degrading|improving|clear|config)",
         "/dluptime       - Show system uptime (how long since startup)",
+        "/dlhealthdash   - Show health dashboard (status|config|report)",
         "/dlspath [cmd]  - Save path manager (status|config|set-base|organize|category|predict|validate)",
         "/dldiag         - Download diagnostics (status|run|report|config)",
         "/dldepviz [cmd]   - Dependency visualization (graph|stats|config|cycles|roots|leaves|text|dot)",
@@ -4695,6 +4715,98 @@ async fn handle_command(
             );
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
+        }
+        Command::DlHealthDash { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_health_dashboard_config().await;
+                    let dashboard = download_manager.build_health_dashboard(&config).await;
+                    let msg = format!(
+                        "{} Health Dashboard\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         Overall: {} {} (Score: {}/100)\n\
+                         \n\
+                         📦 Queue: {}/100 ({} tasks, {} downloading, {} errors)\n\
+                         ⚡ Speed: {}/100 ({}/s current)\n\
+                         🌐 Network: {}/100 ({} quality)\n\
+                         💾 Storage: {}/100 ({} available)\n\
+                         ❌ Errors: {}/100 ({} error tasks)\n\
+                         \n\
+                         💡 Recommendations: {}",
+                        dashboard.overall.emoji(),
+                        dashboard.overall.emoji(),
+                        dashboard.overall.label(),
+                        dashboard.overall_score,
+                        dashboard.queue.score,
+                        dashboard.queue.total_tasks,
+                        dashboard.queue.downloading,
+                        dashboard.queue.error_count,
+                        dashboard.speed.score,
+                        ipmsg_download::health_dashboard::format_speed(
+                            dashboard.speed.current_speed_bps
+                        ),
+                        dashboard.network.quality_score,
+                        if dashboard.network.is_connected {
+                            "Connected"
+                        } else {
+                            "Disconnected"
+                        },
+                        dashboard.storage.available_bytes as u8,
+                        ipmsg_download::health_dashboard::format_size(
+                            dashboard.storage.available_bytes
+                        ),
+                        dashboard.errors.error_tasks as u8,
+                        dashboard.errors.error_tasks,
+                        if dashboard.recommendations.is_empty() {
+                            "None".to_string()
+                        } else {
+                            format!("{} items", dashboard.recommendations.len())
+                        }
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    let config = download_manager.get_health_dashboard_config().await;
+                    let msg = format!(
+                        "⚙️ Health Dashboard Configuration\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         Slow Speed Threshold: {}/s\n\
+                         Error Warning Threshold: {}\n\
+                         Error Critical Threshold: {}\n\
+                         Low Disk Threshold: {}\n\
+                         Anomaly Warning Threshold: {}",
+                        ipmsg_download::health_dashboard::format_speed(
+                            config.slow_speed_threshold_bps
+                        ),
+                        config.error_warning_threshold,
+                        config.error_critical_threshold,
+                        ipmsg_download::health_dashboard::format_size(
+                            config.low_disk_threshold_bytes
+                        ),
+                        config.anomaly_warning_threshold
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "report" => {
+                    let config = download_manager.get_health_dashboard_config().await;
+                    let dashboard = download_manager.build_health_dashboard(&config).await;
+                    let report = ipmsg_download::health_dashboard::format_health_report(&dashboard);
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", report);
+                }
+                _ => {
+                    let msg = "❌ Unknown subcommand. Usage: /dlhealthdash <status|config|report>"
+                        .to_string();
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+            }
         }
         Command::DlSeq { subcommand, args } => {
             let download_manager = {
@@ -23682,6 +23794,53 @@ async fn handle_command_headless(
                 summary.uptime_seconds,
                 summary.started_at.format("%Y-%m-%d %H:%M:%S UTC")
             );
+        }
+        Command::DlHealthDash { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_health_dashboard_config().await;
+                    let dashboard = download_manager.build_health_dashboard(&config).await;
+                    println!(
+                        "[health] {} {} (Score: {}/100) | Queue: {} | Speed: {} | Network: {} | Storage: {} | Errors: {}",
+                        dashboard.overall.emoji(),
+                        dashboard.overall.label(),
+                        dashboard.overall_score,
+                        dashboard.queue.score,
+                        dashboard.speed.score,
+                        dashboard.network.quality_score,
+                        dashboard.storage.available_bytes as u8,
+                        dashboard.errors.error_tasks as u8
+                    );
+                }
+                "config" => {
+                    let config = download_manager.get_health_dashboard_config().await;
+                    println!(
+                        "[health-config] slow_speed: {}/s | error_warn: {} | error_crit: {} | low_disk: {} | anomaly_warn: {}",
+                        ipmsg_download::health_dashboard::format_speed(
+                            config.slow_speed_threshold_bps
+                        ),
+                        config.error_warning_threshold,
+                        config.error_critical_threshold,
+                        ipmsg_download::health_dashboard::format_size(
+                            config.low_disk_threshold_bytes
+                        ),
+                        config.anomaly_warning_threshold
+                    );
+                }
+                "report" => {
+                    let config = download_manager.get_health_dashboard_config().await;
+                    let dashboard = download_manager.build_health_dashboard(&config).await;
+                    let report = ipmsg_download::health_dashboard::format_health_report(&dashboard);
+                    println!("{}", report);
+                }
+                _ => {
+                    println!("❌ Unknown subcommand. Usage: /dlhealthdash <status|config|report>");
+                }
+            }
         }
         Command::DlSeq { subcommand, args } => {
             let download_manager = {

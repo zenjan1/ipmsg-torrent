@@ -980,6 +980,18 @@ pub fn create_router(state: Arc<WebState>) -> Router {
             post(execute_source_rotation_handler),
         )
         .route(
+            "/api/mirror-health/:task_id",
+            get(get_mirror_health_handler).post(set_mirrors_handler),
+        )
+        .route(
+            "/api/mirror-health/:task_id/check",
+            post(check_mirror_health_handler),
+        )
+        .route(
+            "/api/mirror-health/:task_id/switch",
+            post(switch_to_best_mirror_handler),
+        )
+        .route(
             "/api/bandwidth-allocation",
             get(get_bandwidth_allocation_handler),
         )
@@ -5419,6 +5431,111 @@ async fn execute_source_rotation_handler(
     Json(serde_json::json!({
         "decisions": decisions,
     }))
+}
+
+/// GET /api/mirror-health/:task_id - Get mirror health summary for a task
+async fn get_mirror_health_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.check_mirror_health(&task_id).await {
+        Some(summary) => Json(serde_json::json!({
+            "status": "ok",
+            "task_id": summary.task_id,
+            "active_url": summary.active_url,
+            "recommended_url": summary.recommended_url,
+            "should_switch": summary.should_switch,
+            "mirrors": summary.mirrors.iter().map(|m| serde_json::json!({
+                "url": m.url,
+                "reachable": m.reachable,
+                "response_time_ms": m.response_time_ms,
+                "failure_count": m.failure_count,
+                "last_checked": m.last_checked,
+                "health_score": m.health_score,
+            })).collect::<Vec<_>>(),
+        })),
+        None => Json(serde_json::json!({
+            "status": "error",
+            "error": format!("Task {} not found", task_id),
+        })),
+    }
+}
+
+/// POST /api/mirror-health/:task_id - Set mirror URLs for a task
+async fn set_mirrors_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let urls: Vec<String> = match body.get("urls").and_then(|v| v.as_array()) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        None => {
+            return Json(serde_json::json!({
+                "status": "error",
+                "error": "Missing 'urls' array in request body",
+            }));
+        }
+    };
+
+    let success = state.manager.set_mirrors(&task_id, urls).await;
+    if success {
+        Json(serde_json::json!({"status": "ok"}))
+    } else {
+        Json(serde_json::json!({
+            "status": "error",
+            "error": format!("Task {} not found", task_id),
+        }))
+    }
+}
+
+/// POST /api/mirror-health/:task_id/check - Check mirror health for a task
+async fn check_mirror_health_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.check_mirror_health(&task_id).await {
+        Some(summary) => Json(serde_json::json!({
+            "status": "ok",
+            "task_id": summary.task_id,
+            "active_url": summary.active_url,
+            "recommended_url": summary.recommended_url,
+            "should_switch": summary.should_switch,
+            "mirrors": summary.mirrors.iter().map(|m| serde_json::json!({
+                "url": m.url,
+                "reachable": m.reachable,
+                "response_time_ms": m.response_time_ms,
+                "failure_count": m.failure_count,
+                "last_checked": m.last_checked,
+                "health_score": m.health_score,
+            })).collect::<Vec<_>>(),
+        })),
+        None => Json(serde_json::json!({
+            "status": "error",
+            "error": format!("Task {} not found", task_id),
+        })),
+    }
+}
+
+/// POST /api/mirror-health/:task_id/switch - Switch to best mirror
+async fn switch_to_best_mirror_handler(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.switch_to_best_mirror(&task_id).await {
+        Some(new_url) => Json(serde_json::json!({
+            "status": "ok",
+            "switched": true,
+            "new_url": new_url,
+        })),
+        None => Json(serde_json::json!({
+            "status": "ok",
+            "switched": false,
+            "message": "No switch needed or task not found",
+        })),
+    }
 }
 
 /// Get bandwidth allocation configuration
@@ -14606,5 +14723,111 @@ mod speed_anomaly_tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_mirror_health_get_nonexistent() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/mirror-health/nonexistent-task")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(body.to_vec()).unwrap()).unwrap();
+        assert_eq!(json["status"], "error");
+        assert!(json["error"].as_str().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_mirror_health_check_nonexistent() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/mirror-health/nonexistent-task/check")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(body.to_vec()).unwrap()).unwrap();
+        assert_eq!(json["status"], "error");
+    }
+
+    #[tokio::test]
+    async fn test_mirror_health_switch_nonexistent() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/mirror-health/nonexistent-task/switch")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(body.to_vec()).unwrap()).unwrap();
+        assert_eq!(json["switched"], false);
+    }
+
+    #[tokio::test]
+    async fn test_mirror_health_set_mirrors_nonexistent() {
+        let state = test_state();
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/mirror-health/nonexistent-task")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "urls": ["http://mirror1.com/file.zip", "http://mirror2.com/file.zip"]
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(body.to_vec()).unwrap()).unwrap();
+        assert_eq!(json["status"], "error");
     }
 }
