@@ -379,6 +379,12 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
+    /// Connection health monitor - track connection quality metrics (Phase 182)
+    DlConnHealth {
+        /// "status", "config", "summary", "assess <conn_id>", "remove <conn_id>", "clear"
+        action: String,
+        args: Vec<String>,
+    },
     /// Dependency visualization - view and analyze task dependency graphs (Phase 154)
     DlDepViz {
         /// "graph", "stats", "config", "cycles", "roots", "leaves", "text", "dot"
@@ -1617,6 +1623,18 @@ fn parse_command(input: &str) -> Command {
                 Command::DlUrlHealth { action, args }
             }
         }
+        "dlconnhealth" | "dl-conn-health" | "dlcnh" => {
+            if parts.len() < 2 {
+                Command::DlConnHealth {
+                    action: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let action = parts[1].to_string();
+                let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
+                Command::DlConnHealth { action, args }
+            }
+        }
         "dldepviz" | "dl-depviz" | "dldv" => {
             if parts.len() < 2 {
                 Command::DlDepViz {
@@ -2743,7 +2761,7 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
-        "dlresumepolicy" | "dl-resume-policy" | "dlrp" => {
+        "dlresumepolicy" | "dl-resume-policy" | "dlresp" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
                 Command::Unknown(
@@ -3382,6 +3400,7 @@ fn command_help() -> String {
         "/dlcprob [cmd]    - Completion probability estimator (status|summary|estimate <id>|clear|save|load)",
         "/dlsla [cmd]      - SLA compliance tracking (status|summary|list|add|remove|enable|disable|evaluate|history|report|clear)",
         "/dlreliability [cmd] - Source reliability tracker (status|summary|domain|score|tier|avoid|domains|prune|clear|config)",
+        "/dlconnhealth [cmd] - Connection health monitor (status|config|summary|assess|remove|clear)",
         "/block <peer>  - Block a peer",
         "/unblock <peer> - Unblock a peer",
         "/fingerprint   - Show your fingerprint for verification",
@@ -22909,6 +22928,268 @@ async fn handle_command(
                 }
             }
         }
+        Command::DlConnHealth { action, args } => {
+            let download_manager = state.lock().await.download_manager.clone();
+            match action.as_str() {
+                "status" => {
+                    let config = download_manager.get_connection_health_config().await;
+                    let summary = download_manager.get_connection_health_summary().await;
+                    let msg = format!(
+                        "🔌 Connection Health Monitor Status:\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         🔄 Enabled: {}\n\
+                         📊 Total Connections: {}\n\
+                         ✅ Healthy: {}\n\
+                         ⚠️  Degraded: {}\n\
+                         ❌ Unhealthy: {}\n\
+                         ❓ Unknown: {}\n\
+                         🕒 Stale: {}\n\
+                         📉 Total Errors: {}\n\
+                         ⏱️  Total Timeouts: {}\n\
+                         📦 Bytes Transferred: {}",
+                        config.enabled,
+                        summary.total_connections,
+                        summary.healthy_count,
+                        summary.degraded_count,
+                        summary.unhealthy_count,
+                        summary.unknown_count,
+                        summary.stale_count,
+                        summary.total_errors,
+                        summary.total_timeouts,
+                        summary.total_bytes_transferred
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_connection_health_config().await;
+                        let msg = format!(
+                            "⚙️ Connection Health Config:\n\
+                             Enabled: {}\n\
+                             Stall Threshold: {} B/s\n\
+                             Degraded Stall Threshold: {}\n\
+                             Unhealthy Stall Threshold: {}\n\
+                             Degraded Error Threshold: {}\n\
+                             Unhealthy Error Threshold: {}\n\
+                             Degraded Timeout Threshold: {}\n\
+                             Unhealthy Timeout Threshold: {}\n\
+                             Max Idle Seconds: {}\n\
+                             Max Connections Per Task: {}\n\
+                             Max Total Connections: {}",
+                            config.enabled,
+                            config.stall_threshold_bps,
+                            config.degraded_stall_threshold,
+                            config.unhealthy_stall_threshold,
+                            config.degraded_error_threshold,
+                            config.unhealthy_error_threshold,
+                            config.degraded_timeout_threshold,
+                            config.unhealthy_timeout_threshold,
+                            config.max_idle_secs,
+                            config.max_connections_per_task,
+                            config.max_total_connections
+                        );
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    } else {
+                        let mut config = download_manager.get_connection_health_config().await;
+                        match args[0].as_str() {
+                            "enable" => {
+                                config.enabled = true;
+                                download_manager.set_connection_health_config(config).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "✅ Connection health monitoring enabled".to_string(),
+                                );
+                            }
+                            "disable" => {
+                                config.enabled = false;
+                                download_manager.set_connection_health_config(config).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "❌ Connection health monitoring disabled".to_string(),
+                                );
+                            }
+                            "stall-threshold" => {
+                                if args.len() < 2 {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "Usage: /dlch config stall-threshold <bytes_per_sec>"
+                                            .to_string(),
+                                    );
+                                } else if let Ok(val) = args[1].parse::<u64>() {
+                                    config.stall_threshold_bps = val;
+                                    download_manager.set_connection_health_config(config).await;
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("✅ Stall threshold set to {} B/s", val),
+                                    );
+                                } else {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "❌ Invalid stall threshold value".to_string(),
+                                    );
+                                }
+                            }
+                            "max-idle" => {
+                                if args.len() < 2 {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "Usage: /dlch config max-idle <seconds>".to_string(),
+                                    );
+                                } else if let Ok(val) = args[1].parse::<u64>() {
+                                    config.max_idle_secs = val;
+                                    download_manager.set_connection_health_config(config).await;
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        format!("✅ Max idle time set to {} seconds", val),
+                                    );
+                                } else {
+                                    let mut s = state.lock().await;
+                                    s.add_system_message(
+                                        "main",
+                                        "❌ Invalid max idle value".to_string(),
+                                    );
+                                }
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Usage: /dlch config [enable|disable|stall-threshold <bps>|max-idle <secs>]".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_connection_health_summary().await;
+                    let mut msg = format!(
+                        "📊 Connection Health Summary:\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         Total Connections: {}\n\
+                         Healthy: {} | Degraded: {} | Unhealthy: {} | Unknown: {}\n\
+                         Stale: {}\n\
+                         Total Errors: {} | Timeouts: {}\n\
+                         Bytes Transferred: {}\n\n",
+                        summary.total_connections,
+                        summary.healthy_count,
+                        summary.degraded_count,
+                        summary.unhealthy_count,
+                        summary.unknown_count,
+                        summary.stale_count,
+                        summary.total_errors,
+                        summary.total_timeouts,
+                        summary.total_bytes_transferred
+                    );
+                    if !summary.connections_needing_action.is_empty() {
+                        msg.push_str("⚠️  Connections Needing Action:\n");
+                        for assessment in summary.connections_needing_action.iter().take(5) {
+                            msg.push_str(&format!(
+                                "  - {} ({}) - {} - Speed: {} B/s, Errors: {}, Timeouts: {}\n",
+                                assessment.connection_id,
+                                assessment.remote_addr,
+                                assessment.status,
+                                assessment.metrics.avg_speed_bps,
+                                assessment.metrics.error_count,
+                                assessment.metrics.timeout_count
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "assess" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlch assess <connection_id>".to_string(),
+                        );
+                    } else {
+                        let conn_id = &args[0];
+                        match download_manager.assess_connection_health(conn_id).await {
+                            Some(assessment) => {
+                                let msg = format!(
+                                    "🔍 Connection Assessment: {}\n\
+                                     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                                     Status: {}\n\
+                                     Task ID: {}\n\
+                                     Remote: {}\n\
+                                     Protocol: {}\n\
+                                     Avg Speed: {} B/s\n\
+                                     Last Speed: {} B/s\n\
+                                     Errors: {} | Timeouts: {} | Stalls: {}\n\
+                                     Bytes Transferred: {}\n\
+                                     Age: {} seconds\n\
+                                     Reason: {}\n\
+                                     Recommended Action: {}",
+                                    assessment.connection_id,
+                                    assessment.status,
+                                    assessment.task_id,
+                                    assessment.remote_addr,
+                                    assessment.protocol,
+                                    assessment.metrics.avg_speed_bps,
+                                    assessment.metrics.last_speed_bps,
+                                    assessment.metrics.error_count,
+                                    assessment.metrics.timeout_count,
+                                    assessment.metrics.stall_count,
+                                    assessment.metrics.bytes_transferred,
+                                    assessment.metrics.age_secs(),
+                                    assessment.reason,
+                                    assessment.action
+                                );
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", msg);
+                            }
+                            None => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Connection not found: {}", conn_id),
+                                );
+                            }
+                        }
+                    }
+                }
+                "remove" => {
+                    if args.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlch remove <connection_id>".to_string(),
+                        );
+                    } else {
+                        let conn_id = &args[0];
+                        download_manager.unregister_connection_health(conn_id);
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", format!("🗑️ Removed connection: {}", conn_id));
+                    }
+                }
+                "clear" => {
+                    let count = download_manager.clear_all_connections_health().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        format!("🧹 Cleared {} connections from monitoring", count),
+                    );
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dlch <status|config|summary|assess|remove|clear>".to_string(),
+                    );
+                }
+            }
+        }
         Command::DlDepViz { action, args: _ } => {
             let download_manager = state.lock().await.download_manager.clone();
             match action.as_str() {
@@ -27002,5 +27283,121 @@ mod save_path_tests {
     fn test_help_contains_dldp() {
         let help = command_help();
         assert!(help.contains("/dldp"));
+    }
+
+    #[test]
+    fn test_parse_dlconnhealth_status() {
+        let cmd = parse_command("/dlconnhealth status");
+        match cmd {
+            Command::DlConnHealth { action, args } => {
+                assert_eq!(action, "status");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlConnHealth, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlconnhealth_config() {
+        let cmd = parse_command("/dlconnhealth config");
+        match cmd {
+            Command::DlConnHealth { action, args } => {
+                assert_eq!(action, "config");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlConnHealth, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlconnhealth_summary() {
+        let cmd = parse_command("/dlconnhealth summary");
+        match cmd {
+            Command::DlConnHealth { action, args } => {
+                assert_eq!(action, "summary");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlConnHealth, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlconnhealth_assess() {
+        let cmd = parse_command("/dlconnhealth assess conn123");
+        match cmd {
+            Command::DlConnHealth { action, args } => {
+                assert_eq!(action, "assess");
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0], "conn123");
+            }
+            other => panic!("Expected DlConnHealth, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlconnhealth_remove() {
+        let cmd = parse_command("/dlconnhealth remove conn456");
+        match cmd {
+            Command::DlConnHealth { action, args } => {
+                assert_eq!(action, "remove");
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0], "conn456");
+            }
+            other => panic!("Expected DlConnHealth, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlconnhealth_clear() {
+        let cmd = parse_command("/dlconnhealth clear");
+        match cmd {
+            Command::DlConnHealth { action, args } => {
+                assert_eq!(action, "clear");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlConnHealth, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlconnhealth_alias() {
+        let cmd = parse_command("/dl-conn-health status");
+        match cmd {
+            Command::DlConnHealth { action, args } => {
+                assert_eq!(action, "status");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlConnHealth, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlconnhealth_short_alias() {
+        let cmd = parse_command("/dlch status");
+        match cmd {
+            Command::DlConnHealth { action, args } => {
+                assert_eq!(action, "status");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlConnHealth, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlconnhealth_no_args() {
+        let cmd = parse_command("/dlconnhealth");
+        match cmd {
+            Command::DlConnHealth { action, args } => {
+                assert_eq!(action, "status");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlConnHealth, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_dlconnhealth() {
+        let help = command_help();
+        assert!(help.contains("/dlconnhealth"));
     }
 }

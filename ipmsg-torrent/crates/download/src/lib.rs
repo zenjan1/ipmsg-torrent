@@ -4420,6 +4420,11 @@ impl DownloadManager {
             .get_unhealthy_connections()
     }
 
+    /// Clear all tracked connections from health monitoring.
+    pub async fn clear_all_connections_health(&self) -> usize {
+        self.connection_health.lock().await.clear_all_connections()
+    }
+
     // ========== Phase 95: Download Source Rotation ==========
 
     /// Set source rotation configuration.

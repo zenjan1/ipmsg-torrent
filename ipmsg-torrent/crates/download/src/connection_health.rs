@@ -504,6 +504,13 @@ impl ConnectionHealthManager {
             .count()
     }
 
+    /// Clear all tracked connections
+    pub fn clear_all_connections(&mut self) -> usize {
+        let count = self.connections.len();
+        self.connections.clear();
+        count
+    }
+
     /// Internal: evaluate metrics and return (status, reason, action)
     fn evaluate_metrics(
         &self,
