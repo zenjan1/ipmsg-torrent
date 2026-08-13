@@ -873,4 +873,893 @@ mod tests {
         let graph = manager.get_graph().unwrap();
         assert_eq!(graph.stats.connected_components, 2);
     }
+
+    #[test]
+    fn test_serialization_dependency_node() {
+        let node = DependencyNode {
+            task_id: "t1".to_string(),
+            task_name: "Task One".to_string(),
+            dependencies: vec!["t2".to_string()],
+            dependents: vec!["t3".to_string()],
+            state: "Running".to_string(),
+            depth: 2,
+            in_cycle: false,
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        let deser: DependencyNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.task_id, "t1");
+        assert_eq!(deser.depth, 2);
+        assert!(!deser.in_cycle);
+    }
+
+    #[test]
+    fn test_serialization_dependency_graph() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "a".to_string(),
+                "A".to_string(),
+                "Running".to_string(),
+                vec![],
+            ),
+            (
+                "b".to_string(),
+                "B".to_string(),
+                "Queued".to_string(),
+                vec!["a".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap();
+        let json = serde_json::to_string(graph).unwrap();
+        let deser: DependencyGraph = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.stats.total_tasks, 2);
+        assert_eq!(deser.roots.len(), 1);
+        assert_eq!(deser.leaves.len(), 1);
+    }
+
+    #[test]
+    fn test_serialization_graph_stats() {
+        let stats = GraphStats {
+            total_tasks: 10,
+            root_tasks: 3,
+            leaf_tasks: 4,
+            cyclic_tasks: 2,
+            isolated_tasks: 1,
+            avg_dependencies: 1.5,
+            avg_dependents: 1.5,
+            max_depth: 5,
+            connected_components: 2,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deser: GraphStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.total_tasks, 10);
+        assert_eq!(deser.cyclic_tasks, 2);
+    }
+
+    #[test]
+    fn test_serialization_visualization_config() {
+        let config = VisualizationConfig {
+            include_completed: false,
+            highlight_cycles: false,
+            max_display_depth: 10,
+            show_task_names: false,
+            compute_stats: false,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deser: VisualizationConfig = serde_json::from_str(&json).unwrap();
+        assert!(!deser.include_completed);
+        assert!(!deser.highlight_cycles);
+        assert_eq!(deser.max_display_depth, 10);
+    }
+
+    #[test]
+    fn test_visualization_config_default() {
+        let config = VisualizationConfig::default();
+        assert!(config.include_completed);
+        assert!(config.highlight_cycles);
+        assert_eq!(config.max_display_depth, 0);
+        assert!(config.show_task_names);
+        assert!(config.compute_stats);
+    }
+
+    #[test]
+    fn test_graph_stats_default() {
+        let stats = GraphStats::default();
+        assert_eq!(stats.total_tasks, 0);
+        assert_eq!(stats.root_tasks, 0);
+        assert_eq!(stats.leaf_tasks, 0);
+        assert_eq!(stats.cyclic_tasks, 0);
+        assert_eq!(stats.isolated_tasks, 0);
+        assert_eq!(stats.avg_dependencies, 0.0);
+        assert_eq!(stats.avg_dependents, 0.0);
+        assert_eq!(stats.max_depth, 0);
+        assert_eq!(stats.connected_components, 0);
+    }
+
+    #[test]
+    fn test_with_config() {
+        let config = VisualizationConfig {
+            include_completed: false,
+            highlight_cycles: true,
+            max_display_depth: 7,
+            show_task_names: true,
+            compute_stats: true,
+        };
+        let manager = DependencyVisualizationManager::with_config(config);
+        assert_eq!(manager.get_config().max_display_depth, 7);
+        assert!(!manager.get_config().include_completed);
+    }
+
+    #[test]
+    fn test_include_completed_false_filters_completed() {
+        let mut manager = DependencyVisualizationManager::with_config(VisualizationConfig {
+            include_completed: false,
+            highlight_cycles: true,
+            max_display_depth: 0,
+            show_task_names: true,
+            compute_stats: true,
+        });
+        let tasks = vec![
+            (
+                "t1".to_string(),
+                "Task 1".to_string(),
+                "Completed".to_string(),
+                vec![],
+            ),
+            (
+                "t2".to_string(),
+                "Task 2".to_string(),
+                "Running".to_string(),
+                vec!["t1".to_string()],
+            ),
+            (
+                "t3".to_string(),
+                "Task 3".to_string(),
+                "Queued".to_string(),
+                vec!["t2".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap();
+        assert_eq!(graph.stats.total_tasks, 2); // t1 filtered out
+        assert!(graph.nodes.get("t1").is_none());
+    }
+
+    #[test]
+    fn test_highlight_cycles_false_skips_cycle_detection() {
+        let mut manager = DependencyVisualizationManager::with_config(VisualizationConfig {
+            include_completed: true,
+            highlight_cycles: false,
+            max_display_depth: 0,
+            show_task_names: true,
+            compute_stats: true,
+        });
+        let tasks = vec![
+            (
+                "t1".to_string(),
+                "T1".to_string(),
+                "Running".to_string(),
+                vec!["t3".to_string()],
+            ),
+            (
+                "t2".to_string(),
+                "T2".to_string(),
+                "Running".to_string(),
+                vec!["t1".to_string()],
+            ),
+            (
+                "t3".to_string(),
+                "T3".to_string(),
+                "Running".to_string(),
+                vec!["t2".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap();
+        assert!(graph.cycles.is_empty()); // cycles not detected
+        assert_eq!(graph.stats.cyclic_tasks, 0);
+    }
+
+    #[test]
+    fn test_compute_stats_false_returns_default_stats() {
+        let mut manager = DependencyVisualizationManager::with_config(VisualizationConfig {
+            include_completed: true,
+            highlight_cycles: true,
+            max_display_depth: 0,
+            show_task_names: true,
+            compute_stats: false,
+        });
+        let tasks = vec![
+            (
+                "t1".to_string(),
+                "T1".to_string(),
+                "Running".to_string(),
+                vec![],
+            ),
+            (
+                "t2".to_string(),
+                "T2".to_string(),
+                "Running".to_string(),
+                vec!["t1".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap();
+        assert_eq!(graph.stats.total_tasks, 0); // default stats
+    }
+
+    #[test]
+    fn test_self_dependency() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![(
+            "t1".to_string(),
+            "T1".to_string(),
+            "Running".to_string(),
+            vec!["t1".to_string()],
+        )];
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap();
+        assert_eq!(graph.stats.total_tasks, 1);
+        // self-dependency: cycle detection requires len > 1, so no cycle detected
+        // but the node still has the dependency recorded
+        let node = graph.nodes.get("t1").unwrap();
+        assert!(node.dependencies.contains(&"t1".to_string()));
+    }
+
+    #[test]
+    fn test_diamond_dependency() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "a".to_string(),
+                "A".to_string(),
+                "Running".to_string(),
+                vec![],
+            ),
+            (
+                "b".to_string(),
+                "B".to_string(),
+                "Queued".to_string(),
+                vec!["a".to_string()],
+            ),
+            (
+                "c".to_string(),
+                "C".to_string(),
+                "Queued".to_string(),
+                vec!["a".to_string()],
+            ),
+            (
+                "d".to_string(),
+                "D".to_string(),
+                "Queued".to_string(),
+                vec!["b".to_string(), "c".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap();
+        assert_eq!(graph.stats.total_tasks, 4);
+        assert_eq!(graph.stats.root_tasks, 1);
+        assert_eq!(graph.stats.leaf_tasks, 1);
+        assert_eq!(graph.max_depth, 2);
+        // a -> b, c; b,c -> d
+        let d_node = graph.nodes.get("d").unwrap();
+        assert_eq!(d_node.dependencies.len(), 2);
+        let a_node = graph.nodes.get("a").unwrap();
+        assert_eq!(a_node.dependents.len(), 2);
+    }
+
+    #[test]
+    fn test_multiple_cycles() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "t1".to_string(),
+                "T1".to_string(),
+                "Running".to_string(),
+                vec!["t2".to_string()],
+            ),
+            (
+                "t2".to_string(),
+                "T2".to_string(),
+                "Running".to_string(),
+                vec!["t1".to_string()],
+            ),
+            (
+                "t3".to_string(),
+                "T3".to_string(),
+                "Running".to_string(),
+                vec!["t4".to_string()],
+            ),
+            (
+                "t4".to_string(),
+                "T4".to_string(),
+                "Running".to_string(),
+                vec!["t3".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap();
+        assert_eq!(graph.cycles.len(), 2);
+        assert_eq!(graph.stats.cyclic_tasks, 4);
+    }
+
+    #[test]
+    fn test_nonexistent_dependency_reference() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![(
+            "t1".to_string(),
+            "T1".to_string(),
+            "Running".to_string(),
+            vec!["nonexistent".to_string()],
+        )];
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap();
+        assert_eq!(graph.stats.total_tasks, 1);
+        // nonexistent task should not be in the graph
+        assert!(graph.nodes.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_get_stats_before_build() {
+        let manager = DependencyVisualizationManager::new();
+        assert!(manager.get_stats().is_none());
+    }
+
+    #[test]
+    fn test_get_cycles_before_build() {
+        let manager = DependencyVisualizationManager::new();
+        assert!(manager.get_cycles().is_none());
+    }
+
+    #[test]
+    fn test_get_roots_before_build() {
+        let manager = DependencyVisualizationManager::new();
+        assert!(manager.get_roots().is_none());
+    }
+
+    #[test]
+    fn test_get_leaves_before_build() {
+        let manager = DependencyVisualizationManager::new();
+        assert!(manager.get_leaves().is_none());
+    }
+
+    #[test]
+    fn test_get_node_before_build() {
+        let manager = DependencyVisualizationManager::new();
+        assert!(manager.get_node("any").is_none());
+    }
+
+    #[test]
+    fn test_visualize_text_before_build() {
+        let manager = DependencyVisualizationManager::new();
+        assert!(manager.visualize_text().is_none());
+    }
+
+    #[test]
+    fn test_export_dot_before_build() {
+        let manager = DependencyVisualizationManager::new();
+        assert!(manager.export_dot().is_none());
+    }
+
+    #[test]
+    fn test_clear_graph() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![(
+            "t1".to_string(),
+            "T1".to_string(),
+            "Running".to_string(),
+            vec![],
+        )];
+        manager.build_graph(&tasks);
+        assert!(manager.get_graph().is_some());
+        manager.clear();
+        assert!(manager.get_graph().is_none());
+    }
+
+    #[test]
+    fn test_rebuild_graph_after_clear() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks1 = vec![(
+            "t1".to_string(),
+            "T1".to_string(),
+            "Running".to_string(),
+            vec![],
+        )];
+        manager.build_graph(&tasks1);
+        assert_eq!(manager.get_graph().unwrap().stats.total_tasks, 1);
+        manager.clear();
+        let tasks2 = vec![
+            (
+                "a".to_string(),
+                "A".to_string(),
+                "Running".to_string(),
+                vec![],
+            ),
+            (
+                "b".to_string(),
+                "B".to_string(),
+                "Running".to_string(),
+                vec![],
+            ),
+        ];
+        manager.build_graph(&tasks2);
+        assert_eq!(manager.get_graph().unwrap().stats.total_tasks, 2);
+    }
+
+    #[test]
+    fn test_avg_dependencies_calculation() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "t1".to_string(),
+                "T1".to_string(),
+                "Running".to_string(),
+                vec![],
+            ),
+            (
+                "t2".to_string(),
+                "T2".to_string(),
+                "Queued".to_string(),
+                vec!["t1".to_string()],
+            ),
+            (
+                "t3".to_string(),
+                "T3".to_string(),
+                "Queued".to_string(),
+                vec!["t1".to_string(), "t2".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let stats = manager.get_stats().unwrap();
+        // total deps = 0 + 1 + 2 = 3, avg = 3/3 = 1.0
+        assert!((stats.avg_dependencies - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_avg_dependents_calculation() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "t1".to_string(),
+                "T1".to_string(),
+                "Running".to_string(),
+                vec![],
+            ),
+            (
+                "t2".to_string(),
+                "T2".to_string(),
+                "Queued".to_string(),
+                vec!["t1".to_string()],
+            ),
+            (
+                "t3".to_string(),
+                "T3".to_string(),
+                "Queued".to_string(),
+                vec!["t1".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let stats = manager.get_stats().unwrap();
+        // t1 has 2 dependents, t2 has 0, t3 has 0; avg = 2/3
+        assert!((stats.avg_dependents - 2.0 / 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_text_visualization_with_cycles() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "t1".to_string(),
+                "T1".to_string(),
+                "Running".to_string(),
+                vec!["t2".to_string()],
+            ),
+            (
+                "t2".to_string(),
+                "T2".to_string(),
+                "Running".to_string(),
+                vec!["t1".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let viz = manager.visualize_text().unwrap();
+        assert!(viz.contains("Detected Cycles"));
+    }
+
+    #[test]
+    fn test_text_visualization_shows_roots_and_leaves() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "root".to_string(),
+                "Root Task".to_string(),
+                "Running".to_string(),
+                vec![],
+            ),
+            (
+                "leaf".to_string(),
+                "Leaf Task".to_string(),
+                "Queued".to_string(),
+                vec!["root".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let viz = manager.visualize_text().unwrap();
+        assert!(viz.contains("Root Tasks"));
+        assert!(viz.contains("Leaf Tasks"));
+        assert!(viz.contains("Root Task"));
+        assert!(viz.contains("Leaf Task"));
+    }
+
+    #[test]
+    fn test_dot_export_colors_by_state() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "t1".to_string(),
+                "T1".to_string(),
+                "Completed".to_string(),
+                vec![],
+            ),
+            (
+                "t2".to_string(),
+                "T2".to_string(),
+                "Running".to_string(),
+                vec!["t1".to_string()],
+            ),
+            (
+                "t3".to_string(),
+                "T3".to_string(),
+                "Queued".to_string(),
+                vec!["t2".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let dot = manager.export_dot().unwrap();
+        assert!(dot.contains("color=green")); // Completed
+        assert!(dot.contains("color=blue")); // Running
+        assert!(dot.contains("color=yellow")); // Queued
+    }
+
+    #[test]
+    fn test_dot_export_cycle_nodes_red() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "t1".to_string(),
+                "T1".to_string(),
+                "Running".to_string(),
+                vec!["t2".to_string()],
+            ),
+            (
+                "t2".to_string(),
+                "T2".to_string(),
+                "Running".to_string(),
+                vec!["t1".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let dot = manager.export_dot().unwrap();
+        assert!(dot.contains("color=red")); // cycle nodes
+    }
+
+    #[test]
+    fn test_dot_export_show_task_names_false() {
+        let mut manager = DependencyVisualizationManager::with_config(VisualizationConfig {
+            include_completed: true,
+            highlight_cycles: true,
+            max_display_depth: 0,
+            show_task_names: false,
+            compute_stats: true,
+        });
+        let tasks = vec![(
+            "t1".to_string(),
+            "My Task Name".to_string(),
+            "Running".to_string(),
+            vec![],
+        )];
+        manager.build_graph(&tasks);
+        let dot = manager.export_dot().unwrap();
+        // label should be just the task_id, not the name
+        assert!(dot.contains("label=\"t1\""));
+        assert!(!dot.contains("My Task Name"));
+    }
+
+    #[test]
+    fn test_dot_export_show_task_names_true() {
+        let mut manager = DependencyVisualizationManager::with_config(VisualizationConfig {
+            include_completed: true,
+            highlight_cycles: true,
+            max_display_depth: 0,
+            show_task_names: true,
+            compute_stats: true,
+        });
+        let tasks = vec![(
+            "t1".to_string(),
+            "My Task Name".to_string(),
+            "Running".to_string(),
+            vec![],
+        )];
+        manager.build_graph(&tasks);
+        let dot = manager.export_dot().unwrap();
+        assert!(dot.contains("My Task Name"));
+    }
+
+    #[test]
+    fn test_dot_export_edges() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "a".to_string(),
+                "A".to_string(),
+                "Running".to_string(),
+                vec![],
+            ),
+            (
+                "b".to_string(),
+                "B".to_string(),
+                "Queued".to_string(),
+                vec!["a".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let dot = manager.export_dot().unwrap();
+        // Edge: a -> b (b depends on a)
+        assert!(dot.contains("\"a\" -> \"b\""));
+    }
+
+    #[test]
+    fn test_depth_calculation_linear_chain() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "t1".to_string(),
+                "T1".to_string(),
+                "Running".to_string(),
+                vec![],
+            ),
+            (
+                "t2".to_string(),
+                "T2".to_string(),
+                "Queued".to_string(),
+                vec!["t1".to_string()],
+            ),
+            (
+                "t3".to_string(),
+                "T3".to_string(),
+                "Queued".to_string(),
+                vec!["t2".to_string()],
+            ),
+            (
+                "t4".to_string(),
+                "T4".to_string(),
+                "Queued".to_string(),
+                vec!["t3".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap();
+        assert_eq!(graph.nodes.get("t1").unwrap().depth, 0);
+        assert_eq!(graph.nodes.get("t2").unwrap().depth, 1);
+        assert_eq!(graph.nodes.get("t3").unwrap().depth, 2);
+        assert_eq!(graph.nodes.get("t4").unwrap().depth, 3);
+        assert_eq!(graph.max_depth, 3);
+    }
+
+    #[test]
+    fn test_dependents_populated_correctly() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "a".to_string(),
+                "A".to_string(),
+                "Running".to_string(),
+                vec![],
+            ),
+            (
+                "b".to_string(),
+                "B".to_string(),
+                "Queued".to_string(),
+                vec!["a".to_string()],
+            ),
+            (
+                "c".to_string(),
+                "C".to_string(),
+                "Queued".to_string(),
+                vec!["a".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap();
+        let a_node = graph.nodes.get("a").unwrap();
+        assert_eq!(a_node.dependents.len(), 2);
+        assert!(a_node.dependents.contains(&"b".to_string()));
+        assert!(a_node.dependents.contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn test_single_task_graph() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![(
+            "solo".to_string(),
+            "Solo Task".to_string(),
+            "Running".to_string(),
+            vec![],
+        )];
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap();
+        assert_eq!(graph.stats.total_tasks, 1);
+        assert_eq!(graph.stats.root_tasks, 1);
+        assert_eq!(graph.stats.leaf_tasks, 1);
+        assert_eq!(graph.stats.isolated_tasks, 1);
+        assert_eq!(graph.stats.connected_components, 1);
+        assert_eq!(graph.max_depth, 0);
+    }
+
+    #[test]
+    fn test_large_graph() {
+        let mut manager = DependencyVisualizationManager::new();
+        let mut tasks = Vec::new();
+        // Create a chain of 100 tasks
+        for i in 0..100 {
+            let deps = if i == 0 {
+                vec![]
+            } else {
+                vec![format!("task_{}", i - 1)]
+            };
+            tasks.push((
+                format!("task_{}", i),
+                format!("Task {}", i),
+                "Queued".to_string(),
+                deps,
+            ));
+        }
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap();
+        assert_eq!(graph.stats.total_tasks, 100);
+        assert_eq!(graph.stats.root_tasks, 1);
+        assert_eq!(graph.stats.leaf_tasks, 1);
+        assert_eq!(graph.max_depth, 99);
+    }
+
+    #[test]
+    fn test_clone_dependency_node() {
+        let node = DependencyNode {
+            task_id: "t1".to_string(),
+            task_name: "Task".to_string(),
+            dependencies: vec!["t2".to_string()],
+            dependents: vec![],
+            state: "Running".to_string(),
+            depth: 0,
+            in_cycle: false,
+        };
+        let cloned = node.clone();
+        assert_eq!(cloned.task_id, node.task_id);
+        assert_eq!(cloned.dependencies, node.dependencies);
+    }
+
+    #[test]
+    fn test_clone_dependency_graph() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![(
+            "t1".to_string(),
+            "T1".to_string(),
+            "Running".to_string(),
+            vec![],
+        )];
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap().clone();
+        assert_eq!(graph.stats.total_tasks, 1);
+    }
+
+    #[test]
+    fn test_debug_trait() {
+        let node = DependencyNode {
+            task_id: "t1".to_string(),
+            task_name: "Task".to_string(),
+            dependencies: vec![],
+            dependents: vec![],
+            state: "Running".to_string(),
+            depth: 0,
+            in_cycle: false,
+        };
+        let debug_str = format!("{:?}", node);
+        assert!(debug_str.contains("DependencyNode"));
+    }
+
+    #[test]
+    fn test_text_visualization_state_markers() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "t1".to_string(),
+                "Completed Task".to_string(),
+                "Completed".to_string(),
+                vec![],
+            ),
+            (
+                "t2".to_string(),
+                "Running Task".to_string(),
+                "Running".to_string(),
+                vec!["t1".to_string()],
+            ),
+            (
+                "t3".to_string(),
+                "Queued Task".to_string(),
+                "Queued".to_string(),
+                vec!["t2".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let viz = manager.visualize_text().unwrap();
+        assert!(viz.contains("✅")); // Completed
+        assert!(viz.contains("🔄")); // Running
+        assert!(viz.contains("⏳")); // Queued
+    }
+
+    #[test]
+    fn test_text_visualization_cycle_marker() {
+        let mut manager = DependencyVisualizationManager::new();
+        let tasks = vec![
+            (
+                "t1".to_string(),
+                "T1".to_string(),
+                "Running".to_string(),
+                vec!["t2".to_string()],
+            ),
+            (
+                "t2".to_string(),
+                "T2".to_string(),
+                "Running".to_string(),
+                vec!["t1".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let viz = manager.visualize_text().unwrap();
+        assert!(viz.contains("⚠️")); // cycle marker
+    }
+
+    #[test]
+    fn test_max_display_depth_config() {
+        let mut manager = DependencyVisualizationManager::with_config(VisualizationConfig {
+            include_completed: true,
+            highlight_cycles: true,
+            max_display_depth: 2,
+            show_task_names: true,
+            compute_stats: true,
+        });
+        assert_eq!(manager.get_config().max_display_depth, 2);
+    }
+
+    #[test]
+    fn test_dependents_no_duplicates() {
+        let mut manager = DependencyVisualizationManager::new();
+        // t3 depends on t1 twice (should not create duplicate dependents entry)
+        let tasks = vec![
+            (
+                "t1".to_string(),
+                "T1".to_string(),
+                "Running".to_string(),
+                vec![],
+            ),
+            (
+                "t2".to_string(),
+                "T2".to_string(),
+                "Queued".to_string(),
+                vec!["t1".to_string()],
+            ),
+            (
+                "t3".to_string(),
+                "T3".to_string(),
+                "Queued".to_string(),
+                vec!["t1".to_string(), "t1".to_string()],
+            ),
+        ];
+        manager.build_graph(&tasks);
+        let graph = manager.get_graph().unwrap();
+        let t1_node = graph.nodes.get("t1").unwrap();
+        // t3 should only appear once in dependents
+        assert_eq!(t1_node.dependents.iter().filter(|d| *d == "t3").count(), 1);
+    }
 }
