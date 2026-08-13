@@ -623,4 +623,1155 @@ mod tests {
         let hooks = load_hooks(temp_dir.path()).unwrap();
         assert!(hooks.is_empty());
     }
+
+    // ============================================================
+    // Comprehensive test coverage - Phase 206
+    // ============================================================
+
+    // --- HookEvent comprehensive tests ---
+
+    #[test]
+    fn test_hook_event_clone_debug() {
+        let event = HookEvent::OnComplete;
+        let cloned = event.clone();
+        assert_eq!(event, cloned);
+        // Debug trait
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("OnComplete"));
+    }
+
+    #[test]
+    fn test_hook_event_all_variants() {
+        let variants = vec![HookEvent::OnComplete, HookEvent::OnFailure, HookEvent::Both];
+        assert_eq!(variants.len(), 3);
+    }
+
+    #[test]
+    fn test_hook_event_eq_partial_eq() {
+        assert_eq!(HookEvent::OnComplete, HookEvent::OnComplete);
+        assert_ne!(HookEvent::OnComplete, HookEvent::OnFailure);
+        assert_ne!(HookEvent::OnComplete, HookEvent::Both);
+        assert_ne!(HookEvent::OnFailure, HookEvent::Both);
+    }
+
+    #[test]
+    fn test_hook_event_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(HookEvent::OnComplete);
+        set.insert(HookEvent::OnFailure);
+        set.insert(HookEvent::Both);
+        set.insert(HookEvent::OnComplete); // duplicate
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn test_hook_event_serde_roundtrip() {
+        for event in &[HookEvent::OnComplete, HookEvent::OnFailure, HookEvent::Both] {
+            let json = serde_json::to_string(event).unwrap();
+            let deserialized: HookEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(*event, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_hook_event_serde_values() {
+        let json_complete = serde_json::to_string(&HookEvent::OnComplete).unwrap();
+        assert!(json_complete.contains("OnComplete"));
+
+        let json_failure = serde_json::to_string(&HookEvent::OnFailure).unwrap();
+        assert!(json_failure.contains("OnFailure"));
+
+        let json_both = serde_json::to_string(&HookEvent::Both).unwrap();
+        assert!(json_both.contains("Both"));
+    }
+
+    #[test]
+    fn test_hook_event_should_run_on_complete_only() {
+        // OnComplete should only run for DownloadComplete
+        assert!(HookEvent::OnComplete.should_run(NotificationEvent::DownloadComplete));
+        // Should NOT run for other events
+        assert!(!HookEvent::OnComplete.should_run(NotificationEvent::DownloadFailed));
+        assert!(!HookEvent::OnComplete.should_run(NotificationEvent::QueueEmpty));
+        assert!(!HookEvent::OnComplete.should_run(NotificationEvent::ProgressMilestone));
+    }
+
+    #[test]
+    fn test_hook_event_should_run_on_failure_only() {
+        // OnFailure should only run for DownloadFailed
+        assert!(HookEvent::OnFailure.should_run(NotificationEvent::DownloadFailed));
+        // Should NOT run for other events
+        assert!(!HookEvent::OnFailure.should_run(NotificationEvent::DownloadComplete));
+        assert!(!HookEvent::OnFailure.should_run(NotificationEvent::QueueEmpty));
+        assert!(!HookEvent::OnFailure.should_run(NotificationEvent::ProgressMilestone));
+    }
+
+    #[test]
+    fn test_hook_event_should_run_both() {
+        // Both should run for DownloadComplete and DownloadFailed
+        assert!(HookEvent::Both.should_run(NotificationEvent::DownloadComplete));
+        assert!(HookEvent::Both.should_run(NotificationEvent::DownloadFailed));
+        // Should NOT run for other events
+        assert!(!HookEvent::Both.should_run(NotificationEvent::QueueEmpty));
+        assert!(!HookEvent::Both.should_run(NotificationEvent::ProgressMilestone));
+    }
+
+    // --- PostHook comprehensive tests ---
+
+    #[test]
+    fn test_post_hook_new_generates_unique_id() {
+        let hook1 = PostHook::new("Hook 1".into(), HookEvent::OnComplete, "echo 1".into());
+        let hook2 = PostHook::new("Hook 2".into(), HookEvent::OnComplete, "echo 2".into());
+        assert_ne!(hook1.id, hook2.id);
+    }
+
+    #[test]
+    fn test_post_hook_new_defaults() {
+        let hook = PostHook::new("Test".into(), HookEvent::OnComplete, "echo test".into());
+        assert!(hook.enabled);
+        assert_eq!(hook.timeout_secs, 30);
+        assert!(hook.working_dir.is_none());
+        assert!(!hook.id.is_empty());
+    }
+
+    #[test]
+    fn test_post_hook_with_working_dir_builder() {
+        let hook = PostHook::new("Test".into(), HookEvent::OnComplete, "ls".into())
+            .with_working_dir(PathBuf::from("/var/log"));
+        assert_eq!(hook.working_dir, Some(PathBuf::from("/var/log")));
+        assert!(hook.enabled);
+        assert_eq!(hook.timeout_secs, 30);
+    }
+
+    #[test]
+    fn test_post_hook_with_timeout_builder() {
+        let hook = PostHook::new("Test".into(), HookEvent::OnComplete, "sleep 10".into())
+            .with_timeout(120);
+        assert_eq!(hook.timeout_secs, 120);
+        assert!(hook.enabled);
+        assert!(hook.working_dir.is_none());
+    }
+
+    #[test]
+    fn test_post_hook_chained_builders() {
+        let hook = PostHook::new("Test".into(), HookEvent::Both, "run.sh".into())
+            .with_working_dir(PathBuf::from("/home/user"))
+            .with_timeout(60);
+        assert_eq!(hook.timeout_secs, 60);
+        assert_eq!(hook.working_dir, Some(PathBuf::from("/home/user")));
+        assert_eq!(hook.event, HookEvent::Both);
+    }
+
+    #[test]
+    fn test_post_hook_with_timeout_zero() {
+        let hook = PostHook::new(
+            "No Timeout".into(),
+            HookEvent::OnComplete,
+            "long running".into(),
+        )
+        .with_timeout(0);
+        assert_eq!(hook.timeout_secs, 0);
+    }
+
+    #[test]
+    fn test_post_hook_empty_name_and_command() {
+        let hook = PostHook::new("".into(), HookEvent::OnComplete, "".into());
+        assert_eq!(hook.name, "");
+        assert_eq!(hook.command, "");
+        assert!(!hook.id.is_empty());
+    }
+
+    #[test]
+    fn test_post_hook_unicode_name() {
+        let hook = PostHook::new(
+            "测试钩子 🎣".into(),
+            HookEvent::OnComplete,
+            "echo 测试".into(),
+        );
+        assert_eq!(hook.name, "测试钩子 🎣");
+    }
+
+    #[test]
+    fn test_post_hook_clone() {
+        let hook = PostHook::new("Original".into(), HookEvent::OnComplete, "echo test".into())
+            .with_working_dir(PathBuf::from("/tmp"))
+            .with_timeout(60);
+        let cloned = hook.clone();
+        assert_eq!(cloned.id, hook.id);
+        assert_eq!(cloned.name, hook.name);
+        assert_eq!(cloned.event, hook.event);
+        assert_eq!(cloned.command, hook.command);
+        assert_eq!(cloned.working_dir, hook.working_dir);
+        assert_eq!(cloned.timeout_secs, hook.timeout_secs);
+        assert_eq!(cloned.enabled, hook.enabled);
+    }
+
+    #[test]
+    fn test_post_hook_debug() {
+        let hook = PostHook::new(
+            "Debug Test".into(),
+            HookEvent::OnFailure,
+            "echo debug".into(),
+        );
+        let debug_str = format!("{:?}", hook);
+        assert!(debug_str.contains("Debug Test"));
+        assert!(debug_str.contains("OnFailure"));
+    }
+
+    #[test]
+    fn test_post_hook_serde_roundtrip() {
+        let hook = PostHook::new(
+            "Serialize Me".into(),
+            HookEvent::Both,
+            "echo serialized".into(),
+        )
+        .with_working_dir(PathBuf::from("/tmp"))
+        .with_timeout(45);
+        let json = serde_json::to_string(&hook).unwrap();
+        let deserialized: PostHook = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, hook.id);
+        assert_eq!(deserialized.name, hook.name);
+        assert_eq!(deserialized.event, hook.event);
+        assert_eq!(deserialized.command, hook.command);
+        assert_eq!(deserialized.working_dir, hook.working_dir);
+        assert_eq!(deserialized.timeout_secs, hook.timeout_secs);
+        assert_eq!(deserialized.enabled, hook.enabled);
+    }
+
+    #[test]
+    fn test_post_hook_serde_without_working_dir() {
+        let hook = PostHook::new("No Dir".into(), HookEvent::OnComplete, "echo no dir".into());
+        let json = serde_json::to_string(&hook).unwrap();
+        let deserialized: PostHook = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.working_dir.is_none());
+    }
+
+    #[test]
+    fn test_post_hook_serde_extra_fields_ignored() {
+        let json = r#"{
+            "id": "test-id",
+            "name": "Test",
+            "event": "OnComplete",
+            "command": "echo test",
+            "working_dir": null,
+            "enabled": true,
+            "timeout_secs": 30,
+            "extra_field": "should be ignored",
+            "another_extra": 42
+        }"#;
+        let hook: PostHook = serde_json::from_str(json).unwrap();
+        assert_eq!(hook.id, "test-id");
+        assert_eq!(hook.name, "Test");
+        assert_eq!(hook.timeout_secs, 30);
+    }
+
+    // --- HookResult tests ---
+
+    #[test]
+    fn test_hook_result_success() {
+        let result = HookResult {
+            hook_id: "id-1".into(),
+            hook_name: "Success Hook".into(),
+            success: true,
+            exit_code: Some(0),
+            error: None,
+            duration_ms: 100,
+        };
+        assert!(result.success);
+        assert_eq!(result.exit_code, Some(0));
+        assert!(result.error.is_none());
+        assert_eq!(result.duration_ms, 100);
+    }
+
+    #[test]
+    fn test_hook_result_failure_with_exit_code() {
+        let result = HookResult {
+            hook_id: "id-2".into(),
+            hook_name: "Failed Hook".into(),
+            success: false,
+            exit_code: Some(1),
+            error: Some("Exit code: 1".into()),
+            duration_ms: 50,
+        };
+        assert!(!result.success);
+        assert_eq!(result.exit_code, Some(1));
+        assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn test_hook_result_timeout() {
+        let result = HookResult {
+            hook_id: "id-3".into(),
+            hook_name: "Timeout Hook".into(),
+            success: false,
+            exit_code: None,
+            error: Some("Timeout after 30s".into()),
+            duration_ms: 30000,
+        };
+        assert!(!result.success);
+        assert!(result.exit_code.is_none());
+        assert!(result.error.unwrap().contains("Timeout"));
+    }
+
+    #[test]
+    fn test_hook_result_clone_debug() {
+        let result = HookResult {
+            hook_id: "id".into(),
+            hook_name: "name".into(),
+            success: true,
+            exit_code: Some(0),
+            error: None,
+            duration_ms: 0,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.hook_id, result.hook_id);
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("HookResult"));
+    }
+
+    #[test]
+    fn test_hook_result_serde_roundtrip() {
+        let result = HookResult {
+            hook_id: "hook-123".into(),
+            hook_name: "Test Hook".into(),
+            success: false,
+            exit_code: Some(2),
+            error: Some("Exit code: 2".into()),
+            duration_ms: 500,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: HookResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.hook_id, result.hook_id);
+        assert_eq!(deserialized.success, result.success);
+        assert_eq!(deserialized.exit_code, result.exit_code);
+        assert_eq!(deserialized.error, result.error);
+        assert_eq!(deserialized.duration_ms, result.duration_ms);
+    }
+
+    // --- HookPersistenceError tests ---
+
+    #[test]
+    fn test_hook_persistence_error_display_io() {
+        let err = HookPersistenceError::Io("Permission denied".into());
+        assert_eq!(format!("{}", err), "IO error: Permission denied");
+    }
+
+    #[test]
+    fn test_hook_persistence_error_display_serialize() {
+        let err = HookPersistenceError::Serialize("Invalid JSON".into());
+        assert_eq!(format!("{}", err), "Serialize error: Invalid JSON");
+    }
+
+    #[test]
+    fn test_hook_persistence_error_display_deserialize() {
+        let err = HookPersistenceError::Deserialize("Missing field".into());
+        assert_eq!(format!("{}", err), "Deserialize error: Missing field");
+    }
+
+    #[test]
+    fn test_hook_persistence_error_debug() {
+        let err = HookPersistenceError::Io("test error".into());
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("Io"));
+        assert!(debug_str.contains("test error"));
+    }
+
+    // --- HookManager comprehensive tests ---
+
+    #[test]
+    fn test_hook_manager_new() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+        let hooks = manager.list_hooks();
+        assert!(hooks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_add_multiple_hooks() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        for i in 0..10 {
+            let hook = PostHook::new(
+                format!("Hook {}", i),
+                HookEvent::OnComplete,
+                format!("echo {}", i),
+            );
+            manager.add_hook(hook).unwrap();
+        }
+
+        let hooks = manager.list_hooks();
+        assert_eq!(hooks.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_remove_nonexistent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let removed = manager.remove_hook("nonexistent-id").unwrap();
+        assert!(!removed);
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_update_nonexistent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook = PostHook::new(
+            "Updated".into(),
+            HookEvent::OnComplete,
+            "echo updated".into(),
+        );
+        let success = manager.update_hook("nonexistent-id", hook).unwrap();
+        assert!(!success);
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_enable_disable_nonexistent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let success = manager.set_hook_enabled("nonexistent-id", true).unwrap();
+        assert!(!success);
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_get_nonexistent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook = manager.get_hook("nonexistent-id");
+        assert!(hook.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_get_hook_by_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook = PostHook::new("Find Me".into(), HookEvent::OnComplete, "echo found".into());
+        let hook_id = manager.add_hook(hook).unwrap();
+
+        let found = manager.get_hook(&hook_id);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "Find Me");
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_remove_first_hook() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook1 = PostHook::new("First".into(), HookEvent::OnComplete, "echo 1".into());
+        let hook2 = PostHook::new("Second".into(), HookEvent::OnComplete, "echo 2".into());
+        let hook3 = PostHook::new("Third".into(), HookEvent::OnComplete, "echo 3".into());
+
+        let id1 = manager.add_hook(hook1).unwrap();
+        manager.add_hook(hook2).unwrap();
+        manager.add_hook(hook3).unwrap();
+
+        let removed = manager.remove_hook(&id1).unwrap();
+        assert!(removed);
+
+        let hooks = manager.list_hooks();
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0].name, "Second");
+        assert_eq!(hooks[1].name, "Third");
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_remove_last_hook() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook1 = PostHook::new("First".into(), HookEvent::OnComplete, "echo 1".into());
+        let hook2 = PostHook::new("Last".into(), HookEvent::OnComplete, "echo 2".into());
+
+        manager.add_hook(hook1).unwrap();
+        let id2 = manager.add_hook(hook2).unwrap();
+
+        let removed = manager.remove_hook(&id2).unwrap();
+        assert!(removed);
+
+        let hooks = manager.list_hooks();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].name, "First");
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_persistence_across_instances() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager1 = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook = PostHook::new(
+            "Persistent".into(),
+            HookEvent::Both,
+            "echo persistent".into(),
+        )
+        .with_timeout(120)
+        .with_working_dir(PathBuf::from("/var/log"));
+        manager1.add_hook(hook).unwrap();
+
+        // Create a new manager instance
+        let manager2 = HookManager::new(temp_dir.path().to_path_buf());
+        manager2.load().unwrap();
+
+        let hooks = manager2.list_hooks();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].name, "Persistent");
+        assert_eq!(hooks[0].timeout_secs, 120);
+        assert_eq!(hooks[0].working_dir, Some(PathBuf::from("/var/log")));
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_update_preserves_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook = PostHook::new(
+            "Original".into(),
+            HookEvent::OnComplete,
+            "echo original".into(),
+        );
+        let hook_id = manager.add_hook(hook).unwrap();
+
+        let mut updated = PostHook::new(
+            "Updated".into(),
+            HookEvent::OnFailure,
+            "echo updated".into(),
+        );
+        updated.id = hook_id.clone();
+
+        manager.update_hook(&hook_id, updated).unwrap();
+
+        let hook = manager.get_hook(&hook_id).unwrap();
+        assert_eq!(hook.id, hook_id);
+        assert_eq!(hook.name, "Updated");
+        assert_eq!(hook.event, HookEvent::OnFailure);
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_disable_then_enable() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook = PostHook::new("Toggle".into(), HookEvent::OnComplete, "echo toggle".into());
+        let hook_id = manager.add_hook(hook).unwrap();
+
+        // Disable
+        manager.set_hook_enabled(&hook_id, false).unwrap();
+        assert!(!manager.get_hook(&hook_id).unwrap().enabled);
+
+        // Enable
+        manager.set_hook_enabled(&hook_id, true).unwrap();
+        assert!(manager.get_hook(&hook_id).unwrap().enabled);
+
+        // Disable again
+        manager.set_hook_enabled(&hook_id, false).unwrap();
+        assert!(!manager.get_hook(&hook_id).unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_disable_persists() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook = PostHook::new(
+            "Persist Disable".into(),
+            HookEvent::OnComplete,
+            "echo test".into(),
+        );
+        let hook_id = manager.add_hook(hook).unwrap();
+        manager.set_hook_enabled(&hook_id, false).unwrap();
+
+        // Load fresh
+        let manager2 = HookManager::new(temp_dir.path().to_path_buf());
+        manager2.load().unwrap();
+
+        let loaded = manager2.get_hook(&hook_id).unwrap();
+        assert!(!loaded.enabled);
+    }
+
+    // --- save_hooks / load_hooks comprehensive tests ---
+
+    #[test]
+    fn test_save_load_empty_hooks() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let hooks: Vec<PostHook> = vec![];
+        save_hooks(&hooks, temp_dir.path()).unwrap();
+        let loaded = load_hooks(temp_dir.path()).unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn test_save_load_hooks_preserves_order() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut hooks = Vec::new();
+        for i in 0..20 {
+            let hook = PostHook::new(
+                format!("Hook {}", i),
+                if i % 2 == 0 {
+                    HookEvent::OnComplete
+                } else {
+                    HookEvent::OnFailure
+                },
+                format!("echo {}", i),
+            );
+            hooks.push(hook);
+        }
+        save_hooks(&hooks, temp_dir.path()).unwrap();
+        let loaded = load_hooks(temp_dir.path()).unwrap();
+        assert_eq!(loaded.len(), 20);
+        for (i, hook) in loaded.iter().enumerate() {
+            assert_eq!(hook.name, format!("Hook {}", i));
+        }
+    }
+
+    #[test]
+    fn test_save_overwrites_existing_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Save initial hooks
+        let hooks1 = vec![PostHook::new(
+            "Initial".into(),
+            HookEvent::OnComplete,
+            "echo initial".into(),
+        )];
+        save_hooks(&hooks1, temp_dir.path()).unwrap();
+
+        // Overwrite with new hooks
+        let hooks2 = vec![
+            PostHook::new("New 1".into(), HookEvent::OnComplete, "echo new1".into()),
+            PostHook::new("New 2".into(), HookEvent::OnFailure, "echo new2".into()),
+        ];
+        save_hooks(&hooks2, temp_dir.path()).unwrap();
+
+        let loaded = load_hooks(temp_dir.path()).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].name, "New 1");
+        assert_eq!(loaded[1].name, "New 2");
+    }
+
+    #[test]
+    fn test_load_hooks_corrupt_json() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("post_hooks.json");
+        std::fs::write(&config_path, "this is not valid json {{{").unwrap();
+        let result = load_hooks(temp_dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_hooks_empty_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("post_hooks.json");
+        std::fs::write(&config_path, "").unwrap();
+        let result = load_hooks(temp_dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_hooks_creates_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("post_hooks.json");
+        assert!(!config_path.exists());
+
+        let hooks = vec![PostHook::new(
+            "Create".into(),
+            HookEvent::OnComplete,
+            "echo create".into(),
+        )];
+        save_hooks(&hooks, temp_dir.path()).unwrap();
+        assert!(config_path.exists());
+    }
+
+    #[test]
+    fn test_save_load_hooks_with_unicode() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let hooks = vec![
+            PostHook::new(
+                "中文钩子 🎣".into(),
+                HookEvent::Both,
+                "echo '测试中文'".into(),
+            )
+            .with_working_dir(PathBuf::from("/tmp/测试")),
+        ];
+        save_hooks(&hooks, temp_dir.path()).unwrap();
+        let loaded = load_hooks(temp_dir.path()).unwrap();
+        assert_eq!(loaded[0].name, "中文钩子 🎣");
+        assert_eq!(loaded[0].working_dir, Some(PathBuf::from("/tmp/测试")));
+    }
+
+    #[test]
+    fn test_load_hooks_extra_json_fields_ignored() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("post_hooks.json");
+        let json = r#"[{
+            "id": "test-id",
+            "name": "Test",
+            "event": "OnComplete",
+            "command": "echo test",
+            "working_dir": null,
+            "enabled": true,
+            "timeout_secs": 30,
+            "unknown_field": "ignored"
+        }]"#;
+        std::fs::write(&config_path, json).unwrap();
+        let loaded = load_hooks(temp_dir.path()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "Test");
+    }
+
+    // --- execute_hooks comprehensive tests ---
+
+    #[tokio::test]
+    async fn test_execute_hooks_empty_list() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let ctx = make_test_ctx(NotificationEvent::DownloadComplete);
+        let results = manager.execute_hooks(&ctx).await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_execute_hooks_multiple_matching() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook1 = PostHook::new("Hook 1".into(), HookEvent::OnComplete, "echo 1".into());
+        let hook2 = PostHook::new("Hook 2".into(), HookEvent::Both, "echo 2".into());
+        let hook3 = PostHook::new("Hook 3".into(), HookEvent::OnFailure, "echo 3".into());
+
+        manager.add_hook(hook1).unwrap();
+        manager.add_hook(hook2).unwrap();
+        manager.add_hook(hook3).unwrap();
+
+        let ctx = make_test_ctx(NotificationEvent::DownloadComplete);
+        let results = manager.execute_hooks(&ctx).await;
+
+        // hook1 (OnComplete) and hook2 (Both) should run, hook3 (OnFailure) should not
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].hook_name, "Hook 1");
+        assert_eq!(results[1].hook_name, "Hook 2");
+    }
+
+    #[tokio::test]
+    async fn test_execute_hooks_all_disabled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook1 = PostHook::new("Disabled 1".into(), HookEvent::OnComplete, "echo 1".into());
+        let hook2 = PostHook::new("Disabled 2".into(), HookEvent::OnComplete, "echo 2".into());
+
+        let id1 = manager.add_hook(hook1).unwrap();
+        let id2 = manager.add_hook(hook2).unwrap();
+
+        manager.set_hook_enabled(&id1, false).unwrap();
+        manager.set_hook_enabled(&id2, false).unwrap();
+
+        let ctx = make_test_ctx(NotificationEvent::DownloadComplete);
+        let results = manager.execute_hooks(&ctx).await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_execute_hooks_on_failure_event() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook_complete =
+            PostHook::new("Complete".into(), HookEvent::OnComplete, "echo c".into());
+        let hook_failure = PostHook::new("Failure".into(), HookEvent::OnFailure, "echo f".into());
+        let hook_both = PostHook::new("Both".into(), HookEvent::Both, "echo b".into());
+
+        manager.add_hook(hook_complete).unwrap();
+        manager.add_hook(hook_failure).unwrap();
+        manager.add_hook(hook_both).unwrap();
+
+        let ctx = make_test_ctx(NotificationEvent::DownloadFailed);
+        let results = manager.execute_hooks(&ctx).await;
+
+        // hook_failure (OnFailure) and hook_both (Both) should run
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].hook_name, "Failure");
+        assert_eq!(results[1].hook_name, "Both");
+    }
+
+    #[tokio::test]
+    async fn test_execute_hook_with_working_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let working_dir = temp_dir.path().join("work");
+        std::fs::create_dir(&working_dir).unwrap();
+        let output_file = working_dir.join("output.txt");
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let command = format!("echo 'hello' > {}", output_file.display());
+        let hook = PostHook::new("WorkDir".into(), HookEvent::OnComplete, command)
+            .with_working_dir(working_dir.clone());
+
+        let ctx = make_test_ctx(NotificationEvent::DownloadComplete);
+        let result = manager.execute_hook(&hook, &ctx).await;
+        assert!(result.success);
+        assert!(output_file.exists());
+    }
+
+    #[tokio::test]
+    async fn test_execute_hook_no_timeout() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook = PostHook::new(
+            "No Timeout".into(),
+            HookEvent::OnComplete,
+            "echo fast".into(),
+        )
+        .with_timeout(0);
+
+        let ctx = make_test_ctx(NotificationEvent::DownloadComplete);
+        let result = manager.execute_hook(&hook, &ctx).await;
+        assert!(result.success);
+        assert_eq!(result.exit_code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_execute_hook_records_duration() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook =
+            PostHook::new("Slow".into(), HookEvent::OnComplete, "sleep 1".into()).with_timeout(10);
+
+        let ctx = make_test_ctx(NotificationEvent::DownloadComplete);
+        let result = manager.execute_hook(&hook, &ctx).await;
+        assert!(result.success);
+        // Should have taken at least some time
+        assert!(result.duration_ms < 10_000); // less than timeout
+    }
+
+    #[tokio::test]
+    async fn test_execute_hook_command_not_found() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook = PostHook::new(
+            "Not Found".into(),
+            HookEvent::OnComplete,
+            "/nonexistent/binary --flag".into(),
+        );
+
+        let ctx = make_test_ctx(NotificationEvent::DownloadComplete);
+        let result = manager.execute_hook(&hook, &ctx).await;
+        assert!(!result.success);
+        assert!(result.error.is_some());
+    }
+
+    // --- HookManager error handling ---
+
+    #[tokio::test]
+    async fn test_hook_manager_add_hook_persists_immediately() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook = PostHook::new(
+            "Immediate".into(),
+            HookEvent::OnComplete,
+            "echo immediate".into(),
+        );
+        manager.add_hook(hook).unwrap();
+
+        // Verify file exists
+        let config_path = temp_dir.path().join("post_hooks.json");
+        assert!(config_path.exists());
+
+        // Verify content
+        let loaded = load_hooks(temp_dir.path()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "Immediate");
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_remove_persists_immediately() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook = PostHook::new(
+            "ToRemove".into(),
+            HookEvent::OnComplete,
+            "echo remove".into(),
+        );
+        let hook_id = manager.add_hook(hook).unwrap();
+
+        // Verify hook exists
+        assert_eq!(manager.list_hooks().len(), 1);
+
+        // Remove
+        manager.remove_hook(&hook_id).unwrap();
+
+        // Verify persisted empty
+        let loaded = load_hooks(temp_dir.path()).unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_save_and_reload() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook1 = PostHook::new("Hook A".into(), HookEvent::OnComplete, "echo a".into());
+        let hook2 = PostHook::new("Hook B".into(), HookEvent::Both, "echo b".into())
+            .with_timeout(60)
+            .with_working_dir(PathBuf::from("/tmp"));
+
+        manager.add_hook(hook1).unwrap();
+        manager.add_hook(hook2).unwrap();
+
+        // Explicit save
+        manager.save().unwrap();
+
+        // Reload
+        let manager2 = HookManager::new(temp_dir.path().to_path_buf());
+        manager2.load().unwrap();
+
+        let hooks = manager2.list_hooks();
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0].name, "Hook A");
+        assert_eq!(hooks[1].name, "Hook B");
+        assert_eq!(hooks[1].timeout_secs, 60);
+    }
+
+    // --- NotificationContext template rendering integration ---
+
+    #[tokio::test]
+    async fn test_execute_hook_template_all_variables() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output_file = temp_dir.path().join("template_output.txt");
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let command = format!(
+            "echo '{{name}}|{{size}}|{{protocol}}|{{save_path}}|{{task_id}}' > {}",
+            output_file.display()
+        );
+        let hook = PostHook::new("Full Template".into(), HookEvent::OnComplete, command);
+
+        let ctx = NotificationContext {
+            task_id: "task-12345".into(),
+            name: "my_file.zip".into(),
+            size: 1048576,
+            downloaded: 524288,
+            protocol: "Torrent".into(),
+            save_path: "/downloads/my_file.zip".into(),
+            error: None,
+            event: NotificationEvent::DownloadComplete,
+        };
+
+        let result = manager.execute_hook(&hook, &ctx).await;
+        assert!(result.success);
+
+        let content = tokio::fs::read_to_string(&output_file).await.unwrap();
+        assert!(content.contains("my_file.zip"));
+        assert!(content.contains("1048576"));
+        assert!(content.contains("Torrent"));
+        assert!(content.contains("/downloads/my_file.zip"));
+        assert!(content.contains("task-12345"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_hook_template_with_failure_event() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output_file = temp_dir.path().join("failure_output.txt");
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let command = format!("echo '{{name}}|{{event}}' > {}", output_file.display());
+        let hook = PostHook::new("Failure Template".into(), HookEvent::OnFailure, command);
+
+        let ctx = NotificationContext {
+            task_id: "fail-task".into(),
+            name: "failed_file.rar".into(),
+            size: 2048,
+            downloaded: 0,
+            protocol: "HTTP".into(),
+            save_path: "/downloads/failed_file.rar".into(),
+            error: Some("Connection refused".into()),
+            event: NotificationEvent::DownloadFailed,
+        };
+
+        let result = manager.execute_hook(&hook, &ctx).await;
+        assert!(result.success);
+
+        let content = tokio::fs::read_to_string(&output_file).await.unwrap();
+        assert!(content.contains("failed_file.rar"));
+    }
+
+    // --- Concurrent access tests ---
+
+    #[tokio::test]
+    async fn test_hook_manager_concurrent_reads() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        for i in 0..5 {
+            let hook = PostHook::new(
+                format!("Hook {}", i),
+                HookEvent::OnComplete,
+                "echo test".into(),
+            );
+            manager.add_hook(hook).unwrap();
+        }
+
+        // Multiple concurrent reads
+        let manager = Arc::new(manager);
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let mgr = Arc::clone(&manager);
+            handles.push(tokio::spawn(async move { mgr.list_hooks() }));
+        }
+
+        for handle in handles {
+            let hooks = handle.await.unwrap();
+            assert_eq!(hooks.len(), 5);
+        }
+    }
+
+    // --- Edge cases ---
+
+    #[test]
+    fn test_hook_event_serde_extra_fields_ignored() {
+        let json = r#""OnComplete""#;
+        let event: HookEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event, HookEvent::OnComplete);
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_add_remove_add_same_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let mut hook = PostHook::new("Original".into(), HookEvent::OnComplete, "echo 1".into());
+        let fixed_id = "fixed-id-123".to_string();
+        hook.id = fixed_id.clone();
+
+        manager.add_hook(hook).unwrap();
+        assert_eq!(manager.list_hooks().len(), 1);
+
+        // Remove
+        manager.remove_hook(&fixed_id).unwrap();
+        assert_eq!(manager.list_hooks().len(), 0);
+
+        // Add again with same ID
+        let mut hook2 = PostHook::new("New".into(), HookEvent::OnFailure, "echo 2".into());
+        hook2.id = fixed_id.clone();
+        manager.add_hook(hook2).unwrap();
+
+        let hooks = manager.list_hooks();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].name, "New");
+        assert_eq!(hooks[0].id, fixed_id);
+    }
+
+    #[tokio::test]
+    async fn test_execute_hooks_returns_results_in_order() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        // Add hooks in order - all should match OnComplete
+        for i in 0..5 {
+            let hook = PostHook::new(
+                format!("Ordered {}", i),
+                HookEvent::OnComplete,
+                "echo test".into(),
+            );
+            manager.add_hook(hook).unwrap();
+        }
+
+        let ctx = make_test_ctx(NotificationEvent::DownloadComplete);
+        let results = manager.execute_hooks(&ctx).await;
+
+        assert_eq!(results.len(), 5);
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(result.hook_name, format!("Ordered {}", i));
+        }
+    }
+
+    #[test]
+    fn test_post_hook_serde_pretty_format() {
+        let hook = PostHook::new("Pretty".into(), HookEvent::OnComplete, "echo pretty".into());
+        let pretty = serde_json::to_string_pretty(&hook).unwrap();
+        assert!(pretty.contains('\n'));
+        let deserialized: PostHook = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(deserialized.id, hook.id);
+    }
+
+    #[test]
+    fn test_save_load_hooks_multiple_events() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let hooks = vec![
+            PostHook::new("Complete".into(), HookEvent::OnComplete, "echo c".into()),
+            PostHook::new("Failure".into(), HookEvent::OnFailure, "echo f".into()),
+            PostHook::new("Both".into(), HookEvent::Both, "echo b".into()),
+        ];
+        save_hooks(&hooks, temp_dir.path()).unwrap();
+        let loaded = load_hooks(temp_dir.path()).unwrap();
+        assert_eq!(loaded[0].event, HookEvent::OnComplete);
+        assert_eq!(loaded[1].event, HookEvent::OnFailure);
+        assert_eq!(loaded[2].event, HookEvent::Both);
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_update_changes_event_type() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook = PostHook::new(
+            "Event Change".into(),
+            HookEvent::OnComplete,
+            "echo test".into(),
+        );
+        let hook_id = manager.add_hook(hook).unwrap();
+
+        let mut updated = manager.get_hook(&hook_id).unwrap();
+        updated.event = HookEvent::OnFailure;
+        manager.update_hook(&hook_id, updated).unwrap();
+
+        let hook = manager.get_hook(&hook_id).unwrap();
+        assert_eq!(hook.event, HookEvent::OnFailure);
+    }
+
+    #[tokio::test]
+    async fn test_hook_manager_update_changes_timeout() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        let hook = PostHook::new(
+            "Timeout Change".into(),
+            HookEvent::OnComplete,
+            "echo test".into(),
+        )
+        .with_timeout(30);
+        let hook_id = manager.add_hook(hook).unwrap();
+
+        let mut updated = manager.get_hook(&hook_id).unwrap();
+        updated.timeout_secs = 120;
+        manager.update_hook(&hook_id, updated).unwrap();
+
+        let hook = manager.get_hook(&hook_id).unwrap();
+        assert_eq!(hook.timeout_secs, 120);
+    }
+
+    #[tokio::test]
+    async fn test_execute_hook_exit_code_negative() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let manager = HookManager::new(temp_dir.path().to_path_buf());
+
+        // exit 2 gives a non-zero exit code
+        let hook = PostHook::new("Exit 2".into(), HookEvent::OnComplete, "exit 2".into());
+
+        let ctx = make_test_ctx(NotificationEvent::DownloadComplete);
+        let result = manager.execute_hook(&hook, &ctx).await;
+        assert!(!result.success);
+        assert_eq!(result.exit_code, Some(2));
+        assert!(result.error.is_some());
+        assert!(result.error.unwrap().contains("Exit code: 2"));
+    }
 }
