@@ -920,4 +920,849 @@ mod tests {
                 .contains("File size mismatch")
         );
     }
+
+    // ========== calculate_optimal_segment_count ==========
+
+    #[test]
+    fn test_optimal_segment_count_small_file() {
+        // Files < 1MB should always use 1 segment
+        let count = SegmentDownloader::calculate_optimal_segment_count(512 * 1024, 10_000_000.0);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_optimal_segment_count_high_bandwidth() {
+        // > 2 MB/s → MAX_SEGMENT_COUNT (16), but capped by file size
+        let file_size = 100 * 1024 * 1024; // 100MB, plenty of room
+        let count = SegmentDownloader::calculate_optimal_segment_count(file_size, 3_000_000.0);
+        assert_eq!(count, MAX_SEGMENT_COUNT);
+    }
+
+    #[test]
+    fn test_optimal_segment_count_medium_bandwidth() {
+        // 1-2 MB/s → 8 segments
+        let file_size = 100 * 1024 * 1024;
+        let count = SegmentDownloader::calculate_optimal_segment_count(file_size, 1_500_000.0);
+        assert_eq!(count, 8);
+    }
+
+    #[test]
+    fn test_optimal_segment_count_default_bandwidth() {
+        // 0.5-1 MB/s → DEFAULT_SEGMENT_COUNT (4)
+        let file_size = 100 * 1024 * 1024;
+        let count = SegmentDownloader::calculate_optimal_segment_count(file_size, 750_000.0);
+        assert_eq!(count, DEFAULT_SEGMENT_COUNT);
+    }
+
+    #[test]
+    fn test_optimal_segment_count_low_bandwidth() {
+        // < 0.5 MB/s → 2 segments
+        let file_size = 100 * 1024 * 1024;
+        let count = SegmentDownloader::calculate_optimal_segment_count(file_size, 100_000.0);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_optimal_segment_count_zero_bandwidth() {
+        // 0 bandwidth → 2 segments (lowest tier)
+        let file_size = 10 * 1024 * 1024;
+        let count = SegmentDownloader::calculate_optimal_segment_count(file_size, 0.0);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_optimal_segment_count_size_capped() {
+        // Small file with high bandwidth: capped by min_segment_size (256KB)
+        // 1.5MB file → max_by_size = 1.5MB / 256KB = 5 (integer div)
+        // High bandwidth wants 16, but capped to 5
+        let file_size = 1_500_000; // ~1.43MB
+        let count = SegmentDownloader::calculate_optimal_segment_count(file_size, 5_000_000.0);
+        let max_by_size = (file_size / (256 * 1024)) as usize;
+        assert_eq!(count, max_by_size.min(MAX_SEGMENT_COUNT));
+    }
+
+    #[test]
+    fn test_optimal_segment_count_tiny_file() {
+        // Very tiny file: 100KB → max_by_size = 0, but .max(1) ensures at least 1
+        let file_size = 100 * 1024; // 100KB, below MIN_FILE_SIZE_FOR_SEGMENTATION
+        let count = SegmentDownloader::calculate_optimal_segment_count(file_size, 5_000_000.0);
+        assert_eq!(count, 1); // Below 1MB threshold
+    }
+
+    #[test]
+    fn test_optimal_segment_count_exact_1mb_boundary() {
+        // Exactly 1MB: NOT < MIN_FILE_SIZE (strict less-than), so proceeds to bandwidth check
+        // With high bandwidth → MAX_SEGMENT_COUNT=16, capped by max_by_size = 1MB/256KB = 4
+        let count = SegmentDownloader::calculate_optimal_segment_count(1024 * 1024, 5_000_000.0);
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn test_optimal_segment_count_just_above_1mb() {
+        // Just above 1MB with high bandwidth
+        let file_size = 1024 * 1024 + 1;
+        let count = SegmentDownloader::calculate_optimal_segment_count(file_size, 5_000_000.0);
+        // max_by_size = 1048577 / 262144 = 4 (integer div)
+        // High bandwidth wants 16, capped to 4
+        assert!(count <= 4);
+        assert!(count >= 1);
+    }
+
+    #[test]
+    fn test_optimal_segment_count_exact_thresholds() {
+        let file_size = 100 * 1024 * 1024;
+        // Exactly at HIGH_BANDWIDTH_THRESHOLD → MAX (since > not >=)
+        let count_at =
+            SegmentDownloader::calculate_optimal_segment_count(file_size, HIGH_BANDWIDTH_THRESHOLD);
+        // HIGH_BANDWIDTH_THRESHOLD is 2_000_000; > check means this falls to next tier
+        assert_eq!(count_at, 8); // Not > threshold, so falls to 1-2M tier
+
+        let count_above = SegmentDownloader::calculate_optimal_segment_count(
+            file_size,
+            HIGH_BANDWIDTH_THRESHOLD + 1.0,
+        );
+        assert_eq!(count_above, MAX_SEGMENT_COUNT);
+    }
+
+    // ========== update_bandwidth_estimate ==========
+
+    #[test]
+    fn test_update_bandwidth_estimate_initial() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            10 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        assert_eq!(dl.estimated_bandwidth, 0.0);
+
+        // First update: should set directly (no smoothing)
+        dl.update_bandwidth_estimate(1_000_000, 1000.0); // 1MB in 1s = 1MB/s
+        assert!((dl.estimated_bandwidth - 1_000_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_update_bandwidth_estimate_ewma_smoothing() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            10 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        // Set initial bandwidth to 1 MB/s
+        dl.estimated_bandwidth = 1_000_000.0;
+
+        // Update with 2 MB/s instant bandwidth
+        // EWMA: 0.7 * 1_000_000 + 0.3 * 2_000_000 = 700_000 + 600_000 = 1_300_000
+        dl.update_bandwidth_estimate(2_000_000, 1000.0);
+        let expected = 0.7 * 1_000_000.0 + 0.3 * 2_000_000.0;
+        assert!((dl.estimated_bandwidth - expected).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_update_bandwidth_estimate_zero_duration() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            10 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        dl.estimated_bandwidth = 500_000.0;
+
+        // Zero duration should not change the estimate
+        dl.update_bandwidth_estimate(1_000_000, 0.0);
+        assert_eq!(dl.estimated_bandwidth, 500_000.0);
+    }
+
+    #[test]
+    fn test_update_bandwidth_estimate_multiple_updates() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            10 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        // Simulate multiple bandwidth samples
+        dl.update_bandwidth_estimate(500_000, 1000.0); // 500 KB/s
+        let bw1 = dl.estimated_bandwidth;
+        assert!((bw1 - 500_000.0).abs() < 1.0);
+
+        dl.update_bandwidth_estimate(1_500_000, 1000.0); // 1.5 MB/s
+        let bw2 = dl.estimated_bandwidth;
+        let expected2 = 0.7 * bw1 + 0.3 * 1_500_000.0;
+        assert!((bw2 - expected2).abs() < 1.0);
+
+        dl.update_bandwidth_estimate(3_000_000, 1000.0); // 3 MB/s
+        let bw3 = dl.estimated_bandwidth;
+        let expected3 = 0.7 * bw2 + 0.3 * 3_000_000.0;
+        assert!((bw3 - expected3).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_update_bandwidth_estimate_zero_bytes() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            10 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        dl.estimated_bandwidth = 1_000_000.0;
+
+        // Zero bytes transferred should still compute (gives 0 instant bw)
+        dl.update_bandwidth_estimate(0, 1000.0);
+        let expected = 0.7 * 1_000_000.0 + 0.3 * 0.0;
+        assert!((dl.estimated_bandwidth - expected).abs() < 1.0);
+    }
+
+    // ========== maybe_adjust_segment_count ==========
+
+    #[test]
+    fn test_maybe_adjust_segment_count_no_change_needed() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            100 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        // Set bandwidth to match current segment count
+        dl.estimated_bandwidth = 750_000.0; // → wants 4 = DEFAULT_SEGMENT_COUNT
+        dl.segment_count = 4;
+
+        dl.maybe_adjust_segment_count();
+        assert_eq!(dl.segment_count, 4); // No change
+    }
+
+    #[test]
+    fn test_maybe_adjust_segment_count_increase() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            100 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        // Set very high bandwidth → wants MAX_SEGMENT_COUNT (16)
+        dl.estimated_bandwidth = 5_000_000.0;
+        dl.segment_count = 4;
+
+        dl.maybe_adjust_segment_count();
+        assert_eq!(dl.segment_count, MAX_SEGMENT_COUNT);
+    }
+
+    #[test]
+    fn test_maybe_adjust_segment_count_adjust_when_optimal_exceeds_remaining() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            100 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        // Mark most segments as downloaded so remaining < optimal
+        for seg in &mut dl.segments {
+            seg.downloaded = true;
+        }
+        // Only 1 segment remaining
+        dl.segments[0].downloaded = false;
+
+        // High bandwidth wants 16, remaining = 1
+        dl.estimated_bandwidth = 5_000_000.0;
+        dl.segment_count = 4;
+
+        dl.maybe_adjust_segment_count();
+        // Code adjusts when optimal > remaining count
+        assert_eq!(dl.segment_count, MAX_SEGMENT_COUNT);
+    }
+
+    #[test]
+    fn test_maybe_adjust_segment_count_no_adjust_when_remaining_exceeds_optimal() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            100 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        // All 4 segments remaining (none downloaded)
+        // Low bandwidth → optimal = 2, remaining = 4
+        dl.estimated_bandwidth = 100_000.0;
+        dl.segment_count = 4;
+
+        dl.maybe_adjust_segment_count();
+        // optimal (2) < remaining (4), so condition optimal > remaining is false → no adjust
+        assert_eq!(dl.segment_count, 4);
+    }
+
+    // ========== create_segments edge cases ==========
+
+    #[test]
+    fn test_create_segments_single_segment() {
+        let segments = SegmentDownloader::create_segments(1024, 1);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].offset, 0);
+        assert_eq!(segments[0].size, 1024);
+        assert!(!segments[0].downloaded);
+        assert_eq!(segments[0].index, 0);
+    }
+
+    #[test]
+    fn test_create_segments_many_segments() {
+        let file_size = 1000;
+        let segments = SegmentDownloader::create_segments(file_size, 10);
+        assert_eq!(segments.len(), 10);
+        // Each 100 bytes
+        for (i, seg) in segments.iter().enumerate() {
+            assert_eq!(seg.index, i);
+            assert_eq!(seg.size, 100);
+            assert_eq!(seg.offset, (i as u64) * 100);
+        }
+        let total: u64 = segments.iter().map(|s| s.size).sum();
+        assert_eq!(total, file_size);
+    }
+
+    #[test]
+    fn test_create_segments_remainder_handling() {
+        // 100 bytes / 7 segments = 14 each, last gets 100 - 14*6 = 16
+        let segments = SegmentDownloader::create_segments(100, 7);
+        assert_eq!(segments.len(), 7);
+        for i in 0..6 {
+            assert_eq!(segments[i].size, 14);
+        }
+        assert_eq!(segments[6].size, 16); // remainder
+        let total: u64 = segments.iter().map(|s| s.size).sum();
+        assert_eq!(total, 100);
+    }
+
+    #[test]
+    fn test_create_segments_offsets_contiguous() {
+        let segments = SegmentDownloader::create_segments(10_000, 13);
+        // Verify offsets are contiguous (no gaps, no overlaps)
+        for i in 1..segments.len() {
+            assert_eq!(
+                segments[i].offset,
+                segments[i - 1].offset + segments[i - 1].size
+            );
+        }
+        // First offset is 0
+        assert_eq!(segments[0].offset, 0);
+        // Last segment ends at file_size
+        let last = segments.last().unwrap();
+        assert_eq!(last.offset + last.size, 10_000);
+    }
+
+    #[test]
+    fn test_create_segments_indices_sequential() {
+        let segments = SegmentDownloader::create_segments(10_000, 8);
+        for (i, seg) in segments.iter().enumerate() {
+            assert_eq!(seg.index, i);
+        }
+    }
+
+    #[test]
+    fn test_create_segments_all_initially_not_downloaded() {
+        let segments = SegmentDownloader::create_segments(10_000, 5);
+        for seg in &segments {
+            assert!(!seg.downloaded);
+            assert_eq!(seg.throughput_bps, 0.0);
+        }
+    }
+
+    // ========== get_progress edge cases ==========
+
+    #[test]
+    fn test_get_progress_no_start_time() {
+        let tmp_dir = tempdir().unwrap();
+        let dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            1024,
+            tmp_dir.path().to_path_buf(),
+        );
+        // start_time is None initially
+        assert!(dl.get_progress().is_none());
+    }
+
+    #[test]
+    fn test_get_progress_with_partial_download() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            10 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        dl.start_time = Some(tokio::time::Instant::now());
+        dl.segments[0].downloaded = true;
+        dl.segments[0].throughput_bps = 1_000_000.0;
+        dl.segments[2].downloaded = true;
+        dl.segments[2].throughput_bps = 500_000.0;
+        dl.downloaded = 5 * 1024 * 1024;
+
+        let p = dl.get_progress().unwrap();
+        assert_eq!(p.completed_segments, 2);
+        assert_eq!(p.total_segments, 4);
+        assert_eq!(p.downloaded, 5 * 1024 * 1024);
+        assert!(p.speed > 0.0);
+        assert_eq!(p.segment_progress.len(), 4);
+        assert!(p.segment_progress[0].downloaded);
+        assert!(!p.segment_progress[1].downloaded);
+        assert!(p.segment_progress[2].downloaded);
+        assert!(!p.segment_progress[3].downloaded);
+        assert_eq!(p.segment_progress[0].throughput_bps, 1_000_000.0);
+        assert_eq!(p.segment_progress[2].throughput_bps, 500_000.0);
+    }
+
+    #[test]
+    fn test_get_progress_segment_info_fields() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        dl.start_time = Some(tokio::time::Instant::now());
+        dl.segments[0].offset = 0;
+        dl.segments[0].size = 512;
+        dl.segments[0].throughput_bps = 12345.0;
+
+        let p = dl.get_progress().unwrap();
+        let info = &p.segment_progress[0];
+        assert_eq!(info.index, 0);
+        assert_eq!(info.offset, 0);
+        assert_eq!(info.size, 512);
+        assert_eq!(info.throughput_bps, 12345.0);
+    }
+
+    #[test]
+    fn test_get_progress_estimated_bandwidth() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            10 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        dl.start_time = Some(tokio::time::Instant::now());
+        dl.estimated_bandwidth = 2_500_000.0;
+
+        let p = dl.get_progress().unwrap();
+        assert_eq!(p.estimated_bandwidth, 2_500_000.0);
+    }
+
+    // ========== SegmentDownloadError Display ==========
+
+    #[test]
+    fn test_error_display_http() {
+        let err = SegmentDownloadError::Http("connection refused".to_string());
+        assert_eq!(err.to_string(), "HTTP error: connection refused");
+    }
+
+    #[test]
+    fn test_error_display_io() {
+        let err = SegmentDownloadError::Io("disk full".to_string());
+        assert_eq!(err.to_string(), "IO error: disk full");
+    }
+
+    #[test]
+    fn test_error_display_cancelled() {
+        let err = SegmentDownloadError::Io("cancelled".to_string());
+        assert!(err.to_string().contains("cancelled"));
+    }
+
+    // ========== Segment struct ==========
+
+    #[test]
+    fn test_segment_clone() {
+        let seg = Segment {
+            offset: 1000,
+            size: 500,
+            downloaded: true,
+            index: 3,
+            throughput_bps: 1_000_000.0,
+        };
+        let cloned = seg.clone();
+        assert_eq!(cloned.offset, 1000);
+        assert_eq!(cloned.size, 500);
+        assert!(cloned.downloaded);
+        assert_eq!(cloned.index, 3);
+        assert_eq!(cloned.throughput_bps, 1_000_000.0);
+    }
+
+    #[test]
+    fn test_segment_debug() {
+        let seg = Segment {
+            offset: 0,
+            size: 1024,
+            downloaded: false,
+            index: 0,
+            throughput_bps: 0.0,
+        };
+        let debug_str = format!("{:?}", seg);
+        assert!(debug_str.contains("Segment"));
+        assert!(debug_str.contains("offset"));
+        assert!(debug_str.contains("size"));
+    }
+
+    // ========== SegmentDownloadProgress struct ==========
+
+    #[test]
+    fn test_progress_clone() {
+        let p = SegmentDownloadProgress {
+            total_size: 1000,
+            downloaded: 500,
+            speed: 100.0,
+            total_segments: 4,
+            completed_segments: 2,
+            estimated_bandwidth: 200.0,
+            segment_progress: vec![],
+        };
+        let cloned = p.clone();
+        assert_eq!(cloned.total_size, 1000);
+        assert_eq!(cloned.downloaded, 500);
+        assert_eq!(cloned.speed, 100.0);
+        assert_eq!(cloned.total_segments, 4);
+        assert_eq!(cloned.completed_segments, 2);
+        assert_eq!(cloned.estimated_bandwidth, 200.0);
+    }
+
+    #[test]
+    fn test_progress_debug() {
+        let p = SegmentDownloadProgress {
+            total_size: 1000,
+            downloaded: 0,
+            speed: 0.0,
+            total_segments: 1,
+            completed_segments: 0,
+            estimated_bandwidth: 0.0,
+            segment_progress: vec![],
+        };
+        let debug_str = format!("{:?}", p);
+        assert!(debug_str.contains("SegmentDownloadProgress"));
+    }
+
+    // ========== SegmentInfo struct ==========
+
+    #[test]
+    fn test_segment_info_clone() {
+        let info = SegmentInfo {
+            index: 5,
+            offset: 5000,
+            size: 1000,
+            downloaded: true,
+            throughput_bps: 3_000_000.0,
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.index, 5);
+        assert_eq!(cloned.offset, 5000);
+        assert_eq!(cloned.size, 1000);
+        assert!(cloned.downloaded);
+        assert_eq!(cloned.throughput_bps, 3_000_000.0);
+    }
+
+    #[test]
+    fn test_segment_info_debug() {
+        let info = SegmentInfo {
+            index: 0,
+            offset: 0,
+            size: 256,
+            downloaded: false,
+            throughput_bps: 0.0,
+        };
+        let debug_str = format!("{:?}", info);
+        assert!(debug_str.contains("SegmentInfo"));
+    }
+
+    // ========== Progress persistence robustness ==========
+
+    #[tokio::test]
+    async fn test_save_load_all_segments_downloaded() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            4 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        // Mark all segments as downloaded
+        for seg in &mut dl.segments {
+            seg.downloaded = true;
+        }
+        dl.downloaded = 4 * 1024 * 1024;
+
+        dl.save_progress().unwrap();
+
+        let mut dl2 = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            4 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+        dl2.load_progress().unwrap();
+
+        assert!(dl2.is_complete());
+        assert_eq!(dl2.downloaded, 4 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_save_load_no_segments_downloaded() {
+        let tmp_dir = tempdir().unwrap();
+        let dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            4 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        // Save with nothing downloaded
+        dl.save_progress().unwrap();
+
+        let mut dl2 = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            4 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+        dl2.load_progress().unwrap();
+
+        assert_eq!(dl2.downloaded, 0);
+        for seg in &dl2.segments {
+            assert!(!seg.downloaded);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_progress_corrupted_data() {
+        let tmp_dir = tempdir().unwrap();
+        let progress_path = tmp_dir.path().join("f.zip.segments");
+
+        // Write garbage data
+        std::fs::write(&progress_path, b"this is not valid cbor data at all").unwrap();
+
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            4 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        let result = dl.load_progress();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_load_progress_wrong_segment_count() {
+        let tmp_dir = tempdir().unwrap();
+
+        // Save progress with 4 segments
+        let dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            4 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+        dl.save_progress().unwrap();
+
+        // Load into downloader with different segment count (8)
+        let mut dl2 = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            4 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+        dl2.set_segment_count(8);
+
+        // Load should still work - bitmap only has 4 entries, rest stay false
+        let result = dl2.load_progress();
+        assert!(result.is_ok());
+    }
+
+    // ========== set_rate_limiter ==========
+
+    #[test]
+    fn test_set_rate_limiter() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        assert!(dl.rate_limiter.is_none());
+
+        let limiter = RateLimiter::new(1_000_000);
+        dl.set_rate_limiter(limiter);
+
+        assert!(dl.rate_limiter.is_some());
+    }
+
+    // ========== Constants ==========
+
+    #[test]
+    fn test_constants_sanity() {
+        assert!(DEFAULT_SEGMENT_COUNT > 0);
+        assert!(MAX_SEGMENT_COUNT >= DEFAULT_SEGMENT_COUNT);
+        assert!(MIN_FILE_SIZE_FOR_SEGMENTATION > 0);
+        assert!(MAX_SEGMENT_RETRIES > 0);
+        assert!(WRITE_BUFFER_SIZE > 0);
+        assert!(HIGH_BANDWIDTH_THRESHOLD > 0.0);
+    }
+
+    #[test]
+    fn test_max_segment_count_is_16() {
+        assert_eq!(MAX_SEGMENT_COUNT, 16);
+    }
+
+    #[test]
+    fn test_min_file_size_is_1mb() {
+        assert_eq!(MIN_FILE_SIZE_FOR_SEGMENTATION, 1024 * 1024);
+    }
+
+    #[test]
+    fn test_write_buffer_is_64kb() {
+        assert_eq!(WRITE_BUFFER_SIZE, 64 * 1024);
+    }
+
+    // ========== is_complete edge cases ==========
+
+    #[test]
+    fn test_is_complete_single_segment() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            512 * 1024, // Small file → 1 segment
+            tmp_dir.path().to_path_buf(),
+        );
+
+        assert!(!dl.is_complete());
+        dl.segments[0].downloaded = true;
+        assert!(dl.is_complete());
+    }
+
+    #[test]
+    fn test_is_complete_partial() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/f.zip".to_string(),
+            "f.zip".to_string(),
+            10 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        // Download first 3 of 4 segments
+        dl.segments[0].downloaded = true;
+        dl.segments[1].downloaded = true;
+        dl.segments[2].downloaded = true;
+
+        assert!(!dl.is_complete());
+
+        // Download last one
+        dl.segments[3].downloaded = true;
+        assert!(dl.is_complete());
+    }
+
+    // ========== get_file_name / get_file_size ==========
+
+    #[test]
+    fn test_get_file_name() {
+        let tmp_dir = tempdir().unwrap();
+        let dl = SegmentDownloader::new(
+            "http://example.com/my-file.tar.gz".to_string(),
+            "my-file.tar.gz".to_string(),
+            1024,
+            tmp_dir.path().to_path_buf(),
+        );
+        assert_eq!(dl.get_file_name(), "my-file.tar.gz");
+    }
+
+    #[test]
+    fn test_get_file_size() {
+        let tmp_dir = tempdir().unwrap();
+        let dl = SegmentDownloader::new(
+            "http://example.com/big.zip".to_string(),
+            "big.zip".to_string(),
+            999_999_999,
+            tmp_dir.path().to_path_buf(),
+        );
+        assert_eq!(dl.get_file_size(), 999_999_999);
+    }
+
+    // ========== Integration-style: full lifecycle ==========
+
+    #[test]
+    fn test_full_lifecycle_without_network() {
+        let tmp_dir = tempdir().unwrap();
+        let mut dl = SegmentDownloader::new(
+            "http://example.com/test.bin".to_string(),
+            "test.bin".to_string(),
+            8 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+
+        // Verify initial state
+        assert_eq!(dl.get_file_name(), "test.bin");
+        assert_eq!(dl.get_file_size(), 8 * 1024 * 1024);
+        assert_eq!(dl.segments.len(), 4);
+        assert!(!dl.is_complete());
+        assert!(dl.get_progress().is_none()); // No start_time
+
+        // Simulate bandwidth updates
+        dl.start_time = Some(tokio::time::Instant::now());
+        dl.update_bandwidth_estimate(2_000_000, 1000.0);
+        assert!(dl.estimated_bandwidth > 0.0);
+
+        // Simulate segment downloads
+        dl.segments[0].downloaded = true;
+        dl.segments[0].throughput_bps = 2_000_000.0;
+        dl.downloaded += dl.segments[0].size;
+
+        dl.segments[1].downloaded = true;
+        dl.segments[1].throughput_bps = 1_800_000.0;
+        dl.downloaded += dl.segments[1].size;
+
+        // Check progress
+        let p = dl.get_progress().unwrap();
+        assert_eq!(p.completed_segments, 2);
+        assert_eq!(p.total_segments, 4);
+        assert!(p.speed > 0.0);
+        assert_eq!(p.segment_progress[0].throughput_bps, 2_000_000.0);
+
+        // Save and reload
+        dl.save_progress().unwrap();
+
+        let mut dl2 = SegmentDownloader::new(
+            "http://example.com/test.bin".to_string(),
+            "test.bin".to_string(),
+            8 * 1024 * 1024,
+            tmp_dir.path().to_path_buf(),
+        );
+        dl2.load_progress().unwrap();
+
+        assert_eq!(dl2.downloaded, dl.downloaded);
+        assert!(dl2.segments[0].downloaded);
+        assert!(dl2.segments[1].downloaded);
+        assert!(!dl2.segments[2].downloaded);
+        assert!(!dl2.segments[3].downloaded);
+    }
 }
