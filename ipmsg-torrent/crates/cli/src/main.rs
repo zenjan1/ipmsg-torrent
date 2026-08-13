@@ -122,6 +122,13 @@ enum Command {
         action: String,
         args: Vec<String>,
     },
+    /// Dynamic priority adjustment (status|config|run|summary|clear)
+    DlDynamicPriority {
+        /// Subcommand
+        subcommand: String,
+        /// Arguments
+        args: Vec<String>,
+    },
     /// Show speed history for a task or all tasks
     DlSpeedHistory {
         task_id: Option<String>,
@@ -1174,6 +1181,20 @@ fn parse_command(input: &str) -> Command {
                 let action = args[0].clone();
                 let args = args[1..].to_vec();
                 Command::DlQueueStale { action, args }
+            }
+        }
+        "dldynamic" | "dl-dynamic" | "dldp" => {
+            // /dldp <action> [args...]
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::DlDynamicPriority {
+                    subcommand: "help".to_string(),
+                    args: vec![],
+                }
+            } else {
+                let subcommand = args[0].clone();
+                let args = args[1..].to_vec();
+                Command::DlDynamicPriority { subcommand, args }
             }
         }
         "dlspeedhist" | "dl-speed-hist" | "dlsh" => {
@@ -3223,6 +3244,7 @@ fn command_help() -> String {
         "/dlstats         - Show download statistics",
         "/dlhealth        - Show download queue health report",
         "/dlqstale [cmd]  - Queue staleness detection (status|config|check|clear)",
+        "/dldp [cmd]      - Dynamic priority adjustment (status|config|run|summary|clear)",
         "/dlspeedhist [id] - Show speed history (all tasks or specific task)",
         "/dlspeedpredict [status|predict|windows|profile|domains|remove|cleanup|clear|config] - Speed prediction and optimal window analysis",
         "/dlcleanup [cmd]  - Auto-cleanup completed/failed (status|enable|disable|set|run)",
@@ -4731,6 +4753,262 @@ async fn handle_command(
                     s.add_system_message(
                         "main",
                         "usage: /dlqs <status|config|check|clear>".to_string(),
+                    );
+                }
+            }
+        }
+        Command::DlDynamicPriority { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_dynamic_priority_config().await;
+                    let summary = download_manager.get_dynamic_priority_summary().await;
+                    let msg = format!(
+                        "🎯 Dynamic Priority Status\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         Enabled: {}\n\
+                         Tasks Evaluated: {}\n\
+                         Tasks Adjusted: {}\n\
+                         Last Adjustment: {}\n\
+                         Check Interval: {}s\n\
+                         Max Changes/Cycle: {}\n\
+                         Slow Speed Threshold: {} B/s\n\
+                         Near Complete: {}%\n\
+                         Max Retry Threshold: {}\n\
+                         Small File Threshold: {} bytes",
+                        config.enabled,
+                        summary.tasks_evaluated,
+                        summary.tasks_adjusted,
+                        summary
+                            .last_adjustment_at
+                            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                            .unwrap_or_else(|| "never".to_string()),
+                        config.check_interval_secs,
+                        config.max_changes_per_cycle,
+                        config.slow_speed_bps,
+                        config.near_complete_pct,
+                        config.max_retry_threshold,
+                        config.small_file_bytes
+                    );
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_dynamic_priority_config().await;
+                        let msg = format!(
+                            "⚙️  Dynamic Priority Configuration\n\
+                             ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                             Enabled: {}\n\
+                             Weights:\n\
+                               Speed: {}\n\
+                               Wait Time: {}\n\
+                               Progress: {}\n\
+                               Retry: {}\n\
+                               Size: {}\n\
+                             Min Wait: {}s\n\
+                             Slow Speed: {} B/s\n\
+                             Near Complete: {}%\n\
+                             Max Retries: {}\n\
+                             Small File: {} bytes\n\
+                             Check Interval: {}s\n\
+                             Max Changes/Cycle: {}",
+                            config.enabled,
+                            config.weights.speed_weight,
+                            config.weights.wait_time_weight,
+                            config.weights.progress_weight,
+                            config.weights.retry_weight,
+                            config.weights.size_weight,
+                            config.min_wait_secs,
+                            config.slow_speed_bps,
+                            config.near_complete_pct,
+                            config.max_retry_threshold,
+                            config.small_file_bytes,
+                            config.check_interval_secs,
+                            config.max_changes_per_cycle
+                        );
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    } else if args.len() >= 2 {
+                        let mut config = download_manager.get_dynamic_priority_config().await;
+                        let parse_result: Result<(), String> = (|| {
+                            match args[0].as_str() {
+                                "enabled" => {
+                                    config.enabled = args[1]
+                                        .parse()
+                                        .map_err(|_| "enabled must be true/false")?;
+                                }
+                                "interval" => {
+                                    config.check_interval_secs =
+                                        args[1].parse().map_err(|_| "interval must be seconds")?;
+                                }
+                                "max-changes" => {
+                                    config.max_changes_per_cycle = args[1]
+                                        .parse()
+                                        .map_err(|_| "max-changes must be a number")?;
+                                }
+                                "slow-speed" => {
+                                    config.slow_speed_bps = args[1]
+                                        .parse()
+                                        .map_err(|_| "slow-speed must be bytes/sec")?;
+                                }
+                                "near-complete" => {
+                                    config.near_complete_pct = args[1]
+                                        .parse()
+                                        .map_err(|_| "near-complete must be percentage (0-100)")?;
+                                }
+                                "max-retries" => {
+                                    config.max_retry_threshold = args[1]
+                                        .parse()
+                                        .map_err(|_| "max-retries must be a number")?;
+                                }
+                                "small-file" => {
+                                    config.small_file_bytes =
+                                        args[1].parse().map_err(|_| "small-file must be bytes")?;
+                                }
+                                "min-wait" => {
+                                    config.min_wait_secs =
+                                        args[1].parse().map_err(|_| "min-wait must be seconds")?;
+                                }
+                                "speed-weight" => {
+                                    config.weights.speed_weight = args[1]
+                                        .parse()
+                                        .map_err(|_| "speed-weight must be a number")?;
+                                }
+                                "wait-time-weight" => {
+                                    config.weights.wait_time_weight = args[1]
+                                        .parse()
+                                        .map_err(|_| "wait-time-weight must be a number")?;
+                                }
+                                "progress-weight" => {
+                                    config.weights.progress_weight = args[1]
+                                        .parse()
+                                        .map_err(|_| "progress-weight must be a number")?;
+                                }
+                                "retry-weight" => {
+                                    config.weights.retry_weight = args[1]
+                                        .parse()
+                                        .map_err(|_| "retry-weight must be a number")?;
+                                }
+                                "size-weight" => {
+                                    config.weights.size_weight = args[1]
+                                        .parse()
+                                        .map_err(|_| "size-weight must be a number")?;
+                                }
+                                _ => return Err(format!("unknown config key: {}", args[0])),
+                            }
+                            Ok(())
+                        })();
+                        match parse_result {
+                            Ok(()) => {
+                                download_manager.set_dynamic_priority_config(config).await;
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "✅ Dynamic priority configuration updated".to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message("main", format!("❌ {}", e));
+                            }
+                        }
+                    } else {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dldp config [key value]\n\
+                             Keys: enabled, interval, max-changes, slow-speed, near-complete,\n\
+                                   max-retries, small-file, min-wait, speed-weight,\n\
+                                   wait-time-weight, progress-weight, retry-weight, size-weight"
+                                .to_string(),
+                        );
+                    }
+                }
+                "run" => {
+                    let adjustments = download_manager.run_dynamic_priority_adjustment().await;
+                    if adjustments.is_empty() {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "ℹ️ No priority adjustments needed".to_string(),
+                        );
+                    } else {
+                        let mut msg = format!(
+                            "🎯 Dynamic Priority Adjustments ({})\n\
+                             ━━━━━━━━━━━━━━━━━━━━━━━━━\n",
+                            adjustments.len()
+                        );
+                        for adj in &adjustments {
+                            msg.push_str(&format!(
+                                "• {} → {} (score: {:.2})\n  Reason: {}\n",
+                                adj.task_id,
+                                format!("{:?}", adj.new_priority),
+                                adj.score,
+                                adj.reason
+                            ));
+                        }
+                        let mut s = state.lock().await;
+                        s.add_system_message("main", msg);
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_dynamic_priority_summary().await;
+                    let mut msg = format!(
+                        "📊 Dynamic Priority Summary\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         Enabled: {}\n\
+                         Tasks Evaluated: {}\n\
+                         Tasks Adjusted: {}\n\
+                         Last Adjustment: {}\n\
+                         Recent Adjustments: {}\n",
+                        summary.enabled,
+                        summary.tasks_evaluated,
+                        summary.tasks_adjusted,
+                        summary
+                            .last_adjustment_at
+                            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                            .unwrap_or_else(|| "never".to_string()),
+                        summary.recent_adjustments.len()
+                    );
+                    if !summary.recent_adjustments.is_empty() {
+                        msg.push_str("\nRecent History:\n");
+                        for record in summary.recent_adjustments.iter().take(10) {
+                            msg.push_str(&format!(
+                                "• {} @ {} → {:?} (score: {:.2})\n  {}\n",
+                                record.task_id,
+                                record.timestamp.format("%H:%M:%S"),
+                                record.new_priority,
+                                record.score,
+                                record.reason
+                            ));
+                        }
+                    }
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", msg);
+                }
+                "clear" => {
+                    download_manager.clear_dynamic_priority_history().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "✅ Cleared dynamic priority adjustment history".to_string(),
+                    );
+                }
+                _ => {
+                    let mut s = state.lock().await;
+                    s.add_system_message(
+                        "main",
+                        "Usage: /dldp <status|config|run|summary|clear> [args...]\n\
+                         status  - Show current status and configuration\n\
+                         config  - View or modify configuration (config [key value])\n\
+                         run     - Manually trigger priority adjustment\n\
+                         summary - Show adjustment history summary\n\
+                         clear   - Clear adjustment history"
+                            .to_string(),
                     );
                 }
             }
@@ -24092,6 +24370,229 @@ async fn handle_command_headless(
         Command::Ping => {
             println!("[pong] Local OK");
         }
+        Command::DlDynamicPriority { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "status" => {
+                    let config = download_manager.get_dynamic_priority_config().await;
+                    let summary = download_manager.get_dynamic_priority_summary().await;
+                    println!(
+                        "[dynamic-priority] Enabled: {}, Tasks: {}/{}, Last: {}, Interval: {}s, MaxChanges: {}, SlowSpeed: {} B/s, NearComplete: {}%, MaxRetries: {}, SmallFile: {} bytes",
+                        config.enabled,
+                        summary.tasks_evaluated,
+                        summary.tasks_adjusted,
+                        summary
+                            .last_adjustment_at
+                            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                            .unwrap_or_else(|| "never".to_string()),
+                        config.check_interval_secs,
+                        config.max_changes_per_cycle,
+                        config.slow_speed_bps,
+                        config.near_complete_pct,
+                        config.max_retry_threshold,
+                        config.small_file_bytes
+                    );
+                }
+                "config" => {
+                    if args.is_empty() {
+                        let config = download_manager.get_dynamic_priority_config().await;
+                        println!(
+                            "[dynamic-priority-config] Enabled: {}, Weights: speed={}, wait={}, progress={}, retry={}, size={}, MinWait: {}s, SlowSpeed: {} B/s, NearComplete: {}%, MaxRetries: {}, SmallFile: {} bytes, Interval: {}s, MaxChanges: {}",
+                            config.enabled,
+                            config.weights.speed_weight,
+                            config.weights.wait_time_weight,
+                            config.weights.progress_weight,
+                            config.weights.retry_weight,
+                            config.weights.size_weight,
+                            config.min_wait_secs,
+                            config.slow_speed_bps,
+                            config.near_complete_pct,
+                            config.max_retry_threshold,
+                            config.small_file_bytes,
+                            config.check_interval_secs,
+                            config.max_changes_per_cycle
+                        );
+                    } else if args.len() >= 2 {
+                        let mut config = download_manager.get_dynamic_priority_config().await;
+                        match args[0].as_str() {
+                            "enabled" => {
+                                if let Ok(v) = args[1].parse() {
+                                    config.enabled = v;
+                                    download_manager.set_dynamic_priority_config(config).await;
+                                    println!("[dynamic-priority] Enabled set to {}", args[1]);
+                                } else {
+                                    println!("[error] enabled must be true/false");
+                                }
+                            }
+                            "interval" => {
+                                if let Ok(v) = args[1].parse() {
+                                    config.check_interval_secs = v;
+                                    download_manager.set_dynamic_priority_config(config).await;
+                                    println!("[dynamic-priority] Interval set to {}s", v);
+                                } else {
+                                    println!("[error] interval must be seconds");
+                                }
+                            }
+                            "max-changes" => {
+                                if let Ok(v) = args[1].parse() {
+                                    config.max_changes_per_cycle = v;
+                                    download_manager.set_dynamic_priority_config(config).await;
+                                    println!("[dynamic-priority] MaxChanges set to {}", v);
+                                } else {
+                                    println!("[error] max-changes must be a number");
+                                }
+                            }
+                            "slow-speed" => {
+                                if let Ok(v) = args[1].parse() {
+                                    config.slow_speed_bps = v;
+                                    download_manager.set_dynamic_priority_config(config).await;
+                                    println!("[dynamic-priority] SlowSpeed set to {} B/s", v);
+                                } else {
+                                    println!("[error] slow-speed must be bytes/sec");
+                                }
+                            }
+                            "near-complete" => {
+                                if let Ok(v) = args[1].parse() {
+                                    config.near_complete_pct = v;
+                                    download_manager.set_dynamic_priority_config(config).await;
+                                    println!("[dynamic-priority] NearComplete set to {}%", v);
+                                } else {
+                                    println!("[error] near-complete must be percentage (0-100)");
+                                }
+                            }
+                            "max-retries" => {
+                                if let Ok(v) = args[1].parse() {
+                                    config.max_retry_threshold = v;
+                                    download_manager.set_dynamic_priority_config(config).await;
+                                    println!("[dynamic-priority] MaxRetries set to {}", v);
+                                } else {
+                                    println!("[error] max-retries must be a number");
+                                }
+                            }
+                            "small-file" => {
+                                if let Ok(v) = args[1].parse() {
+                                    config.small_file_bytes = v;
+                                    download_manager.set_dynamic_priority_config(config).await;
+                                    println!("[dynamic-priority] SmallFile set to {} bytes", v);
+                                } else {
+                                    println!("[error] small-file must be bytes");
+                                }
+                            }
+                            "min-wait" => {
+                                if let Ok(v) = args[1].parse() {
+                                    config.min_wait_secs = v;
+                                    download_manager.set_dynamic_priority_config(config).await;
+                                    println!("[dynamic-priority] MinWait set to {}s", v);
+                                } else {
+                                    println!("[error] min-wait must be seconds");
+                                }
+                            }
+                            "speed-weight" => {
+                                if let Ok(v) = args[1].parse() {
+                                    config.weights.speed_weight = v;
+                                    download_manager.set_dynamic_priority_config(config).await;
+                                    println!("[dynamic-priority] SpeedWeight set to {}", v);
+                                } else {
+                                    println!("[error] speed-weight must be a number");
+                                }
+                            }
+                            "wait-time-weight" => {
+                                if let Ok(v) = args[1].parse() {
+                                    config.weights.wait_time_weight = v;
+                                    download_manager.set_dynamic_priority_config(config).await;
+                                    println!("[dynamic-priority] WaitTimeWeight set to {}", v);
+                                } else {
+                                    println!("[error] wait-time-weight must be a number");
+                                }
+                            }
+                            "progress-weight" => {
+                                if let Ok(v) = args[1].parse() {
+                                    config.weights.progress_weight = v;
+                                    download_manager.set_dynamic_priority_config(config).await;
+                                    println!("[dynamic-priority] ProgressWeight set to {}", v);
+                                } else {
+                                    println!("[error] progress-weight must be a number");
+                                }
+                            }
+                            "retry-weight" => {
+                                if let Ok(v) = args[1].parse() {
+                                    config.weights.retry_weight = v;
+                                    download_manager.set_dynamic_priority_config(config).await;
+                                    println!("[dynamic-priority] RetryWeight set to {}", v);
+                                } else {
+                                    println!("[error] retry-weight must be a number");
+                                }
+                            }
+                            "size-weight" => {
+                                if let Ok(v) = args[1].parse() {
+                                    config.weights.size_weight = v;
+                                    download_manager.set_dynamic_priority_config(config).await;
+                                    println!("[dynamic-priority] SizeWeight set to {}", v);
+                                } else {
+                                    println!("[error] size-weight must be a number");
+                                }
+                            }
+                            _ => {
+                                println!("[error] unknown config key: {}", args[0]);
+                            }
+                        }
+                    } else {
+                        println!("[usage] /dldp config [key value]");
+                        println!(
+                            "[keys] enabled, interval, max-changes, slow-speed, near-complete, max-retries, small-file, min-wait, speed-weight, wait-time-weight, progress-weight, retry-weight, size-weight"
+                        );
+                    }
+                }
+                "run" => {
+                    let adjustments = download_manager.run_dynamic_priority_adjustment().await;
+                    if adjustments.is_empty() {
+                        println!("[dynamic-priority] No adjustments needed");
+                    } else {
+                        println!("[dynamic-priority] {} adjustments:", adjustments.len());
+                        for adj in &adjustments {
+                            println!(
+                                "  {} → {:?} (score: {:.2}) - {}",
+                                adj.task_id, adj.new_priority, adj.score, adj.reason
+                            );
+                        }
+                    }
+                }
+                "summary" => {
+                    let summary = download_manager.get_dynamic_priority_summary().await;
+                    println!(
+                        "[dynamic-priority-summary] Enabled: {}, Tasks: {}/{}, Last: {}, Recent: {}",
+                        summary.enabled,
+                        summary.tasks_evaluated,
+                        summary.tasks_adjusted,
+                        summary
+                            .last_adjustment_at
+                            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                            .unwrap_or_else(|| "never".to_string()),
+                        summary.recent_adjustments.len()
+                    );
+                    for record in summary.recent_adjustments.iter().take(10) {
+                        println!(
+                            "  {} @ {} → {:?} (score: {:.2}) - {}",
+                            record.task_id,
+                            record.timestamp.format("%H:%M:%S"),
+                            record.new_priority,
+                            record.score,
+                            record.reason
+                        );
+                    }
+                }
+                "clear" => {
+                    download_manager.clear_dynamic_priority_history().await;
+                    println!("[dynamic-priority] History cleared");
+                }
+                _ => {
+                    println!("[usage] /dldp <status|config|run|summary|clear>");
+                }
+            }
+        }
         Command::DlUptime => {
             let s = state.lock().await;
             let download_manager = s.download_manager.clone();
@@ -26192,5 +26693,107 @@ mod save_path_tests {
     fn test_help_contains_dlnorm() {
         let help = command_help();
         assert!(help.contains("/dlnorm"));
+    }
+
+    #[test]
+    fn test_parse_dldp_status() {
+        let cmd = parse_command("/dldp status");
+        match cmd {
+            Command::DlDynamicPriority { subcommand, args } => {
+                assert_eq!(subcommand, "status");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlDynamicPriority, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dldp_config() {
+        let cmd = parse_command("/dldp config enabled true");
+        match cmd {
+            Command::DlDynamicPriority { subcommand, args } => {
+                assert_eq!(subcommand, "config");
+                assert_eq!(args, vec!["enabled", "true"]);
+            }
+            other => panic!("Expected DlDynamicPriority, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dldp_run() {
+        let cmd = parse_command("/dldp run");
+        match cmd {
+            Command::DlDynamicPriority { subcommand, args } => {
+                assert_eq!(subcommand, "run");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlDynamicPriority, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dldp_summary() {
+        let cmd = parse_command("/dldp summary");
+        match cmd {
+            Command::DlDynamicPriority { subcommand, args } => {
+                assert_eq!(subcommand, "summary");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlDynamicPriority, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dldp_clear() {
+        let cmd = parse_command("/dldp clear");
+        match cmd {
+            Command::DlDynamicPriority { subcommand, args } => {
+                assert_eq!(subcommand, "clear");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlDynamicPriority, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dldp_alias() {
+        let cmd = parse_command("/dl-dynamic status");
+        match cmd {
+            Command::DlDynamicPriority { subcommand, args } => {
+                assert_eq!(subcommand, "status");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlDynamicPriority, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dldp_short_alias() {
+        let cmd = parse_command("/dldp status");
+        match cmd {
+            Command::DlDynamicPriority { subcommand, args } => {
+                assert_eq!(subcommand, "status");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlDynamicPriority, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dldp_no_args() {
+        let cmd = parse_command("/dldp");
+        match cmd {
+            Command::DlDynamicPriority { subcommand, args } => {
+                assert_eq!(subcommand, "help");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlDynamicPriority, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_help_contains_dldp() {
+        let help = command_help();
+        assert!(help.contains("/dldp"));
     }
 }

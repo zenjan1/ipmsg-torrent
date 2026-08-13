@@ -83,7 +83,9 @@ async fn test_connection_pool_dns_cache() {
     assert_eq!(addr.port(), 8080);
 
     // Non-existent domain should fail
-    let missing = pool.resolve_cached("this-domain-definitely-does-not-exist.invalid", 80).await;
+    let missing = pool
+        .resolve_cached("this-domain-definitely-does-not-exist.invalid", 80)
+        .await;
     assert!(missing.is_err());
 }
 
