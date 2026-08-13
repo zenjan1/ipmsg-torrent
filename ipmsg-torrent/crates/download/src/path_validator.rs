@@ -560,12 +560,14 @@ mod tests {
     #[tokio::test]
     async fn test_auto_create_directory() {
         let temp_dir = TempDir::new().unwrap();
-        let new_dir = temp_dir.path().join("new").join("nested").join("dir");
+        let relative_path = PathBuf::from("new").join("nested").join("dir");
+        let absolute_path = temp_dir.path().join(&relative_path);
 
-        let result = validate_and_create(&new_dir, temp_dir.path()).await;
+        // Use relative path with validate_path
+        let result = validate_path(&relative_path, temp_dir.path()).await;
 
-        assert!(result.is_ok());
-        assert!(new_dir.exists());
+        assert!(result.is_valid, "Validation failed: {:?}", result.error);
+        assert!(absolute_path.exists());
     }
 
     #[tokio::test]
@@ -589,16 +591,12 @@ mod tests {
     #[tokio::test]
     async fn test_validate_nested_path() {
         let temp_dir = TempDir::new().unwrap();
-        let nested = temp_dir
-            .path()
-            .join("level1")
-            .join("level2")
-            .join("file.txt");
+        let nested = PathBuf::from("level1").join("level2");
 
-        let result = validate_and_create(nested.parent().unwrap(), temp_dir.path()).await;
+        let result = validate_path(&nested, temp_dir.path()).await;
 
-        assert!(result.is_ok());
-        assert!(nested.parent().unwrap().exists());
+        assert!(result.is_valid, "Validation failed: {:?}", result.error);
+        assert!(temp_dir.path().join(&nested).exists());
     }
 
     #[test]
@@ -651,5 +649,730 @@ mod tests {
         let validator = PathValidator::with_config(config);
         assert_eq!(validator.config().max_path_length, 1000);
         assert!(!validator.config().auto_create_dirs);
+    }
+
+    // ===== PathValidationError Display =====
+
+    #[test]
+    fn test_error_display_path_traversal() {
+        let err = PathValidationError::PathTraversal("../../etc".into());
+        assert_eq!(err.to_string(), "Path traversal detected: ../../etc");
+    }
+
+    #[test]
+    fn test_error_display_invalid_character() {
+        let err = PathValidationError::InvalidCharacter("<".into());
+        assert_eq!(err.to_string(), "Invalid character in path: <");
+    }
+
+    #[test]
+    fn test_error_display_reserved_name() {
+        let err = PathValidationError::ReservedName("CON".into());
+        assert_eq!(err.to_string(), "Reserved name in path: CON");
+    }
+
+    #[test]
+    fn test_error_display_too_long() {
+        let err = PathValidationError::TooLong {
+            path: "very/long/path".into(),
+            max: 100,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("too long"));
+        assert!(msg.contains("100"));
+        assert!(msg.contains("very/long/path"));
+    }
+
+    #[test]
+    fn test_error_display_empty_component() {
+        let err = PathValidationError::EmptyComponent;
+        assert_eq!(err.to_string(), "Empty path component");
+    }
+
+    #[test]
+    fn test_error_display_absolute_path() {
+        let err = PathValidationError::AbsolutePath;
+        assert_eq!(
+            err.to_string(),
+            "Path is absolute but should be relative to base"
+        );
+    }
+
+    #[test]
+    fn test_error_display_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+        let err = PathValidationError::Io(io_err);
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_error_display_not_writable() {
+        let err = PathValidationError::NotWritable(PathBuf::from("/readonly"));
+        let msg = err.to_string();
+        assert!(msg.contains("not writable"));
+        assert!(msg.contains("/readonly"));
+    }
+
+    #[test]
+    fn test_error_display_create_failed() {
+        let err = PathValidationError::CreateFailed(PathBuf::from("/some/dir"));
+        let msg = err.to_string();
+        assert!(msg.contains("Failed to create directory"));
+        assert!(msg.contains("/some/dir"));
+    }
+
+    // ===== PathValidationError From<io::Error> =====
+
+    #[test]
+    fn test_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let path_err: PathValidationError = io_err.into();
+        assert!(path_err.to_string().contains("denied"));
+    }
+
+    // ===== PathValidationError Debug =====
+
+    #[test]
+    fn test_error_debug_variants() {
+        // Verify Debug impl for all variants
+        let errors: Vec<Box<dyn std::fmt::Debug>> = vec![
+            Box::new(PathValidationError::PathTraversal("test".into())),
+            Box::new(PathValidationError::InvalidCharacter("x".into())),
+            Box::new(PathValidationError::ReservedName("CON".into())),
+            Box::new(PathValidationError::TooLong {
+                path: "p".into(),
+                max: 10,
+            }),
+            Box::new(PathValidationError::EmptyComponent),
+            Box::new(PathValidationError::AbsolutePath),
+            Box::new(PathValidationError::Io(std::io::Error::other("io"))),
+            Box::new(PathValidationError::NotWritable(PathBuf::from("/x"))),
+            Box::new(PathValidationError::CreateFailed(PathBuf::from("/y"))),
+        ];
+        for err in &errors {
+            let debug_str = format!("{:?}", err);
+            assert!(!debug_str.is_empty());
+        }
+    }
+
+    // ===== ValidationResult =====
+
+    #[test]
+    fn test_validation_result_invalid() {
+        let result = ValidationResult::invalid("some error");
+        assert!(!result.is_valid);
+        assert!(result.canonical_path.is_none());
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.error.as_deref(), Some("some error"));
+    }
+
+    #[test]
+    fn test_validation_result_valid_no_warnings() {
+        let result = ValidationResult::valid(PathBuf::from("/ok"));
+        assert!(result.is_valid);
+        assert_eq!(result.canonical_path, Some(PathBuf::from("/ok")));
+        assert!(result.warnings.is_empty());
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn test_validation_result_multiple_warnings() {
+        let result = ValidationResult::valid(PathBuf::from("/ok"))
+            .with_warning("warn1")
+            .with_warning("warn2")
+            .with_warning("warn3");
+        assert_eq!(result.warnings.len(), 3);
+        assert_eq!(result.warnings[0], "warn1");
+        assert_eq!(result.warnings[2], "warn3");
+    }
+
+    #[test]
+    fn test_validation_result_clone() {
+        let result = ValidationResult::valid(PathBuf::from("/ok")).with_warning("test");
+        let cloned = result.clone();
+        assert_eq!(cloned.is_valid, result.is_valid);
+        assert_eq!(cloned.canonical_path, result.canonical_path);
+        assert_eq!(cloned.warnings, result.warnings);
+        assert_eq!(cloned.error, result.error);
+    }
+
+    // ===== PathValidatorConfig =====
+
+    #[test]
+    fn test_config_default_values() {
+        let config = PathValidatorConfig::default();
+        assert_eq!(config.base_dir, PathBuf::from("."));
+        assert!(config.auto_create_dirs);
+        assert_eq!(config.max_path_length, 4096);
+        assert!(config.check_reserved_names);
+        assert!(!config.allow_absolute_paths);
+    }
+
+    #[test]
+    fn test_config_serde_roundtrip() {
+        let config = PathValidatorConfig {
+            base_dir: PathBuf::from("/tmp/downloads"),
+            auto_create_dirs: false,
+            max_path_length: 2048,
+            check_reserved_names: false,
+            allow_absolute_paths: true,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: PathValidatorConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.base_dir, config.base_dir);
+        assert_eq!(loaded.auto_create_dirs, config.auto_create_dirs);
+        assert_eq!(loaded.max_path_length, config.max_path_length);
+        assert_eq!(loaded.check_reserved_names, config.check_reserved_names);
+        assert_eq!(loaded.allow_absolute_paths, config.allow_absolute_paths);
+    }
+
+    #[test]
+    fn test_config_serde_extra_fields_ignored() {
+        let json = r#"{
+            "base_dir": "/tmp",
+            "auto_create_dirs": true,
+            "max_path_length": 4096,
+            "check_reserved_names": true,
+            "allow_absolute_paths": false,
+            "unknown_field": 42
+        }"#;
+        let config: PathValidatorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.base_dir, PathBuf::from("/tmp"));
+    }
+
+    // ===== PathValidator Default =====
+
+    #[test]
+    fn test_validator_default_trait() {
+        let validator = PathValidator::default();
+        assert_eq!(validator.config().base_dir, PathBuf::from("."));
+        assert!(validator.config().auto_create_dirs);
+    }
+
+    // ===== set_base_dir =====
+
+    #[test]
+    fn test_set_base_dir() {
+        let mut validator = PathValidator::new();
+        assert_eq!(validator.config().base_dir, PathBuf::from("."));
+        validator.set_base_dir(PathBuf::from("/new/base"));
+        assert_eq!(validator.config().base_dir, PathBuf::from("/new/base"));
+    }
+
+    // ===== check_invalid_chars extended =====
+
+    #[test]
+    fn test_check_invalid_chars_null_byte() {
+        let validator = PathValidator::new();
+        assert_eq!(validator.check_invalid_chars("file\0name"), Some('\0'));
+    }
+
+    #[test]
+    fn test_check_invalid_chars_control_chars() {
+        let validator = PathValidator::new();
+        // Tab is a control character
+        assert_eq!(validator.check_invalid_chars("file\tname"), Some('\t'));
+        // Newline is a control character
+        assert_eq!(validator.check_invalid_chars("file\nname"), Some('\n'));
+    }
+
+    #[test]
+    fn test_check_invalid_chars_normal() {
+        let validator = PathValidator::new();
+        assert!(
+            validator
+                .check_invalid_chars("hello_world-123.txt")
+                .is_none()
+        );
+        assert!(validator.check_invalid_chars("日本語ファイル").is_none());
+        assert!(validator.check_invalid_chars("файл").is_none());
+        assert!(validator.check_invalid_chars("café").is_none());
+    }
+
+    // ===== check_reserved_name extended =====
+
+    #[test]
+    fn test_check_reserved_name_all_com_ports() {
+        let validator = PathValidator::new();
+        for i in 1..=9 {
+            let name = format!("COM{}", i);
+            // Just verify it returns Some for all COM ports
+            assert!(validator.check_reserved_name(&name).is_some());
+        }
+    }
+
+    #[test]
+    fn test_check_reserved_name_all_lpt_ports() {
+        let validator = PathValidator::new();
+        for i in 1..=9 {
+            let name = format!("LPT{}", i);
+            assert!(validator.check_reserved_name(&name).is_some());
+        }
+    }
+
+    #[test]
+    fn test_check_reserved_name_case_insensitive() {
+        let validator = PathValidator::new();
+        assert!(validator.check_reserved_name("con").is_some());
+        assert!(validator.check_reserved_name("Con").is_some());
+        assert!(validator.check_reserved_name("cOn").is_some());
+        assert!(validator.check_reserved_name("nul").is_some());
+        assert!(validator.check_reserved_name("Nul").is_some());
+        assert!(validator.check_reserved_name("aux").is_some());
+        assert!(validator.check_reserved_name("prn").is_some());
+    }
+
+    #[test]
+    fn test_check_reserved_name_non_reserved() {
+        let validator = PathValidator::new();
+        assert!(validator.check_reserved_name("myfile").is_none());
+        assert!(validator.check_reserved_name("config").is_none());
+        assert!(validator.check_reserved_name("data").is_none());
+        assert!(validator.check_reserved_name("COM0").is_none()); // COM0 not reserved
+        assert!(validator.check_reserved_name("LPT0").is_none()); // LPT0 not reserved
+        assert!(validator.check_reserved_name("COM10").is_none()); // COM10 not reserved
+    }
+
+    #[test]
+    fn test_check_reserved_name_with_multiple_dots() {
+        let validator = PathValidator::new();
+        // "CON" is extracted from first split on '.'
+        assert!(validator.check_reserved_name("CON.tar.gz").is_some());
+        assert!(validator.check_reserved_name("NUL.dat.bak").is_some());
+    }
+
+    // ===== Validation boundary: exact max_path_length =====
+
+    #[tokio::test]
+    async fn test_validate_path_exact_max_length() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = PathValidatorConfig {
+            base_dir: temp_dir.path().to_path_buf(),
+            max_path_length: 10,
+            ..Default::default()
+        };
+        let validator = PathValidator::with_config(config);
+
+        // Exactly 10 chars should be ok
+        let result = validator.validate("aaaaaaaaaa").await;
+        // It may fail for other reasons (path doesn't exist, auto-create), but NOT for length
+        if !result.is_valid {
+            assert!(!result.error.as_ref().unwrap().contains("too long"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_path_one_over_max_length() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = PathValidatorConfig {
+            base_dir: temp_dir.path().to_path_buf(),
+            max_path_length: 10,
+            ..Default::default()
+        };
+        let validator = PathValidator::with_config(config);
+
+        // 11 chars should fail
+        let result = validator.validate("aaaaaaaaaaa").await;
+        assert!(!result.is_valid);
+        assert!(result.error.unwrap().contains("too long"));
+    }
+
+    // ===== auto_create_dirs = false =====
+
+    #[tokio::test]
+    async fn test_validate_nonexistent_no_auto_create() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = PathValidatorConfig {
+            base_dir: temp_dir.path().to_path_buf(),
+            auto_create_dirs: false,
+            ..Default::default()
+        };
+        let validator = PathValidator::with_config(config);
+
+        let result = validator.validate("nonexistent_dir").await;
+        assert!(!result.is_valid);
+        assert!(result.error.unwrap().contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_existing_dir_no_auto_create() {
+        let temp_dir = TempDir::new().unwrap();
+        let sub = temp_dir.path().join("existing");
+        tokio::fs::create_dir_all(&sub).await.unwrap();
+
+        let config = PathValidatorConfig {
+            base_dir: temp_dir.path().to_path_buf(),
+            auto_create_dirs: false,
+            ..Default::default()
+        };
+        let validator = PathValidator::with_config(config);
+
+        let result = validator.validate("existing").await;
+        assert!(result.is_valid);
+    }
+
+    // ===== check_reserved_names = false =====
+
+    #[tokio::test]
+    async fn test_validate_reserved_name_check_disabled() {
+        let temp_dir = TempDir::new().unwrap();
+        // Create the CON directory so it exists
+        let con_dir = temp_dir.path().join("CON");
+        tokio::fs::create_dir_all(&con_dir).await.unwrap();
+
+        let config = PathValidatorConfig {
+            base_dir: temp_dir.path().to_path_buf(),
+            check_reserved_names: false,
+            ..Default::default()
+        };
+        let validator = PathValidator::with_config(config);
+
+        let result = validator.validate("CON").await;
+        // Should not fail on reserved name check
+        assert!(result.is_valid);
+    }
+
+    // ===== validate_and_create =====
+
+    #[tokio::test]
+    async fn test_validate_and_create_success() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let result = validate_and_create("new_dir", temp_dir.path()).await;
+        assert!(
+            result.is_ok(),
+            "validate_and_create failed: {:?}",
+            result.err()
+        );
+        assert!(temp_dir.path().join("new_dir").exists());
+    }
+
+    #[tokio::test]
+    async fn test_validate_and_create_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        // Path with invalid characters should fail
+        let bad_path = temp_dir.path().join("file<bad>name");
+
+        let result = validate_and_create(&bad_path, temp_dir.path()).await;
+        assert!(result.is_err());
+    }
+
+    // ===== validate_all edge cases =====
+
+    #[tokio::test]
+    async fn test_validate_all_empty_slice() {
+        let temp_dir = TempDir::new().unwrap();
+        let validator = PathValidator::with_config(PathValidatorConfig {
+            base_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        });
+
+        let paths: Vec<&str> = vec![];
+        let results = validator.validate_all(&paths).await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_validate_all_single_valid() {
+        let temp_dir = TempDir::new().unwrap();
+        let validator = PathValidator::with_config(PathValidatorConfig {
+            base_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        });
+
+        let paths = vec!["single_file.txt"];
+        let results = validator.validate_all(&paths).await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_all_preserves_order() {
+        let temp_dir = TempDir::new().unwrap();
+        let validator = PathValidator::with_config(PathValidatorConfig {
+            base_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        });
+
+        let paths = vec!["a.txt", "b.txt", "c.txt"];
+        let results = validator.validate_all(&paths).await;
+        assert_eq!(results[0].0, PathBuf::from("a.txt"));
+        assert_eq!(results[1].0, PathBuf::from("b.txt"));
+        assert_eq!(results[2].0, PathBuf::from("c.txt"));
+    }
+
+    // ===== Unicode path handling =====
+
+    #[tokio::test]
+    async fn test_validate_unicode_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let unicode_dir = temp_dir.path().join("日本語");
+        tokio::fs::create_dir_all(&unicode_dir).await.unwrap();
+
+        let result = validate_path("日本語", temp_dir.path()).await;
+        assert!(result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_emoji_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let emoji_dir = temp_dir.path().join("📁downloads");
+        tokio::fs::create_dir_all(&emoji_dir).await.unwrap();
+
+        let result = validate_path("📁downloads", temp_dir.path()).await;
+        assert!(result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_cyrillic_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let cyrillic_dir = temp_dir.path().join("файлы");
+        tokio::fs::create_dir_all(&cyrillic_dir).await.unwrap();
+
+        let result = validate_path("файлы", temp_dir.path()).await;
+        assert!(result.is_valid);
+    }
+
+    // ===== Path with spaces and dots =====
+
+    #[tokio::test]
+    async fn test_validate_path_with_spaces() {
+        let temp_dir = TempDir::new().unwrap();
+        let spaced_dir = temp_dir.path().join("my downloads");
+        tokio::fs::create_dir_all(&spaced_dir).await.unwrap();
+
+        let result = validate_path("my downloads", temp_dir.path()).await;
+        assert!(result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_path_with_dots_in_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let dotted_dir = temp_dir.path().join("v1.2.3");
+        tokio::fs::create_dir_all(&dotted_dir).await.unwrap();
+
+        let result = validate_path("v1.2.3", temp_dir.path()).await;
+        assert!(result.is_valid);
+    }
+
+    // ===== Validation: path is a file not directory =====
+
+    #[tokio::test]
+    async fn test_validate_existing_file_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("existing_file.txt");
+        tokio::fs::write(&file_path, b"hello").await.unwrap();
+
+        // Validating a file (not directory) - should succeed as path validation
+        // checks the path itself, not whether it's a directory
+        let result = validate_path("existing_file.txt", temp_dir.path()).await;
+        assert!(result.is_valid);
+    }
+
+    // ===== Writable check =====
+
+    #[tokio::test]
+    async fn test_validate_writable_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let sub = temp_dir.path().join("writable_dir");
+        tokio::fs::create_dir_all(&sub).await.unwrap();
+
+        let result = validate_path("writable_dir", temp_dir.path()).await;
+        assert!(result.is_valid);
+        // The temp dir should be writable on any normal system
+    }
+
+    // ===== Convenience functions =====
+
+    #[tokio::test]
+    async fn test_validate_path_convenience() {
+        let temp_dir = TempDir::new().unwrap();
+        let sub = temp_dir.path().join("conv");
+        tokio::fs::create_dir_all(&sub).await.unwrap();
+
+        let result = validate_path("conv", &temp_dir).await;
+        assert!(result.is_valid);
+    }
+
+    // ===== Multiple invalid characters in same component =====
+
+    #[tokio::test]
+    async fn test_validate_multiple_invalid_chars() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = validate_path("file<>name", temp_dir.path()).await;
+        assert!(!result.is_valid);
+        assert!(result.error.unwrap().contains("Invalid character"));
+    }
+
+    // ===== Path traversal variants =====
+
+    #[tokio::test]
+    async fn test_validate_dot_dot_in_middle() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = validate_path("sub/../../outside", temp_dir.path()).await;
+        assert!(!result.is_valid);
+        assert!(result.error.unwrap().contains("traversal"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_dot_dot_at_end() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = validate_path("sub/..", temp_dir.path()).await;
+        // "sub/.." contains ".." component
+        assert!(!result.is_valid);
+    }
+
+    // ===== Reserved names: AUX, COM2-9, LPT2-9 =====
+
+    #[tokio::test]
+    async fn test_validate_reserved_aux() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = validate_path("AUX", temp_dir.path()).await;
+        assert!(!result.is_valid);
+        assert!(result.error.unwrap().contains("Reserved name"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_reserved_com2() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = validate_path("COM2", temp_dir.path()).await;
+        assert!(!result.is_valid);
+        assert!(result.error.unwrap().contains("Reserved name"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_reserved_lpt9() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = validate_path("LPT9", temp_dir.path()).await;
+        assert!(!result.is_valid);
+        assert!(result.error.unwrap().contains("Reserved name"));
+    }
+
+    // ===== Non-reserved similar names =====
+
+    #[tokio::test]
+    async fn test_validate_non_reserved_similar() {
+        let temp_dir = TempDir::new().unwrap();
+        let sub = temp_dir.path().join("CONF");
+        tokio::fs::create_dir_all(&sub).await.unwrap();
+
+        let result = validate_path("CONF", temp_dir.path()).await;
+        assert!(result.is_valid);
+    }
+
+    // ===== Deeply nested auto-create =====
+
+    #[tokio::test]
+    async fn test_auto_create_deeply_nested() {
+        let temp_dir = TempDir::new().unwrap();
+        let deep = PathBuf::from("a").join("b").join("c").join("d").join("e");
+
+        let result = validate_and_create(&deep, temp_dir.path()).await;
+        assert!(
+            result.is_ok(),
+            "validate_and_create failed: {:?}",
+            result.err()
+        );
+        assert!(temp_dir.path().join(&deep).exists());
+    }
+
+    // ===== validate with existing path that's already canonical =====
+
+    #[tokio::test]
+    async fn test_validate_canonical_path_returned() {
+        let temp_dir = TempDir::new().unwrap();
+        let sub = temp_dir.path().join("canonical_test");
+        tokio::fs::create_dir_all(&sub).await.unwrap();
+
+        let result = validate_path("canonical_test", temp_dir.path()).await;
+        assert!(result.is_valid);
+        let canonical = result.canonical_path.unwrap();
+        assert!(canonical.is_absolute());
+        // Should be under the temp dir
+        assert!(canonical.starts_with(temp_dir.path()));
+    }
+
+    // ===== validate_all with all invalid =====
+
+    #[tokio::test]
+    async fn test_validate_all_all_invalid() {
+        let temp_dir = TempDir::new().unwrap();
+        let validator = PathValidator::with_config(PathValidatorConfig {
+            base_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        });
+
+        let paths = vec!["../a", "../b", "../c"];
+        let results = validator.validate_all(&paths).await;
+        assert_eq!(results.len(), 3);
+        for (_, result) in &results {
+            assert!(!result.is_valid);
+        }
+    }
+
+    // ===== Empty component detection =====
+
+    #[test]
+    fn test_check_invalid_chars_empty_string() {
+        let validator = PathValidator::new();
+        // Empty string has no invalid chars
+        assert!(validator.check_invalid_chars("").is_none());
+    }
+
+    // ===== Reserved name edge cases =====
+
+    #[test]
+    fn test_check_reserved_name_dot_only() {
+        let validator = PathValidator::new();
+        // "." splits to "" which is not reserved
+        assert!(validator.check_reserved_name(".").is_none());
+    }
+
+    #[test]
+    fn test_check_reserved_name_starts_with_dot() {
+        let validator = PathValidator::new();
+        // ".hidden" - name before first dot is empty
+        assert!(validator.check_reserved_name(".hidden").is_none());
+    }
+
+    // ===== Full workflow =====
+
+    #[tokio::test]
+    async fn test_full_validation_workflow() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // 1. Create validator with custom config
+        let config = PathValidatorConfig {
+            base_dir: temp_dir.path().to_path_buf(),
+            auto_create_dirs: true,
+            max_path_length: 4096,
+            check_reserved_names: true,
+            allow_absolute_paths: false,
+        };
+        let mut validator = PathValidator::with_config(config);
+
+        // 2. Validate a valid path
+        let result = validator.validate("downloads/movies").await;
+        assert!(result.is_valid);
+        assert!(result.canonical_path.is_some());
+
+        // 3. Change base dir
+        let new_base = temp_dir.path().join("new_base");
+        tokio::fs::create_dir_all(&new_base).await.unwrap();
+        validator.set_base_dir(new_base.clone());
+
+        // 4. Validate under new base
+        let result = validator.validate("subdir").await;
+        assert!(result.is_valid);
+
+        // 5. Try invalid path
+        let result = validator.validate("../../etc").await;
+        assert!(!result.is_valid);
+
+        // 6. Validate multiple
+        let results = validator.validate_all(&["ok1", "ok2"]).await;
+        assert_eq!(results.len(), 2);
+        assert!(results[0].1.is_valid);
+        assert!(results[1].1.is_valid);
     }
 }
