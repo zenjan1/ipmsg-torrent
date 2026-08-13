@@ -76,17 +76,15 @@ async fn test_connection_pool_cleanup() {
 async fn test_connection_pool_dns_cache() {
     let pool = ConnectionPool::new();
 
-    // Cache a DNS result
-    pool.cache_dns_result("example.com".to_string(), "127.0.0.1".parse().unwrap());
+    // resolve_cached should work for localhost (no external DNS needed)
+    let result = pool.resolve_cached("127.0.0.1", 8080).await;
+    assert!(result.is_ok());
+    let addr = result.unwrap();
+    assert_eq!(addr.port(), 8080);
 
-    // Resolve from cache
-    let cached = pool.resolve_dns("example.com".to_string()).await;
-    assert!(cached.is_some());
-    assert_eq!(cached.unwrap(), "127.0.0.1".parse().unwrap());
-
-    // Non-existent domain
-    let missing = pool.resolve_dns("nonexistent.com".to_string()).await;
-    assert!(missing.is_none());
+    // Non-existent domain should fail
+    let missing = pool.resolve_cached("this-domain-definitely-does-not-exist.invalid", 80).await;
+    assert!(missing.is_err());
 }
 
 #[tokio::test]

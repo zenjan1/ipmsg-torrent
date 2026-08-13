@@ -103,7 +103,7 @@ async fn test_download_manager_speed_limit() {
         .unwrap();
 
     // Set per-task speed limit
-    manager.set_task_speed_limit(&task_id, 500_000).await; // 500 KB/s
+    manager.set_task_speed_limit(500_000).await; // 500 KB/s
 
     let tasks = manager.list_tasks().await;
     assert_eq!(tasks.len(), 1);

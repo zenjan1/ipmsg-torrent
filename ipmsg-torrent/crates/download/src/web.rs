@@ -412,6 +412,8 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/auto-cleanup", get(get_auto_cleanup))
         .route("/api/auto-cleanup", post(set_auto_cleanup))
+        .route("/api/auto-shutdown", get(get_auto_shutdown))
+        .route("/api/auto-shutdown", post(set_auto_shutdown))
         .route("/api/dedup", get(get_dedup_config))
         .route("/api/dedup", post(set_dedup_config))
         .route("/api/conflict", get(get_conflict_strategy))
@@ -3533,6 +3535,23 @@ async fn set_auto_cleanup(
     Json(config): Json<crate::auto_cleanup::AutoCleanupConfig>,
 ) -> impl axum::response::IntoResponse {
     state.manager.set_auto_cleanup(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get auto-shutdown configuration
+async fn get_auto_shutdown(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::auto_shutdown::AutoShutdownConfig> {
+    let config = state.manager.get_auto_shutdown().await;
+    Json(config)
+}
+
+/// Set auto-shutdown configuration
+async fn set_auto_shutdown(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::auto_shutdown::AutoShutdownConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_auto_shutdown(config).await;
     Json(serde_json::json!({"status": "ok"}))
 }
 
