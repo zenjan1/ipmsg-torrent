@@ -296,7 +296,7 @@ impl AnalyticsSummary {
             "📊 Download Analytics: {} to {} ({} days)\n",
             self.start_date, self.end_date, self.days_covered
         ));
-        report.push_str(&format!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"));
+        report.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
         report.push_str(&format!(
             "📥 Total Downloaded: {}\n",
             DailyMetrics::format_bytes(self.total_bytes_downloaded)
@@ -535,7 +535,7 @@ impl AnalyticsManager {
     /// Get all records sorted by date (newest first)
     pub fn all_records(&self) -> Vec<&DailyMetrics> {
         let mut records: Vec<_> = self.records.values().collect();
-        records.sort_by(|a, b| b.date.cmp(&a.date));
+        records.sort_by_key(|r| std::cmp::Reverse(r.date));
         records
     }
 
@@ -775,7 +775,7 @@ impl Default for AnalyticsManager {
     }
 }
 
-/// Persistence functions for analytics data
+// Persistence functions for analytics data
 
 /// Save analytics config to disk
 pub fn save_analytics_config(
@@ -783,8 +783,7 @@ pub fn save_analytics_config(
     config: &AnalyticsConfig,
 ) -> Result<(), std::io::Error> {
     let path = data_dir.join("analytics_config.json");
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(config).map_err(std::io::Error::other)?;
     std::fs::write(&path, json)
 }
 
@@ -801,8 +800,7 @@ pub fn save_analytics_records(
     records: &HashMap<NaiveDate, DailyMetrics>,
 ) -> Result<(), std::io::Error> {
     let path = data_dir.join("analytics_records.json");
-    let json = serde_json::to_string_pretty(records)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(records).map_err(std::io::Error::other)?;
     std::fs::write(&path, json)
 }
 
@@ -1234,5 +1232,1250 @@ mod tests {
         for i in 0..records.len() - 1 {
             assert!(records[i].date > records[i + 1].date);
         }
+    }
+
+    // ===== AnalyticsProtocol comprehensive tests =====
+
+    #[test]
+    fn test_analytics_protocol_labels() {
+        assert_eq!(AnalyticsProtocol::Http.label(), "HTTP/HTTPS");
+        assert_eq!(AnalyticsProtocol::Torrent.label(), "Torrent");
+        assert_eq!(AnalyticsProtocol::Ed2k.label(), "eDonkey");
+        assert_eq!(AnalyticsProtocol::P2p.label(), "P2P");
+        assert_eq!(AnalyticsProtocol::Other.label(), "Other");
+    }
+
+    #[test]
+    fn test_analytics_protocol_from_url_empty() {
+        assert_eq!(AnalyticsProtocol::from_url(""), AnalyticsProtocol::Other);
+    }
+
+    #[test]
+    fn test_analytics_protocol_from_url_mixed_case() {
+        assert_eq!(
+            AnalyticsProtocol::from_url("HTTPS://EXAMPLE.COM/file.zip"),
+            AnalyticsProtocol::Http
+        );
+        assert_eq!(
+            AnalyticsProtocol::from_url("HTTP://example.com/file"),
+            AnalyticsProtocol::Http
+        );
+    }
+
+    #[test]
+    fn test_analytics_protocol_from_url_torrent_file() {
+        assert_eq!(
+            AnalyticsProtocol::from_url("file:///path/to/file.torrent"),
+            AnalyticsProtocol::Torrent
+        );
+    }
+
+    #[test]
+    fn test_analytics_protocol_from_url_ftp() {
+        assert_eq!(
+            AnalyticsProtocol::from_url("ftp://ftp.example.com/file.iso"),
+            AnalyticsProtocol::Other
+        );
+    }
+
+    #[test]
+    fn test_analytics_protocol_serde_roundtrip() {
+        let protos = vec![
+            AnalyticsProtocol::Http,
+            AnalyticsProtocol::Torrent,
+            AnalyticsProtocol::Ed2k,
+            AnalyticsProtocol::P2p,
+            AnalyticsProtocol::Other,
+        ];
+        for proto in &protos {
+            let json = serde_json::to_string(proto).unwrap();
+            let deser: AnalyticsProtocol = serde_json::from_str(&json).unwrap();
+            assert_eq!(*proto, deser);
+        }
+    }
+
+    #[test]
+    fn test_analytics_protocol_serde_lowercase() {
+        let json = "\"http\"";
+        let proto: AnalyticsProtocol = serde_json::from_str(json).unwrap();
+        assert_eq!(proto, AnalyticsProtocol::Http);
+    }
+
+    #[test]
+    fn test_analytics_protocol_clone_copy_debug() {
+        let a = AnalyticsProtocol::Http;
+        let b = a; // Copy
+        assert_eq!(a, b);
+        let _ = format!("{:?}", a);
+        let c = a.clone();
+        assert_eq!(a, c);
+    }
+
+    // ===== DailyMetrics comprehensive tests =====
+
+    #[test]
+    fn test_daily_metrics_new_zero_state() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap();
+        let metrics = DailyMetrics::new(date);
+        assert_eq!(metrics.date, date);
+        assert_eq!(metrics.bytes_downloaded, 0);
+        assert_eq!(metrics.bytes_uploaded, 0);
+        assert_eq!(metrics.tasks_started, 0);
+        assert_eq!(metrics.tasks_completed, 0);
+        assert_eq!(metrics.tasks_failed, 0);
+        assert_eq!(metrics.tasks_paused, 0);
+        assert_eq!(metrics.peak_speed_bps, 0);
+        assert_eq!(metrics.avg_speed_bps, 0);
+        assert_eq!(metrics.speed_sample_count, 0);
+        assert!(metrics.protocol_bytes.is_empty());
+        assert!(metrics.hourly_bytes.is_empty());
+        assert_eq!(metrics.error_count, 0);
+        assert_eq!(metrics.retry_count, 0);
+        assert_eq!(metrics.active_time_secs, 0);
+    }
+
+    #[test]
+    fn test_daily_metrics_record_download_zero_bytes() {
+        let today = Utc::now().date_naive();
+        let mut metrics = DailyMetrics::new(today);
+        metrics.record_download(0, AnalyticsProtocol::Http, 10);
+        assert_eq!(metrics.bytes_downloaded, 0);
+        assert_eq!(metrics.protocol_bytes[&AnalyticsProtocol::Http], 0);
+        assert_eq!(metrics.hourly_bytes[&10], 0);
+    }
+
+    #[test]
+    fn test_daily_metrics_record_download_multiple_protocols_same_hour() {
+        let today = Utc::now().date_naive();
+        let mut metrics = DailyMetrics::new(today);
+        metrics.record_download(100, AnalyticsProtocol::Http, 14);
+        metrics.record_download(200, AnalyticsProtocol::Torrent, 14);
+        metrics.record_download(300, AnalyticsProtocol::Ed2k, 14);
+        assert_eq!(metrics.bytes_downloaded, 600);
+        assert_eq!(metrics.hourly_bytes[&14], 600);
+        assert_eq!(metrics.protocol_bytes.len(), 3);
+    }
+
+    #[test]
+    fn test_daily_metrics_record_download_same_protocol_different_hours() {
+        let today = Utc::now().date_naive();
+        let mut metrics = DailyMetrics::new(today);
+        metrics.record_download(100, AnalyticsProtocol::Http, 8);
+        metrics.record_download(200, AnalyticsProtocol::Http, 14);
+        metrics.record_download(300, AnalyticsProtocol::Http, 22);
+        assert_eq!(metrics.bytes_downloaded, 600);
+        assert_eq!(metrics.protocol_bytes[&AnalyticsProtocol::Http], 600);
+        assert_eq!(metrics.hourly_bytes.len(), 3);
+    }
+
+    #[test]
+    fn test_daily_metrics_record_speed_zero() {
+        let today = Utc::now().date_naive();
+        let mut metrics = DailyMetrics::new(today);
+        metrics.record_speed(0);
+        assert_eq!(metrics.peak_speed_bps, 0);
+        assert_eq!(metrics.speed_sample_count, 1);
+        assert_eq!(metrics.avg_speed_bps, 0);
+    }
+
+    #[test]
+    fn test_daily_metrics_record_speed_single_sample() {
+        let today = Utc::now().date_naive();
+        let mut metrics = DailyMetrics::new(today);
+        metrics.record_speed(500_000);
+        assert_eq!(metrics.peak_speed_bps, 500_000);
+        assert_eq!(metrics.avg_speed_bps, 500_000);
+        assert_eq!(metrics.speed_sample_count, 1);
+    }
+
+    #[test]
+    fn test_daily_metrics_record_speed_decreasing() {
+        let today = Utc::now().date_naive();
+        let mut metrics = DailyMetrics::new(today);
+        metrics.record_speed(1_000_000);
+        metrics.record_speed(500_000);
+        metrics.record_speed(100_000);
+        assert_eq!(metrics.peak_speed_bps, 1_000_000);
+        assert_eq!(metrics.speed_sample_count, 3);
+        // Average: (1000000 + 500000 + 100000) / 3 = 533333
+        assert_eq!(metrics.avg_speed_bps, 533_333);
+    }
+
+    #[test]
+    fn test_daily_metrics_record_task_paused() {
+        let today = Utc::now().date_naive();
+        let mut metrics = DailyMetrics::new(today);
+        metrics.record_task_event(TaskAnalyticsEvent::Paused);
+        metrics.record_task_event(TaskAnalyticsEvent::Paused);
+        assert_eq!(metrics.tasks_paused, 2);
+    }
+
+    #[test]
+    fn test_daily_metrics_record_active_time() {
+        let today = Utc::now().date_naive();
+        let mut metrics = DailyMetrics::new(today);
+        metrics.record_active_time(60);
+        metrics.record_active_time(120);
+        assert_eq!(metrics.active_time_secs, 180);
+    }
+
+    #[test]
+    fn test_daily_metrics_record_active_time_zero() {
+        let today = Utc::now().date_naive();
+        let mut metrics = DailyMetrics::new(today);
+        metrics.record_active_time(0);
+        assert_eq!(metrics.active_time_secs, 0);
+    }
+
+    #[test]
+    fn test_daily_metrics_top_protocol_empty() {
+        let today = Utc::now().date_naive();
+        let metrics = DailyMetrics::new(today);
+        assert!(metrics.top_protocol().is_none());
+    }
+
+    #[test]
+    fn test_daily_metrics_top_protocol_single() {
+        let today = Utc::now().date_naive();
+        let mut metrics = DailyMetrics::new(today);
+        metrics.record_download(1000, AnalyticsProtocol::Http, 10);
+        let (proto, bytes) = metrics.top_protocol().unwrap();
+        assert_eq!(proto, AnalyticsProtocol::Http);
+        assert_eq!(bytes, 1000);
+    }
+
+    #[test]
+    fn test_daily_metrics_peak_hour_empty() {
+        let today = Utc::now().date_naive();
+        let metrics = DailyMetrics::new(today);
+        assert!(metrics.peak_hour().is_none());
+    }
+
+    #[test]
+    fn test_daily_metrics_peak_hour_single() {
+        let today = Utc::now().date_naive();
+        let mut metrics = DailyMetrics::new(today);
+        metrics.record_download(500, AnalyticsProtocol::Http, 22);
+        let (hour, bytes) = metrics.peak_hour().unwrap();
+        assert_eq!(hour, 22);
+        assert_eq!(bytes, 500);
+    }
+
+    #[test]
+    fn test_daily_metrics_format_bytes_zero() {
+        assert_eq!(DailyMetrics::format_bytes(0), "0 B");
+    }
+
+    #[test]
+    fn test_daily_metrics_format_bytes_exact_kb() {
+        assert_eq!(DailyMetrics::format_bytes(1024), "1.00 KB");
+    }
+
+    #[test]
+    fn test_daily_metrics_format_bytes_exact_mb() {
+        assert_eq!(DailyMetrics::format_bytes(1_048_576), "1.00 MB");
+    }
+
+    #[test]
+    fn test_daily_metrics_format_bytes_exact_gb() {
+        assert_eq!(DailyMetrics::format_bytes(1_073_741_824), "1.00 GB");
+    }
+
+    #[test]
+    fn test_daily_metrics_format_bytes_large() {
+        assert_eq!(DailyMetrics::format_bytes(5_000_000_000), "4.66 GB");
+    }
+
+    #[test]
+    fn test_daily_metrics_format_speed() {
+        assert_eq!(DailyMetrics::format_speed(0), "0 B/s");
+        assert_eq!(DailyMetrics::format_speed(1024), "1.00 KB/s");
+        assert_eq!(DailyMetrics::format_speed(1_048_576), "1.00 MB/s");
+    }
+
+    // ===== AnalyticsConfig tests =====
+
+    #[test]
+    fn test_analytics_config_default() {
+        let config = AnalyticsConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.retention_days, DEFAULT_RETENTION_DAYS);
+        assert!(config.track_protocol_breakdown);
+        assert!(config.track_hourly_distribution);
+    }
+
+    #[test]
+    fn test_analytics_config_custom_values() {
+        let config = AnalyticsConfig {
+            enabled: false,
+            retention_days: 365,
+            track_protocol_breakdown: false,
+            track_hourly_distribution: false,
+        };
+        assert!(!config.enabled);
+        assert_eq!(config.retention_days, 365);
+        assert!(!config.track_protocol_breakdown);
+        assert!(!config.track_hourly_distribution);
+    }
+
+    #[test]
+    fn test_analytics_config_serde_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"retention_days":30,"track_protocol_breakdown":true,"track_hourly_distribution":true,"unknown_field":"value"}"#;
+        let config: AnalyticsConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.retention_days, 30);
+    }
+
+    #[test]
+    fn test_analytics_config_clone_debug() {
+        let config = AnalyticsConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.retention_days, config.retention_days);
+        let _ = format!("{:?}", config);
+    }
+
+    // ===== AnalyticsSummary tests =====
+
+    #[test]
+    fn test_analytics_summary_serde_roundtrip() {
+        let summary = AnalyticsSummary {
+            days_covered: 7,
+            start_date: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
+            total_bytes_downloaded: 10_000_000,
+            total_bytes_uploaded: 1_000_000,
+            total_tasks_started: 20,
+            total_tasks_completed: 18,
+            total_tasks_failed: 2,
+            overall_peak_speed_bps: 5_000_000,
+            avg_daily_bytes: 1_428_571,
+            avg_daily_completions: 2.57,
+            total_errors: 3,
+            total_retries: 5,
+            protocol_totals: HashMap::new(),
+            hourly_totals: HashMap::new(),
+            best_day: Some((NaiveDate::from_ymd_opt(2026, 8, 5).unwrap(), 3_000_000)),
+            worst_day: Some((NaiveDate::from_ymd_opt(2026, 8, 2).unwrap(), 500_000)),
+            total_active_time_secs: 3600,
+            success_rate: 0.9,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deser: AnalyticsSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.days_covered, 7);
+        assert_eq!(deser.total_bytes_downloaded, 10_000_000);
+        assert_eq!(deser.total_tasks_completed, 18);
+    }
+
+    #[test]
+    fn test_analytics_summary_format_report_with_best_worst_day() {
+        let summary = AnalyticsSummary {
+            days_covered: 3,
+            start_date: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2026, 8, 3).unwrap(),
+            total_bytes_downloaded: 6_000_000,
+            total_bytes_uploaded: 600_000,
+            total_tasks_started: 15,
+            total_tasks_completed: 12,
+            total_tasks_failed: 3,
+            overall_peak_speed_bps: 3_000_000,
+            avg_daily_bytes: 2_000_000,
+            avg_daily_completions: 4.0,
+            total_errors: 5,
+            total_retries: 8,
+            protocol_totals: HashMap::new(),
+            hourly_totals: HashMap::new(),
+            best_day: Some((NaiveDate::from_ymd_opt(2026, 8, 2).unwrap(), 3_000_000)),
+            worst_day: Some((NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(), 1_000_000)),
+            total_active_time_secs: 7200,
+            success_rate: 0.8,
+        };
+        let report = summary.format_report();
+        assert!(report.contains("Best Day"));
+        assert!(report.contains("Worst Day"));
+        assert!(report.contains("80.0%"));
+        assert!(report.contains("2h 0m"));
+    }
+
+    #[test]
+    fn test_analytics_summary_format_report_no_best_worst() {
+        let summary = AnalyticsSummary {
+            days_covered: 0,
+            start_date: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
+            total_bytes_downloaded: 0,
+            total_bytes_uploaded: 0,
+            total_tasks_started: 0,
+            total_tasks_completed: 0,
+            total_tasks_failed: 0,
+            overall_peak_speed_bps: 0,
+            avg_daily_bytes: 0,
+            avg_daily_completions: 0.0,
+            total_errors: 0,
+            total_retries: 0,
+            protocol_totals: HashMap::new(),
+            hourly_totals: HashMap::new(),
+            best_day: None,
+            worst_day: None,
+            total_active_time_secs: 0,
+            success_rate: 0.0,
+        };
+        let report = summary.format_report();
+        assert!(!report.contains("Best Day"));
+        assert!(!report.contains("Worst Day"));
+        assert!(report.contains("0.0%"));
+    }
+
+    // ===== TrendDirection tests =====
+
+    #[test]
+    fn test_trend_direction_serde_roundtrip() {
+        let directions = vec![
+            TrendDirection::Improving,
+            TrendDirection::Declining,
+            TrendDirection::Stable,
+        ];
+        for dir in &directions {
+            let json = serde_json::to_string(dir).unwrap();
+            let deser: TrendDirection = serde_json::from_str(&json).unwrap();
+            assert_eq!(*dir, deser);
+        }
+    }
+
+    #[test]
+    fn test_trend_direction_serde_lowercase() {
+        let json = "\"improving\"";
+        let dir: TrendDirection = serde_json::from_str(json).unwrap();
+        assert_eq!(dir, TrendDirection::Improving);
+
+        let json = "\"declining\"";
+        let dir: TrendDirection = serde_json::from_str(json).unwrap();
+        assert_eq!(dir, TrendDirection::Declining);
+
+        let json = "\"stable\"";
+        let dir: TrendDirection = serde_json::from_str(json).unwrap();
+        assert_eq!(dir, TrendDirection::Stable);
+    }
+
+    #[test]
+    fn test_trend_direction_clone_copy_debug() {
+        let d = TrendDirection::Improving;
+        let d2 = d; // Copy
+        assert_eq!(d, d2);
+        let _ = format!("{:?}", d);
+        let d3 = d.clone();
+        assert_eq!(d, d3);
+    }
+
+    // ===== TrendComparison tests =====
+
+    #[test]
+    fn test_trend_comparison_serde_roundtrip() {
+        let comparison = TrendComparison {
+            current: AnalyticsSummary {
+                days_covered: 7,
+                start_date: NaiveDate::from_ymd_opt(2026, 8, 8).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2026, 8, 14).unwrap(),
+                total_bytes_downloaded: 10_000_000,
+                total_bytes_uploaded: 0,
+                total_tasks_started: 10,
+                total_tasks_completed: 8,
+                total_tasks_failed: 2,
+                overall_peak_speed_bps: 5_000_000,
+                avg_daily_bytes: 1_428_571,
+                avg_daily_completions: 1.14,
+                total_errors: 3,
+                total_retries: 5,
+                protocol_totals: HashMap::new(),
+                hourly_totals: HashMap::new(),
+                best_day: None,
+                worst_day: None,
+                total_active_time_secs: 0,
+                success_rate: 0.8,
+            },
+            previous: AnalyticsSummary {
+                days_covered: 7,
+                start_date: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
+                total_bytes_downloaded: 5_000_000,
+                total_bytes_uploaded: 0,
+                total_tasks_started: 8,
+                total_tasks_completed: 5,
+                total_tasks_failed: 3,
+                overall_peak_speed_bps: 2_500_000,
+                avg_daily_bytes: 714_285,
+                avg_daily_completions: 0.71,
+                total_errors: 6,
+                total_retries: 10,
+                protocol_totals: HashMap::new(),
+                hourly_totals: HashMap::new(),
+                best_day: None,
+                worst_day: None,
+                total_active_time_secs: 0,
+                success_rate: 0.625,
+            },
+            download_change_pct: 100.0,
+            completion_change_pct: 60.0,
+            speed_change_pct: 100.0,
+            error_change_pct: -50.0,
+            trend_direction: TrendDirection::Improving,
+        };
+        let json = serde_json::to_string(&comparison).unwrap();
+        let deser: TrendComparison = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.trend_direction, TrendDirection::Improving);
+        assert!((deser.download_change_pct - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_trend_comparison_format_declining() {
+        let comparison = TrendComparison {
+            current: AnalyticsSummary {
+                days_covered: 7,
+                start_date: NaiveDate::from_ymd_opt(2026, 8, 8).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2026, 8, 14).unwrap(),
+                total_bytes_downloaded: 2_000_000,
+                total_bytes_uploaded: 0,
+                total_tasks_started: 5,
+                total_tasks_completed: 2,
+                total_tasks_failed: 3,
+                overall_peak_speed_bps: 1_000_000,
+                avg_daily_bytes: 285_714,
+                avg_daily_completions: 0.29,
+                total_errors: 10,
+                total_retries: 15,
+                protocol_totals: HashMap::new(),
+                hourly_totals: HashMap::new(),
+                best_day: None,
+                worst_day: None,
+                total_active_time_secs: 0,
+                success_rate: 0.4,
+            },
+            previous: AnalyticsSummary {
+                days_covered: 7,
+                start_date: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
+                total_bytes_downloaded: 10_000_000,
+                total_bytes_uploaded: 0,
+                total_tasks_started: 20,
+                total_tasks_completed: 18,
+                total_tasks_failed: 2,
+                overall_peak_speed_bps: 5_000_000,
+                avg_daily_bytes: 1_428_571,
+                avg_daily_completions: 2.57,
+                total_errors: 3,
+                total_retries: 5,
+                protocol_totals: HashMap::new(),
+                hourly_totals: HashMap::new(),
+                best_day: None,
+                worst_day: None,
+                total_active_time_secs: 0,
+                success_rate: 0.9,
+            },
+            download_change_pct: -80.0,
+            completion_change_pct: -88.9,
+            speed_change_pct: -80.0,
+            error_change_pct: 233.3,
+            trend_direction: TrendDirection::Declining,
+        };
+        let report = comparison.format_report();
+        assert!(report.contains("Declining"));
+        assert!(report.contains("-80.0%"));
+    }
+
+    #[test]
+    fn test_trend_comparison_format_stable() {
+        let comparison = TrendComparison {
+            current: AnalyticsSummary {
+                days_covered: 7,
+                start_date: NaiveDate::from_ymd_opt(2026, 8, 8).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2026, 8, 14).unwrap(),
+                total_bytes_downloaded: 5_100_000,
+                total_bytes_uploaded: 0,
+                total_tasks_started: 10,
+                total_tasks_completed: 9,
+                total_tasks_failed: 1,
+                overall_peak_speed_bps: 5_100_000,
+                avg_daily_bytes: 728_571,
+                avg_daily_completions: 1.29,
+                total_errors: 2,
+                total_retries: 3,
+                protocol_totals: HashMap::new(),
+                hourly_totals: HashMap::new(),
+                best_day: None,
+                worst_day: None,
+                total_active_time_secs: 0,
+                success_rate: 0.9,
+            },
+            previous: AnalyticsSummary {
+                days_covered: 7,
+                start_date: NaiveDate::from_ymd_opt(2026, 8, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2026, 8, 7).unwrap(),
+                total_bytes_downloaded: 5_000_000,
+                total_bytes_uploaded: 0,
+                total_tasks_started: 10,
+                total_tasks_completed: 9,
+                total_tasks_failed: 1,
+                overall_peak_speed_bps: 5_000_000,
+                avg_daily_bytes: 714_285,
+                avg_daily_completions: 1.29,
+                total_errors: 2,
+                total_retries: 3,
+                protocol_totals: HashMap::new(),
+                hourly_totals: HashMap::new(),
+                best_day: None,
+                worst_day: None,
+                total_active_time_secs: 0,
+                success_rate: 0.9,
+            },
+            download_change_pct: 2.0,
+            completion_change_pct: 0.0,
+            speed_change_pct: 2.0,
+            error_change_pct: 0.0,
+            trend_direction: TrendDirection::Stable,
+        };
+        let report = comparison.format_report();
+        assert!(report.contains("Stable"));
+    }
+
+    // ===== AnalyticsManager comprehensive tests =====
+
+    #[test]
+    fn test_analytics_manager_default_trait() {
+        let manager = AnalyticsManager::default();
+        assert_eq!(manager.record_count(), 0);
+        assert!(manager.config().enabled);
+    }
+
+    #[test]
+    fn test_analytics_manager_with_config() {
+        let config = AnalyticsConfig {
+            enabled: true,
+            retention_days: 30,
+            track_protocol_breakdown: false,
+            track_hourly_distribution: false,
+        };
+        let manager = AnalyticsManager::with_config(config);
+        assert_eq!(manager.config().retention_days, 30);
+        assert!(!manager.config().track_protocol_breakdown);
+    }
+
+    #[test]
+    fn test_analytics_manager_today_mut_creates_record() {
+        let mut manager = AnalyticsManager::new();
+        assert!(manager.today().is_none());
+        let _ = manager.today_mut();
+        assert!(manager.today().is_some());
+        assert_eq!(manager.record_count(), 1);
+    }
+
+    #[test]
+    fn test_analytics_manager_record_download_disabled() {
+        let mut manager = AnalyticsManager::with_config(AnalyticsConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        manager.record_download(1000, "https://example.com/file.zip");
+        assert!(manager.today().is_none());
+    }
+
+    #[test]
+    fn test_analytics_manager_record_speed_disabled() {
+        let mut manager = AnalyticsManager::with_config(AnalyticsConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        manager.record_speed(500_000);
+        assert!(manager.today().is_none());
+    }
+
+    #[test]
+    fn test_analytics_manager_record_task_event_disabled() {
+        let mut manager = AnalyticsManager::with_config(AnalyticsConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        manager.record_task_event(TaskAnalyticsEvent::Started);
+        assert!(manager.today().is_none());
+    }
+
+    #[test]
+    fn test_analytics_manager_record_active_time_disabled() {
+        let mut manager = AnalyticsManager::with_config(AnalyticsConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        manager.record_active_time(60);
+        assert!(manager.today().is_none());
+    }
+
+    #[test]
+    fn test_analytics_manager_get_day_existing() {
+        let mut manager = AnalyticsManager::new();
+        let today = Utc::now().date_naive();
+        manager.records.insert(today, DailyMetrics::new(today));
+        assert!(manager.get_day(today).is_some());
+    }
+
+    #[test]
+    fn test_analytics_manager_get_day_non_existing() {
+        let manager = AnalyticsManager::new();
+        let date = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+        assert!(manager.get_day(date).is_none());
+    }
+
+    #[test]
+    fn test_analytics_manager_summary_range_exact() {
+        let mut manager = AnalyticsManager::new();
+        let date1 = NaiveDate::from_ymd_opt(2026, 8, 1).unwrap();
+        let date2 = NaiveDate::from_ymd_opt(2026, 8, 2).unwrap();
+        let date3 = NaiveDate::from_ymd_opt(2026, 8, 3).unwrap();
+
+        let mut m1 = DailyMetrics::new(date1);
+        m1.bytes_downloaded = 1000;
+        let mut m2 = DailyMetrics::new(date2);
+        m2.bytes_downloaded = 2000;
+        let mut m3 = DailyMetrics::new(date3);
+        m3.bytes_downloaded = 3000;
+
+        manager.records.insert(date1, m1);
+        manager.records.insert(date2, m2);
+        manager.records.insert(date3, m3);
+
+        let summary = manager.summary_range(date1, date3).unwrap();
+        assert_eq!(summary.days_covered, 3);
+        assert_eq!(summary.total_bytes_downloaded, 6000);
+        assert_eq!(summary.avg_daily_bytes, 2000);
+    }
+
+    #[test]
+    fn test_analytics_manager_summary_range_partial_overlap() {
+        let mut manager = AnalyticsManager::new();
+        let date1 = NaiveDate::from_ymd_opt(2026, 8, 1).unwrap();
+        let date2 = NaiveDate::from_ymd_opt(2026, 8, 2).unwrap();
+
+        let mut m1 = DailyMetrics::new(date1);
+        m1.bytes_downloaded = 1000;
+        let mut m2 = DailyMetrics::new(date2);
+        m2.bytes_downloaded = 2000;
+
+        manager.records.insert(date1, m1);
+        manager.records.insert(date2, m2);
+
+        // Range that partially overlaps (date2 to date5)
+        let start = NaiveDate::from_ymd_opt(2026, 8, 2).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 8, 5).unwrap();
+        let summary = manager.summary_range(start, end).unwrap();
+        assert_eq!(summary.days_covered, 1);
+        assert_eq!(summary.total_bytes_downloaded, 2000);
+    }
+
+    #[test]
+    fn test_analytics_manager_summary_range_no_overlap() {
+        let mut manager = AnalyticsManager::new();
+        let date1 = NaiveDate::from_ymd_opt(2026, 8, 1).unwrap();
+
+        let mut m1 = DailyMetrics::new(date1);
+        m1.bytes_downloaded = 1000;
+        manager.records.insert(date1, m1);
+
+        let start = NaiveDate::from_ymd_opt(2026, 8, 10).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
+        assert!(manager.summary_range(start, end).is_none());
+    }
+
+    #[test]
+    fn test_analytics_manager_summary_single_day() {
+        let mut manager = AnalyticsManager::new();
+        let today = Utc::now().date_naive();
+
+        let mut metrics = DailyMetrics::new(today);
+        metrics.bytes_downloaded = 5000;
+        metrics.tasks_completed = 3;
+        metrics.tasks_started = 5;
+        metrics.peak_speed_bps = 1_000_000;
+        manager.records.insert(today, metrics);
+
+        let summary = manager.summary_last_n_days(1).unwrap();
+        assert_eq!(summary.days_covered, 1);
+        assert_eq!(summary.total_bytes_downloaded, 5000);
+        assert_eq!(summary.total_tasks_completed, 3);
+        assert!((summary.success_rate - 0.6).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_analytics_manager_compare_periods_declining() {
+        let mut manager = AnalyticsManager::new();
+        let today = Utc::now().date_naive();
+
+        for i in 0..14 {
+            let date = today - chrono::Duration::days(i);
+            let mut metrics = DailyMetrics::new(date);
+            if i < 7 {
+                // Current period: lower values
+                metrics.bytes_downloaded = 3000;
+                metrics.tasks_completed = 2;
+                metrics.peak_speed_bps = 500_000;
+                metrics.tasks_started = 3;
+                metrics.error_count = 5;
+            } else {
+                // Previous period: higher values
+                metrics.bytes_downloaded = 10000;
+                metrics.tasks_completed = 8;
+                metrics.peak_speed_bps = 2_000_000;
+                metrics.tasks_started = 10;
+                metrics.error_count = 1;
+            }
+            manager.records.insert(date, metrics);
+        }
+
+        let comparison = manager.compare_periods(7).unwrap();
+        assert!(comparison.download_change_pct < -60.0);
+        assert_eq!(comparison.trend_direction, TrendDirection::Declining);
+    }
+
+    #[test]
+    fn test_analytics_manager_compare_periods_stable() {
+        let mut manager = AnalyticsManager::new();
+        let today = Utc::now().date_naive();
+
+        for i in 0..14 {
+            let date = today - chrono::Duration::days(i);
+            let mut metrics = DailyMetrics::new(date);
+            metrics.bytes_downloaded = 5000;
+            metrics.tasks_completed = 4;
+            metrics.peak_speed_bps = 1_000_000;
+            metrics.tasks_started = 5;
+            manager.records.insert(date, metrics);
+        }
+
+        let comparison = manager.compare_periods(7).unwrap();
+        assert!((comparison.download_change_pct).abs() < 1.0);
+        assert_eq!(comparison.trend_direction, TrendDirection::Stable);
+    }
+
+    #[test]
+    fn test_analytics_manager_compare_periods_missing_previous() {
+        let mut manager = AnalyticsManager::new();
+        let today = Utc::now().date_naive();
+
+        // Only insert current period (7 days), no previous
+        for i in 0..7 {
+            let date = today - chrono::Duration::days(i);
+            let mut metrics = DailyMetrics::new(date);
+            metrics.bytes_downloaded = 5000;
+            manager.records.insert(date, metrics);
+        }
+
+        // Should return None because previous period has no data
+        assert!(manager.compare_periods(7).is_none());
+    }
+
+    #[test]
+    fn test_analytics_manager_prune_disabled_config() {
+        let mut manager = AnalyticsManager::with_config(AnalyticsConfig {
+            enabled: false,
+            retention_days: 1,
+            ..Default::default()
+        });
+
+        let today = Utc::now().date_naive();
+        let old_date = today - chrono::Duration::days(30);
+        manager
+            .records
+            .insert(old_date, DailyMetrics::new(old_date));
+        manager.records.insert(today, DailyMetrics::new(today));
+
+        // Prune should not remove anything when disabled
+        manager.prune_old_records();
+        assert_eq!(manager.record_count(), 2);
+    }
+
+    #[test]
+    fn test_analytics_manager_prune_max_records() {
+        let mut manager = AnalyticsManager::with_config(AnalyticsConfig {
+            retention_days: 3650, // very long retention
+            ..Default::default()
+        });
+
+        // Insert more than MAX_RECORDS (365)
+        let today = Utc::now().date_naive();
+        for i in 0..400 {
+            let date = today - chrono::Duration::days(i);
+            manager.records.insert(date, DailyMetrics::new(date));
+        }
+        assert_eq!(manager.record_count(), 400);
+
+        manager.prune_old_records();
+        assert_eq!(manager.record_count(), MAX_RECORDS);
+    }
+
+    #[test]
+    fn test_analytics_manager_insert_record() {
+        let mut manager = AnalyticsManager::new();
+        let date = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap();
+        let mut metrics = DailyMetrics::new(date);
+        metrics.bytes_downloaded = 9999;
+        manager.insert_record(date, metrics);
+        assert_eq!(manager.record_count(), 1);
+        assert_eq!(manager.get_day(date).unwrap().bytes_downloaded, 9999);
+    }
+
+    #[test]
+    fn test_analytics_manager_config_mut() {
+        let mut manager = AnalyticsManager::new();
+        assert!(manager.config().enabled);
+        manager.config_mut().enabled = false;
+        assert!(!manager.config().enabled);
+    }
+
+    #[test]
+    fn test_analytics_manager_set_config() {
+        let mut manager = AnalyticsManager::new();
+        let config = AnalyticsConfig {
+            retention_days: 180,
+            ..Default::default()
+        };
+        manager.set_config(config);
+        assert_eq!(manager.config().retention_days, 180);
+    }
+
+    #[test]
+    fn test_analytics_manager_records_mut() {
+        let mut manager = AnalyticsManager::new();
+        let date = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap();
+        manager.records_mut().insert(date, DailyMetrics::new(date));
+        assert_eq!(manager.record_count(), 1);
+    }
+
+    #[test]
+    fn test_analytics_manager_all_records_empty() {
+        let manager = AnalyticsManager::new();
+        assert!(manager.all_records().is_empty());
+    }
+
+    // ===== TaskAnalyticsEvent tests =====
+
+    #[test]
+    fn test_task_analytics_event_clone_copy_debug() {
+        let e = TaskAnalyticsEvent::Started;
+        let e2 = e; // Copy
+        assert_eq!(e, e2);
+        let _ = format!("{:?}", e);
+        let e3 = e.clone();
+        assert_eq!(e, e3);
+    }
+
+    #[test]
+    fn test_task_analytics_event_all_variants() {
+        let events = vec![
+            TaskAnalyticsEvent::Started,
+            TaskAnalyticsEvent::Completed,
+            TaskAnalyticsEvent::Failed,
+            TaskAnalyticsEvent::Paused,
+            TaskAnalyticsEvent::Error,
+            TaskAnalyticsEvent::Retry,
+        ];
+        assert_eq!(events.len(), 6);
+        // All should be distinct
+        for i in 0..events.len() {
+            for j in (i + 1)..events.len() {
+                assert_ne!(events[i], events[j]);
+            }
+        }
+    }
+
+    // ===== format_duration comprehensive tests =====
+
+    #[test]
+    fn test_format_duration_zero() {
+        assert_eq!(format_duration(0), "0m");
+    }
+
+    #[test]
+    fn test_format_duration_minutes_only() {
+        assert_eq!(format_duration(59), "0m");
+        assert_eq!(format_duration(60), "1m");
+        assert_eq!(format_duration(3599), "59m");
+    }
+
+    #[test]
+    fn test_format_duration_hours_minutes() {
+        assert_eq!(format_duration(3600), "1h 0m");
+        assert_eq!(format_duration(3660), "1h 1m");
+        assert_eq!(format_duration(7200), "2h 0m");
+    }
+
+    #[test]
+    fn test_format_duration_days() {
+        assert_eq!(format_duration(86400), "1d 0h 0m");
+        assert_eq!(format_duration(90061), "1d 1h 1m");
+    }
+
+    // ===== Persistence tests =====
+
+    #[test]
+    fn test_save_load_analytics_config_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AnalyticsConfig {
+            enabled: true,
+            retention_days: 45,
+            track_protocol_breakdown: false,
+            track_hourly_distribution: true,
+        };
+        save_analytics_config(dir.path(), &config).unwrap();
+        let loaded = load_analytics_config(dir.path()).unwrap();
+        assert_eq!(loaded.retention_days, 45);
+        assert!(!loaded.track_protocol_breakdown);
+        assert!(loaded.track_hourly_distribution);
+    }
+
+    #[test]
+    fn test_load_analytics_config_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_analytics_config(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_load_analytics_config_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("analytics_config.json");
+        std::fs::write(&path, "not valid json").unwrap();
+        assert!(load_analytics_config(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_save_load_analytics_records_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut records = HashMap::new();
+        let date1 = NaiveDate::from_ymd_opt(2026, 8, 13).unwrap();
+        let date2 = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap();
+
+        let mut m1 = DailyMetrics::new(date1);
+        m1.bytes_downloaded = 5000;
+        m1.record_download(1000, AnalyticsProtocol::Http, 10);
+
+        let mut m2 = DailyMetrics::new(date2);
+        m2.bytes_downloaded = 10000;
+        m2.record_speed(2_000_000);
+
+        records.insert(date1, m1);
+        records.insert(date2, m2);
+
+        save_analytics_records(dir.path(), &records).unwrap();
+        let loaded = load_analytics_records(dir.path()).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[&date1].bytes_downloaded, 6000); // 5000 + 1000
+        assert_eq!(loaded[&date2].peak_speed_bps, 2_000_000);
+    }
+
+    #[test]
+    fn test_load_analytics_records_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = load_analytics_records(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_analytics_records_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("analytics_records.json");
+        std::fs::write(&path, "{invalid json}").unwrap();
+        let result = load_analytics_records(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_analytics_config_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let config1 = AnalyticsConfig {
+            retention_days: 30,
+            ..Default::default()
+        };
+        save_analytics_config(dir.path(), &config1).unwrap();
+
+        let config2 = AnalyticsConfig {
+            retention_days: 90,
+            ..Default::default()
+        };
+        save_analytics_config(dir.path(), &config2).unwrap();
+
+        let loaded = load_analytics_config(dir.path()).unwrap();
+        assert_eq!(loaded.retention_days, 90);
+    }
+
+    // ===== Summary best/worst day edge cases =====
+
+    #[test]
+    fn test_summary_best_worst_day_excludes_zero() {
+        let mut manager = AnalyticsManager::new();
+        let today = Utc::now().date_naive();
+        let d1 = today - chrono::Duration::days(2);
+        let d2 = today - chrono::Duration::days(1);
+
+        let mut m1 = DailyMetrics::new(d1);
+        m1.bytes_downloaded = 0; // zero-download day
+        let mut m2 = DailyMetrics::new(d2);
+        m2.bytes_downloaded = 5000;
+        let mut m3 = DailyMetrics::new(today);
+        m3.bytes_downloaded = 2000;
+
+        manager.records.insert(d1, m1);
+        manager.records.insert(d2, m2);
+        manager.records.insert(today, m3);
+
+        let summary = manager.summary_last_n_days(3).unwrap();
+        // Best day should be d2 (5000)
+        assert_eq!(summary.best_day, Some((d2, 5000)));
+        // Worst day should be today (2000), not d1 (0 bytes excluded)
+        assert_eq!(summary.worst_day, Some((today, 2000)));
+    }
+
+    #[test]
+    fn test_summary_all_zero_downloads_no_worst_day() {
+        let mut manager = AnalyticsManager::new();
+        let today = Utc::now().date_naive();
+        let d1 = today - chrono::Duration::days(1);
+
+        let m1 = DailyMetrics::new(d1); // 0 bytes
+        let m2 = DailyMetrics::new(today); // 0 bytes
+        manager.records.insert(d1, m1);
+        manager.records.insert(today, m2);
+
+        let summary = manager.summary_last_n_days(2).unwrap();
+        assert!(summary.worst_day.is_none()); // all zero, no worst
+        assert_eq!(summary.best_day, Some((today, 0))); // best is still set
+    }
+
+    // ===== Compare periods edge cases =====
+
+    #[test]
+    fn test_compare_periods_both_zero_downloads() {
+        let mut manager = AnalyticsManager::new();
+        let today = Utc::now().date_naive();
+
+        for i in 0..14 {
+            let date = today - chrono::Duration::days(i);
+            let metrics = DailyMetrics::new(date); // all zeros
+            manager.records.insert(date, metrics);
+        }
+
+        let comparison = manager.compare_periods(7).unwrap();
+        assert!((comparison.download_change_pct).abs() < 0.01);
+        assert!((completion_change_pct(&comparison)).abs() < 0.01);
+        assert_eq!(comparison.trend_direction, TrendDirection::Stable);
+    }
+
+    fn completion_change_pct(c: &TrendComparison) -> f64 {
+        c.completion_change_pct
+    }
+
+    #[test]
+    fn test_compare_periods_previous_zero_current_nonzero() {
+        let mut manager = AnalyticsManager::new();
+        let today = Utc::now().date_naive();
+
+        for i in 0..14 {
+            let date = today - chrono::Duration::days(i);
+            let mut metrics = DailyMetrics::new(date);
+            if i < 7 {
+                metrics.bytes_downloaded = 5000;
+                metrics.tasks_completed = 3;
+                metrics.tasks_started = 4;
+            }
+            manager.records.insert(date, metrics);
+        }
+
+        let comparison = manager.compare_periods(7).unwrap();
+        assert!((comparison.download_change_pct - 100.0).abs() < 0.01);
+        assert!((comparison.completion_change_pct - 100.0).abs() < 0.01);
+    }
+
+    // ===== Protocol and hourly aggregation in summary =====
+
+    #[test]
+    fn test_summary_protocol_aggregation() {
+        let mut manager = AnalyticsManager::new();
+        let today = Utc::now().date_naive();
+        let d1 = today - chrono::Duration::days(1);
+
+        let mut m1 = DailyMetrics::new(d1);
+        m1.protocol_bytes.insert(AnalyticsProtocol::Http, 3000);
+        m1.protocol_bytes.insert(AnalyticsProtocol::Torrent, 1000);
+
+        let mut m2 = DailyMetrics::new(today);
+        m2.protocol_bytes.insert(AnalyticsProtocol::Http, 2000);
+        m2.protocol_bytes.insert(AnalyticsProtocol::Ed2k, 500);
+
+        manager.records.insert(d1, m1);
+        manager.records.insert(today, m2);
+
+        let summary = manager.summary_last_n_days(2).unwrap();
+        assert_eq!(summary.protocol_totals[&AnalyticsProtocol::Http], 5000);
+        assert_eq!(summary.protocol_totals[&AnalyticsProtocol::Torrent], 1000);
+        assert_eq!(summary.protocol_totals[&AnalyticsProtocol::Ed2k], 500);
+    }
+
+    #[test]
+    fn test_summary_hourly_aggregation() {
+        let mut manager = AnalyticsManager::new();
+        let today = Utc::now().date_naive();
+        let d1 = today - chrono::Duration::days(1);
+
+        let mut m1 = DailyMetrics::new(d1);
+        m1.hourly_bytes.insert(10, 1000);
+        m1.hourly_bytes.insert(14, 3000);
+
+        let mut m2 = DailyMetrics::new(today);
+        m2.hourly_bytes.insert(10, 2000);
+        m2.hourly_bytes.insert(22, 500);
+
+        manager.records.insert(d1, m1);
+        manager.records.insert(today, m2);
+
+        let summary = manager.summary_last_n_days(2).unwrap();
+        assert_eq!(summary.hourly_totals[&10], 3000);
+        assert_eq!(summary.hourly_totals[&14], 3000);
+        assert_eq!(summary.hourly_totals[&22], 500);
+    }
+
+    // ===== Success rate edge cases =====
+
+    #[test]
+    fn test_success_rate_zero_started() {
+        let mut manager = AnalyticsManager::new();
+        let today = Utc::now().date_naive();
+
+        let mut metrics = DailyMetrics::new(today);
+        metrics.tasks_started = 0;
+        metrics.tasks_completed = 0;
+        manager.records.insert(today, metrics);
+
+        let summary = manager.summary_last_n_days(1).unwrap();
+        assert!((summary.success_rate).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_success_rate_100_percent() {
+        let mut manager = AnalyticsManager::new();
+        let today = Utc::now().date_naive();
+
+        let mut metrics = DailyMetrics::new(today);
+        metrics.tasks_started = 10;
+        metrics.tasks_completed = 10;
+        manager.records.insert(today, metrics);
+
+        let summary = manager.summary_last_n_days(1).unwrap();
+        assert!((summary.success_rate - 1.0).abs() < 0.01);
+    }
+
+    // ===== Constants validation =====
+
+    #[test]
+    fn test_default_retention_days() {
+        assert_eq!(DEFAULT_RETENTION_DAYS, 90);
+    }
+
+    #[test]
+    fn test_max_records_constant() {
+        assert_eq!(MAX_RECORDS, 365);
     }
 }
