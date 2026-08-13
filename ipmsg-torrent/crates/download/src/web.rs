@@ -705,6 +705,31 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         )
         .route("/api/csv-export/string", get(export_csv_string_handler))
         .route("/api/csv-export/file", post(export_csv_file_handler))
+        // Phase 176: Tag Management REST API
+        .route(
+            "/api/tag-management/summary",
+            get(get_tag_management_summary_handler),
+        )
+        .route(
+            "/api/tag-management/config",
+            get(get_tag_management_config_handler).post(set_tag_management_config_handler),
+        )
+        .route("/api/tag-management/tags", get(get_all_tags_handler))
+        .route("/api/tag-management/tag/:tag", get(get_tag_info_handler))
+        .route("/api/tag-management/rename", post(rename_tag_handler))
+        .route("/api/tag-management/merge", post(merge_tags_handler))
+        .route("/api/tag-management/alias", post(add_alias_handler))
+        .route(
+            "/api/tag-management/alias/:alias",
+            delete(remove_alias_handler),
+        )
+        .route("/api/tag-management/aliases", get(get_aliases_handler))
+        .route(
+            "/api/tag-management/label/:tag",
+            post(set_tag_label_handler),
+        )
+        .route("/api/tag-management/cleanup", post(cleanup_orphans_handler))
+        .route("/api/tag-management/tag/:tag", delete(delete_tag_handler))
         // Phase 161: Task Export/Import REST API
         .route("/api/task-export", get(export_tasks_json_handler))
         .route("/api/task-export/csv", get(export_tasks_csv_handler))
@@ -14100,6 +14125,219 @@ async fn activate_speed_profile_handler(
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": e.to_string()})),
         ),
+    }
+}
+
+// ─── Phase 176: Tag Management REST API Handlers ───
+
+/// GET /api/tag-management/summary - Get tag management summary
+async fn get_tag_management_summary_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::tag_management::TagManagementSummary> {
+    let summary = state.manager.get_tag_management_summary().await;
+    Json(summary)
+}
+
+/// GET /api/tag-management/config - Get tag management config
+async fn get_tag_management_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<crate::tag_management::TagManagementConfig> {
+    let config = state.manager.get_tag_management_config().await;
+    Json(config)
+}
+
+/// POST /api/tag-management/config - Update tag management config
+async fn set_tag_management_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::tag_management::TagManagementConfig>,
+) -> Json<serde_json::Value> {
+    state.manager.set_tag_management_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// GET /api/tag-management/tags - Get all tags
+async fn get_all_tags_handler(
+    State(state): State<Arc<WebState>>,
+) -> Json<Vec<crate::tag_management::TagInfo>> {
+    let tags = state.manager.get_all_tag_info().await;
+    Json(tags)
+}
+
+/// GET /api/tag-management/tag/:tag - Get specific tag info
+async fn get_tag_info_handler(
+    State(state): State<Arc<WebState>>,
+    Path(tag): Path<String>,
+) -> impl IntoResponse {
+    let all_tags = state.manager.get_all_tag_info().await;
+    match all_tags.iter().find(|t| t.name == tag) {
+        Some(info) => (StatusCode::OK, Json(serde_json::to_value(info).unwrap())),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "tag not found"})),
+        ),
+    }
+}
+
+/// POST /api/tag-management/rename - Rename a tag
+async fn rename_tag_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let old_name = req["old"].as_str().unwrap_or_default();
+    let new_name = req["new"].as_str().unwrap_or_default();
+
+    if old_name.is_empty() || new_name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "old and new are required"})),
+        );
+    }
+
+    match state.manager.rename_tag(old_name, new_name).await {
+        Some(action) => (
+            StatusCode::OK,
+            Json(
+                serde_json::json!({"status": "ok", "result": serde_json::to_value(&action).unwrap()}),
+            ),
+        ),
+        None => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "rename failed (tag not found or target exists)"})),
+        ),
+    }
+}
+
+/// POST /api/tag-management/merge - Merge two tags
+async fn merge_tags_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let source = req["source"].as_str().unwrap_or_default();
+    let target = req["target"].as_str().unwrap_or_default();
+
+    if source.is_empty() || target.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "source and target are required"})),
+        );
+    }
+
+    match state.manager.merge_tags(source, target).await {
+        Some(action) => (
+            StatusCode::OK,
+            Json(
+                serde_json::json!({"status": "ok", "result": serde_json::to_value(&action).unwrap()}),
+            ),
+        ),
+        None => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "merge failed"})),
+        ),
+    }
+}
+
+/// POST /api/tag-management/alias - Add an alias
+async fn add_alias_handler(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let alias = req["alias"].as_str().unwrap_or_default();
+    let canonical = req["canonical"].as_str().unwrap_or_default();
+
+    if alias.is_empty() || canonical.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "alias and canonical are required"})),
+        );
+    }
+
+    if state.manager.add_tag_alias(alias, canonical).await {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "message": "alias added"})),
+        )
+    } else {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "alias already exists or same as canonical"})),
+        )
+    }
+}
+
+/// DELETE /api/tag-management/alias/:alias - Remove an alias
+async fn remove_alias_handler(
+    State(state): State<Arc<WebState>>,
+    Path(alias): Path<String>,
+) -> impl IntoResponse {
+    if state.manager.remove_tag_alias(&alias).await {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "message": "alias removed"})),
+        )
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "alias not found"})),
+        )
+    }
+}
+
+/// GET /api/tag-management/aliases - Get all aliases
+async fn get_aliases_handler(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    let aliases = state.manager.get_tag_aliases().await;
+    Json(serde_json::json!({"aliases": aliases}))
+}
+
+/// POST /api/tag-management/label/:tag - Set tag label
+async fn set_tag_label_handler(
+    State(state): State<Arc<WebState>>,
+    Path(tag): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let label = req["label"].as_str().map(|s| s.to_string());
+    if state.manager.set_tag_label(&tag, label).await {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "message": "label set"})),
+        )
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "tag not found"})),
+        )
+    }
+}
+
+/// POST /api/tag-management/cleanup - Clean up orphan tags
+async fn cleanup_orphans_handler(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    let action = state.manager.cleanup_orphan_tags().await;
+    match action {
+        crate::tag_management::TagAction::OrphansCleaned { removed } => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "removed": removed.len(), "tags": removed})),
+        ),
+        _ => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "removed": 0, "tags": []})),
+        ),
+    }
+}
+
+/// DELETE /api/tag-management/tag/:tag - Delete a tag
+async fn delete_tag_handler(
+    State(state): State<Arc<WebState>>,
+    Path(tag): Path<String>,
+) -> impl IntoResponse {
+    if state.manager.delete_tag(&tag).await {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "message": "tag deleted"})),
+        )
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "tag not found"})),
+        )
     }
 }
 

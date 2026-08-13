@@ -71,7 +71,7 @@ pub struct TagManagementSummary {
 }
 
 /// Actions the tag manager can perform
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TagAction {
     /// Rename a tag across all tasks
     Renamed {

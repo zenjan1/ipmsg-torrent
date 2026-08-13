@@ -312,6 +312,12 @@ enum Command {
     },
     /// System uptime - view how long the system has been running (Phase 143)
     DlUptime,
+    /// Tag management - manage tags, aliases, labels, and cleanup (Phase 176)
+    DlTagMgmt {
+        /// Subcommand: status|config|list|rename|merge|alias|alias-del|label|cleanup|delete
+        subcommand: String,
+        args: Vec<String>,
+    },
     /// Health dashboard - view unified system health status (Phase 174)
     DlHealthDash {
         /// Subcommand: status|config|report
@@ -1435,6 +1441,20 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dluptime" | "dl-uptime" | "dlupt" => Command::DlUptime,
+        "dltagmgmt" | "dl-tagmgmt" | "dltm" => {
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() < 2 {
+                Command::DlTagMgmt {
+                    subcommand: "status".to_string(),
+                    args: vec![],
+                }
+            } else {
+                Command::DlTagMgmt {
+                    subcommand: parts[1].to_string(),
+                    args: parts[2..].iter().map(|s| s.to_string()).collect(),
+                }
+            }
+        }
         "dlhealthdash" | "dl-healthdash" | "dlhd" => {
             let parts: Vec<&str> = input.split_whitespace().collect();
             if parts.len() < 2 {
@@ -3307,6 +3327,7 @@ fn command_help() -> String {
         "/dlspeedtest [cmd] - Speed test (status|run <url>|summary|history|latest|clear|config)",
         "/dlspdtrend [cmd] - Speed trend analysis (status|summary|trends|degrading|improving|clear|config)",
         "/dluptime       - Show system uptime (how long since startup)",
+        "/dltagmgmt [cmd] - Tag management (status|config|list|rename|merge|alias|alias-del|label|cleanup|delete)",
         "/dlhealthdash   - Show health dashboard (status|config|report)",
         "/dlspath [cmd]  - Save path manager (status|config|set-base|organize|category|predict|validate)",
         "/dldiag         - Download diagnostics (status|run|report|config)",
@@ -4729,6 +4750,172 @@ async fn handle_command(
                 summary.uptime_seconds,
                 summary.started_at.format("%Y-%m-%d %H:%M:%S UTC")
             );
+            let mut s = state.lock().await;
+            s.add_system_message("main", msg);
+        }
+        Command::DlTagMgmt { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            let msg = match subcommand.as_str() {
+                "status" => {
+                    let summary = download_manager.get_tag_management_summary().await;
+                    format!(
+                        "🏷️ Tag Management Summary\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         📊 Total tags: {}\n\
+                         🗑️ Orphan tags: {}\n\
+                         🔗 Alias mappings: {}\n\
+                         ⚙️ Auto-cleanup: {}\n\
+                         📈 Top tags: {}",
+                        summary.total_tags,
+                        summary.orphan_tags.len(),
+                        summary.alias_count,
+                        if summary.config.auto_cleanup_orphans { "enabled" } else { "disabled" },
+                        summary.top_tags.iter()
+                            .map(|(name, count)| format!("{}({})", name, count))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+                "config" => {
+                    let config = download_manager.get_tag_management_config().await;
+                    format!(
+                        "⚙️ Tag Management Configuration\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         Auto-cleanup orphans: {}\n\
+                         Orphan threshold: {} seconds\n\
+                         Enable aliases: {}\n\
+                         Max tags: {}",
+                        if config.auto_cleanup_orphans { "enabled" } else { "disabled" },
+                        config.orphan_threshold_secs,
+                        if config.enable_aliases { "yes" } else { "no" },
+                        if config.max_tags == 0 { "unlimited".to_string() } else { config.max_tags.to_string() }
+                    )
+                }
+                "list" => {
+                    let tags = download_manager.get_all_tag_info().await;
+                    if tags.is_empty() {
+                        "🏷️ No tags found".to_string()
+                    } else {
+                        let mut msg = "🏷️ All Tags\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n".to_string();
+                        for tag in tags.iter().take(50) {
+                            msg.push_str(&format!(
+                                "  • {} (used {} times{})\n",
+                                tag.name,
+                                tag.usage_count,
+                                tag.label.as_ref().map(|l| format!(" {}", l)).unwrap_or_default()
+                            ));
+                        }
+                        if tags.len() > 50 {
+                            msg.push_str(&format!("  ... and {} more\n", tags.len() - 50));
+                        }
+                        msg
+                    }
+                }
+                "rename" => {
+                    if args.len() < 2 {
+                        "❌ Usage: /dltagmgmt rename <old_name> <new_name>".to_string()
+                    } else {
+                        let old_name = &args[0];
+                        let new_name = &args[1];
+                        match download_manager.rename_tag(old_name, new_name).await {
+                            Some(action) => {
+                                if let ipmsg_download::tag_management::TagAction::Renamed { affected_tasks, .. } = action {
+                                    format!("✅ Renamed tag '{}' to '{}' (affected {} tasks)", old_name, new_name, affected_tasks)
+                                } else {
+                                    format!("✅ Renamed tag '{}' to '{}'", old_name, new_name)
+                                }
+                            }
+                            None => format!("❌ Failed to rename tag '{}' to '{}'", old_name, new_name),
+                        }
+                    }
+                }
+                "merge" => {
+                    if args.len() < 2 {
+                        "❌ Usage: /dltagmgmt merge <source> <target>".to_string()
+                    } else {
+                        let source = &args[0];
+                        let target = &args[1];
+                        match download_manager.merge_tags(source, target).await {
+                            Some(action) => {
+                                if let ipmsg_download::tag_management::TagAction::Merged { affected_tasks, .. } = action {
+                                    format!("✅ Merged tag '{}' into '{}' (affected {} tasks)", source, target, affected_tasks)
+                                } else {
+                                    format!("✅ Merged tag '{}' into '{}'", source, target)
+                                }
+                            }
+                            None => format!("❌ Failed to merge tag '{}' into '{}'", source, target),
+                        }
+                    }
+                }
+                "alias" => {
+                    if args.len() < 2 {
+                        "❌ Usage: /dltagmgmt alias <alias> <canonical>".to_string()
+                    } else {
+                        let alias = &args[0];
+                        let canonical = &args[1];
+                        if download_manager.add_tag_alias(alias, canonical).await {
+                            format!("✅ Added alias '{}' → '{}'", alias, canonical)
+                        } else {
+                            format!("❌ Failed to add alias (may already exist)")
+                        }
+                    }
+                }
+                "alias-del" => {
+                    if args.len() < 1 {
+                        "❌ Usage: /dltagmgmt alias-del <alias>".to_string()
+                    } else {
+                        let alias = &args[0];
+                        if download_manager.remove_tag_alias(alias).await {
+                            format!("✅ Removed alias '{}'", alias)
+                        } else {
+                            format!("❌ Alias '{}' not found", alias)
+                        }
+                    }
+                }
+                "label" => {
+                    if args.len() < 2 {
+                        "❌ Usage: /dltagmgmt label <tag> <emoji>".to_string()
+                    } else {
+                        let tag = &args[0];
+                        let label = &args[1];
+                        if download_manager.set_tag_label(tag, Some(label.clone())).await {
+                            format!("✅ Set label for tag '{}': {}", tag, label)
+                        } else {
+                            format!("❌ Tag '{}' not found", tag)
+                        }
+                    }
+                }
+                "cleanup" => {
+                    let action = download_manager.cleanup_orphan_tags().await;
+                    match action {
+                        ipmsg_download::tag_management::TagAction::OrphansCleaned { removed } => {
+                            if removed.is_empty() {
+                                "✅ No orphan tags to clean up".to_string()
+                            } else {
+                                format!("✅ Cleaned up {} orphan tags: {}", removed.len(), removed.join(", "))
+                            }
+                        }
+                        _ => "❌ Unexpected response from cleanup".to_string(),
+                    }
+                }
+                "delete" => {
+                    if args.len() < 1 {
+                        "❌ Usage: /dltagmgmt delete <tag>".to_string()
+                    } else {
+                        let tag = &args[0];
+                        if download_manager.delete_tag(tag).await {
+                            format!("✅ Deleted tag '{}'", tag)
+                        } else {
+                            format!("❌ Tag '{}' not found", tag)
+                        }
+                    }
+                }
+                _ => "❌ Unknown subcommand. Usage: /dltagmgmt <status|config|list|rename|merge|alias|alias-del|label|cleanup|delete>".to_string(),
+            };
+
             let mut s = state.lock().await;
             s.add_system_message("main", msg);
         }
@@ -23916,6 +24103,184 @@ async fn handle_command_headless(
                 summary.uptime_seconds,
                 summary.started_at.format("%Y-%m-%d %H:%M:%S UTC")
             );
+        }
+        Command::DlTagMgmt { subcommand, args } => {
+            let s = state.lock().await;
+            let download_manager = s.download_manager.clone();
+            drop(s);
+
+            match subcommand.as_str() {
+                "status" => {
+                    let summary = download_manager.get_tag_management_summary().await;
+                    println!(
+                        "[tagmgmt] {} tags, {} orphans, {} aliases, auto-cleanup: {}",
+                        summary.total_tags,
+                        summary.orphan_tags.len(),
+                        summary.alias_count,
+                        if summary.config.auto_cleanup_orphans {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    );
+                }
+                "config" => {
+                    let config = download_manager.get_tag_management_config().await;
+                    println!(
+                        "[tagmgmt-config] auto-cleanup: {}, orphan-threshold: {}s, aliases: {}, max-tags: {}",
+                        if config.auto_cleanup_orphans {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        },
+                        config.orphan_threshold_secs,
+                        if config.enable_aliases {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        },
+                        if config.max_tags == 0 {
+                            "unlimited".to_string()
+                        } else {
+                            config.max_tags.to_string()
+                        }
+                    );
+                }
+                "list" => {
+                    let tags = download_manager.get_all_tag_info().await;
+                    if tags.is_empty() {
+                        println!("[tagmgmt] No tags found");
+                    } else {
+                        for tag in tags.iter().take(50) {
+                            println!(
+                                "  {} ({} uses{})",
+                                tag.name,
+                                tag.usage_count,
+                                tag.label
+                                    .as_ref()
+                                    .map(|l| format!(" {}", l))
+                                    .unwrap_or_default()
+                            );
+                        }
+                        if tags.len() > 50 {
+                            println!("  ... and {} more", tags.len() - 50);
+                        }
+                    }
+                }
+                "rename" => {
+                    if args.len() < 2 {
+                        println!("Usage: /dltagmgmt rename <old_name> <new_name>");
+                        return;
+                    }
+                    match download_manager.rename_tag(&args[0], &args[1]).await {
+                        Some(action) => {
+                            if let ipmsg_download::tag_management::TagAction::Renamed {
+                                affected_tasks,
+                                ..
+                            } = action
+                            {
+                                println!(
+                                    "[tagmgmt] Renamed '{}' -> '{}' ({} tasks affected)",
+                                    args[0], args[1], affected_tasks
+                                );
+                            } else {
+                                println!("[tagmgmt] Renamed '{}' -> '{}'", args[0], args[1]);
+                            }
+                        }
+                        None => println!("[tagmgmt] Failed to rename tag"),
+                    }
+                }
+                "merge" => {
+                    if args.len() < 2 {
+                        println!("Usage: /dltagmgmt merge <source> <target>");
+                        return;
+                    }
+                    match download_manager.merge_tags(&args[0], &args[1]).await {
+                        Some(action) => {
+                            if let ipmsg_download::tag_management::TagAction::Merged {
+                                affected_tasks,
+                                ..
+                            } = action
+                            {
+                                println!(
+                                    "[tagmgmt] Merged '{}' -> '{}' ({} tasks affected)",
+                                    args[0], args[1], affected_tasks
+                                );
+                            } else {
+                                println!("[tagmgmt] Merged '{}' -> '{}'", args[0], args[1]);
+                            }
+                        }
+                        None => println!("[tagmgmt] Failed to merge tags"),
+                    }
+                }
+                "alias" => {
+                    if args.len() < 2 {
+                        println!("Usage: /dltagmgmt alias <alias> <canonical>");
+                        return;
+                    }
+                    if download_manager.add_tag_alias(&args[0], &args[1]).await {
+                        println!("[tagmgmt] Added alias '{}' -> '{}'", args[0], args[1]);
+                    } else {
+                        println!("[tagmgmt] Failed to add alias");
+                    }
+                }
+                "alias-del" => {
+                    if args.len() < 1 {
+                        println!("Usage: /dltagmgmt alias-del <alias>");
+                        return;
+                    }
+                    if download_manager.remove_tag_alias(&args[0]).await {
+                        println!("[tagmgmt] Removed alias '{}'", args[0]);
+                    } else {
+                        println!("[tagmgmt] Alias not found");
+                    }
+                }
+                "label" => {
+                    if args.len() < 2 {
+                        println!("Usage: /dltagmgmt label <tag> <emoji>");
+                        return;
+                    }
+                    if download_manager
+                        .set_tag_label(&args[0], Some(args[1].clone()))
+                        .await
+                    {
+                        println!("[tagmgmt] Set label for '{}': {}", args[0], args[1]);
+                    } else {
+                        println!("[tagmgmt] Tag not found");
+                    }
+                }
+                "cleanup" => {
+                    let action = download_manager.cleanup_orphan_tags().await;
+                    match action {
+                        ipmsg_download::tag_management::TagAction::OrphansCleaned { removed } => {
+                            if removed.is_empty() {
+                                println!("[tagmgmt] No orphan tags to clean up");
+                            } else {
+                                println!(
+                                    "[tagmgmt] Cleaned up {} orphan tags: {}",
+                                    removed.len(),
+                                    removed.join(", ")
+                                );
+                            }
+                        }
+                        _ => println!("[tagmgmt] Unexpected response"),
+                    }
+                }
+                "delete" => {
+                    if args.len() < 1 {
+                        println!("Usage: /dltagmgmt delete <tag>");
+                        return;
+                    }
+                    if download_manager.delete_tag(&args[0]).await {
+                        println!("[tagmgmt] Deleted tag '{}'", args[0]);
+                    } else {
+                        println!("[tagmgmt] Tag not found");
+                    }
+                }
+                _ => println!(
+                    "Unknown subcommand. Usage: /dltagmgmt <status|config|list|rename|merge|alias|alias-del|label|cleanup|delete>"
+                ),
+            }
         }
         Command::DlHealthDash { subcommand, args } => {
             let s = state.lock().await;
