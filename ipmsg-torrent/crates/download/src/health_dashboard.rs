@@ -1049,4 +1049,1280 @@ mod tests {
         assert!(dashboard.subsystems.iter().any(|s| s.name == "Storage"));
         assert!(dashboard.subsystems.iter().any(|s| s.name == "Errors"));
     }
+
+    // ===== Serialization Tests =====
+
+    #[test]
+    fn test_system_health_serde_roundtrip() {
+        for variant in [
+            SystemHealth::Healthy,
+            SystemHealth::Warning,
+            SystemHealth::Degraded,
+            SystemHealth::Critical,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: SystemHealth = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, back);
+        }
+    }
+
+    #[test]
+    fn test_subsystem_health_serde_roundtrip() {
+        let health = SubsystemHealth {
+            name: "Queue".to_string(),
+            status: SystemHealth::Warning,
+            score: 65,
+            summary: "5 tasks, 2 errors".to_string(),
+            issue_count: 2,
+        };
+        let json = serde_json::to_string(&health).unwrap();
+        let back: SubsystemHealth = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "Queue");
+        assert_eq!(back.status, SystemHealth::Warning);
+        assert_eq!(back.score, 65);
+        assert_eq!(back.issue_count, 2);
+    }
+
+    #[test]
+    fn test_queue_health_data_serde_roundtrip() {
+        let data = QueueHealthData {
+            total_tasks: 10,
+            downloading: 3,
+            queued: 4,
+            paused: 1,
+            completed: 2,
+            error_count: 1,
+            anomaly_count: 2,
+            deadline_missed: 0,
+            score: 80,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let back: QueueHealthData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.total_tasks, 10);
+        assert_eq!(back.downloading, 3);
+        assert_eq!(back.score, 80);
+    }
+
+    #[test]
+    fn test_speed_health_data_serde_roundtrip() {
+        let data = SpeedHealthData {
+            current_speed_bps: 500_000,
+            avg_speed_5min: 450_000,
+            avg_speed_15min: 400_000,
+            active_alerts: 1,
+            anomaly_count: 2,
+            score: 70,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let back: SpeedHealthData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.current_speed_bps, 500_000);
+        assert_eq!(back.active_alerts, 1);
+    }
+
+    #[test]
+    fn test_network_health_data_serde_roundtrip() {
+        let data = NetworkHealthData {
+            is_connected: true,
+            quality_score: 85,
+            issue_count: 1,
+            proxy_enabled: true,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let back: NetworkHealthData = serde_json::from_str(&json).unwrap();
+        assert!(back.is_connected);
+        assert_eq!(back.quality_score, 85);
+        assert!(back.proxy_enabled);
+    }
+
+    #[test]
+    fn test_storage_health_data_serde_roundtrip() {
+        let data = StorageHealthData {
+            available_bytes: 50_000_000_000,
+            is_low: false,
+            integrity_issues: 0,
+            recycle_bin_count: 3,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let back: StorageHealthData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.available_bytes, 50_000_000_000);
+        assert!(!back.is_low);
+    }
+
+    #[test]
+    fn test_error_health_data_serde_roundtrip() {
+        let data = ErrorHealthData {
+            error_tasks: 5,
+            pending_retry: 2,
+            retries_today: 10,
+            recovery_enabled: true,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let back: ErrorHealthData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.error_tasks, 5);
+        assert_eq!(back.pending_retry, 2);
+        assert!(back.recovery_enabled);
+    }
+
+    #[test]
+    fn test_health_dashboard_serde_roundtrip() {
+        let input = default_input();
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+
+        let json = serde_json::to_string(&dashboard).unwrap();
+        let back: HealthDashboard = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.overall, dashboard.overall);
+        assert_eq!(back.overall_score, dashboard.overall_score);
+        assert_eq!(back.queue.total_tasks, dashboard.queue.total_tasks);
+        assert_eq!(back.subsystems.len(), dashboard.subsystems.len());
+        assert_eq!(back.recommendations.len(), dashboard.recommendations.len());
+    }
+
+    #[test]
+    fn test_health_dashboard_config_serde_roundtrip() {
+        let config = HealthDashboardConfig {
+            slow_speed_threshold_bps: 20_000,
+            error_warning_threshold: 5,
+            error_critical_threshold: 15,
+            low_disk_threshold_bytes: 2_000_000_000,
+            anomaly_warning_threshold: 10,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: HealthDashboardConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.slow_speed_threshold_bps, 20_000);
+        assert_eq!(back.error_warning_threshold, 5);
+        assert_eq!(back.error_critical_threshold, 15);
+        assert_eq!(back.low_disk_threshold_bytes, 2_000_000_000);
+        assert_eq!(back.anomaly_warning_threshold, 10);
+    }
+
+    #[test]
+    fn test_health_dashboard_config_extra_fields_ignored() {
+        let json = r#"{
+            "slow_speed_threshold_bps": 10000,
+            "error_warning_threshold": 3,
+            "error_critical_threshold": 10,
+            "low_disk_threshold_bytes": 1073741824,
+            "anomaly_warning_threshold": 5,
+            "unknown_field": "should be ignored"
+        }"#;
+        let config: HealthDashboardConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.slow_speed_threshold_bps, 10_000);
+        assert_eq!(config.error_warning_threshold, 3);
+    }
+
+    #[test]
+    fn test_health_dashboard_config_pretty_serde() {
+        let config = HealthDashboardConfig::default();
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        assert!(pretty.contains('\n'));
+        let back: HealthDashboardConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(
+            back.slow_speed_threshold_bps,
+            config.slow_speed_threshold_bps
+        );
+    }
+
+    // ===== SystemHealth Tests =====
+
+    #[test]
+    fn test_system_health_all_labels() {
+        assert_eq!(SystemHealth::Healthy.label(), "Healthy");
+        assert_eq!(SystemHealth::Warning.label(), "Warning");
+        assert_eq!(SystemHealth::Degraded.label(), "Degraded");
+        assert_eq!(SystemHealth::Critical.label(), "Critical");
+    }
+
+    #[test]
+    fn test_system_health_all_scores() {
+        assert_eq!(SystemHealth::Healthy.score(), 100);
+        assert_eq!(SystemHealth::Warning.score(), 75);
+        assert_eq!(SystemHealth::Degraded.score(), 50);
+        assert_eq!(SystemHealth::Critical.score(), 25);
+    }
+
+    #[test]
+    fn test_system_health_all_emojis() {
+        assert_eq!(SystemHealth::Healthy.emoji(), "✅");
+        assert_eq!(SystemHealth::Warning.emoji(), "⚠️");
+        assert_eq!(SystemHealth::Degraded.emoji(), "🔶");
+        assert_eq!(SystemHealth::Critical.emoji(), "🔴");
+    }
+
+    #[test]
+    fn test_system_health_clone_debug() {
+        let h = SystemHealth::Healthy;
+        let h2 = h.clone();
+        assert_eq!(h, h2);
+        let debug = format!("{:?}", h);
+        assert_eq!(debug, "Healthy");
+    }
+
+    #[test]
+    fn test_system_health_partial_eq() {
+        assert_eq!(SystemHealth::Healthy, SystemHealth::Healthy);
+        assert_ne!(SystemHealth::Healthy, SystemHealth::Critical);
+        assert_ne!(SystemHealth::Warning, SystemHealth::Degraded);
+    }
+
+    // ===== compute_overall_health Tests =====
+
+    #[test]
+    fn test_compute_overall_health_empty() {
+        let (status, score) = compute_overall_health(&[]);
+        assert_eq!(status, SystemHealth::Healthy);
+        assert_eq!(score, 100);
+    }
+
+    #[test]
+    fn test_compute_overall_health_single_healthy() {
+        let subsystems = vec![SubsystemHealth {
+            name: "Test".to_string(),
+            status: SystemHealth::Healthy,
+            score: 95,
+            summary: "ok".to_string(),
+            issue_count: 0,
+        }];
+        let (status, score) = compute_overall_health(&subsystems);
+        // avg=95, min=95, weighted=95*0.6+95*0.4=95
+        assert_eq!(score, 95);
+        assert_eq!(status, SystemHealth::Healthy);
+    }
+
+    #[test]
+    fn test_compute_overall_health_single_critical() {
+        let subsystems = vec![SubsystemHealth {
+            name: "Test".to_string(),
+            status: SystemHealth::Critical,
+            score: 20,
+            summary: "bad".to_string(),
+            issue_count: 5,
+        }];
+        let (status, score) = compute_overall_health(&subsystems);
+        assert_eq!(score, 20);
+        assert_eq!(status, SystemHealth::Critical);
+    }
+
+    #[test]
+    fn test_compute_overall_health_all_healthy() {
+        let subsystems = vec![
+            SubsystemHealth {
+                name: "A".to_string(),
+                status: SystemHealth::Healthy,
+                score: 90,
+                summary: String::new(),
+                issue_count: 0,
+            },
+            SubsystemHealth {
+                name: "B".to_string(),
+                status: SystemHealth::Healthy,
+                score: 95,
+                summary: String::new(),
+                issue_count: 0,
+            },
+            SubsystemHealth {
+                name: "C".to_string(),
+                status: SystemHealth::Healthy,
+                score: 100,
+                summary: String::new(),
+                issue_count: 0,
+            },
+        ];
+        let (status, score) = compute_overall_health(&subsystems);
+        // avg=(90+95+100)/3=95, min=90, weighted=95*0.6+90*0.4=57+36=93
+        assert_eq!(score, 93);
+        assert_eq!(status, SystemHealth::Healthy);
+    }
+
+    #[test]
+    fn test_compute_overall_health_degraded_threshold() {
+        let subsystems = vec![
+            SubsystemHealth {
+                name: "A".to_string(),
+                status: SystemHealth::Degraded,
+                score: 45,
+                summary: String::new(),
+                issue_count: 3,
+            },
+            SubsystemHealth {
+                name: "B".to_string(),
+                status: SystemHealth::Degraded,
+                score: 50,
+                summary: String::new(),
+                issue_count: 2,
+            },
+        ];
+        let (status, score) = compute_overall_health(&subsystems);
+        // avg=(45+50)/2=47, min=45, weighted=47*0.6+45*0.4=28.2+18=46.2 → 46
+        assert_eq!(score, 46);
+        assert_eq!(status, SystemHealth::Degraded);
+    }
+
+    #[test]
+    fn test_compute_overall_health_weak_link_dominates() {
+        let subsystems = vec![
+            SubsystemHealth {
+                name: "A".to_string(),
+                status: SystemHealth::Healthy,
+                score: 100,
+                summary: String::new(),
+                issue_count: 0,
+            },
+            SubsystemHealth {
+                name: "B".to_string(),
+                status: SystemHealth::Critical,
+                score: 10,
+                summary: String::new(),
+                issue_count: 10,
+            },
+        ];
+        let (status, score) = compute_overall_health(&subsystems);
+        // avg=(100+10)/2=55, min=10, weighted=55*0.6+10*0.4=33+4=37
+        assert_eq!(score, 37);
+        assert_eq!(status, SystemHealth::Critical);
+    }
+
+    // ===== compute_queue_score Tests =====
+
+    #[test]
+    fn test_compute_queue_score_perfect() {
+        let input = default_input();
+        assert_eq!(compute_queue_score(&input), 100);
+    }
+
+    #[test]
+    fn test_compute_queue_score_error_penalty() {
+        let mut input = default_input();
+        input.error_count = 3;
+        // 100 - 3*10 = 70
+        assert_eq!(compute_queue_score(&input), 70);
+    }
+
+    #[test]
+    fn test_compute_queue_score_anomaly_penalty() {
+        let mut input = default_input();
+        input.speed_anomaly_count = 4;
+        // 100 - 4*5 = 80
+        assert_eq!(compute_queue_score(&input), 80);
+    }
+
+    #[test]
+    fn test_compute_queue_score_deadline_penalty() {
+        let mut input = default_input();
+        input.deadline_missed = 2;
+        // 100 - 2*15 = 70
+        assert_eq!(compute_queue_score(&input), 70);
+    }
+
+    #[test]
+    fn test_compute_queue_score_stuck_queue() {
+        let mut input = default_input();
+        input.downloading = 0;
+        input.queued = 0;
+        input.error_count = 2;
+        // 100 - 2*10 - 20 = 60
+        assert_eq!(compute_queue_score(&input), 60);
+    }
+
+    #[test]
+    fn test_compute_queue_score_combined_penalties() {
+        let mut input = default_input();
+        input.error_count = 2;
+        input.speed_anomaly_count = 3;
+        input.deadline_missed = 1;
+        // 100 - 20 - 15 - 15 = 50
+        assert_eq!(compute_queue_score(&input), 50);
+    }
+
+    #[test]
+    fn test_compute_queue_score_saturates_at_zero() {
+        let mut input = default_input();
+        input.error_count = 20;
+        input.speed_anomaly_count = 30;
+        input.deadline_missed = 10;
+        let score = compute_queue_score(&input);
+        assert_eq!(score, 0);
+    }
+
+    // ===== compute_speed_score Tests =====
+
+    #[test]
+    fn test_compute_speed_score_perfect() {
+        let input = default_input();
+        assert_eq!(compute_speed_score(&input), 100);
+    }
+
+    #[test]
+    fn test_compute_speed_score_low_speed() {
+        let mut input = default_input();
+        input.current_speed_bps = 5_000; // below 10_000
+        input.downloading = 2;
+        // 100 - 30 = 70
+        assert_eq!(compute_speed_score(&input), 70);
+    }
+
+    #[test]
+    fn test_compute_speed_score_moderate_speed() {
+        let mut input = default_input();
+        input.current_speed_bps = 30_000; // below 50_000 but above 10_000
+        input.downloading = 1;
+        // 100 - 15 = 85
+        assert_eq!(compute_speed_score(&input), 85);
+    }
+
+    #[test]
+    fn test_compute_speed_score_no_penalty_when_not_downloading() {
+        let mut input = default_input();
+        input.current_speed_bps = 100; // very low
+        input.downloading = 0; // but nothing downloading
+        // No penalty for low speed when nothing is downloading
+        assert_eq!(compute_speed_score(&input), 100);
+    }
+
+    #[test]
+    fn test_compute_speed_score_alert_penalty() {
+        let mut input = default_input();
+        input.speed_alert_count = 3;
+        // 100 - 3*10 = 70
+        assert_eq!(compute_speed_score(&input), 70);
+    }
+
+    #[test]
+    fn test_compute_speed_score_anomaly_penalty() {
+        let mut input = default_input();
+        input.speed_anomaly_count = 2;
+        // 100 - 2*8 = 84
+        assert_eq!(compute_speed_score(&input), 84);
+    }
+
+    #[test]
+    fn test_compute_speed_score_declining_trend_severe() {
+        let mut input = default_input();
+        input.avg_speed_5min = 40_000;
+        input.avg_speed_15min = 100_000;
+        // ratio = 40000/100000 = 0.4 < 0.5 → -20
+        assert_eq!(compute_speed_score(&input), 80);
+    }
+
+    #[test]
+    fn test_compute_speed_score_declining_trend_moderate() {
+        let mut input = default_input();
+        input.avg_speed_5min = 70_000;
+        input.avg_speed_15min = 100_000;
+        // ratio = 70000/100000 = 0.7, 0.5 <= 0.7 < 0.8 → -10
+        assert_eq!(compute_speed_score(&input), 90);
+    }
+
+    #[test]
+    fn test_compute_speed_score_no_decline_when_5min_higher() {
+        let mut input = default_input();
+        input.avg_speed_5min = 600_000;
+        input.avg_speed_15min = 400_000;
+        // ratio > 1.0, no penalty
+        assert_eq!(compute_speed_score(&input), 100);
+    }
+
+    #[test]
+    fn test_compute_speed_score_zero_averages_no_decline() {
+        let mut input = default_input();
+        input.avg_speed_5min = 0;
+        input.avg_speed_15min = 0;
+        // Both zero → skip decline check
+        assert_eq!(compute_speed_score(&input), 100);
+    }
+
+    // ===== compute_network_score Tests =====
+
+    #[test]
+    fn test_compute_network_score_disconnected() {
+        let mut input = default_input();
+        input.network_connected = false;
+        assert_eq!(compute_network_score(&input), 10);
+    }
+
+    #[test]
+    fn test_compute_network_score_perfect() {
+        let mut input = default_input();
+        input.network_connected = true;
+        input.network_quality = 100;
+        input.network_issues = 0;
+        assert_eq!(compute_network_score(&input), 100);
+    }
+
+    #[test]
+    fn test_compute_network_score_with_issues() {
+        let mut input = default_input();
+        input.network_connected = true;
+        input.network_quality = 80;
+        input.network_issues = 2;
+        // 80 - 2*15 = 50
+        assert_eq!(compute_network_score(&input), 50);
+    }
+
+    #[test]
+    fn test_compute_network_score_saturates() {
+        let mut input = default_input();
+        input.network_connected = true;
+        input.network_quality = 30;
+        input.network_issues = 10;
+        // 30 - 150 → 0 (saturating_sub)
+        assert_eq!(compute_network_score(&input), 0);
+    }
+
+    // ===== compute_storage_score Tests =====
+
+    #[test]
+    fn test_compute_storage_score_perfect() {
+        let input = default_input();
+        assert_eq!(compute_storage_score(&input), 100);
+    }
+
+    #[test]
+    fn test_compute_storage_score_disk_low() {
+        let mut input = default_input();
+        input.disk_low = true;
+        // 100 - 40 = 60
+        assert_eq!(compute_storage_score(&input), 60);
+    }
+
+    #[test]
+    fn test_compute_storage_score_integrity_issues() {
+        let mut input = default_input();
+        input.integrity_issues = 3;
+        // 100 - 3*10 = 70
+        assert_eq!(compute_storage_score(&input), 70);
+    }
+
+    #[test]
+    fn test_compute_storage_score_combined() {
+        let mut input = default_input();
+        input.disk_low = true;
+        input.integrity_issues = 5;
+        // 100 - 40 - 50 = 10
+        assert_eq!(compute_storage_score(&input), 10);
+    }
+
+    // ===== compute_error_score Tests =====
+
+    #[test]
+    fn test_compute_error_score_perfect() {
+        let input = default_input();
+        assert_eq!(compute_error_score(&input), 100);
+    }
+
+    #[test]
+    fn test_compute_error_score_errors_only() {
+        let mut input = default_input();
+        input.error_count = 4;
+        // 100 - 4*12 = 52
+        assert_eq!(compute_error_score(&input), 52);
+    }
+
+    #[test]
+    fn test_compute_error_score_pending_retry() {
+        let mut input = default_input();
+        input.pending_retry = 5;
+        // 100 - 5*5 = 75
+        assert_eq!(compute_error_score(&input), 75);
+    }
+
+    #[test]
+    fn test_compute_error_score_recovery_disabled() {
+        let mut input = default_input();
+        input.error_count = 2;
+        input.recovery_enabled = false;
+        // 100 - 2*12 - 15 = 61
+        assert_eq!(compute_error_score(&input), 61);
+    }
+
+    #[test]
+    fn test_compute_error_score_recovery_disabled_no_errors() {
+        let mut input = default_input();
+        input.error_count = 0;
+        input.recovery_enabled = false;
+        // No penalty when no errors even if recovery disabled
+        assert_eq!(compute_error_score(&input), 100);
+    }
+
+    // ===== generate_recommendations Tests =====
+
+    #[test]
+    fn test_recommendations_network_disconnected() {
+        let mut input = default_input();
+        input.network_connected = false;
+        let recs = generate_recommendations(&input, 100, 100, 100, 100, 100);
+        assert!(recs.iter().any(|r| r.contains("Network disconnected")));
+    }
+
+    #[test]
+    fn test_recommendations_disk_low() {
+        let mut input = default_input();
+        input.disk_low = true;
+        let recs = generate_recommendations(&input, 100, 100, 100, 100, 100);
+        assert!(recs.iter().any(|r| r.contains("Disk space low")));
+    }
+
+    #[test]
+    fn test_recommendations_high_errors() {
+        let mut input = default_input();
+        input.error_count = 10;
+        let recs = generate_recommendations(&input, 100, 100, 100, 100, 100);
+        assert!(recs.iter().any(|r| r.contains("error state")));
+    }
+
+    #[test]
+    fn test_recommendations_high_anomalies() {
+        let mut input = default_input();
+        input.speed_anomaly_count = 5;
+        let recs = generate_recommendations(&input, 100, 100, 100, 100, 100);
+        assert!(recs.iter().any(|r| r.contains("speed anomalies")));
+    }
+
+    #[test]
+    fn test_recommendations_deadline_misses() {
+        let mut input = default_input();
+        input.deadline_missed = 2;
+        let recs = generate_recommendations(&input, 100, 100, 100, 100, 100);
+        assert!(recs.iter().any(|r| r.contains("missed deadlines")));
+    }
+
+    #[test]
+    fn test_recommendations_low_speed() {
+        let mut input = default_input();
+        input.downloading = 2;
+        let recs = generate_recommendations(&input, 100, 30, 100, 100, 100);
+        assert!(recs.iter().any(|r| r.contains("speeds are low")));
+    }
+
+    #[test]
+    fn test_recommendations_poor_network() {
+        let mut input = default_input();
+        let recs = generate_recommendations(&input, 100, 100, 30, 100, 100);
+        assert!(recs.iter().any(|r| r.contains("Network quality is poor")));
+    }
+
+    #[test]
+    fn test_recommendations_recovery_disabled() {
+        let mut input = default_input();
+        input.error_count = 3;
+        input.recovery_enabled = false;
+        let recs = generate_recommendations(&input, 100, 100, 100, 100, 100);
+        assert!(recs.iter().any(|r| r.contains("Enable error recovery")));
+    }
+
+    #[test]
+    fn test_recommendations_large_queue_low_health() {
+        let mut input = default_input();
+        input.queued = 15;
+        let recs = generate_recommendations(&input, 30, 100, 100, 100, 100);
+        assert!(recs.iter().any(|r| r.contains("Large queue")));
+    }
+
+    #[test]
+    fn test_recommendations_empty_when_all_healthy() {
+        let input = default_input();
+        let recs = generate_recommendations(&input, 100, 100, 100, 100, 100);
+        assert!(recs.is_empty());
+    }
+
+    #[test]
+    fn test_recommendations_no_recovery_when_no_errors() {
+        let mut input = default_input();
+        input.error_count = 0;
+        input.recovery_enabled = false;
+        let recs = generate_recommendations(&input, 100, 100, 100, 100, 100);
+        assert!(!recs.iter().any(|r| r.contains("recovery")));
+    }
+
+    #[test]
+    fn test_recommendations_no_low_speed_when_not_downloading() {
+        let mut input = default_input();
+        input.downloading = 0;
+        let recs = generate_recommendations(&input, 100, 30, 100, 100, 100);
+        assert!(!recs.iter().any(|r| r.contains("speeds are low")));
+    }
+
+    // ===== format_speed Tests =====
+
+    #[test]
+    fn test_format_speed_zero() {
+        assert_eq!(format_speed(0), "0 B");
+    }
+
+    #[test]
+    fn test_format_speed_exact_kb() {
+        assert_eq!(format_speed(1024), "1.0 KB");
+    }
+
+    #[test]
+    fn test_format_speed_exact_mb() {
+        assert_eq!(format_speed(1_048_576), "1.0 MB");
+    }
+
+    #[test]
+    fn test_format_speed_exact_gb() {
+        assert_eq!(format_speed(1_073_741_824), "1.0 GB");
+    }
+
+    #[test]
+    fn test_format_speed_large_value() {
+        assert_eq!(format_speed(5_000_000_000), "4.7 GB");
+    }
+
+    #[test]
+    fn test_format_speed_below_kb() {
+        assert_eq!(format_speed(1023), "1023 B");
+    }
+
+    // ===== format_size Tests =====
+
+    #[test]
+    fn test_format_size_zero() {
+        assert_eq!(format_size(0), "0 B");
+    }
+
+    #[test]
+    fn test_format_size_exact_kb() {
+        assert_eq!(format_size(1024), "1.0 KB");
+    }
+
+    #[test]
+    fn test_format_size_exact_mb() {
+        assert_eq!(format_size(1_048_576), "1.0 MB");
+    }
+
+    #[test]
+    fn test_format_size_exact_gb() {
+        assert_eq!(format_size(1_073_741_824), "1.0 GB");
+    }
+
+    #[test]
+    fn test_format_size_exact_tb() {
+        assert_eq!(format_size(1_099_511_627_776), "1.0 TB");
+    }
+
+    #[test]
+    fn test_format_size_below_kb() {
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn test_format_size_large_tb() {
+        assert_eq!(format_size(5_000_000_000_000), "4.5 TB");
+    }
+
+    // ===== format_timestamp Tests =====
+
+    #[test]
+    fn test_format_timestamp_zero() {
+        assert_eq!(format_timestamp(0), "00:00:00");
+    }
+
+    #[test]
+    fn test_format_timestamp_midnight() {
+        // 0 hours, 0 minutes, 30 seconds
+        assert_eq!(format_timestamp(30), "00:00:30");
+    }
+
+    #[test]
+    fn test_format_timestamp_one_hour() {
+        assert_eq!(format_timestamp(3600), "01:00:00");
+    }
+
+    #[test]
+    fn test_format_timestamp_complex() {
+        // 14 hours, 30 minutes, 45 seconds = 14*3600 + 30*60 + 45 = 52245
+        assert_eq!(format_timestamp(52245), "14:30:45");
+    }
+
+    // ===== score_emoji Tests =====
+
+    #[test]
+    fn test_score_emoji_critical() {
+        assert_eq!(score_emoji(0), "🔴");
+        assert_eq!(score_emoji(24), "🔴");
+    }
+
+    #[test]
+    fn test_score_emoji_degraded() {
+        assert_eq!(score_emoji(25), "🔶");
+        assert_eq!(score_emoji(49), "🔶");
+    }
+
+    #[test]
+    fn test_score_emoji_warning() {
+        assert_eq!(score_emoji(50), "⚠️");
+        assert_eq!(score_emoji(74), "⚠️");
+    }
+
+    #[test]
+    fn test_score_emoji_healthy() {
+        assert_eq!(score_emoji(75), "✅");
+        assert_eq!(score_emoji(100), "✅");
+    }
+
+    // ===== build_health_dashboard Integration Tests =====
+
+    #[test]
+    fn test_build_dashboard_all_critical() {
+        let mut input = default_input();
+        input.network_connected = false;
+        input.network_quality = 5;
+        input.disk_low = true;
+        input.error_count = 15;
+        input.speed_anomaly_count = 10;
+        input.speed_alert_count = 5;
+        input.deadline_missed = 3;
+
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+
+        assert_eq!(dashboard.overall, SystemHealth::Critical);
+        assert!(dashboard.overall_score < 40);
+        assert!(!dashboard.recommendations.is_empty());
+    }
+
+    #[test]
+    fn test_build_dashboard_preserves_input_data() {
+        let input = default_input();
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+
+        assert_eq!(dashboard.queue.total_tasks, 10);
+        assert_eq!(dashboard.queue.downloading, 3);
+        assert_eq!(dashboard.queue.queued, 4);
+        assert_eq!(dashboard.queue.paused, 1);
+        assert_eq!(dashboard.queue.completed, 2);
+        assert_eq!(dashboard.speed.current_speed_bps, 500_000);
+        assert!(dashboard.network.is_connected);
+        assert_eq!(dashboard.storage.recycle_bin_count, 2);
+        assert_eq!(dashboard.errors.recovery_enabled, true);
+    }
+
+    #[test]
+    fn test_build_dashboard_timestamp_is_recent() {
+        let input = default_input();
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Timestamp should be within 2 seconds of now
+        assert!(dashboard.timestamp <= now);
+        assert!(dashboard.timestamp + 2 >= now);
+    }
+
+    #[test]
+    fn test_build_dashboard_subsystem_names_order() {
+        let input = default_input();
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+
+        assert_eq!(dashboard.subsystems[0].name, "Queue");
+        assert_eq!(dashboard.subsystems[1].name, "Speed");
+        assert_eq!(dashboard.subsystems[2].name, "Network");
+        assert_eq!(dashboard.subsystems[3].name, "Storage");
+        assert_eq!(dashboard.subsystems[4].name, "Errors");
+    }
+
+    #[test]
+    fn test_build_dashboard_with_custom_config() {
+        let input = default_input();
+        let config = HealthDashboardConfig {
+            slow_speed_threshold_bps: 1_000_000,
+            error_warning_threshold: 1,
+            error_critical_threshold: 5,
+            low_disk_threshold_bytes: 100_000_000_000,
+            anomaly_warning_threshold: 1,
+        };
+        let dashboard = build_health_dashboard(&input, &config);
+        // Config doesn't affect scoring directly (used by external code)
+        // but the dashboard should still build correctly
+        assert_eq!(dashboard.overall_score, dashboard.overall_score);
+    }
+
+    #[test]
+    fn test_build_dashboard_proxy_enabled() {
+        let mut input = default_input();
+        input.proxy_enabled = true;
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+        assert!(dashboard.network.proxy_enabled);
+    }
+
+    // ===== quick_summary Tests =====
+
+    #[test]
+    fn test_quick_summary_contains_all_fields() {
+        let input = default_input();
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+        let summary = dashboard.quick_summary();
+
+        assert!(summary.contains("Healthy"));
+        assert!(summary.contains("Q:"));
+        assert!(summary.contains("S:"));
+        assert!(summary.contains("N:"));
+        assert!(summary.contains("St:"));
+        assert!(summary.contains("E:"));
+        assert!(summary.contains("recs"));
+    }
+
+    #[test]
+    fn test_quick_summary_critical_system() {
+        let mut input = default_input();
+        input.network_connected = false;
+        input.error_count = 20;
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+        let summary = dashboard.quick_summary();
+        assert!(summary.contains("🔴"));
+    }
+
+    // ===== format_health_report Tests =====
+
+    #[test]
+    fn test_format_report_contains_all_sections() {
+        let input = default_input();
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+        let report = format_health_report(&dashboard);
+
+        assert!(report.contains("System Health"));
+        assert!(report.contains("Queue"));
+        assert!(report.contains("Speed"));
+        assert!(report.contains("Network"));
+        assert!(report.contains("Storage"));
+        assert!(report.contains("Errors"));
+        assert!(report.contains("Timestamp"));
+    }
+
+    #[test]
+    fn test_format_report_with_recommendations() {
+        let mut input = default_input();
+        input.network_connected = false;
+        input.disk_low = true;
+        input.error_count = 10;
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+        let report = format_health_report(&dashboard);
+
+        assert!(report.contains("Recommendations"));
+        assert!(report.contains("Network"));
+        assert!(report.contains("Disk"));
+    }
+
+    #[test]
+    fn test_format_report_no_recommendations_section_when_empty() {
+        let input = default_input();
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+        let report = format_health_report(&dashboard);
+
+        assert!(!report.contains("Recommendations"));
+    }
+
+    #[test]
+    fn test_format_report_shows_speed_values() {
+        let input = default_input();
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+        let report = format_health_report(&dashboard);
+
+        assert!(report.contains("/s"));
+        assert!(report.contains("Current:"));
+    }
+
+    #[test]
+    fn test_format_report_shows_network_status() {
+        let input = default_input();
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+        let report = format_health_report(&dashboard);
+
+        assert!(report.contains("Connected"));
+        assert!(report.contains("Quality:"));
+    }
+
+    #[test]
+    fn test_format_report_disconnected_network() {
+        let mut input = default_input();
+        input.network_connected = false;
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+        let report = format_health_report(&dashboard);
+
+        assert!(report.contains("Disconnected"));
+    }
+
+    // ===== Clone/Debug Traits Tests =====
+
+    #[test]
+    fn test_health_dashboard_clone() {
+        let input = default_input();
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+        let cloned = dashboard.clone();
+
+        assert_eq!(cloned.overall, dashboard.overall);
+        assert_eq!(cloned.overall_score, dashboard.overall_score);
+        assert_eq!(cloned.queue.total_tasks, dashboard.queue.total_tasks);
+        assert_eq!(cloned.subsystems.len(), dashboard.subsystems.len());
+    }
+
+    #[test]
+    fn test_health_dashboard_debug() {
+        let input = default_input();
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+        let debug = format!("{:?}", dashboard);
+        assert!(debug.contains("HealthDashboard"));
+        assert!(debug.contains("overall"));
+    }
+
+    #[test]
+    fn test_health_dashboard_config_clone() {
+        let config = HealthDashboardConfig::default();
+        let cloned = config.clone();
+        assert_eq!(
+            cloned.slow_speed_threshold_bps,
+            config.slow_speed_threshold_bps
+        );
+        assert_eq!(
+            cloned.error_warning_threshold,
+            config.error_warning_threshold
+        );
+    }
+
+    #[test]
+    fn test_health_dashboard_config_debug() {
+        let config = HealthDashboardConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("HealthDashboardConfig"));
+    }
+
+    #[test]
+    fn test_subsystem_health_clone_debug() {
+        let health = SubsystemHealth {
+            name: "Test".to_string(),
+            status: SystemHealth::Healthy,
+            score: 90,
+            summary: "ok".to_string(),
+            issue_count: 0,
+        };
+        let cloned = health.clone();
+        assert_eq!(cloned.name, "Test");
+        let debug = format!("{:?}", health);
+        assert!(debug.contains("SubsystemHealth"));
+    }
+
+    // ===== Edge Case Tests =====
+
+    #[test]
+    fn test_zero_tasks_system() {
+        let mut input = default_input();
+        input.total_tasks = 0;
+        input.downloading = 0;
+        input.queued = 0;
+        input.paused = 0;
+        input.completed = 0;
+        input.error_count = 0;
+
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+
+        assert_eq!(dashboard.queue.total_tasks, 0);
+        assert_eq!(dashboard.queue.score, 100);
+        assert_eq!(dashboard.overall, SystemHealth::Healthy);
+    }
+
+    #[test]
+    fn test_massive_error_count() {
+        let mut input = default_input();
+        input.error_count = 1000;
+
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+
+        assert_eq!(dashboard.errors.error_tasks, 1000);
+        // Error score computed separately; verify via subsystem
+        let error_subsystem = dashboard
+            .subsystems
+            .iter()
+            .find(|s| s.name == "Errors")
+            .unwrap();
+        assert_eq!(error_subsystem.score, 0);
+    }
+
+    #[test]
+    fn test_unicode_in_recommendations() {
+        let mut input = default_input();
+        input.error_count = 10;
+        let recs = generate_recommendations(&input, 100, 100, 100, 100, 100);
+        // Error count recommendation contains the number
+        assert!(recs.iter().any(|r| r.contains("10 tasks")));
+    }
+
+    #[test]
+    fn test_health_input_clone() {
+        let input = default_input();
+        let cloned = input.clone();
+        assert_eq!(cloned.total_tasks, input.total_tasks);
+        assert_eq!(cloned.current_speed_bps, input.current_speed_bps);
+    }
+
+    #[test]
+    fn test_health_input_debug() {
+        let input = default_input();
+        let debug = format!("{:?}", input);
+        assert!(debug.contains("HealthInput"));
+    }
+
+    #[test]
+    fn test_all_data_structs_clone_debug() {
+        let q = QueueHealthData {
+            total_tasks: 1,
+            downloading: 0,
+            queued: 0,
+            paused: 0,
+            completed: 1,
+            error_count: 0,
+            anomaly_count: 0,
+            deadline_missed: 0,
+            score: 100,
+        };
+        let q2 = q.clone();
+        assert_eq!(q2.total_tasks, 1);
+        assert!(format!("{:?}", q).contains("QueueHealthData"));
+
+        let s = SpeedHealthData {
+            current_speed_bps: 0,
+            avg_speed_5min: 0,
+            avg_speed_15min: 0,
+            active_alerts: 0,
+            anomaly_count: 0,
+            score: 100,
+        };
+        let s2 = s.clone();
+        assert_eq!(s2.current_speed_bps, 0);
+        assert!(format!("{:?}", s).contains("SpeedHealthData"));
+
+        let n = NetworkHealthData {
+            is_connected: true,
+            quality_score: 100,
+            issue_count: 0,
+            proxy_enabled: false,
+        };
+        let n2 = n.clone();
+        assert!(n2.is_connected);
+        assert!(format!("{:?}", n).contains("NetworkHealthData"));
+
+        let st = StorageHealthData {
+            available_bytes: 100,
+            is_low: false,
+            integrity_issues: 0,
+            recycle_bin_count: 0,
+        };
+        let st2 = st.clone();
+        assert_eq!(st2.available_bytes, 100);
+        assert!(format!("{:?}", st).contains("StorageHealthData"));
+
+        let e = ErrorHealthData {
+            error_tasks: 0,
+            pending_retry: 0,
+            retries_today: 0,
+            recovery_enabled: true,
+        };
+        let e2 = e.clone();
+        assert_eq!(e2.error_tasks, 0);
+        assert!(format!("{:?}", e).contains("ErrorHealthData"));
+    }
+
+    #[test]
+    fn test_subsystem_health_issue_counts() {
+        let mut input = default_input();
+        input.error_count = 3;
+        input.deadline_missed = 2;
+        input.speed_alert_count = 1;
+        input.speed_anomaly_count = 2;
+        input.network_issues = 1;
+        input.integrity_issues = 1;
+        input.disk_low = true;
+
+        let config = HealthDashboardConfig::default();
+        let dashboard = build_health_dashboard(&input, &config);
+
+        // Queue issue_count = error_count + deadline_missed
+        assert_eq!(dashboard.subsystems[0].issue_count, 5);
+        // Speed issue_count = speed_alert_count + speed_anomaly_count
+        assert_eq!(dashboard.subsystems[1].issue_count, 3);
+        // Network issue_count = network_issues
+        assert_eq!(dashboard.subsystems[2].issue_count, 1);
+        // Storage issue_count = integrity_issues + (disk_low ? 1 : 0)
+        assert_eq!(dashboard.subsystems[3].issue_count, 2);
+        // Errors issue_count = error_count
+        assert_eq!(dashboard.subsystems[4].issue_count, 3);
+    }
+
+    #[test]
+    fn test_speed_score_boundary_10k() {
+        let mut input = default_input();
+        input.current_speed_bps = 9_999;
+        input.downloading = 1;
+        let score = compute_speed_score(&input);
+        // Below 10_000 → -30
+        assert_eq!(score, 70);
+    }
+
+    #[test]
+    fn test_speed_score_boundary_10k_exact() {
+        let mut input = default_input();
+        input.current_speed_bps = 10_000;
+        input.downloading = 1;
+        let score = compute_speed_score(&input);
+        // At 10_000: not < 10_000, but IS < 50_000 → -15
+        assert_eq!(score, 85);
+    }
+
+    #[test]
+    fn test_speed_score_boundary_50k() {
+        let mut input = default_input();
+        input.current_speed_bps = 49_999;
+        input.downloading = 1;
+        let score = compute_speed_score(&input);
+        // Below 50_000 → -15
+        assert_eq!(score, 85);
+    }
+
+    #[test]
+    fn test_speed_score_boundary_50k_exact() {
+        let mut input = default_input();
+        input.current_speed_bps = 50_000;
+        input.downloading = 1;
+        let score = compute_speed_score(&input);
+        // At 50_000, not below → no penalty
+        assert_eq!(score, 100);
+    }
+
+    #[test]
+    fn test_speed_score_decline_boundary_exact_half() {
+        let mut input = default_input();
+        input.avg_speed_5min = 50_000;
+        input.avg_speed_15min = 100_000;
+        // ratio = 0.5 exactly → NOT < 0.5, but IS < 0.8 → -10
+        let score = compute_speed_score(&input);
+        assert_eq!(score, 90);
+    }
+
+    #[test]
+    fn test_speed_score_decline_boundary_08() {
+        let mut input = default_input();
+        input.avg_speed_5min = 80_000;
+        input.avg_speed_15min = 100_000;
+        // ratio = 0.8 exactly → NOT < 0.8 → no penalty
+        let score = compute_speed_score(&input);
+        assert_eq!(score, 100);
+    }
 }

@@ -1258,4 +1258,998 @@ mod tests {
         entry.record_success();
         assert_eq!(entry.reuse_count, 2);
     }
+
+    // ========== Phase 207: Comprehensive Test Coverage ==========
+
+    // --- PoolConfig: Duration methods ---
+
+    #[test]
+    fn test_pool_config_duration_methods_zero() {
+        let config = PoolConfig {
+            max_age_secs: 0,
+            max_idle_secs: 0,
+            connect_timeout_secs: 0,
+            dns_cache_ttl_secs: 0,
+            ..Default::default()
+        };
+        assert_eq!(config.max_age(), Duration::from_secs(0));
+        assert_eq!(config.max_idle(), Duration::from_secs(0));
+        assert_eq!(config.connect_timeout(), Duration::from_secs(0));
+        assert_eq!(config.dns_cache_ttl(), Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_pool_config_duration_methods_large_values() {
+        let config = PoolConfig {
+            max_age_secs: u64::MAX,
+            max_idle_secs: u64::MAX,
+            connect_timeout_secs: u64::MAX,
+            dns_cache_ttl_secs: u64::MAX,
+            ..Default::default()
+        };
+        assert_eq!(config.max_age(), Duration::from_secs(u64::MAX));
+        assert_eq!(config.max_idle(), Duration::from_secs(u64::MAX));
+    }
+
+    // --- PoolConfig: TCP buffer fields ---
+
+    #[test]
+    fn test_pool_config_tcp_buffer_sizes() {
+        let config = PoolConfig {
+            tcp_send_buffer_size: 512 * 1024,
+            tcp_recv_buffer_size: 1024 * 1024,
+            ..Default::default()
+        };
+        assert_eq!(config.tcp_send_buffer_size, 512 * 1024);
+        assert_eq!(config.tcp_recv_buffer_size, 1024 * 1024);
+    }
+
+    #[test]
+    fn test_pool_config_tcp_buffer_zero_system_default() {
+        let config = PoolConfig {
+            tcp_send_buffer_size: 0,
+            tcp_recv_buffer_size: 0,
+            ..Default::default()
+        };
+        assert_eq!(config.tcp_send_buffer_size, 0);
+        assert_eq!(config.tcp_recv_buffer_size, 0);
+    }
+
+    // --- PoolConfig: Serialization ---
+
+    #[test]
+    fn test_pool_config_pretty_serialization() {
+        let config = PoolConfig::default();
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        assert!(pretty.contains('\n'));
+        let deserialized: PoolConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(
+            deserialized.max_connections_per_addr,
+            config.max_connections_per_addr
+        );
+    }
+
+    #[test]
+    fn test_pool_config_extra_json_fields_ignored() {
+        let json = r#"{
+            "max_connections_per_addr": 8,
+            "max_age_secs": 600,
+            "max_idle_secs": 120,
+            "connect_timeout_secs": 5,
+            "tcp_send_buffer_size": 262144,
+            "tcp_recv_buffer_size": 262144,
+            "tcp_nodelay": true,
+            "dns_cache_enabled": true,
+            "dns_cache_ttl_secs": 300,
+            "health_check_enabled": true,
+            "unknown_field": "should be ignored",
+            "another_extra": 42
+        }"#;
+        let config: PoolConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.max_connections_per_addr, 8);
+        assert_eq!(config.max_age_secs, 600);
+    }
+
+    #[test]
+    fn test_pool_config_zero_values_serialization() {
+        let config = PoolConfig {
+            max_connections_per_addr: 0,
+            max_age_secs: 0,
+            max_idle_secs: 0,
+            connect_timeout_secs: 0,
+            tcp_send_buffer_size: 0,
+            tcp_recv_buffer_size: 0,
+            tcp_nodelay: false,
+            dns_cache_enabled: false,
+            dns_cache_ttl_secs: 0,
+            health_check_enabled: false,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: PoolConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.max_connections_per_addr, 0);
+        assert_eq!(deserialized.max_age_secs, 0);
+        assert!(!deserialized.tcp_nodelay);
+    }
+
+    // --- PoolConfig: Traits ---
+
+    #[test]
+    fn test_pool_config_clone() {
+        let config = PoolConfig {
+            max_connections_per_addr: 16,
+            max_age_secs: 999,
+            ..Default::default()
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.max_connections_per_addr, 16);
+        assert_eq!(cloned.max_age_secs, 999);
+    }
+
+    #[test]
+    fn test_pool_config_debug() {
+        let config = PoolConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("PoolConfig"));
+        assert!(debug.contains("max_connections_per_addr"));
+    }
+
+    // --- PoolStats: Default and traits ---
+
+    #[test]
+    fn test_pool_stats_default_all_zero() {
+        let stats = PoolStats::default();
+        assert_eq!(stats.total_addresses, 0);
+        assert_eq!(stats.total_connections, 0);
+        assert_eq!(stats.healthy_connections, 0);
+        assert_eq!(stats.dns_cache_size, 0);
+        assert_eq!(stats.total_created, 0);
+        assert_eq!(stats.total_reused, 0);
+        assert_eq!(stats.total_discarded, 0);
+        assert_eq!(stats.dns_cache_hits, 0);
+        assert_eq!(stats.dns_cache_misses, 0);
+    }
+
+    #[test]
+    fn test_pool_stats_clone() {
+        let stats = PoolStats {
+            total_addresses: 3,
+            total_connections: 10,
+            healthy_connections: 8,
+            dns_cache_size: 2,
+            total_created: 50,
+            total_reused: 30,
+            total_discarded: 5,
+            dns_cache_hits: 100,
+            dns_cache_misses: 20,
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.total_addresses, 3);
+        assert_eq!(cloned.total_reused, 30);
+        assert_eq!(cloned.dns_cache_hits, 100);
+    }
+
+    #[test]
+    fn test_pool_stats_debug() {
+        let stats = PoolStats::default();
+        let debug = format!("{:?}", stats);
+        assert!(debug.contains("PoolStats"));
+    }
+
+    #[test]
+    fn test_pool_stats_full_roundtrip() {
+        let stats = PoolStats {
+            total_addresses: 7,
+            total_connections: 15,
+            healthy_connections: 12,
+            dns_cache_size: 4,
+            total_created: 200,
+            total_reused: 150,
+            total_discarded: 10,
+            dns_cache_hits: 500,
+            dns_cache_misses: 50,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: PoolStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.total_addresses, 7);
+        assert_eq!(deserialized.total_connections, 15);
+        assert_eq!(deserialized.healthy_connections, 12);
+        assert_eq!(deserialized.dns_cache_size, 4);
+        assert_eq!(deserialized.total_created, 200);
+        assert_eq!(deserialized.total_reused, 150);
+        assert_eq!(deserialized.total_discarded, 10);
+        assert_eq!(deserialized.dns_cache_hits, 500);
+        assert_eq!(deserialized.dns_cache_misses, 50);
+    }
+
+    #[test]
+    fn test_pool_stats_extra_fields_ignored() {
+        let json = r#"{
+            "total_addresses": 1,
+            "total_connections": 2,
+            "healthy_connections": 2,
+            "dns_cache_size": 0,
+            "total_created": 10,
+            "total_reused": 5,
+            "total_discarded": 1,
+            "dns_cache_hits": 3,
+            "dns_cache_misses": 7,
+            "extra_future_field": true
+        }"#;
+        let stats: PoolStats = serde_json::from_str(json).unwrap();
+        assert_eq!(stats.total_addresses, 1);
+        assert_eq!(stats.total_reused, 5);
+    }
+
+    // --- DomainConnectionInfo: Traits and edge cases ---
+
+    #[test]
+    fn test_domain_connection_info_clone() {
+        let info = DomainConnectionInfo {
+            domain: "test.com".to_string(),
+            current_connections: 5,
+            connection_limit: Some(10),
+            utilization_percent: 50.0,
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.domain, "test.com");
+        assert_eq!(cloned.current_connections, 5);
+    }
+
+    #[test]
+    fn test_domain_connection_info_debug() {
+        let info = DomainConnectionInfo {
+            domain: "debug.com".to_string(),
+            current_connections: 0,
+            connection_limit: None,
+            utilization_percent: 0.0,
+        };
+        let debug = format!("{:?}", info);
+        assert!(debug.contains("debug.com"));
+    }
+
+    #[test]
+    fn test_domain_connection_info_no_limit_utilization_zero() {
+        let info = DomainConnectionInfo {
+            domain: "nolimit.com".to_string(),
+            current_connections: 100,
+            connection_limit: None,
+            utilization_percent: 0.0,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let deserialized: DomainConnectionInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.current_connections, 100);
+        assert!(deserialized.connection_limit.is_none());
+    }
+
+    #[test]
+    fn test_domain_connection_info_unicode_domain() {
+        let info = DomainConnectionInfo {
+            domain: "日本語テスト.com".to_string(),
+            current_connections: 1,
+            connection_limit: Some(5),
+            utilization_percent: 20.0,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let deserialized: DomainConnectionInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.domain, "日本語テスト.com");
+    }
+
+    // --- PoolStatus: Traits ---
+
+    #[test]
+    fn test_pool_status_clone() {
+        let status = PoolStatus {
+            config: PoolConfig::default(),
+            stats: PoolStats::default(),
+            domain_connections: vec![],
+            uptime_secs: 42,
+        };
+        let cloned = status.clone();
+        assert_eq!(cloned.uptime_secs, 42);
+        assert_eq!(cloned.config.max_connections_per_addr, 4);
+    }
+
+    #[test]
+    fn test_pool_status_debug() {
+        let status = PoolStatus {
+            config: PoolConfig::default(),
+            stats: PoolStats::default(),
+            domain_connections: vec![],
+            uptime_secs: 0,
+        };
+        let debug = format!("{:?}", status);
+        assert!(debug.contains("PoolStatus"));
+    }
+
+    // --- PoolError: Traits and conversions ---
+
+    #[test]
+    fn test_pool_error_from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        let pool_err: PoolError = PoolError::Io(io_err);
+        assert!(pool_err.to_string().contains("refused"));
+    }
+
+    #[test]
+    fn test_pool_error_debug() {
+        let err = PoolError::Timeout;
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Timeout"));
+
+        let err = PoolError::Dns("no such host".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Dns"));
+    }
+
+    #[test]
+    fn test_pool_error_dns_empty_message() {
+        let err = PoolError::Dns(String::new());
+        assert_eq!(err.to_string(), "DNS resolution failed: ");
+    }
+
+    // --- ConnectionPool: Construction and defaults ---
+
+    #[test]
+    fn test_connection_pool_default_trait() {
+        let pool = ConnectionPool::default();
+        let config = pool.get_config();
+        assert_eq!(config.max_connections_per_addr, 4);
+        assert_eq!(config.max_age_secs, 300);
+    }
+
+    #[tokio::test]
+    async fn test_connection_pool_with_custom_config() {
+        let config = PoolConfig {
+            max_connections_per_addr: 20,
+            max_age_secs: 1200,
+            max_idle_secs: 300,
+            ..Default::default()
+        };
+        let pool = ConnectionPool::with_config(config);
+        let loaded = pool.get_config_async().await;
+        assert_eq!(loaded.max_connections_per_addr, 20);
+        assert_eq!(loaded.max_age_secs, 1200);
+        assert_eq!(loaded.max_idle_secs, 300);
+    }
+
+    // --- ConnectionPool: Domain limits ---
+
+    #[tokio::test]
+    async fn test_domain_limit_override() {
+        let pool = ConnectionPool::new();
+        pool.set_domain_limit("example.com", 5).await;
+        assert!(pool.can_connect_domain("example.com").await);
+
+        // Override the limit
+        pool.set_domain_limit("example.com", 1).await;
+        // Already at 0 connections, limit 1 should still allow
+        assert!(pool.can_connect_domain("example.com").await);
+
+        pool.record_domain_connection("example.com").await;
+        // Now at 1, limit 1 should deny
+        assert!(!pool.can_connect_domain("example.com").await);
+    }
+
+    #[tokio::test]
+    async fn test_domain_limit_zero() {
+        let pool = ConnectionPool::new();
+        pool.set_domain_limit("blocked.com", 0).await;
+        // Zero limit means no connections allowed
+        assert!(!pool.can_connect_domain("blocked.com").await);
+    }
+
+    #[tokio::test]
+    async fn test_domain_disconnect_unknown_domain_no_panic() {
+        let pool = ConnectionPool::new();
+        // Disconnect from a domain that was never recorded should not panic
+        pool.record_domain_disconnect("never-existed.com").await;
+        assert!(pool.can_connect_domain("never-existed.com").await);
+    }
+
+    #[tokio::test]
+    async fn test_domain_connections_empty() {
+        let pool = ConnectionPool::new();
+        let info = pool.get_domain_connections().await;
+        assert!(info.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_domain_connections_sorted_descending() {
+        let pool = ConnectionPool::new();
+        pool.record_domain_connection("a.com").await;
+        pool.record_domain_connection("b.com").await;
+        pool.record_domain_connection("b.com").await;
+        pool.record_domain_connection("c.com").await;
+        pool.record_domain_connection("c.com").await;
+        pool.record_domain_connection("c.com").await;
+
+        let info = pool.get_domain_connections().await;
+        assert_eq!(info.len(), 3);
+        // c.com (3) > b.com (2) > a.com (1)
+        assert_eq!(info[0].domain, "c.com");
+        assert_eq!(info[0].current_connections, 3);
+        assert_eq!(info[1].domain, "b.com");
+        assert_eq!(info[1].current_connections, 2);
+        assert_eq!(info[2].domain, "a.com");
+        assert_eq!(info[2].current_connections, 1);
+    }
+
+    #[tokio::test]
+    async fn test_domain_connections_multiple_records() {
+        let pool = ConnectionPool::new();
+        for _ in 0..10 {
+            pool.record_domain_connection("heavy.com").await;
+        }
+        let info = pool.get_domain_connections().await;
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].current_connections, 10);
+    }
+
+    // --- ConnectionPool: get_or_connect ---
+
+    #[tokio::test]
+    async fn test_get_or_connect_increments_created() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let pool = ConnectionPool::new();
+        let s1 = pool.get_or_connect(addr).await.unwrap();
+        drop(s1);
+
+        let stats = pool.stats().await;
+        assert_eq!(stats.total_created, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_or_connect_unreachable_timeout() {
+        let config = PoolConfig {
+            connect_timeout_secs: 1,
+            ..Default::default()
+        };
+        let pool = ConnectionPool::with_config(config);
+        // Use a non-routable address to trigger timeout
+        let unreachable: SocketAddr = "192.0.2.1:12345".parse().unwrap();
+        let result = pool.get_or_connect(unreachable).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Should be either Timeout or Io error
+        match err {
+            PoolError::Timeout | PoolError::Io(_) => {}
+            _ => panic!("Expected Timeout or Io error, got: {:?}", err),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_or_connect_reuse_then_return() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let pool = ConnectionPool::new();
+
+        // First connection
+        let s1 = pool.get_or_connect(addr).await.unwrap();
+        pool.return_connection(s1, addr).await;
+
+        // Second should reuse
+        let s2 = pool.get_or_connect(addr).await.unwrap();
+        pool.return_connection(s2, addr).await;
+
+        let stats = pool.stats().await;
+        assert_eq!(stats.total_created, 1);
+        assert_eq!(stats.total_reused, 1);
+        assert_eq!(stats.total_discarded, 0);
+    }
+
+    // --- ConnectionPool: return_connection ---
+
+    #[tokio::test]
+    async fn test_return_connection_respects_max_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let config = PoolConfig {
+            max_connections_per_addr: 1,
+            ..Default::default()
+        };
+        let pool = ConnectionPool::with_config(config);
+
+        // Create and return 3 connections
+        for _ in 0..3 {
+            let s = pool.get_or_connect(addr).await.unwrap();
+            pool.return_connection(s, addr).await;
+        }
+
+        let stats = pool.stats().await;
+        // Should be capped at max_connections_per_addr
+        assert_eq!(stats.total_connections, 1);
+    }
+
+    #[tokio::test]
+    async fn test_return_connection_different_addresses() {
+        let l1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let a1 = l1.local_addr().unwrap();
+        let l2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let a2 = l2.local_addr().unwrap();
+
+        let pool = ConnectionPool::new();
+
+        let s1 = pool.get_or_connect(a1).await.unwrap();
+        let s2 = pool.get_or_connect(a2).await.unwrap();
+        pool.return_connection(s1, a1).await;
+        pool.return_connection(s2, a2).await;
+
+        let stats = pool.stats().await;
+        assert_eq!(stats.total_addresses, 2);
+        assert_eq!(stats.total_connections, 2);
+    }
+
+    // --- ConnectionPool: mark_connection_error ---
+
+    #[tokio::test]
+    async fn test_mark_connection_error_nonexistent_addr() {
+        let pool = ConnectionPool::new();
+        let fake_addr: SocketAddr = "127.0.0.1:59999".parse().unwrap();
+        // Should not panic on non-existent address
+        pool.mark_connection_error(fake_addr).await;
+    }
+
+    #[tokio::test]
+    async fn test_mark_connection_error_boundary_3_errors_healthy() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let pool = ConnectionPool::new();
+        let s = pool.get_or_connect(addr).await.unwrap();
+        pool.return_connection(s, addr).await;
+
+        // 3 errors: still healthy (threshold is > 3)
+        pool.mark_connection_error(addr).await;
+        pool.mark_connection_error(addr).await;
+        pool.mark_connection_error(addr).await;
+
+        // Connection should still be reused
+        let s2 = pool.get_or_connect(addr).await.unwrap();
+        pool.return_connection(s2, addr).await;
+
+        let stats = pool.stats().await;
+        assert_eq!(stats.total_reused, 1);
+        assert_eq!(stats.total_discarded, 0);
+    }
+
+    #[tokio::test]
+    async fn test_mark_connection_error_4_errors_unhealthy() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let pool = ConnectionPool::new();
+        let s = pool.get_or_connect(addr).await.unwrap();
+        pool.return_connection(s, addr).await;
+
+        // 4 errors: unhealthy
+        for _ in 0..4 {
+            pool.mark_connection_error(addr).await;
+        }
+
+        // Connection should be discarded on next get
+        let s2 = pool.get_or_connect(addr).await.unwrap();
+        pool.return_connection(s2, addr).await;
+
+        let stats = pool.stats().await;
+        assert_eq!(stats.total_discarded, 1);
+        assert_eq!(stats.total_reused, 0);
+    }
+
+    // --- ConnectionPool: cleanup ---
+
+    #[tokio::test]
+    async fn test_cleanup_preserves_healthy_connections() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let pool = ConnectionPool::new();
+        let s = pool.get_or_connect(addr).await.unwrap();
+        pool.return_connection(s, addr).await;
+
+        pool.cleanup().await;
+
+        let stats = pool.stats().await;
+        // Healthy connection should survive cleanup
+        assert_eq!(stats.total_connections, 1);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_removes_expired_connections() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let config = PoolConfig {
+            max_age_secs: 0, // Expire immediately
+            ..Default::default()
+        };
+        let pool = ConnectionPool::with_config(config);
+
+        let s = pool.get_or_connect(addr).await.unwrap();
+        pool.return_connection(s, addr).await;
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        pool.cleanup().await;
+
+        let stats = pool.stats().await;
+        assert_eq!(stats.total_connections, 0);
+    }
+
+    // --- ConnectionPool: clear ---
+
+    #[tokio::test]
+    async fn test_clear_resets_all_stats() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let pool = ConnectionPool::new();
+
+        // Create some activity
+        let s1 = pool.get_or_connect(addr).await.unwrap();
+        pool.return_connection(s1, addr).await;
+        let s2 = pool.get_or_connect(addr).await.unwrap();
+        pool.return_connection(s2, addr).await;
+
+        pool.record_domain_connection("example.com").await;
+        let _ = pool.resolve_cached("127.0.0.1", 80).await;
+
+        pool.clear().await;
+
+        let stats = pool.stats().await;
+        assert_eq!(stats.total_addresses, 0);
+        assert_eq!(stats.total_connections, 0);
+        assert_eq!(stats.total_created, 0);
+        assert_eq!(stats.total_reused, 0);
+        assert_eq!(stats.total_discarded, 0);
+        assert_eq!(stats.dns_cache_hits, 0);
+        assert_eq!(stats.dns_cache_misses, 0);
+        assert_eq!(stats.dns_cache_size, 0);
+    }
+
+    #[tokio::test]
+    async fn test_clear_also_clears_dns_cache() {
+        let pool = ConnectionPool::new();
+
+        // Populate DNS cache
+        let _ = pool.resolve_cached("127.0.0.1", 80).await;
+        let stats_before = pool.stats().await;
+        assert_eq!(stats_before.dns_cache_size, 1);
+
+        pool.clear().await;
+
+        let stats_after = pool.stats().await;
+        assert_eq!(stats_after.dns_cache_size, 0);
+    }
+
+    // --- ConnectionPool: update_config ---
+
+    #[tokio::test]
+    async fn test_update_config_affects_max_connections() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let pool = ConnectionPool::new();
+
+        // Return 3 connections with default limit (4)
+        let mut streams = vec![];
+        for _ in 0..3 {
+            let s = pool.get_or_connect(addr).await.unwrap();
+            streams.push(s);
+        }
+        for s in streams {
+            pool.return_connection(s, addr).await;
+        }
+
+        let stats = pool.stats().await;
+        assert_eq!(stats.total_connections, 3);
+
+        // Now reduce max to 1 and return another
+        let new_config = PoolConfig {
+            max_connections_per_addr: 1,
+            ..Default::default()
+        };
+        pool.update_config(new_config).await;
+
+        let s = pool.get_or_connect(addr).await.unwrap();
+        pool.return_connection(s, addr).await;
+
+        let stats = pool.stats().await;
+        // Cleanup during return_connection should have trimmed to 1
+        assert_eq!(stats.total_connections, 1);
+    }
+
+    // --- ConnectionPool: resolve_cached ---
+
+    #[tokio::test]
+    async fn test_resolve_cached_invalid_hostname() {
+        let pool = ConnectionPool::new();
+        let result = pool
+            .resolve_cached("this-host-does-not-exist.invalid", 80)
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PoolError::Dns(msg) => assert!(!msg.is_empty()),
+            other => panic!("Expected Dns error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_cached_port_override() {
+        let pool = ConnectionPool::new();
+        // First resolve with port 80
+        let addr1 = pool.resolve_cached("127.0.0.1", 80).await.unwrap();
+        assert_eq!(addr1.port(), 80);
+
+        // Cache hit with different port should override
+        let addr2 = pool.resolve_cached("127.0.0.1", 443).await.unwrap();
+        assert_eq!(addr2.port(), 443);
+        assert_eq!(addr1.ip(), addr2.ip());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_cached_dns_disabled_always_misses() {
+        let config = PoolConfig {
+            dns_cache_enabled: false,
+            ..Default::default()
+        };
+        let pool = ConnectionPool::with_config(config);
+
+        // First resolution
+        let _ = pool.resolve_cached("127.0.0.1", 80).await.unwrap();
+        let stats1 = pool.stats().await;
+        assert_eq!(stats1.dns_cache_misses, 1);
+        assert_eq!(stats1.dns_cache_hits, 0);
+
+        // Second resolution should also miss (caching disabled)
+        let _ = pool.resolve_cached("127.0.0.1", 80).await.unwrap();
+        let stats2 = pool.stats().await;
+        assert_eq!(stats2.dns_cache_misses, 2);
+        assert_eq!(stats2.dns_cache_hits, 0);
+    }
+
+    // --- ConnectionPool: stats accuracy ---
+
+    #[tokio::test]
+    async fn test_stats_accuracy_after_complex_operations() {
+        let l1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let a1 = l1.local_addr().unwrap();
+        let l2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let a2 = l2.local_addr().unwrap();
+
+        let pool = ConnectionPool::new();
+
+        // Create connections to two addresses
+        let s1 = pool.get_or_connect(a1).await.unwrap();
+        let s2 = pool.get_or_connect(a2).await.unwrap();
+
+        // Return both
+        pool.return_connection(s1, a1).await;
+        pool.return_connection(s2, a2).await;
+
+        // Reuse both
+        let s3 = pool.get_or_connect(a1).await.unwrap();
+        let s4 = pool.get_or_connect(a2).await.unwrap();
+
+        let stats = pool.stats().await;
+        assert_eq!(stats.total_created, 2);
+        assert_eq!(stats.total_reused, 2);
+        assert_eq!(stats.total_addresses, 2);
+
+        // Return again
+        pool.return_connection(s3, a1).await;
+        pool.return_connection(s4, a2).await;
+
+        let stats2 = pool.stats().await;
+        assert_eq!(stats2.total_connections, 2);
+    }
+
+    // --- ConnectionPool: status ---
+
+    #[tokio::test]
+    async fn test_pool_status_comprehensive() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let pool = ConnectionPool::new();
+        pool.set_domain_limit("alpha.com", 10).await;
+        pool.set_domain_limit("beta.com", 5).await;
+        pool.record_domain_connection("alpha.com").await;
+        pool.record_domain_connection("alpha.com").await;
+        pool.record_domain_connection("beta.com").await;
+
+        let s = pool.get_or_connect(addr).await.unwrap();
+        pool.return_connection(s, addr).await;
+
+        let status = pool.status().await;
+        assert_eq!(status.config.max_connections_per_addr, 4);
+        assert_eq!(status.stats.total_addresses, 1);
+        assert_eq!(status.domain_connections.len(), 2);
+        assert!(status.uptime_secs < 10);
+
+        // Verify domain connections are sorted
+        assert_eq!(status.domain_connections[0].domain, "alpha.com");
+        assert_eq!(status.domain_connections[0].current_connections, 2);
+    }
+
+    // --- Persistence ---
+
+    #[test]
+    fn test_save_pool_config_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = PoolConfig::default();
+        save_pool_config(&config, dir.path()).unwrap();
+        let path = dir.path().join("connection_pool_config.json");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_save_pool_config_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let config1 = PoolConfig {
+            max_connections_per_addr: 2,
+            ..Default::default()
+        };
+        save_pool_config(&config1, dir.path()).unwrap();
+
+        let config2 = PoolConfig {
+            max_connections_per_addr: 10,
+            ..Default::default()
+        };
+        save_pool_config(&config2, dir.path()).unwrap();
+
+        let loaded = load_pool_config(dir.path()).unwrap();
+        assert_eq!(loaded.max_connections_per_addr, 10);
+    }
+
+    #[test]
+    fn test_save_pool_config_no_tmp_leftover() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = PoolConfig::default();
+        save_pool_config(&config, dir.path()).unwrap();
+
+        // Check no temporary files left
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                name.contains("tmp") || name.starts_with('.')
+            })
+            .collect();
+        assert!(entries.is_empty(), "Temporary files found: {:?}", entries);
+    }
+
+    #[test]
+    fn test_load_pool_config_full_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = PoolConfig {
+            max_connections_per_addr: 7,
+            max_age_secs: 456,
+            max_idle_secs: 78,
+            connect_timeout_secs: 3,
+            tcp_send_buffer_size: 128 * 1024,
+            tcp_recv_buffer_size: 64 * 1024,
+            tcp_nodelay: false,
+            dns_cache_enabled: false,
+            dns_cache_ttl_secs: 120,
+            health_check_enabled: false,
+        };
+        save_pool_config(&config, dir.path()).unwrap();
+        let loaded = load_pool_config(dir.path()).unwrap();
+        assert_eq!(loaded.max_connections_per_addr, 7);
+        assert_eq!(loaded.max_age_secs, 456);
+        assert_eq!(loaded.max_idle_secs, 78);
+        assert_eq!(loaded.connect_timeout_secs, 3);
+        assert_eq!(loaded.tcp_send_buffer_size, 128 * 1024);
+        assert_eq!(loaded.tcp_recv_buffer_size, 64 * 1024);
+        assert_eq!(loaded.tcp_nodelay, false);
+        assert_eq!(loaded.dns_cache_enabled, false);
+        assert_eq!(loaded.dns_cache_ttl_secs, 120);
+        assert_eq!(loaded.health_check_enabled, false);
+    }
+
+    // --- PoolEntry: boundary tests ---
+
+    #[tokio::test]
+    async fn test_pool_entry_is_healthy_exactly_3_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut entry = PoolEntry::new(stream, addr);
+
+        // Exactly 3 errors: still healthy
+        for _ in 0..3 {
+            entry.record_error();
+        }
+        assert!(entry.is_healthy());
+        assert_eq!(entry.error_count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_pool_entry_is_healthy_4_errors_unhealthy() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut entry = PoolEntry::new(stream, addr);
+
+        for _ in 0..4 {
+            entry.record_error();
+        }
+        assert!(!entry.is_healthy());
+    }
+
+    #[tokio::test]
+    async fn test_pool_entry_initial_state() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let entry = PoolEntry::new(stream, addr);
+
+        assert_eq!(entry.reuse_count, 0);
+        assert_eq!(entry.error_count, 0);
+        assert!(entry.last_rtt_ms.is_none());
+        assert_eq!(entry.addr, addr);
+    }
+
+    // --- ConnectionPool: pre_connect ---
+
+    #[tokio::test]
+    async fn test_pre_connect_adds_to_pool_stats() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let pool = ConnectionPool::new();
+        pool.pre_connect(addr).await.unwrap();
+
+        let stats = pool.stats().await;
+        assert_eq!(stats.total_created, 1);
+        assert_eq!(stats.total_addresses, 1);
+        assert_eq!(stats.total_connections, 1);
+    }
+
+    // --- ConnectionPool: get_config sync fallback ---
+
+    #[tokio::test]
+    async fn test_get_config_sync_returns_default_when_locked() {
+        let pool = ConnectionPool::new();
+        // When not locked, should return actual config
+        let config = pool.get_config();
+        assert_eq!(config.max_connections_per_addr, 4);
+    }
+
+    // --- ConnectionPool: domain utilization calculation ---
+
+    #[tokio::test]
+    async fn test_domain_utilization_100_percent() {
+        let pool = ConnectionPool::new();
+        pool.set_domain_limit("full.com", 3).await;
+        for _ in 0..3 {
+            pool.record_domain_connection("full.com").await;
+        }
+
+        let info = pool.get_domain_connections().await;
+        let domain = info.iter().find(|d| d.domain == "full.com").unwrap();
+        assert!((domain.utilization_percent - 100.0).abs() < 0.1);
+    }
+
+    #[tokio::test]
+    async fn test_domain_utilization_over_limit() {
+        let pool = ConnectionPool::new();
+        pool.set_domain_limit("over.com", 2).await;
+        for _ in 0..5 {
+            pool.record_domain_connection("over.com").await;
+        }
+
+        let info = pool.get_domain_connections().await;
+        let domain = info.iter().find(|d| d.domain == "over.com").unwrap();
+        // 5/2 * 100 = 250%
+        assert!((domain.utilization_percent - 250.0).abs() < 0.1);
+    }
 }

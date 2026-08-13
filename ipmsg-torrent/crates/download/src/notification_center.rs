@@ -1035,4 +1035,594 @@ mod tests {
         let channels = center.get_channels_for_event(NotificationCenterEvent::DownloadFailed);
         assert_eq!(channels, vec!["webhook", "desktop"]);
     }
+
+    // Phase 207: Comprehensive test coverage
+
+    #[test]
+    fn test_notification_priority_default() {
+        assert_eq!(
+            NotificationPriority::default(),
+            NotificationPriority::Normal
+        );
+    }
+
+    #[test]
+    fn test_notification_priority_serde() {
+        let priority = NotificationPriority::High;
+        let json = serde_json::to_string(&priority).unwrap();
+        let loaded: NotificationPriority = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, NotificationPriority::High);
+    }
+
+    #[test]
+    fn test_notification_priority_clone_copy() {
+        let p1 = NotificationPriority::Critical;
+        let p2 = p1.clone();
+        let p3 = p1;
+        assert_eq!(p2, NotificationPriority::Critical);
+        assert_eq!(p3, NotificationPriority::Critical);
+    }
+
+    #[test]
+    fn test_notification_event_serde() {
+        let event = NotificationCenterEvent::DownloadComplete;
+        let json = serde_json::to_string(&event).unwrap();
+        let loaded: NotificationCenterEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, NotificationCenterEvent::DownloadComplete);
+    }
+
+    #[test]
+    fn test_notification_event_clone_copy() {
+        let e1 = NotificationCenterEvent::DownloadFailed;
+        let e2 = e1.clone();
+        let e3 = e1;
+        assert_eq!(e2, NotificationCenterEvent::DownloadFailed);
+        assert_eq!(e3, NotificationCenterEvent::DownloadFailed);
+    }
+
+    #[test]
+    fn test_notification_event_all_labels() {
+        let events = vec![
+            NotificationCenterEvent::DownloadComplete,
+            NotificationCenterEvent::DownloadFailed,
+            NotificationCenterEvent::DownloadStarted,
+            NotificationCenterEvent::DownloadPaused,
+            NotificationCenterEvent::DownloadResumed,
+            NotificationCenterEvent::QueueEmpty,
+            NotificationCenterEvent::ProgressMilestone,
+            NotificationCenterEvent::SpeedAlert,
+            NotificationCenterEvent::DiskSpaceWarning,
+            NotificationCenterEvent::NetworkDisconnected,
+        ];
+        for event in events {
+            assert!(!event.label().is_empty());
+        }
+    }
+
+    #[test]
+    fn test_quiet_hours_config_serde() {
+        let config = QuietHoursConfig {
+            enabled: true,
+            start_time: "22:00".to_string(),
+            end_time: "07:00".to_string(),
+            allow_critical: false,
+            timezone: Some("Asia/Shanghai".to_string()),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: QuietHoursConfig = serde_json::from_str(&json).unwrap();
+        assert!(loaded.enabled);
+        assert_eq!(loaded.start_time, "22:00");
+        assert_eq!(loaded.end_time, "07:00");
+        assert!(!loaded.allow_critical);
+        assert_eq!(loaded.timezone, Some("Asia/Shanghai".to_string()));
+    }
+
+    #[test]
+    fn test_quiet_hours_same_day_range() {
+        let config = QuietHoursConfig {
+            enabled: true,
+            start_time: "09:00".to_string(),
+            end_time: "17:00".to_string(),
+            allow_critical: true,
+            timezone: None,
+        };
+
+        // Test at 10:00 (should be quiet)
+        let quiet_time = Local::now()
+            .date_naive()
+            .and_hms_opt(10, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap();
+        assert!(config.is_quiet_time(quiet_time).unwrap());
+
+        // Test at 18:00 (should not be quiet)
+        let not_quiet = Local::now()
+            .date_naive()
+            .and_hms_opt(18, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap();
+        assert!(!config.is_quiet_time(not_quiet).unwrap());
+    }
+
+    #[test]
+    fn test_quiet_hours_invalid_time_format() {
+        let config = QuietHoursConfig {
+            enabled: true,
+            start_time: "invalid".to_string(),
+            end_time: "08:00".to_string(),
+            allow_critical: true,
+            timezone: None,
+        };
+        let now = Local::now();
+        assert!(config.is_quiet_time(now).is_err());
+    }
+
+    #[test]
+    fn test_event_channel_preference_serde() {
+        let pref = EventChannelPreference {
+            event: NotificationCenterEvent::DownloadComplete,
+            channels: vec!["email".to_string(), "sms".to_string()],
+            priority_override: Some(NotificationPriority::High),
+            muted: true,
+        };
+        let json = serde_json::to_string(&pref).unwrap();
+        let loaded: EventChannelPreference = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.event, NotificationCenterEvent::DownloadComplete);
+        assert_eq!(loaded.channels, vec!["email", "sms"]);
+        assert_eq!(loaded.priority_override, Some(NotificationPriority::High));
+        assert!(loaded.muted);
+    }
+
+    #[test]
+    fn test_batching_config_default() {
+        let config = BatchingConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.window_secs, 60);
+        assert_eq!(config.max_batch_size, 10);
+    }
+
+    #[test]
+    fn test_batching_config_serde() {
+        let config = BatchingConfig {
+            enabled: false,
+            window_secs: 120,
+            max_batch_size: 20,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: BatchingConfig = serde_json::from_str(&json).unwrap();
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.window_secs, 120);
+        assert_eq!(loaded.max_batch_size, 20);
+    }
+
+    #[test]
+    fn test_pending_notification_serde() {
+        let notif = PendingNotification {
+            id: "test-id".to_string(),
+            event: NotificationCenterEvent::DownloadComplete,
+            priority: NotificationPriority::Normal,
+            title: "Test".to_string(),
+            message: "Message".to_string(),
+            created_at: Utc::now(),
+            task_id: Some("task-1".to_string()),
+            metadata: HashMap::new(),
+        };
+        let json = serde_json::to_string(&notif).unwrap();
+        let loaded: PendingNotification = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.id, "test-id");
+        assert_eq!(loaded.event, NotificationCenterEvent::DownloadComplete);
+    }
+
+    #[test]
+    fn test_notification_record_serde() {
+        let record = NotificationRecord {
+            id: "rec-id".to_string(),
+            event: NotificationCenterEvent::DownloadFailed,
+            priority: NotificationPriority::High,
+            title: "Failed".to_string(),
+            message: "Download failed".to_string(),
+            channels: vec!["desktop".to_string()],
+            delivered_at: Utc::now(),
+            success: true,
+            task_id: Some("task-2".to_string()),
+            suppressed: false,
+            suppression_reason: None,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let loaded: NotificationRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.id, "rec-id");
+        assert!(loaded.success);
+        assert!(!loaded.suppressed);
+    }
+
+    #[test]
+    fn test_channel_stats_default() {
+        let stats = ChannelStats::default();
+        assert_eq!(stats.total_sent, 0);
+        assert_eq!(stats.successful, 0);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.avg_delivery_ms, 0.0);
+    }
+
+    #[test]
+    fn test_notification_analytics_default() {
+        let analytics = NotificationAnalytics::default();
+        assert_eq!(analytics.total_created, 0);
+        assert_eq!(analytics.total_delivered, 0);
+        assert_eq!(analytics.total_suppressed, 0);
+        assert!(analytics.channel_stats.is_empty());
+        assert!(analytics.event_counts.is_empty());
+    }
+
+    #[test]
+    fn test_notification_config_default() {
+        let config = NotificationCenterConfig::default();
+        assert!(!config.quiet_hours.enabled);
+        assert!(config.batching.enabled);
+        assert!(config.event_preferences.is_empty());
+        assert_eq!(config.max_history_size, 1000);
+        assert!(config.persist_history);
+        assert!(config.history_path.is_none());
+    }
+
+    #[test]
+    fn test_notification_config_serde() {
+        let config = NotificationCenterConfig {
+            quiet_hours: QuietHoursConfig {
+                enabled: true,
+                start_time: "22:00".to_string(),
+                end_time: "07:00".to_string(),
+                allow_critical: true,
+                timezone: None,
+            },
+            batching: BatchingConfig {
+                enabled: false,
+                window_secs: 30,
+                max_batch_size: 5,
+            },
+            event_preferences: vec![],
+            max_history_size: 500,
+            persist_history: false,
+            history_path: Some(PathBuf::from("/tmp/history.json")),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: NotificationCenterConfig = serde_json::from_str(&json).unwrap();
+        assert!(loaded.quiet_hours.enabled);
+        assert!(!loaded.batching.enabled);
+        assert_eq!(loaded.max_history_size, 500);
+        assert!(!loaded.persist_history);
+    }
+
+    #[test]
+    fn test_notification_filter_default() {
+        let filter = NotificationFilter::default();
+        assert!(filter.event.is_none());
+        assert!(filter.min_priority.is_none());
+        assert!(filter.channel.is_none());
+        assert!(filter.task_id.is_none());
+        assert!(filter.start_time.is_none());
+        assert!(filter.end_time.is_none());
+        assert!(filter.suppressed.is_none());
+        assert!(filter.limit.is_none());
+    }
+
+    #[test]
+    fn test_notification_center_manager_default() {
+        let center = NotificationCenterManager::default();
+        assert_eq!(center.get_pending_batch_count(), 0);
+        assert_eq!(center.get_analytics().total_created, 0);
+    }
+
+    #[test]
+    fn test_notification_center_get_config() {
+        let center = NotificationCenterManager::new();
+        let config = center.get_config();
+        assert!(!config.quiet_hours.enabled);
+    }
+
+    #[test]
+    fn test_notification_center_set_config() {
+        let mut center = NotificationCenterManager::new();
+        let config = NotificationCenterConfig {
+            quiet_hours: QuietHoursConfig {
+                enabled: true,
+                start_time: "23:00".to_string(),
+                end_time: "08:00".to_string(),
+                allow_critical: true,
+                timezone: None,
+            },
+            ..Default::default()
+        };
+        center.set_config(config);
+        assert!(center.get_config().quiet_hours.enabled);
+    }
+
+    #[test]
+    fn test_notification_center_notify_with_metadata() {
+        let mut center = NotificationCenterManager::new();
+        center.config.batching.enabled = false;
+
+        let mut metadata = HashMap::new();
+        metadata.insert("file_size".to_string(), "1.5 GB".to_string());
+        metadata.insert("duration".to_string(), "00:15:30".to_string());
+
+        let id = center.notify(
+            NotificationCenterEvent::DownloadComplete,
+            "Complete".to_string(),
+            "File downloaded".to_string(),
+            Some("task-meta".to_string()),
+            metadata,
+        );
+
+        assert!(!id.is_empty());
+        assert_eq!(center.history.len(), 1);
+        let record = &center.history[0];
+        assert_eq!(record.task_id, Some("task-meta".to_string()));
+    }
+
+    #[test]
+    fn test_notification_center_priority_override() {
+        let mut center = NotificationCenterManager::new();
+        center.config.batching.enabled = false;
+        center
+            .config
+            .event_preferences
+            .push(EventChannelPreference {
+                event: NotificationCenterEvent::DownloadComplete,
+                channels: vec![],
+                priority_override: Some(NotificationPriority::Critical),
+                muted: false,
+            });
+
+        // Should bypass batching due to Critical override
+        center.notify(
+            NotificationCenterEvent::DownloadComplete,
+            "Complete".to_string(),
+            "Message".to_string(),
+            None,
+            HashMap::new(),
+        );
+
+        assert_eq!(center.get_pending_batch_count(), 0);
+        assert_eq!(center.history.len(), 1);
+    }
+
+    #[test]
+    fn test_notification_center_flush_batch() {
+        let mut center = NotificationCenterManager::new();
+        center.config.batching.enabled = true;
+        center.config.batching.max_batch_size = 100;
+
+        center.notify(
+            NotificationCenterEvent::DownloadComplete,
+            "Test 1".to_string(),
+            "Message 1".to_string(),
+            None,
+            HashMap::new(),
+        );
+        center.notify(
+            NotificationCenterEvent::DownloadComplete,
+            "Test 2".to_string(),
+            "Message 2".to_string(),
+            None,
+            HashMap::new(),
+        );
+
+        assert_eq!(center.get_pending_batch_count(), 2);
+        assert_eq!(center.history.len(), 0);
+
+        center.flush_batch();
+
+        assert_eq!(center.get_pending_batch_count(), 0);
+        assert_eq!(center.history.len(), 2);
+    }
+
+    #[test]
+    fn test_notification_center_check_batch_timeout() {
+        let mut center = NotificationCenterManager::new();
+        center.config.batching.enabled = true;
+        center.config.batching.window_secs = 1;
+        center.config.batching.max_batch_size = 100;
+
+        center.notify(
+            NotificationCenterEvent::DownloadComplete,
+            "Test".to_string(),
+            "Message".to_string(),
+            None,
+            HashMap::new(),
+        );
+
+        // Should not flush yet (just added)
+        center.check_batch_timeout();
+        assert_eq!(center.get_pending_batch_count(), 1);
+
+        // Wait for timeout
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        center.check_batch_timeout();
+
+        assert_eq!(center.get_pending_batch_count(), 0);
+        assert_eq!(center.history.len(), 1);
+    }
+
+    #[test]
+    fn test_notification_history_filter_by_channel() {
+        let mut center = NotificationCenterManager::new();
+        center.config.batching.enabled = false;
+        center
+            .config
+            .event_preferences
+            .push(EventChannelPreference {
+                event: NotificationCenterEvent::DownloadComplete,
+                channels: vec!["email".to_string()],
+                priority_override: None,
+                muted: false,
+            });
+
+        center.notify(
+            NotificationCenterEvent::DownloadComplete,
+            "Complete".to_string(),
+            "Message".to_string(),
+            None,
+            HashMap::new(),
+        );
+
+        let filter = NotificationFilter {
+            channel: Some("email".to_string()),
+            ..Default::default()
+        };
+        let results = center.get_history(filter);
+        assert_eq!(results.len(), 1);
+
+        let filter = NotificationFilter {
+            channel: Some("sms".to_string()),
+            ..Default::default()
+        };
+        let results = center.get_history(filter);
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_notification_history_filter_by_suppressed() {
+        let mut center = NotificationCenterManager::new();
+        center.config.batching.enabled = false;
+        center
+            .config
+            .event_preferences
+            .push(EventChannelPreference {
+                event: NotificationCenterEvent::ProgressMilestone,
+                channels: vec![],
+                priority_override: None,
+                muted: true,
+            });
+
+        center.notify(
+            NotificationCenterEvent::ProgressMilestone,
+            "Progress".to_string(),
+            "50%".to_string(),
+            None,
+            HashMap::new(),
+        );
+        center.notify(
+            NotificationCenterEvent::DownloadComplete,
+            "Complete".to_string(),
+            "Done".to_string(),
+            None,
+            HashMap::new(),
+        );
+
+        let filter = NotificationFilter {
+            suppressed: Some(true),
+            ..Default::default()
+        };
+        let results = center.get_history(filter);
+        assert_eq!(results.len(), 1);
+
+        let filter = NotificationFilter {
+            suppressed: Some(false),
+            ..Default::default()
+        };
+        let results = center.get_history(filter);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_notification_summary_structure() {
+        let mut center = NotificationCenterManager::new();
+        center.config.batching.enabled = false;
+
+        for i in 0..15 {
+            center.notify(
+                NotificationCenterEvent::DownloadComplete,
+                format!("Complete {}", i),
+                format!("Message {}", i),
+                None,
+                HashMap::new(),
+            );
+        }
+
+        let summary = center.get_summary();
+        assert_eq!(summary.history_size, 15);
+        assert_eq!(summary.pending_batch_count, 0);
+        assert_eq!(summary.recent_notifications.len(), 10); // Limited to 10
+        assert_eq!(summary.analytics.total_created, 15);
+    }
+
+    #[tokio::test]
+    async fn test_notification_config_persistence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+
+        let config = NotificationCenterConfig {
+            quiet_hours: QuietHoursConfig {
+                enabled: true,
+                start_time: "22:00".to_string(),
+                end_time: "07:00".to_string(),
+                allow_critical: true,
+                timezone: None,
+            },
+            batching: BatchingConfig {
+                enabled: false,
+                window_secs: 30,
+                max_batch_size: 5,
+            },
+            event_preferences: vec![],
+            max_history_size: 500,
+            persist_history: true,
+            history_path: None,
+        };
+
+        let mut center = NotificationCenterManager::new();
+        center.set_config(config.clone());
+        center.save_config(&config_path).await.unwrap();
+
+        let loaded = NotificationCenterManager::load_config(&config_path)
+            .await
+            .unwrap();
+        assert!(loaded.quiet_hours.enabled);
+        assert!(!loaded.batching.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_notification_history_persistence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let history_path = temp_dir.path().join("history.json");
+
+        let mut center = NotificationCenterManager::new();
+        center.config.batching.enabled = false;
+
+        center.notify(
+            NotificationCenterEvent::DownloadComplete,
+            "Complete 1".to_string(),
+            "Message 1".to_string(),
+            None,
+            HashMap::new(),
+        );
+        center.notify(
+            NotificationCenterEvent::DownloadFailed,
+            "Failed 1".to_string(),
+            "Message 2".to_string(),
+            None,
+            HashMap::new(),
+        );
+
+        center.save_history(&history_path).await.unwrap();
+
+        let mut center2 = NotificationCenterManager::new();
+        center2.load_history(&history_path).await.unwrap();
+
+        assert_eq!(center2.history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_notification_history_load_missing_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let history_path = temp_dir.path().join("missing.json");
+
+        let mut center = NotificationCenterManager::new();
+        center.load_history(&history_path).await.unwrap();
+
+        assert_eq!(center.history.len(), 0);
+    }
 }
