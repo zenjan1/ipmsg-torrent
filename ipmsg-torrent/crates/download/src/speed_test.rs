@@ -1546,4 +1546,695 @@ mod tests {
         // Median of [100k, 200k, 300k, 400k] = (200k + 300k) / 2 = 250k
         assert!((summary.median_speed_bps - 250_000.0).abs() < 1.0);
     }
+
+    // ── Config: custom values & serde ───────────────────────────────
+
+    #[test]
+    fn test_config_custom_values() {
+        let config = SpeedTestConfig {
+            sample_size_bytes: 5_242_880,
+            timeout_secs: 60,
+            parallel_connections: 4,
+            include_dns_time: false,
+            good_speed_threshold_bps: 200_000,
+            acceptable_speed_threshold_bps: 80_000,
+        };
+        assert_eq!(config.sample_size_bytes, 5_242_880);
+        assert_eq!(config.timeout_secs, 60);
+        assert_eq!(config.parallel_connections, 4);
+        assert!(!config.include_dns_time);
+        assert_eq!(config.good_speed_threshold_bps, 200_000);
+        assert_eq!(config.acceptable_speed_threshold_bps, 80_000);
+    }
+
+    #[test]
+    fn test_config_custom_values_roundtrip() {
+        let config = SpeedTestConfig {
+            sample_size_bytes: 999,
+            timeout_secs: 120,
+            parallel_connections: 8,
+            include_dns_time: false,
+            good_speed_threshold_bps: 500_000,
+            acceptable_speed_threshold_bps: 100_000,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: SpeedTestConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.sample_size_bytes, 999);
+        assert_eq!(deserialized.timeout_secs, 120);
+        assert_eq!(deserialized.parallel_connections, 8);
+        assert!(!deserialized.include_dns_time);
+        assert_eq!(deserialized.good_speed_threshold_bps, 500_000);
+        assert_eq!(deserialized.acceptable_speed_threshold_bps, 100_000);
+    }
+
+    #[test]
+    fn test_config_ignores_extra_fields() {
+        let json = r#"{"sample_size_bytes":1048576,"timeout_secs":30,"parallel_connections":1,"include_dns_time":true,"good_speed_threshold_bps":102400,"acceptable_speed_threshold_bps":51200,"unknown_field":42}"#;
+        let config: SpeedTestConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.sample_size_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn test_config_clone_debug() {
+        let config = SpeedTestConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.sample_size_bytes, config.sample_size_bytes);
+        // Debug should not panic
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("SpeedTestConfig"));
+    }
+
+    // ── SpeedRating: serde + traits ─────────────────────────────────
+
+    #[test]
+    fn test_speed_rating_serde_roundtrip() {
+        for rating in [
+            SpeedRating::Excellent,
+            SpeedRating::Good,
+            SpeedRating::Acceptable,
+            SpeedRating::Slow,
+            SpeedRating::Failed,
+        ] {
+            let json = serde_json::to_string(&rating).unwrap();
+            let deserialized: SpeedRating = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, rating);
+        }
+    }
+
+    #[test]
+    fn test_speed_rating_clone_copy() {
+        let r = SpeedRating::Excellent;
+        let r2 = r; // Copy
+        let r3 = r.clone();
+        assert_eq!(r2, r3);
+        assert_eq!(r, SpeedRating::Excellent);
+    }
+
+    #[test]
+    fn test_speed_rating_partial_eq() {
+        assert_eq!(SpeedRating::Good, SpeedRating::Good);
+        assert_ne!(SpeedRating::Good, SpeedRating::Slow);
+        assert_ne!(SpeedRating::Excellent, SpeedRating::Failed);
+    }
+
+    // ── rate_speed: exact boundary thresholds ───────────────────────
+
+    #[test]
+    fn test_rate_speed_exact_excellent_boundary() {
+        let config = SpeedTestConfig::default();
+        // Exactly 1 MB/s = 1_048_576 → Excellent
+        assert_eq!(rate_speed(1_048_576.0, &config), SpeedRating::Excellent);
+    }
+
+    #[test]
+    fn test_rate_speed_just_below_excellent() {
+        let config = SpeedTestConfig::default();
+        // Just below 1 MB/s → Good
+        assert_eq!(rate_speed(1_048_575.999, &config), SpeedRating::Good);
+    }
+
+    #[test]
+    fn test_rate_speed_exact_good_boundary() {
+        let config = SpeedTestConfig::default();
+        // Exactly 100 KB/s → Good
+        assert_eq!(rate_speed(102_400.0, &config), SpeedRating::Good);
+    }
+
+    #[test]
+    fn test_rate_speed_just_below_good() {
+        let config = SpeedTestConfig::default();
+        // Just below 100 KB/s → Acceptable
+        assert_eq!(rate_speed(102_399.999, &config), SpeedRating::Acceptable);
+    }
+
+    #[test]
+    fn test_rate_speed_exact_acceptable_boundary() {
+        let config = SpeedTestConfig::default();
+        // Exactly 50 KB/s → Acceptable
+        assert_eq!(rate_speed(51_200.0, &config), SpeedRating::Acceptable);
+    }
+
+    #[test]
+    fn test_rate_speed_just_below_acceptable() {
+        let config = SpeedTestConfig::default();
+        // Just below 50 KB/s → Slow
+        assert_eq!(rate_speed(51_199.999, &config), SpeedRating::Slow);
+    }
+
+    #[test]
+    fn test_rate_speed_custom_thresholds() {
+        let config = SpeedTestConfig {
+            good_speed_threshold_bps: 200_000,
+            acceptable_speed_threshold_bps: 80_000,
+            ..SpeedTestConfig::default()
+        };
+        assert_eq!(rate_speed(250_000.0, &config), SpeedRating::Good);
+        assert_eq!(rate_speed(100_000.0, &config), SpeedRating::Acceptable);
+        assert_eq!(rate_speed(50_000.0, &config), SpeedRating::Slow);
+    }
+
+    // ── format_speed_bps: edge cases ────────────────────────────────
+
+    #[test]
+    fn test_format_speed_bps_zero() {
+        assert_eq!(format_speed_bps(0.0), "0 B/s");
+    }
+
+    #[test]
+    fn test_format_speed_bps_very_small() {
+        assert_eq!(format_speed_bps(0.5), "0 B/s");
+        assert_eq!(format_speed_bps(1.0), "1 B/s");
+        assert_eq!(format_speed_bps(1023.0), "1023 B/s");
+    }
+
+    #[test]
+    fn test_format_speed_bps_exact_kb() {
+        assert_eq!(format_speed_bps(1024.0), "1.0 KB/s");
+        assert_eq!(format_speed_bps(2048.0), "2.0 KB/s");
+    }
+
+    #[test]
+    fn test_format_speed_bps_exact_mb() {
+        assert_eq!(format_speed_bps(1_048_576.0), "1.00 MB/s");
+        assert_eq!(format_speed_bps(2_097_152.0), "2.00 MB/s");
+    }
+
+    #[test]
+    fn test_format_speed_bps_exact_gb() {
+        assert_eq!(format_speed_bps(1_073_741_824.0), "1.00 GB/s");
+    }
+
+    #[test]
+    fn test_format_speed_bps_large_gb() {
+        assert_eq!(format_speed_bps(5_368_709_120.0), "5.00 GB/s");
+    }
+
+    // ── format_eta: edge cases ──────────────────────────────────────
+
+    #[test]
+    fn test_format_eta_exactly_one_minute() {
+        assert_eq!(format_eta(Duration::from_secs(60)), "1m 0s");
+    }
+
+    #[test]
+    fn test_format_eta_exactly_one_hour() {
+        assert_eq!(format_eta(Duration::from_secs(3600)), "1h 0m");
+    }
+
+    #[test]
+    fn test_format_eta_exactly_one_day() {
+        assert_eq!(format_eta(Duration::from_secs(86400)), "1d 0h");
+    }
+
+    #[test]
+    fn test_format_eta_59_seconds() {
+        assert_eq!(format_eta(Duration::from_secs(59)), "59s");
+    }
+
+    #[test]
+    fn test_format_eta_multi_day() {
+        assert_eq!(format_eta(Duration::from_secs(259200)), "3d 0h");
+    }
+
+    // ── generate_recommendation: boundary values ────────────────────
+
+    #[test]
+    fn test_generate_recommendation_exactly_1mbps() {
+        let config = SpeedTestConfig::default();
+        let rec = generate_recommendation(1_048_576.0, &config);
+        assert!(rec.contains("Excellent"));
+        assert!(rec.contains("MB/s"));
+    }
+
+    #[test]
+    fn test_generate_recommendation_negative_speed() {
+        let config = SpeedTestConfig::default();
+        let rec = generate_recommendation(-100.0, &config);
+        assert!(rec.contains("No speed data"));
+    }
+
+    // ── format_result: optional fields ──────────────────────────────
+
+    #[test]
+    fn test_format_result_success_no_optional_fields() {
+        let result = SpeedTestResult {
+            url: "http://example.com/file".to_string(),
+            success: true,
+            error: None,
+            sample_bytes: 512,
+            speed_bps: 200_000.0,
+            rating: SpeedRating::Good,
+            timing: SpeedTestTiming {
+                dns_ms: 5.0,
+                tcp_connect_ms: 10.0,
+                tls_handshake_ms: 0.0,
+                ttfb_ms: 30.0,
+                transfer_ms: 500.0,
+                total_ms: 545.0,
+            },
+            http_status: None,
+            content_type: None,
+            content_length: None,
+            tested_at: chrono::Utc::now(),
+        };
+        let formatted = format_result(&result);
+        assert!(formatted.contains("http://example.com/file"));
+        assert!(formatted.contains("Good"));
+        // No HTTP Status line when None
+        assert!(!formatted.contains("HTTP Status"));
+        assert!(!formatted.contains("Content-Type"));
+        assert!(!formatted.contains("Content-Length"));
+    }
+
+    #[test]
+    fn test_format_result_success_with_all_optional_fields() {
+        let result = SpeedTestResult {
+            url: "http://cdn.example.com/big.zip".to_string(),
+            success: true,
+            error: None,
+            sample_bytes: 2_000_000,
+            speed_bps: 1_500_000.0,
+            rating: SpeedRating::Excellent,
+            timing: SpeedTestTiming {
+                dns_ms: 3.0,
+                tcp_connect_ms: 8.0,
+                tls_handshake_ms: 12.0,
+                ttfb_ms: 25.0,
+                transfer_ms: 800.0,
+                total_ms: 848.0,
+            },
+            http_status: Some(200),
+            content_type: Some("application/zip".to_string()),
+            content_length: Some(50_000_000),
+            tested_at: chrono::Utc::now(),
+        };
+        let formatted = format_result(&result);
+        assert!(formatted.contains("HTTP Status: 200"));
+        assert!(formatted.contains("Content-Type: application/zip"));
+        assert!(formatted.contains("Content-Length: 50000000 bytes"));
+        assert!(formatted.contains("Excellent"));
+    }
+
+    #[test]
+    fn test_format_result_failure_no_error() {
+        let result = SpeedTestResult {
+            url: "http://example.com".to_string(),
+            success: false,
+            error: None,
+            sample_bytes: 0,
+            speed_bps: 0.0,
+            rating: SpeedRating::Failed,
+            timing: SpeedTestTiming {
+                dns_ms: 0.0,
+                tcp_connect_ms: 0.0,
+                tls_handshake_ms: 0.0,
+                ttfb_ms: 0.0,
+                transfer_ms: 0.0,
+                total_ms: 50.0,
+            },
+            http_status: None,
+            content_type: None,
+            content_length: None,
+            tested_at: chrono::Utc::now(),
+        };
+        let formatted = format_result(&result);
+        assert!(formatted.contains("Failed"));
+        // No "Error:" line when error is None
+        assert!(!formatted.contains("Error:"));
+    }
+
+    // ── format_summary: additional scenarios ────────────────────────
+
+    #[test]
+    fn test_format_summary_single_test() {
+        let summary = SpeedTestSummary {
+            test_count: 1,
+            success_count: 1,
+            failed_count: 0,
+            avg_speed_bps: 1_048_576.0,
+            min_speed_bps: 1_048_576.0,
+            max_speed_bps: 1_048_576.0,
+            median_speed_bps: 1_048_576.0,
+            overall_rating: SpeedRating::Excellent,
+            estimated_download_times: vec![
+                (10 * 1024 * 1024, Duration::from_secs(10)),
+                (50 * 1024 * 1024, Duration::from_secs(50)),
+                (100 * 1024 * 1024, Duration::from_secs(100)),
+                (500 * 1024 * 1024, Duration::from_secs(500)),
+                (1024 * 1024 * 1024, Duration::from_secs(1024)),
+            ],
+            recommendation: "Excellent connection (1.0 MB/s).".to_string(),
+        };
+        let formatted = format_summary(&summary);
+        assert!(formatted.contains("1 total, 1 success, 0 failed"));
+        assert!(formatted.contains("1.00 MB/s"));
+        assert!(formatted.contains("Excellent"));
+    }
+
+    #[test]
+    fn test_format_summary_with_recommendation() {
+        let summary = SpeedTestSummary {
+            test_count: 2,
+            success_count: 2,
+            failed_count: 0,
+            avg_speed_bps: 30_000.0,
+            min_speed_bps: 20_000.0,
+            max_speed_bps: 40_000.0,
+            median_speed_bps: 30_000.0,
+            overall_rating: SpeedRating::Slow,
+            estimated_download_times: vec![],
+            recommendation: "Slow connection (29.3 KB/s). Consider using a mirror.".to_string(),
+        };
+        let formatted = format_summary(&summary);
+        assert!(formatted.contains("💡"));
+        assert!(formatted.contains("Slow connection"));
+    }
+
+    // ── Manager: additional operations ──────────────────────────────
+
+    #[test]
+    fn test_manager_default_trait() {
+        let manager = SpeedTestManager::default();
+        assert!(manager.get_history().is_empty());
+        assert_eq!(manager.get_config().sample_size_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn test_manager_clear_then_record() {
+        let mut manager = SpeedTestManager::new();
+        manager.record_result(make_success_result("http://a.com", 100_000.0));
+        manager.record_result(make_success_result("http://b.com", 200_000.0));
+        assert_eq!(manager.get_history().len(), 2);
+        manager.clear_history();
+        assert!(manager.get_history().is_empty());
+        manager.record_result(make_success_result("http://c.com", 300_000.0));
+        assert_eq!(manager.get_history().len(), 1);
+        assert_eq!(manager.get_history()[0].url, "http://c.com");
+    }
+
+    #[test]
+    fn test_manager_multiple_set_config() {
+        let mut manager = SpeedTestManager::new();
+        for i in 1..=5 {
+            let mut config = SpeedTestConfig::default();
+            config.sample_size_bytes = i * 1_000_000;
+            manager.set_config(config);
+            assert_eq!(manager.get_config().sample_size_bytes, i * 1_000_000);
+        }
+    }
+
+    #[test]
+    fn test_manager_get_latest_returns_most_recent() {
+        let mut manager = SpeedTestManager::new();
+        manager.record_result(make_success_result("http://first.com", 100_000.0));
+        manager.record_result(make_success_result("http://second.com", 200_000.0));
+        manager.record_result(make_success_result("http://third.com", 300_000.0));
+        assert_eq!(manager.get_latest().unwrap().url, "http://third.com");
+    }
+
+    #[test]
+    fn test_manager_max_history_exact_boundary() {
+        let mut manager = SpeedTestManager::new();
+        manager.max_history = 3;
+        for i in 0..3 {
+            manager.record_result(make_success_result(
+                &format!("http://test{}.com", i),
+                100_000.0,
+            ));
+        }
+        assert_eq!(manager.get_history().len(), 3);
+        // One more should trigger truncation
+        manager.record_result(make_success_result("http://overflow.com", 100_000.0));
+        assert_eq!(manager.get_history().len(), 3);
+        assert_eq!(manager.get_history()[0].url, "http://overflow.com");
+    }
+
+    // ── Summary: additional scenarios ───────────────────────────────
+
+    #[test]
+    fn test_summary_single_successful_test() {
+        let mut manager = SpeedTestManager::new();
+        manager.record_result(make_success_result("http://only.com", 500_000.0));
+        let summary = manager.get_summary();
+        assert_eq!(summary.test_count, 1);
+        assert_eq!(summary.success_count, 1);
+        assert_eq!(summary.failed_count, 0);
+        assert_eq!(summary.avg_speed_bps, 500_000.0);
+        assert_eq!(summary.min_speed_bps, 500_000.0);
+        assert_eq!(summary.max_speed_bps, 500_000.0);
+        assert_eq!(summary.median_speed_bps, 500_000.0);
+        assert_eq!(summary.overall_rating, SpeedRating::Good);
+    }
+
+    #[test]
+    fn test_summary_all_identical_speeds() {
+        let mut manager = SpeedTestManager::new();
+        for i in 0..5 {
+            manager.record_result(make_success_result(
+                &format!("http://same{}.com", i),
+                100_000.0,
+            ));
+        }
+        let summary = manager.get_summary();
+        assert_eq!(summary.avg_speed_bps, 100_000.0);
+        assert_eq!(summary.min_speed_bps, 100_000.0);
+        assert_eq!(summary.max_speed_bps, 100_000.0);
+        assert_eq!(summary.median_speed_bps, 100_000.0);
+    }
+
+    #[test]
+    fn test_summary_very_slow_speeds() {
+        let mut manager = SpeedTestManager::new();
+        manager.record_result(make_success_result("http://slow.com", 0.001));
+        let summary = manager.get_summary();
+        assert_eq!(summary.success_count, 1);
+        assert!(summary.avg_speed_bps < 1.0);
+        assert_eq!(summary.overall_rating, SpeedRating::Slow);
+        // ETA should be very large
+        let first_eta = &summary.estimated_download_times[0];
+        assert!(first_eta.1.as_secs() > 0);
+    }
+
+    #[test]
+    fn test_summary_recommendation_content() {
+        let mut manager = SpeedTestManager::new();
+        manager.record_result(make_success_result("http://fast.com", 2_000_000.0));
+        let summary = manager.get_summary();
+        assert!(!summary.recommendation.is_empty());
+        assert!(summary.recommendation.contains("Excellent"));
+    }
+
+    // ── Persistence: edge cases ─────────────────────────────────────
+
+    #[test]
+    fn test_save_load_config_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("speed_test_config.json");
+        std::fs::write(&path, "not valid json{{{").unwrap();
+        let mut manager = SpeedTestManager::new();
+        let result = manager.load_config(dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("parse config"));
+    }
+
+    #[test]
+    fn test_save_load_history_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("speed_test_history.json");
+        std::fs::write(&path, "[invalid json").unwrap();
+        let mut manager = SpeedTestManager::new();
+        let result = manager.load_history(dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("parse history"));
+    }
+
+    #[test]
+    fn test_save_load_history_trims_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        // Save 10 results
+        let mut saver = SpeedTestManager::new();
+        saver.max_history = 100; // allow many
+        for i in 0..10 {
+            saver.record_result(make_success_result(
+                &format!("http://item{}.com", i),
+                100_000.0,
+            ));
+        }
+        saver.save_history(dir.path()).unwrap();
+
+        // Load into manager with smaller max_history
+        let mut loader = SpeedTestManager::new();
+        loader.max_history = 3;
+        loader.load_history(dir.path()).unwrap();
+        assert_eq!(loader.get_history().len(), 3);
+    }
+
+    #[test]
+    fn test_save_load_complex_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SpeedTestManager::new();
+        let config = SpeedTestConfig {
+            sample_size_bytes: 0,
+            timeout_secs: 0,
+            parallel_connections: 0,
+            include_dns_time: false,
+            good_speed_threshold_bps: 0,
+            acceptable_speed_threshold_bps: 0,
+        };
+        manager.set_config(config);
+        manager.save_config(dir.path()).unwrap();
+
+        let mut loaded = SpeedTestManager::new();
+        loaded.load_config(dir.path()).unwrap();
+        assert_eq!(loaded.get_config().sample_size_bytes, 0);
+        assert_eq!(loaded.get_config().timeout_secs, 0);
+        assert!(!loaded.get_config().include_dns_time);
+    }
+
+    #[test]
+    fn test_save_load_history_with_mixed_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = SpeedTestManager::new();
+
+        // Mix of success and failure
+        manager.record_result(make_success_result("http://ok.com", 500_000.0));
+        manager.record_result(SpeedTestResult {
+            url: "http://fail.com".to_string(),
+            success: false,
+            error: Some("timeout".to_string()),
+            sample_bytes: 0,
+            speed_bps: 0.0,
+            rating: SpeedRating::Failed,
+            timing: SpeedTestTiming {
+                dns_ms: 0.0,
+                tcp_connect_ms: 0.0,
+                tls_handshake_ms: 0.0,
+                ttfb_ms: 0.0,
+                transfer_ms: 0.0,
+                total_ms: 30000.0,
+            },
+            http_status: None,
+            content_type: None,
+            content_length: None,
+            tested_at: chrono::Utc::now(),
+        });
+
+        manager.save_history(dir.path()).unwrap();
+
+        let mut loaded = SpeedTestManager::new();
+        loaded.load_history(dir.path()).unwrap();
+        assert_eq!(loaded.get_history().len(), 2);
+        // History is most-recent-first: ok.com was recorded first, fail.com second
+        // So fail.com is at index 0 (most recent)
+        assert!(!loaded.get_history()[0].success);
+        assert!(loaded.get_history()[1].success);
+    }
+
+    // ── Struct traits: Clone/Debug ──────────────────────────────────
+
+    #[test]
+    fn test_speed_test_timing_clone_debug() {
+        let timing = SpeedTestTiming {
+            dns_ms: 1.0,
+            tcp_connect_ms: 2.0,
+            tls_handshake_ms: 3.0,
+            ttfb_ms: 4.0,
+            transfer_ms: 5.0,
+            total_ms: 6.0,
+        };
+        let cloned = timing.clone();
+        assert!((cloned.total_ms - 6.0).abs() < 0.01);
+        let debug = format!("{:?}", timing);
+        assert!(debug.contains("SpeedTestTiming"));
+    }
+
+    #[test]
+    fn test_speed_test_result_clone_debug() {
+        let result = make_success_result("http://test.com", 100_000.0);
+        let cloned = result.clone();
+        assert_eq!(cloned.url, "http://test.com");
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("SpeedTestResult"));
+    }
+
+    #[test]
+    fn test_speed_test_summary_clone_debug() {
+        let summary = SpeedTestSummary {
+            test_count: 1,
+            success_count: 1,
+            failed_count: 0,
+            avg_speed_bps: 100_000.0,
+            min_speed_bps: 100_000.0,
+            max_speed_bps: 100_000.0,
+            median_speed_bps: 100_000.0,
+            overall_rating: SpeedRating::Good,
+            estimated_download_times: vec![(1024, Duration::from_secs(1))],
+            recommendation: "test".to_string(),
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.test_count, 1);
+        let debug = format!("{:?}", summary);
+        assert!(debug.contains("SpeedTestSummary"));
+    }
+
+    #[test]
+    fn test_speed_test_manager_clone_debug() {
+        let mut manager = SpeedTestManager::new();
+        manager.record_result(make_success_result("http://x.com", 50_000.0));
+        let cloned = manager.clone();
+        assert_eq!(cloned.get_history().len(), 1);
+        let debug = format!("{:?}", manager);
+        assert!(debug.contains("SpeedTestManager"));
+    }
+
+    // ── Async: URL parsing edge cases ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_test_url_empty_string() {
+        let mut manager = SpeedTestManager::new();
+        let result = manager.test_url("").await;
+        assert!(!result.success);
+        assert_eq!(result.rating, SpeedRating::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_test_url_file_scheme() {
+        let mut manager = SpeedTestManager::new();
+        let result = manager.test_url("file:///etc/passwd").await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("Unsupported scheme"));
+    }
+
+    #[tokio::test]
+    async fn test_test_url_data_scheme() {
+        let mut manager = SpeedTestManager::new();
+        let result = manager.test_url("data:text/html,hello").await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("Unsupported scheme"));
+    }
+
+    // ── Helper ──────────────────────────────────────────────────────
+
+    fn make_success_result(url: &str, speed_bps: f64) -> SpeedTestResult {
+        SpeedTestResult {
+            url: url.to_string(),
+            success: true,
+            error: None,
+            sample_bytes: 1_048_576,
+            speed_bps,
+            rating: rate_speed(speed_bps, &SpeedTestConfig::default()),
+            timing: SpeedTestTiming {
+                dns_ms: 5.0,
+                tcp_connect_ms: 10.0,
+                tls_handshake_ms: 0.0,
+                ttfb_ms: 30.0,
+                transfer_ms: 500.0,
+                total_ms: 545.0,
+            },
+            http_status: Some(200),
+            content_type: None,
+            content_length: None,
+            tested_at: chrono::Utc::now(),
+        }
+    }
 }
