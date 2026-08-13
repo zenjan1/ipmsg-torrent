@@ -597,7 +597,11 @@ impl SlaComplianceManager {
             }
             SlaTarget::MaxRetries { max_retries } => {
                 if task.retry_count <= *max_retries {
-                    let ratio = task.retry_count as f64 / *max_retries as f64;
+                    let ratio = if *max_retries == 0 {
+                        0.0
+                    } else {
+                        task.retry_count as f64 / *max_retries as f64
+                    };
                     let score = 100.0 - ratio * 50.0;
                     (
                         ComplianceStatus::Compliant,
@@ -1677,5 +1681,1009 @@ mod tests {
         let eval = mgr.evaluate_task(&task, &sla);
         assert_eq!(eval.status, ComplianceStatus::NonCompliant);
         assert_eq!(eval.score, 0.0);
+    }
+
+    // ========================================
+    // Phase 183: Comprehensive Test Coverage
+    // ========================================
+
+    // --- Serialization Tests ---
+
+    #[test]
+    fn test_sla_target_serialization() {
+        let targets = vec![
+            SlaTarget::CompletionTimeSecs { max_secs: 3600 },
+            SlaTarget::MinAverageSpeed { min_bps: 1_000_000 },
+            SlaTarget::SuccessRate {
+                target_percent: 95.0,
+                window_secs: 86400,
+            },
+            SlaTarget::MaxRetries { max_retries: 5 },
+            SlaTarget::Combined {
+                targets: vec![
+                    SlaTarget::CompletionTimeSecs { max_secs: 300 },
+                    SlaTarget::MinAverageSpeed { min_bps: 500_000 },
+                ],
+            },
+        ];
+
+        for target in targets {
+            let json = serde_json::to_string(&target).unwrap();
+            let deserialized: SlaTarget = serde_json::from_str(&json).unwrap();
+            assert_eq!(target, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_compliance_status_serialization() {
+        let statuses = vec![
+            ComplianceStatus::Compliant,
+            ComplianceStatus::NonCompliant,
+            ComplianceStatus::Pending,
+            ComplianceStatus::Waived,
+        ];
+
+        for status in statuses {
+            let json = serde_json::to_string(&status).unwrap();
+            let deserialized: ComplianceStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_sla_evaluation_serialization() {
+        let eval = SlaEvaluation {
+            sla_id: "sla-123".to_string(),
+            sla_name: "Test SLA".to_string(),
+            task_id: "task-456".to_string(),
+            status: ComplianceStatus::Compliant,
+            score: 85.5,
+            details: "completed in 100s".to_string(),
+            evaluated_at: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&eval).unwrap();
+        let deserialized: SlaEvaluation = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.sla_id, "sla-123");
+        assert_eq!(deserialized.task_id, "task-456");
+        assert_eq!(deserialized.status, ComplianceStatus::Compliant);
+        assert!((deserialized.score - 85.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_compliance_entry_serialization() {
+        let entry = ComplianceEntry {
+            task_id: "task-1".to_string(),
+            task_name: "Test Task".to_string(),
+            status: ComplianceStatus::NonCompliant,
+            score: 25.0,
+            reason: "exceeded time limit".to_string(),
+            recorded_at: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: ComplianceEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.task_id, "task-1");
+        assert_eq!(deserialized.status, ComplianceStatus::NonCompliant);
+    }
+
+    #[test]
+    fn test_sla_definition_serialization() {
+        let def = SlaDefinition {
+            id: "sla-test".to_string(),
+            name: "Test Definition".to_string(),
+            description: "A test SLA".to_string(),
+            target: SlaTarget::CompletionTimeSecs { max_secs: 3600 },
+            enabled: true,
+            tag_filter: Some("important".to_string()),
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: 100,
+        };
+
+        let json = serde_json::to_string(&def).unwrap();
+        let deserialized: SlaDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, "sla-test");
+        assert_eq!(deserialized.name, "Test Definition");
+        assert_eq!(deserialized.max_history, 100);
+        assert!(deserialized.tag_filter.is_some());
+    }
+
+    #[test]
+    fn test_sla_config_serialization() {
+        let config = SlaConfig {
+            enabled: true,
+            max_slas: 25,
+            default_max_history: 150,
+            auto_eval_interval_secs: 600,
+            log_violations: false,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: SlaConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.max_slas, 25);
+        assert_eq!(deserialized.default_max_history, 150);
+        assert_eq!(deserialized.auto_eval_interval_secs, 600);
+        assert!(!deserialized.log_violations);
+    }
+
+    #[test]
+    fn test_sla_summary_serialization() {
+        let summary = SlaSummary {
+            total_slas: 3,
+            enabled_slas: 2,
+            per_sla: vec![SlaComplianceSummary {
+                sla_id: "s1".to_string(),
+                sla_name: "SLA 1".to_string(),
+                target: "complete within 3600s".to_string(),
+                enabled: true,
+                tasks_evaluated: 10,
+                tasks_compliant: 8,
+                tasks_non_compliant: 2,
+                tasks_pending: 0,
+                compliance_rate: 80.0,
+                history_count: 50,
+            }],
+            overall_score: 80.0,
+            overall_status: ComplianceStatus::NonCompliant,
+            total_history_entries: 50,
+        };
+
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: SlaSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.total_slas, 3);
+        assert_eq!(deserialized.enabled_slas, 2);
+        assert_eq!(deserialized.overall_status, ComplianceStatus::NonCompliant);
+    }
+
+    // --- Edge Case Tests ---
+
+    #[test]
+    fn test_completion_time_exact_boundary() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        // Task completed exactly at the limit
+        let task = make_completed_task("t1", 300, 1000.0);
+        let sla = SlaDefinition {
+            id: "sla1".to_string(),
+            name: "Exact limit".to_string(),
+            description: String::new(),
+            target: SlaTarget::CompletionTimeSecs { max_secs: 300 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.status, ComplianceStatus::Compliant);
+        // Score should be exactly 50.0 (no margin)
+        assert!((eval.score - 50.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_completion_time_just_over_boundary() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        // Task completed 1 second over the limit
+        let task = make_completed_task("t1", 301, 1000.0);
+        let sla = SlaDefinition {
+            id: "sla1".to_string(),
+            name: "Just over".to_string(),
+            description: String::new(),
+            target: SlaTarget::CompletionTimeSecs { max_secs: 300 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.status, ComplianceStatus::NonCompliant);
+    }
+
+    #[test]
+    fn test_min_speed_exact_boundary() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        // Speed exactly at the minimum
+        let task = make_completed_task("t1", 100, 1_000_000.0);
+        let sla = SlaDefinition {
+            id: "sla2".to_string(),
+            name: "Exact speed".to_string(),
+            description: String::new(),
+            target: SlaTarget::MinAverageSpeed { min_bps: 1_000_000 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.status, ComplianceStatus::Compliant);
+    }
+
+    #[test]
+    fn test_min_speed_zero_speed() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        let task = make_completed_task("t1", 100, 0.0);
+        let sla = SlaDefinition {
+            id: "sla2".to_string(),
+            name: "Zero speed".to_string(),
+            description: String::new(),
+            target: SlaTarget::MinAverageSpeed { min_bps: 1_000_000 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.status, ComplianceStatus::NonCompliant);
+        assert_eq!(eval.score, 0.0);
+    }
+
+    #[test]
+    fn test_max_retries_zero_retries_allowed() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        let mut task = make_task("t1", "test");
+        task.retry_count = 0;
+        task.is_complete = true;
+        task.progress = 1.0;
+
+        let sla = SlaDefinition {
+            id: "sla3".to_string(),
+            name: "No retries".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 0 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.status, ComplianceStatus::Compliant);
+        assert_eq!(eval.score, 100.0);
+    }
+
+    #[test]
+    fn test_max_retries_one_over_limit() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        let mut task = make_task("t1", "test");
+        task.retry_count = 4;
+        task.is_complete = true;
+        task.progress = 1.0;
+
+        let sla = SlaDefinition {
+            id: "sla3".to_string(),
+            name: "Max 3 retries".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 3 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.status, ComplianceStatus::NonCompliant);
+    }
+
+    // --- Combined SLA Edge Cases ---
+
+    #[test]
+    fn test_combined_sla_empty_targets() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        let task = make_completed_task("t1", 100, 1000.0);
+
+        let sla = SlaDefinition {
+            id: "sla4".to_string(),
+            name: "Empty combined".to_string(),
+            description: String::new(),
+            target: SlaTarget::Combined { targets: vec![] },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        // Empty combined should be compliant (vacuous truth)
+        assert_eq!(eval.status, ComplianceStatus::Compliant);
+        assert_eq!(eval.score, 50.0); // default avg for empty
+    }
+
+    #[test]
+    fn test_combined_sla_all_pending() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        let task = make_task("t1", "in-progress"); // not complete, not failed
+
+        let sla = SlaDefinition {
+            id: "sla4".to_string(),
+            name: "All pending".to_string(),
+            description: String::new(),
+            target: SlaTarget::Combined {
+                targets: vec![
+                    SlaTarget::MinAverageSpeed { min_bps: 1_000_000 },
+                    SlaTarget::SuccessRate {
+                        target_percent: 95.0,
+                        window_secs: 86400,
+                    },
+                ],
+            },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.status, ComplianceStatus::Pending);
+    }
+
+    #[test]
+    fn test_combined_sla_nested() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        let task = make_completed_task("t1", 100, 2_000_000.0);
+
+        let sla = SlaDefinition {
+            id: "sla5".to_string(),
+            name: "Nested combined".to_string(),
+            description: String::new(),
+            target: SlaTarget::Combined {
+                targets: vec![
+                    SlaTarget::Combined {
+                        targets: vec![SlaTarget::CompletionTimeSecs { max_secs: 300 }],
+                    },
+                    SlaTarget::MinAverageSpeed { min_bps: 1_000_000 },
+                ],
+            },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.status, ComplianceStatus::Compliant);
+    }
+
+    // --- Success Rate Tests ---
+
+    #[test]
+    fn test_success_rate_completed_task() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        let task = make_completed_task("t1", 100, 1000.0);
+
+        let sla = SlaDefinition {
+            id: "sla-sr".to_string(),
+            name: "Success rate".to_string(),
+            description: String::new(),
+            target: SlaTarget::SuccessRate {
+                target_percent: 95.0,
+                window_secs: 86400,
+            },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.status, ComplianceStatus::Compliant);
+        assert_eq!(eval.score, 100.0);
+    }
+
+    #[test]
+    fn test_success_rate_failed_task() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        let created = Utc::now() - chrono::Duration::seconds(100);
+        let task = TaskSlaData {
+            task_id: "t1".to_string(),
+            task_name: "failed".to_string(),
+            tags: vec![],
+            group: None,
+            is_complete: false,
+            is_failed: true,
+            created_at: created,
+            completed_at: None,
+            avg_speed_bps: 0.0,
+            retry_count: 3,
+            progress: 0.5,
+        };
+
+        let sla = SlaDefinition {
+            id: "sla-sr".to_string(),
+            name: "Success rate".to_string(),
+            description: String::new(),
+            target: SlaTarget::SuccessRate {
+                target_percent: 95.0,
+                window_secs: 86400,
+            },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.status, ComplianceStatus::NonCompliant);
+        assert_eq!(eval.score, 0.0);
+    }
+
+    // --- History Management Tests ---
+
+    #[tokio::test]
+    async fn test_clear_all_history() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+
+        let def1 = SlaDefinition {
+            id: "sla-1".to_string(),
+            name: "SLA 1".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 3 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+        let def2 = SlaDefinition {
+            id: "sla-2".to_string(),
+            name: "SLA 2".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 5 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        mgr.add_sla(def1).await.unwrap();
+        mgr.add_sla(def2).await.unwrap();
+
+        let tasks = vec![make_completed_task("t1", 100, 1000.0)];
+        mgr.evaluate_all(&tasks).await.unwrap();
+
+        assert!(mgr.get_history("sla-1").is_some());
+        assert!(mgr.get_history("sla-2").is_some());
+
+        mgr.clear_all_history().await.unwrap();
+
+        assert!(mgr.get_history("sla-1").is_none());
+        assert!(mgr.get_history("sla-2").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_clear_nonexistent_history() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+
+        let result = mgr.clear_history("nonexistent").await.unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_history_trimming() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+
+        let def = SlaDefinition {
+            id: "trim-sla".to_string(),
+            name: "Trim test".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 10 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: 5, // Small limit
+        };
+
+        mgr.add_sla(def).await.unwrap();
+
+        // Evaluate 10 tasks, should only keep last 5
+        let tasks: Vec<TaskSlaData> = (0..10)
+            .map(|i| make_completed_task(&format!("t{i}"), 100, 1000.0))
+            .collect();
+
+        mgr.evaluate_all(&tasks).await.unwrap();
+
+        let history = mgr.get_history("trim-sla").unwrap();
+        assert_eq!(history.len(), 5);
+        // Should keep the most recent entries
+        assert_eq!(history[0].task_id, "t5");
+        assert_eq!(history[4].task_id, "t9");
+    }
+
+    // --- Summary Edge Cases ---
+
+    #[test]
+    fn test_summary_no_slas() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        let summary = mgr.get_summary();
+        assert_eq!(summary.total_slas, 0);
+        assert_eq!(summary.enabled_slas, 0);
+        assert_eq!(summary.overall_score, 0.0);
+        assert_eq!(summary.overall_status, ComplianceStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_summary_all_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+        mgr.definitions.push(SlaDefinition {
+            id: "disabled-1".to_string(),
+            name: "Disabled".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 3 },
+            enabled: false,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        });
+
+        let summary = mgr.get_summary();
+        assert_eq!(summary.total_slas, 1);
+        assert_eq!(summary.enabled_slas, 0);
+    }
+
+    #[tokio::test]
+    async fn test_summary_mixed_compliance() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+
+        let def = SlaDefinition {
+            id: "mixed-sla".to_string(),
+            name: "Mixed".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 3 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        mgr.add_sla(def).await.unwrap();
+
+        // One compliant, one non-compliant
+        let mut task1 = make_completed_task("t1", 100, 1000.0);
+        task1.retry_count = 1;
+        let mut task2 = make_completed_task("t2", 100, 1000.0);
+        task2.retry_count = 10;
+
+        mgr.evaluate_all(&[task1, task2]).await.unwrap();
+
+        let summary = mgr.get_summary();
+        assert_eq!(summary.per_sla[0].tasks_compliant, 1);
+        assert_eq!(summary.per_sla[0].tasks_non_compliant, 1);
+        assert!((summary.per_sla[0].compliance_rate - 50.0).abs() < 0.1);
+        assert_eq!(summary.overall_status, ComplianceStatus::NonCompliant);
+    }
+
+    // --- Format Report Variations ---
+
+    #[test]
+    fn test_format_report_compliant_overall() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        let summary = SlaSummary {
+            total_slas: 1,
+            enabled_slas: 1,
+            per_sla: vec![SlaComplianceSummary {
+                sla_id: "s1".to_string(),
+                sla_name: "Speed SLA".to_string(),
+                target: "avg speed >= 1000000 B/s".to_string(),
+                enabled: true,
+                tasks_evaluated: 10,
+                tasks_compliant: 10,
+                tasks_non_compliant: 0,
+                tasks_pending: 0,
+                compliance_rate: 100.0,
+                history_count: 50,
+            }],
+            overall_score: 100.0,
+            overall_status: ComplianceStatus::Compliant,
+            total_history_entries: 50,
+        };
+
+        let report = mgr.format_report(&summary);
+        assert!(report.contains("✅"));
+        assert!(report.contains("compliant"));
+    }
+
+    #[test]
+    fn test_format_report_pending_overall() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        let summary = SlaSummary {
+            total_slas: 1,
+            enabled_slas: 1,
+            per_sla: vec![SlaComplianceSummary {
+                sla_id: "s1".to_string(),
+                sla_name: "Pending SLA".to_string(),
+                target: "complete within 3600s".to_string(),
+                enabled: true,
+                tasks_evaluated: 0,
+                tasks_compliant: 0,
+                tasks_non_compliant: 0,
+                tasks_pending: 0,
+                compliance_rate: 0.0,
+                history_count: 0,
+            }],
+            overall_score: 0.0,
+            overall_status: ComplianceStatus::Pending,
+            total_history_entries: 0,
+        };
+
+        let report = mgr.format_report(&summary);
+        assert!(report.contains("⏳"));
+        assert!(report.contains("pending"));
+    }
+
+    // --- Load/Save Error Handling ---
+
+    #[tokio::test]
+    async fn test_load_config_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+
+        // Should succeed with default config when file doesn't exist
+        let result = mgr.load_config().await;
+        assert!(result.is_ok());
+        assert_eq!(mgr.get_config().max_slas, DEFAULT_MAX_SLAS);
+    }
+
+    #[tokio::test]
+    async fn test_load_config_invalid_json() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("sla_compliance_config.json");
+        tokio::fs::write(&config_path, "invalid json{{{")
+            .await
+            .unwrap();
+
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+        let result = mgr.load_config().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_load_definitions_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+
+        let result = mgr.load_definitions().await;
+        assert!(result.is_ok());
+        assert_eq!(mgr.list_slas().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_load_definitions_invalid_json() {
+        let tmp = TempDir::new().unwrap();
+        let defs_path = tmp.path().join("sla_definitions.json");
+        tokio::fs::write(&defs_path, "not valid json")
+            .await
+            .unwrap();
+
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+        let result = mgr.load_definitions().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_load_history_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+
+        let result = mgr.load_history().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_load_history_invalid_json() {
+        let tmp = TempDir::new().unwrap();
+        let hist_path = tmp.path().join("sla_compliance_history.json");
+        tokio::fs::write(&hist_path, "{broken").await.unwrap();
+
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+        let result = mgr.load_history().await;
+        assert!(result.is_err());
+    }
+
+    // --- load_sla_data Function Tests ---
+
+    #[tokio::test]
+    async fn test_load_sla_data_all_missing() {
+        let tmp = TempDir::new().unwrap();
+        let (config, definitions, history) = load_sla_data(tmp.path()).await.unwrap();
+
+        assert_eq!(config.max_slas, DEFAULT_MAX_SLAS);
+        assert!(definitions.is_empty());
+        assert!(history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_sla_data_with_existing_files() {
+        let tmp = TempDir::new().unwrap();
+
+        // Write config
+        let config = SlaConfig {
+            enabled: false,
+            max_slas: 10,
+            default_max_history: 50,
+            auto_eval_interval_secs: 120,
+            log_violations: false,
+        };
+        let config_json = serde_json::to_string(&config).unwrap();
+        tokio::fs::write(tmp.path().join("sla_compliance_config.json"), config_json)
+            .await
+            .unwrap();
+
+        // Write definitions
+        let definitions = vec![SlaDefinition {
+            id: "test-sla".to_string(),
+            name: "Test".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 3 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        }];
+        let defs_json = serde_json::to_string(&definitions).unwrap();
+        tokio::fs::write(tmp.path().join("sla_definitions.json"), defs_json)
+            .await
+            .unwrap();
+
+        let (loaded_config, loaded_defs, _) = load_sla_data(tmp.path()).await.unwrap();
+        assert!(!loaded_config.enabled);
+        assert_eq!(loaded_config.max_slas, 10);
+        assert_eq!(loaded_defs.len(), 1);
+        assert_eq!(loaded_defs[0].id, "test-sla");
+    }
+
+    // --- Additional Manager Tests ---
+
+    #[tokio::test]
+    async fn test_remove_sla_nonexistent() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+
+        let result = mgr.remove_sla("nonexistent").await.unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_get_sla_by_id() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+
+        let def = SlaDefinition {
+            id: "find-me".to_string(),
+            name: "Findable".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 3 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        mgr.add_sla(def).await.unwrap();
+
+        let found = mgr.get_sla("find-me");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "Findable");
+
+        let not_found = mgr.get_sla("not-here");
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_add_sla_auto_generates_id() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+
+        let def = SlaDefinition {
+            id: "".to_string(), // Empty ID should be auto-generated
+            name: "Auto ID".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 3 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let id = mgr.add_sla(def).await.unwrap();
+        assert!(!id.is_empty());
+        assert!(id.starts_with("sla-"));
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_all_skips_disabled_slas() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+
+        let def = SlaDefinition {
+            id: "disabled-sla".to_string(),
+            name: "Disabled".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 3 },
+            enabled: false, // Disabled
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        mgr.add_sla(def).await.unwrap();
+
+        let tasks = vec![make_completed_task("t1", 100, 1000.0)];
+        let evals = mgr.evaluate_all(&tasks).await.unwrap();
+
+        // Disabled SLA should not produce evaluations
+        assert!(evals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_all_group_filter() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SlaComplianceManager::new(tmp.path().to_path_buf());
+
+        let def = SlaDefinition {
+            id: "group-sla".to_string(),
+            name: "Group filter".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 3 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: Some("videos".to_string()),
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        mgr.add_sla(def).await.unwrap();
+
+        let mut task1 = make_completed_task("t1", 100, 1000.0);
+        task1.group = Some("videos".to_string());
+
+        let mut task2 = make_completed_task("t2", 100, 1000.0);
+        task2.group = Some("music".to_string());
+
+        let task3 = make_completed_task("t3", 100, 1000.0);
+        // task3 has no group
+
+        let evals = mgr.evaluate_all(&[task1, task2, task3]).await.unwrap();
+
+        // Only task1 with group "videos" should be evaluated
+        assert_eq!(evals.len(), 1);
+        assert_eq!(evals[0].task_id, "t1");
+    }
+
+    #[test]
+    fn test_completion_time_score_calculation() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+
+        // Task completed at exactly half the allowed time -> high score
+        let task = make_completed_task("t1", 150, 1000.0);
+        let sla = SlaDefinition {
+            id: "sla1".to_string(),
+            name: "Time test".to_string(),
+            description: String::new(),
+            target: SlaTarget::CompletionTimeSecs { max_secs: 300 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.status, ComplianceStatus::Compliant);
+        // margin = (300 - 150) / 300 = 0.5
+        // score = 50 + 0.5 * 50 = 75
+        assert!((eval.score - 75.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn test_min_speed_score_cap() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+
+        // Very high speed should cap at 100
+        let task = make_completed_task("t1", 100, 10_000_000.0);
+        let sla = SlaDefinition {
+            id: "sla2".to_string(),
+            name: "Speed cap".to_string(),
+            description: String::new(),
+            target: SlaTarget::MinAverageSpeed { min_bps: 1_000_000 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.status, ComplianceStatus::Compliant);
+        assert!(eval.score <= 100.0);
+    }
+
+    #[test]
+    fn test_max_retries_score_calculation() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+
+        // 0 retries out of 5 max -> score = 100
+        let mut task = make_task("t1", "test");
+        task.retry_count = 0;
+        task.is_complete = true;
+        task.progress = 1.0;
+
+        let sla = SlaDefinition {
+            id: "sla3".to_string(),
+            name: "Retries".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 5 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.status, ComplianceStatus::Compliant);
+        assert_eq!(eval.score, 100.0);
+    }
+
+    #[test]
+    fn test_evaluation_contains_task_info() {
+        let mgr = SlaComplianceManager::new(PathBuf::from("/tmp"));
+        let task = make_completed_task("task-abc", 100, 1000.0);
+        let sla = SlaDefinition {
+            id: "sla-xyz".to_string(),
+            name: "My SLA".to_string(),
+            description: String::new(),
+            target: SlaTarget::MaxRetries { max_retries: 5 },
+            enabled: true,
+            tag_filter: None,
+            group_filter: None,
+            created_at: Utc::now(),
+            max_history: DEFAULT_MAX_HISTORY,
+        };
+
+        let eval = mgr.evaluate_task(&task, &sla);
+        assert_eq!(eval.sla_id, "sla-xyz");
+        assert_eq!(eval.sla_name, "My SLA");
+        assert_eq!(eval.task_id, "task-abc");
+        assert!(!eval.details.is_empty());
+    }
+
+    #[test]
+    fn test_combined_sla_display() {
+        let combined = SlaTarget::Combined {
+            targets: vec![
+                SlaTarget::CompletionTimeSecs { max_secs: 3600 },
+                SlaTarget::MinAverageSpeed { min_bps: 1_000_000 },
+            ],
+        };
+        let display = combined.to_string();
+        assert!(display.contains("complete within 3600s"));
+        assert!(display.contains("avg speed >= 1000000 B/s"));
+        assert!(display.contains("all of ["));
     }
 }
