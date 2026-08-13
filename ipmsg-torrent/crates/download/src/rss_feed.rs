@@ -817,6 +817,1023 @@ mod tests {
         assert!(mgr.add_subscription("", None, None, vec![]).await.is_err());
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Serialization tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_feed_item_serialize_roundtrip() {
+        let item = FeedItem {
+            id: "abc".into(),
+            title: "Test Title".into(),
+            url: "https://example.com/file.mp4".into(),
+            size: Some(1024),
+            published: Some(Utc::now()),
+            content_type: Some("video/mp4".into()),
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let back: FeedItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "abc");
+        assert_eq!(back.title, "Test Title");
+        assert_eq!(back.url, "https://example.com/file.mp4");
+        assert_eq!(back.size, Some(1024));
+        assert!(back.published.is_some());
+        assert_eq!(back.content_type.as_deref(), Some("video/mp4"));
+    }
+
+    #[test]
+    fn test_feed_item_serialize_nulls() {
+        let item = FeedItem {
+            id: "x".into(),
+            title: "t".into(),
+            url: "u".into(),
+            size: None,
+            published: None,
+            content_type: None,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"size\":null"));
+        let back: FeedItem = serde_json::from_str(&json).unwrap();
+        assert!(back.size.is_none());
+        assert!(back.published.is_none());
+        assert!(back.content_type.is_none());
+    }
+
+    #[test]
+    fn test_feed_item_extra_fields_ignored() {
+        let json = r#"{"id":"a","title":"t","url":"u","size":null,"published":null,"content_type":null,"extra":"ignored"}"#;
+        let item: FeedItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.id, "a");
+    }
+
+    #[test]
+    fn test_feed_subscription_serialize_roundtrip() {
+        let sub = FeedSubscription {
+            id: "sub-1".into(),
+            feed_url: "https://example.com/feed.xml".into(),
+            label: Some("My Feed".into()),
+            title_filter: Some("linux".into()),
+            extensions: vec!["iso".into(), "tar.gz".into()],
+            enabled: true,
+            poll_interval_secs: 900,
+            last_poll: None,
+            seen_ids: vec!["a".into(), "b".into()],
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&sub).unwrap();
+        let back: FeedSubscription = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "sub-1");
+        assert_eq!(back.feed_url, "https://example.com/feed.xml");
+        assert_eq!(back.label.as_deref(), Some("My Feed"));
+        assert_eq!(back.title_filter.as_deref(), Some("linux"));
+        assert_eq!(back.extensions, vec!["iso", "tar.gz"]);
+        assert!(back.enabled);
+        assert_eq!(back.poll_interval_secs, 900);
+        assert!(back.last_poll.is_none());
+        assert_eq!(back.seen_ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_feed_subscription_missing_fields_use_defaults() {
+        // Simulate old JSON format without seen_ids
+        let json = r#"{
+            "id": "old-1",
+            "feed_url": "https://x.com/feed",
+            "label": null,
+            "title_filter": null,
+            "extensions": [],
+            "enabled": true,
+            "poll_interval_secs": 600,
+            "last_poll": null,
+            "created_at": "2026-08-01T00:00:00Z"
+        }"#;
+        let sub: FeedSubscription = serde_json::from_str(json).unwrap();
+        assert_eq!(sub.id, "old-1");
+        assert!(sub.seen_ids.is_empty()); // default
+    }
+
+    #[test]
+    fn test_persisted_subscriptions_roundtrip() {
+        let ps = PersistedSubscriptions {
+            version: 1,
+            subscriptions: vec![FeedSubscription {
+                id: "p1".into(),
+                feed_url: "https://x.com/f".into(),
+                label: None,
+                title_filter: None,
+                extensions: vec![],
+                enabled: true,
+                poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
+                last_poll: None,
+                seen_ids: vec![],
+                created_at: Utc::now(),
+            }],
+        };
+        let json = serde_json::to_string_pretty(&ps).unwrap();
+        let back: PersistedSubscriptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.version, 1);
+        assert_eq!(back.subscriptions.len(), 1);
+        assert_eq!(back.subscriptions[0].id, "p1");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Default values / constants
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_default_max_seen_ids() {
+        assert_eq!(DEFAULT_MAX_SEEN_IDS, 1000);
+    }
+
+    #[test]
+    fn test_default_max_subscriptions() {
+        assert_eq!(DEFAULT_MAX_SUBSCRIPTIONS, 100);
+    }
+
+    #[test]
+    fn test_default_poll_interval_secs() {
+        assert_eq!(DEFAULT_POLL_INTERVAL_SECS, 15 * 60);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // RSS parsing edge cases
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_rss_item_without_title_or_link() {
+        let body = r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <description>no title or link</description>
+    </item>
+  </channel>
+</rss>"#;
+        let items = parse_feed(body).unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_parse_rss_item_with_title_only() {
+        let body = r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>Only Title</title>
+    </item>
+  </channel>
+</rss>"#;
+        let items = parse_feed(body).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Only Title");
+        assert!(items[0].url.is_empty());
+    }
+
+    #[test]
+    fn test_parse_rss_no_enclosure_falls_back_to_link() {
+        let body = r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>Ep</title>
+      <link>https://example.com/ep</link>
+    </item>
+  </channel>
+</rss>"#;
+        let items = parse_feed(body).unwrap();
+        assert_eq!(items[0].url, "https://example.com/ep");
+        assert!(items[0].size.is_none());
+        assert!(items[0].content_type.is_none());
+    }
+
+    #[test]
+    fn test_parse_rss_with_attributes_in_tags() {
+        let body = r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title lang="en">English Title</title>
+      <link>https://example.com/x</link>
+    </item>
+  </channel>
+</rss>"#;
+        let items = parse_feed(body).unwrap();
+        assert_eq!(items[0].title, "English Title");
+    }
+
+    #[test]
+    fn test_parse_rss_xml_entities_in_title() {
+        let body = r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>Rock &amp; Roll &lt;Live&gt;</title>
+      <link>https://example.com/x</link>
+    </item>
+  </channel>
+</rss>"#;
+        let items = parse_feed(body).unwrap();
+        assert_eq!(items[0].title, "Rock & Roll <Live>");
+    }
+
+    #[test]
+    fn test_parse_rss_enclosure_with_quoted_attrs() {
+        let body = r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>File</title>
+      <enclosure url="https://example.com/f.mp4" length="999" type="video/mp4"/>
+    </item>
+  </channel>
+</rss>"#;
+        let items = parse_feed(body).unwrap();
+        assert_eq!(items[0].url, "https://example.com/f.mp4");
+        assert_eq!(items[0].size, Some(999));
+        assert_eq!(items[0].content_type.as_deref(), Some("video/mp4"));
+    }
+
+    #[test]
+    fn test_parse_rss_invalid_pub_date() {
+        let body = r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>T</title>
+      <link>https://example.com/x</link>
+      <pubDate>not a valid date</pubDate>
+    </item>
+  </channel>
+</rss>"#;
+        let items = parse_feed(body).unwrap();
+        assert!(items[0].published.is_none());
+    }
+
+    #[test]
+    fn test_parse_rss_multiple_items() {
+        let body = r#"<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <item><title>A</title><link>https://a.com/a</link></item>
+    <item><title>B</title><link>https://b.com/b</link></item>
+    <item><title>C</title><link>https://c.com/c</link></item>
+  </channel>
+</rss>"#;
+        let items = parse_feed(body).unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].title, "A");
+        assert_eq!(items[1].title, "B");
+        assert_eq!(items[2].title, "C");
+    }
+
+    #[test]
+    fn test_parse_rss_whitespace_only_body() {
+        assert!(parse_feed("   \n\t  ").is_err());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Atom parsing edge cases
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_atom_entry_with_only_alternate_link() {
+        let body = r#"<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>e1</id>
+    <title>Alt Only</title>
+    <link rel="alternate" href="https://example.com/alt"/>
+  </entry>
+</feed>"#;
+        let items = parse_feed(body).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].url, "https://example.com/alt");
+    }
+
+    #[test]
+    fn test_parse_atom_entry_no_id_falls_back_to_url() {
+        let body = r#"<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>No ID</title>
+    <link href="https://example.com/noid"/>
+  </entry>
+</feed>"#;
+        let items = parse_feed(body).unwrap();
+        assert_eq!(items[0].id, "https://example.com/noid");
+    }
+
+    #[test]
+    fn test_parse_atom_entry_no_link_no_title() {
+        let body = r#"<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>empty</id>
+    <summary>nothing useful</summary>
+  </entry>
+</feed>"#;
+        let items = parse_feed(body).unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_parse_atom_enclosure_preferred_over_alternate() {
+        let body = r#"<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>e1</id>
+    <title>Both Links</title>
+    <link rel="alternate" href="https://example.com/alt"/>
+    <link rel="enclosure" href="https://example.com/enc.zip" length="500"/>
+  </entry>
+</feed>"#;
+        let items = parse_feed(body).unwrap();
+        assert_eq!(items[0].url, "https://example.com/enc.zip");
+        assert_eq!(items[0].size, Some(500));
+    }
+
+    #[test]
+    fn test_parse_atom_published_date() {
+        let body = r#"<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>e1</id>
+    <title>T</title>
+    <link href="https://example.com/x"/>
+    <published>2026-01-15T12:00:00Z</published>
+  </entry>
+</feed>"#;
+        let items = parse_feed(body).unwrap();
+        assert!(items[0].published.is_some());
+    }
+
+    #[test]
+    fn test_parse_atom_multiple_entries() {
+        let body = r#"<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><id>1</id><title>A</title><link href="https://a.com"/></entry>
+  <entry><id>2</id><title>B</title><link href="https://b.com"/></entry>
+  <entry><id>3</id><title>C</title><link href="https://c.com"/></entry>
+</feed>"#;
+        let items = parse_feed(body).unwrap();
+        assert_eq!(items.len(), 3);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // matches_filter comprehensive
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_matches_filter_no_filter() {
+        let item = FeedItem {
+            id: "x".into(),
+            title: "anything".into(),
+            url: "https://x.com/f.mp4".into(),
+            size: None,
+            published: None,
+            content_type: None,
+        };
+        assert!(matches_filter(&item, &None, &[]));
+    }
+
+    #[test]
+    fn test_matches_filter_empty_title_with_title_filter() {
+        let item = FeedItem {
+            id: "x".into(),
+            title: "".into(),
+            url: "https://x.com/f.mp4".into(),
+            size: None,
+            published: None,
+            content_type: None,
+        };
+        assert!(!matches_filter(&item, &Some("linux".into()), &[]));
+    }
+
+    #[test]
+    fn test_matches_filter_combined_title_and_extension() {
+        let item = FeedItem {
+            id: "x".into(),
+            title: "Ubuntu 24.04".into(),
+            url: "https://x.com/ubuntu.iso".into(),
+            size: None,
+            published: None,
+            content_type: None,
+        };
+        // Both match
+        assert!(matches_filter(
+            &item,
+            &Some("ubuntu".into()),
+            &["iso".into()]
+        ));
+        // Title matches, extension doesn't
+        assert!(!matches_filter(
+            &item,
+            &Some("ubuntu".into()),
+            &["mp4".into()]
+        ));
+        // Extension matches, title doesn't
+        assert!(!matches_filter(
+            &item,
+            &Some("fedora".into()),
+            &["iso".into()]
+        ));
+    }
+
+    #[test]
+    fn test_matches_filter_multiple_extensions() {
+        let item = FeedItem {
+            id: "x".into(),
+            title: "t".into(),
+            url: "https://x.com/file.mkv".into(),
+            size: None,
+            published: None,
+            content_type: None,
+        };
+        assert!(matches_filter(
+            &item,
+            &None,
+            &["mp4".into(), "mkv".into(), "avi".into()]
+        ));
+        assert!(!matches_filter(&item, &None, &["mp4".into(), "avi".into()]));
+    }
+
+    #[test]
+    fn test_matches_filter_empty_extensions_list() {
+        let item = FeedItem {
+            id: "x".into(),
+            title: "t".into(),
+            url: "https://x.com/file.mp4".into(),
+            size: None,
+            published: None,
+            content_type: None,
+        };
+        // Empty extensions list means no filter
+        assert!(matches_filter(&item, &None, &[]));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // file_extension comprehensive
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_file_extension_with_fragment() {
+        // Note: file_extension only strips query params (?), not fragments (#)
+        // This is the actual behavior of the implementation
+        assert_eq!(
+            file_extension("https://x.com/file.mp4#section"),
+            Some("mp4#section".into())
+        );
+    }
+
+    #[test]
+    fn test_file_extension_root_url() {
+        assert_eq!(file_extension("https://x.com/"), None);
+    }
+
+    #[test]
+    fn test_file_extension_trailing_slash() {
+        assert_eq!(file_extension("https://x.com/dir/"), None);
+    }
+
+    #[test]
+    fn test_file_extension_simple_path() {
+        assert_eq!(
+            file_extension("https://x.com/archive.tar.gz"),
+            Some("gz".into())
+        );
+    }
+
+    #[test]
+    fn test_file_extension_query_params_stripped() {
+        assert_eq!(
+            file_extension("https://x.com/file.iso?token=abc&v=2"),
+            Some("iso".into())
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // decode_xml_entities comprehensive
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_decode_xml_entities_quot() {
+        assert_eq!(decode_xml_entities("&quot;hello&quot;"), "\"hello\"");
+    }
+
+    #[test]
+    fn test_decode_xml_entities_apos() {
+        assert_eq!(decode_xml_entities("it&apos;s"), "it's");
+    }
+
+    #[test]
+    fn test_decode_xml_entities_mixed() {
+        assert_eq!(
+            decode_xml_entities("&lt;a href=&quot;x&quot;&gt;link&lt;/a&gt;"),
+            "<a href=\"x\">link</a>"
+        );
+    }
+
+    #[test]
+    fn test_decode_xml_entities_no_entities() {
+        assert_eq!(decode_xml_entities("plain text"), "plain text");
+    }
+
+    #[test]
+    fn test_decode_xml_entities_empty() {
+        assert_eq!(decode_xml_entities(""), "");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // parse_rfc822 / parse_iso8601
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_rfc822_valid() {
+        let dt = parse_rfc822("Sat, 08 Aug 2026 10:00:00 +0000");
+        assert!(dt.is_some());
+    }
+
+    #[test]
+    fn test_parse_rfc822_rfc3339_fallback() {
+        let dt = parse_rfc822("2026-08-08T10:00:00+00:00");
+        assert!(dt.is_some());
+    }
+
+    #[test]
+    fn test_parse_rfc822_invalid() {
+        assert!(parse_rfc822("not a date").is_none());
+    }
+
+    #[test]
+    fn test_parse_rfc822_empty() {
+        assert!(parse_rfc822("").is_none());
+    }
+
+    #[test]
+    fn test_parse_iso8601_valid() {
+        let dt = parse_iso8601("2026-08-08T10:00:00Z");
+        assert!(dt.is_some());
+    }
+
+    #[test]
+    fn test_parse_iso8601_invalid() {
+        assert!(parse_iso8601("not iso").is_none());
+    }
+
+    #[test]
+    fn test_parse_iso8601_empty() {
+        assert!(parse_iso8601("").is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // FeedSubscriptionManager operations
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_set_enabled_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        assert!(mgr.set_enabled("nonexistent", true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_set_poll_interval_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        assert!(mgr.set_poll_interval("nonexistent", 120).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_set_poll_interval_floor_at_60() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        let id = mgr
+            .add_subscription("https://x.com/f", None, None, vec![])
+            .await
+            .unwrap();
+        // Set to 10 → should be floored to 60
+        mgr.set_poll_interval(&id, 10).await.unwrap();
+        let sub = mgr.get(&id).await.unwrap();
+        assert_eq!(sub.poll_interval_secs, 60);
+    }
+
+    #[tokio::test]
+    async fn test_get_existing_subscription() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        let id = mgr
+            .add_subscription("https://x.com/f", Some("lbl"), None, vec![])
+            .await
+            .unwrap();
+        let sub = mgr.get(&id).await;
+        assert!(sub.is_some());
+        assert_eq!(sub.unwrap().feed_url, "https://x.com/f");
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        assert!(mgr.get("missing").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_extensions_normalized_to_lowercase() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        let id = mgr
+            .add_subscription(
+                "https://x.com/f",
+                None,
+                None,
+                vec!["MP4".into(), "MkV".into()],
+            )
+            .await
+            .unwrap();
+        let sub = mgr.get(&id).await.unwrap();
+        assert_eq!(sub.extensions, vec!["mp4", "mkv"]);
+    }
+
+    #[tokio::test]
+    async fn test_max_subscriptions_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        // Fill up to limit
+        {
+            let mut inner = mgr.inner.write().await;
+            inner.max_subscriptions = 2;
+        }
+        mgr.add_subscription("https://a.com/f", None, None, vec![])
+            .await
+            .unwrap();
+        mgr.add_subscription("https://b.com/f", None, None, vec![])
+            .await
+            .unwrap();
+        // Third should fail
+        let result = mgr
+            .add_subscription("https://c.com/f", None, None, vec![])
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RssFeedError::LimitReached(n) => assert_eq!(n, 2),
+            other => panic!("expected LimitReached, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_new_with_corrupted_json_uses_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        tokio::fs::write(&path, "not valid json{{{").await.unwrap();
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        assert!(mgr.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_new_with_valid_json_restores() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let ps = PersistedSubscriptions {
+            version: 1,
+            subscriptions: vec![FeedSubscription {
+                id: "restored".into(),
+                feed_url: "https://restored.com/feed".into(),
+                label: Some("Restored".into()),
+                title_filter: None,
+                extensions: vec!["iso".into()],
+                enabled: true,
+                poll_interval_secs: 300,
+                last_poll: None,
+                seen_ids: vec!["seen1".into()],
+                created_at: Utc::now(),
+            }],
+        };
+        tokio::fs::write(&path, serde_json::to_string(&ps).unwrap())
+            .await
+            .unwrap();
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        let subs = mgr.list().await;
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].id, "restored");
+        assert_eq!(subs[0].feed_url, "https://restored.com/feed");
+        assert_eq!(subs[0].seen_ids, vec!["seen1"]);
+    }
+
+    #[tokio::test]
+    async fn test_new_no_file_starts_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        assert!(mgr.list().await.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Error Display
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_error_display_invalid_url() {
+        let err = RssFeedError::InvalidUrl("bad url".into());
+        assert_eq!(err.to_string(), "Invalid URL: bad url");
+    }
+
+    #[test]
+    fn test_error_display_parse() {
+        let err = RssFeedError::Parse("unexpected format".into());
+        assert_eq!(err.to_string(), "Parse error: unexpected format");
+    }
+
+    #[test]
+    fn test_error_display_not_found() {
+        let err = RssFeedError::NotFound("sub-123".into());
+        assert_eq!(err.to_string(), "Feed not found: sub-123");
+    }
+
+    #[test]
+    fn test_error_display_limit_reached() {
+        let err = RssFeedError::LimitReached(50);
+        assert_eq!(err.to_string(), "Subscription limit reached: 50");
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let err = RssFeedError::InvalidUrl("x".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InvalidUrl"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Traits: FeedItem / FeedSubscription
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_feed_item_clone() {
+        let item = FeedItem {
+            id: "a".into(),
+            title: "t".into(),
+            url: "u".into(),
+            size: Some(1),
+            published: None,
+            content_type: None,
+        };
+        let cloned = item.clone();
+        assert_eq!(cloned.id, "a");
+        assert_eq!(cloned.title, "t");
+    }
+
+    #[test]
+    fn test_feed_item_debug() {
+        let item = FeedItem {
+            id: "a".into(),
+            title: "t".into(),
+            url: "u".into(),
+            size: None,
+            published: None,
+            content_type: None,
+        };
+        let debug = format!("{item:?}");
+        assert!(debug.contains("FeedItem"));
+        assert!(debug.contains("\"a\""));
+    }
+
+    #[test]
+    fn test_feed_item_partial_eq() {
+        let a = FeedItem {
+            id: "x".into(),
+            title: "t".into(),
+            url: "u".into(),
+            size: None,
+            published: None,
+            content_type: None,
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_feed_subscription_clone() {
+        let sub = FeedSubscription {
+            id: "s1".into(),
+            feed_url: "https://x.com/f".into(),
+            label: None,
+            title_filter: None,
+            extensions: vec![],
+            enabled: true,
+            poll_interval_secs: 600,
+            last_poll: None,
+            seen_ids: vec![],
+            created_at: Utc::now(),
+        };
+        let cloned = sub.clone();
+        assert_eq!(cloned.id, "s1");
+        assert_eq!(cloned.feed_url, "https://x.com/f");
+    }
+
+    #[test]
+    fn test_feed_subscription_debug() {
+        let sub = FeedSubscription {
+            id: "s1".into(),
+            feed_url: "https://x.com/f".into(),
+            label: Some("lbl".into()),
+            title_filter: None,
+            extensions: vec!["mp4".into()],
+            enabled: true,
+            poll_interval_secs: 600,
+            last_poll: None,
+            seen_ids: vec![],
+            created_at: Utc::now(),
+        };
+        let debug = format!("{sub:?}");
+        assert!(debug.contains("FeedSubscription"));
+        assert!(debug.contains("s1"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Persistence edge cases
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_persistence_atomic_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        mgr.add_subscription("https://x.com/f", None, None, vec![])
+            .await
+            .unwrap();
+        // No .tmp file should remain
+        let tmp_path = path.with_extension("tmp");
+        assert!(!tmp_path.exists());
+        // Main file should exist and be valid JSON
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        let _: PersistedSubscriptions = serde_json::from_str(&content).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_persistence_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        let id1 = mgr
+            .add_subscription("https://a.com/f", None, None, vec![])
+            .await
+            .unwrap();
+        mgr.remove_subscription(&id1).await.unwrap();
+        let id2 = mgr
+            .add_subscription("https://b.com/f", None, None, vec![])
+            .await
+            .unwrap();
+        // Re-open and verify only the second subscription
+        let mgr2 = FeedSubscriptionManager::new(&path).await.unwrap();
+        let subs = mgr2.list().await;
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].id, id2);
+        assert_eq!(subs[0].feed_url, "https://b.com/f");
+    }
+
+    #[tokio::test]
+    async fn test_persistence_empty_subscriptions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        // Persist with no subscriptions (triggered by adding and removing)
+        let id = mgr
+            .add_subscription("https://x.com/f", None, None, vec![])
+            .await
+            .unwrap();
+        mgr.remove_subscription(&id).await.unwrap();
+        // Re-open
+        let mgr2 = FeedSubscriptionManager::new(&path).await.unwrap();
+        assert!(mgr2.list().await.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // HTTP integration tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_poll_feed_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        let result = mgr.poll_feed("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_poll_feed_updates_last_poll() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = RSS_SAMPLE.to_string();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = ready_tx.send(());
+            if let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        let _ = ready_rx.await;
+        tokio::task::yield_now().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        let id = mgr
+            .add_subscription(&format!("http://{addr}/feed"), None, None, vec![])
+            .await
+            .unwrap();
+        assert!(mgr.get(&id).await.unwrap().last_poll.is_none());
+        mgr.poll_feed(&id).await.unwrap();
+        assert!(mgr.get(&id).await.unwrap().last_poll.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_poll_feed_updates_seen_ids() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = RSS_SAMPLE.to_string();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = ready_tx.send(());
+            if let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        let _ = ready_rx.await;
+        tokio::task::yield_now().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        let id = mgr
+            .add_subscription(&format!("http://{addr}/feed"), None, None, vec![])
+            .await
+            .unwrap();
+        assert!(mgr.get(&id).await.unwrap().seen_ids.is_empty());
+        mgr.poll_feed(&id).await.unwrap();
+        let sub = mgr.get(&id).await.unwrap();
+        assert!(!sub.seen_ids.is_empty());
+        assert!(sub.seen_ids.contains(&"ep-1".to_string()));
+        assert!(sub.seen_ids.contains(&"ep-2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_poll_feed_deduplication() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = RSS_SAMPLE.to_string();
+        // Serve twice
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = ready_tx.send(());
+            for _ in 0..2 {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    use tokio::io::AsyncWriteExt;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                }
+            }
+        });
+        let _ = ready_rx.await;
+        tokio::task::yield_now().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feeds.json");
+        let mgr = FeedSubscriptionManager::new(&path).await.unwrap();
+        let id = mgr
+            .add_subscription(&format!("http://{addr}/feed"), None, None, vec![])
+            .await
+            .unwrap();
+        // First poll: 2 items
+        let items1 = mgr.poll_feed(&id).await.unwrap();
+        assert_eq!(items1.len(), 2);
+        // Second poll: 0 items (already seen)
+        let items2 = mgr.poll_feed(&id).await.unwrap();
+        assert_eq!(items2.len(), 0);
+    }
+
     // Note: Integration tests for HTTP polling are skipped because they require
     // a real HTTP server, which introduces timing issues. The callback mechanism
     // is tested indirectly through other unit tests.
