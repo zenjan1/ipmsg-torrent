@@ -983,6 +983,12 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/retry-quota", get(get_retry_quota_handler))
         .route("/api/retry-quota", post(set_retry_quota_handler))
         .route("/api/retry-quota/reset", post(reset_retry_quota_handler))
+        .route("/api/resume-policy", get(get_resume_policy_handler))
+        .route("/api/resume-policy", post(set_resume_policy_handler))
+        .route(
+            "/api/resume-policy/preview",
+            get(preview_resume_policy_handler),
+        )
         .route("/api/ttl", get(get_ttl_handler))
         .route("/api/ttl", post(set_ttl_handler))
         .route("/api/ttl/summary", get(get_ttl_summary_handler))
@@ -5357,6 +5363,40 @@ async fn reset_retry_quota_handler(
 ) -> impl axum::response::IntoResponse {
     state.manager.reset_retry_quota().await;
     Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Get resume policy configuration
+async fn get_resume_policy_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_resume_policy_config().await;
+    Json(serde_json::json!({
+        "policy": config.policy,
+        "auto_retry_errors": config.auto_retry_errors,
+        "max_auto_resume": config.max_auto_resume
+    }))
+}
+
+/// Set resume policy configuration
+async fn set_resume_policy_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::resume_policy::ResumePolicyConfig>,
+) -> impl axum::response::IntoResponse {
+    state.manager.set_resume_policy_config(config).await;
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+/// Preview resume policy effect
+async fn preview_resume_policy_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let result = state.manager.preview_resume_policy().await;
+    Json(serde_json::json!({
+        "resumed": result.resumed,
+        "paused": result.paused,
+        "errors_retried": result.errors_retried,
+        "skipped": result.skipped
+    }))
 }
 
 /// Get TTL configuration

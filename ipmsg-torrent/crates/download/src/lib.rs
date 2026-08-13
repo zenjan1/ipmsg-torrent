@@ -15761,6 +15761,43 @@ impl DownloadManager {
         policy.clone()
     }
 
+    /// Preview what the current resume policy would do to all tasks
+    pub async fn preview_resume_policy(&self) -> resume_policy::ResumePolicyResult {
+        let policy_cfg = self.resume_policy.read().await.clone();
+        let task_resume_data = self.build_task_resume_data().await;
+        resume_policy::preview_resume_policy(&policy_cfg, &task_resume_data)
+    }
+
+    /// Build TaskResumeData from current tasks (helper for resume policy operations)
+    async fn build_task_resume_data(&self) -> Vec<resume_policy::TaskResumeData> {
+        let tasks = self.tasks.lock().await;
+        let favorites = self.task_favorites.lock().await;
+        tasks
+            .iter()
+            .map(|task| {
+                let state = match task.state {
+                    DownloadState::Downloading => resume_policy::TaskStateForResume::Downloading,
+                    DownloadState::Paused => resume_policy::TaskStateForResume::Paused,
+                    DownloadState::Queued => resume_policy::TaskStateForResume::Queued,
+                    DownloadState::Complete => resume_policy::TaskStateForResume::Complete,
+                    DownloadState::Error => resume_policy::TaskStateForResume::Error,
+                };
+                let priority = match task.priority {
+                    DownloadPriority::High => resume_policy::TaskPriorityForResume::High,
+                    DownloadPriority::Normal => resume_policy::TaskPriorityForResume::Normal,
+                    DownloadPriority::Low => resume_policy::TaskPriorityForResume::Low,
+                };
+                let is_favorite = favorites.is_favorite(&task.id);
+                resume_policy::TaskResumeData {
+                    id: task.id.clone(),
+                    state,
+                    priority,
+                    is_favorite,
+                }
+            })
+            .collect()
+    }
+
     // ===== Source Benchmark Management (Phase 120) =====
 
     /// Set source benchmark configuration.

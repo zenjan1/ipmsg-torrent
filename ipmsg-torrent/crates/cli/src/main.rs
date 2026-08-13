@@ -858,6 +858,11 @@ enum Command {
         subcommand: String,
         args: Vec<String>,
     },
+    DlResumePolicy {
+        /// Subcommand: status|config|preview|set|retry-errors|max-resume
+        subcommand: String,
+        args: Vec<String>,
+    },
     DlConnectionPool {
         /// Subcommand: status|stats|config|domains|domain|cleanup|clear|save
         subcommand: String,
@@ -923,12 +928,6 @@ enum Command {
     /// Download duplicate detection (status|detect|groups|summary|clear|config)
     DlDuplicate {
         /// Subcommand: status|detect|groups|summary|clear|config
-        subcommand: String,
-        args: Vec<String>,
-    },
-    /// Download resume policy (status|set|preview)
-    DlResumePolicy {
-        /// Subcommand: status|set|preview
         subcommand: String,
         args: Vec<String>,
     },
@@ -2726,6 +2725,25 @@ fn parse_command(input: &str) -> Command {
                 }
             }
         }
+        "dlresumepolicy" | "dl-resume-policy" | "dlrp" => {
+            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+            if args.is_empty() {
+                Command::Unknown(
+                    "/dlrp <status|config|preview|set|retry-errors|max-resume>".to_string(),
+                )
+            } else {
+                let subcommand = args[0].clone();
+                let cmd_args = if args.len() > 1 {
+                    args[1..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Command::DlResumePolicy {
+                    subcommand,
+                    args: cmd_args,
+                }
+            }
+        }
         "dlpool" | "dl-pool" | "dlconnpool" => {
             let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
             if args.is_empty() {
@@ -2935,23 +2953,6 @@ fn parse_command(input: &str) -> Command {
                     Vec::new()
                 };
                 Command::DlDuplicate {
-                    subcommand,
-                    args: cmd_args,
-                }
-            }
-        }
-        "dlresumepolicy" | "dl-resume-policy" | "dlrsp" => {
-            let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
-            if args.is_empty() {
-                Command::Unknown("/dlresumepolicy <status|set|preview>".to_string())
-            } else {
-                let subcommand = args[0].clone();
-                let cmd_args = if args.len() > 1 {
-                    args[1..].to_vec()
-                } else {
-                    Vec::new()
-                };
-                Command::DlResumePolicy {
                     subcommand,
                     args: cmd_args,
                 }
@@ -3326,6 +3327,7 @@ fn command_help() -> String {
         "/dlburst [cmd]     - Speed burst (status|start <task_id> [duration] [multiplier]|stop <task_id>|config)",
         "/dlnetwork [cmd]  - Network-aware download (status|enable|disable|config|summary|probe|paused|clear|reset)",
         "/dlretryquota [cmd] - Retry quota (status|enable|disable|set <max> [window_secs]|reset)",
+        "/dlrp [cmd] - Resume policy (status|config|preview|set <policy>|retry-errors <bool>|max-resume <n>)",
         "/dlpool [cmd]    - Connection pool (status|stats|config|domains|domain <name> <limit>|cleanup|clear|save)",
         "/dlintegrity [cmd] - File integrity verification (status|verify <id>|verify-all|summary|clear|config)",
         "/dldisk [cmd]     - Disk space monitor (status|config|check|start|stop)",
