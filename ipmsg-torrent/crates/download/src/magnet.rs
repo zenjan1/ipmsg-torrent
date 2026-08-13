@@ -248,4 +248,470 @@ mod tests {
         assert!(MagnetLink::parse("magnet:?dn=test").is_err()); // Missing xt
         assert!(MagnetLink::parse("magnet:?xt=invalid").is_err());
     }
+
+    // ===== v2 Magnet Link Parsing =====
+
+    #[test]
+    fn test_parse_magnet_v2_hex() {
+        // v2 uses btmh prefix and 64-char SHA-256 hash
+        let uri =
+            "magnet:?xt=urn:btmh:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.info_hash.len(), 32);
+        assert!(magnet.is_v2);
+        assert!(magnet.display_name.is_none());
+        assert!(magnet.trackers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_magnet_v2_with_all_params() {
+        let uri = "magnet:?xt=urn:btmh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&dn=v2file&tr=http://t1.com&tr=http://t2.com&x.pe=1.2.3.4:6881";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.info_hash.len(), 32);
+        assert!(magnet.is_v2);
+        assert_eq!(magnet.display_name, Some("v2file".to_string()));
+        assert_eq!(magnet.trackers.len(), 2);
+        assert_eq!(magnet.peers.len(), 1);
+    }
+
+    #[test]
+    fn test_v2_hash_length_validation() {
+        // Too short for v2 (40 chars instead of 64)
+        let uri = "magnet:?xt=urn:btmh:da39a3ee5e6b4b0d3255bfef95601890afd80709";
+        let result = MagnetLink::parse(uri);
+        assert!(result.is_err());
+    }
+
+    // ===== Base32 Decoding =====
+
+    #[test]
+    fn test_base32_all_zeros() {
+        // 32 A's in base32 = 20 zero bytes
+        let uri = "magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.info_hash.len(), 20);
+        assert!(magnet.info_hash.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_base32_lowercase() {
+        // Base32 should be case-insensitive
+        let uri_upper = "magnet:?xt=urn:btih:GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        let uri_lower = "magnet:?xt=urn:btih:gezdgnbvgy3tqojqgezdgnbvgy3tqojq";
+
+        let magnet_upper = MagnetLink::parse(uri_upper).unwrap();
+        let magnet_lower = MagnetLink::parse(uri_lower).unwrap();
+
+        assert_eq!(magnet_upper.info_hash, magnet_lower.info_hash);
+    }
+
+    #[test]
+    fn test_base32_with_padding() {
+        // Base32 with = padding becomes 36 chars, which fails length check (expects 32)
+        // This is expected behavior - the parser validates length before decoding
+        let uri = "magnet:?xt=urn:btih:GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ====";
+        let result = MagnetLink::parse(uri);
+        assert!(
+            result.is_err(),
+            "Base32 with padding should fail length validation"
+        );
+    }
+
+    #[test]
+    fn test_invalid_base32_chars() {
+        // Base32 only allows A-Z and 2-7, so '1' is invalid
+        let uri = "magnet:?xt=urn:btih:11111111111111111111111111111111";
+        let result = MagnetLink::parse(uri);
+        assert!(result.is_err());
+    }
+
+    // ===== Hash Length Validation =====
+
+    #[test]
+    fn test_v1_hash_too_short() {
+        // 20 chars instead of 40
+        let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255";
+        let result = MagnetLink::parse(uri);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_v1_hash_too_long() {
+        // 60 chars instead of 40
+        let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709da39a3ee5e6b4b0d3255bfef9560";
+        let result = MagnetLink::parse(uri);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_hex_chars() {
+        // 40 chars but contains invalid hex char 'g'
+        let uri = "magnet:?xt=urn:btih:gg39a3ee5e6b4b0d3255bfef95601890afd80709";
+        let result = MagnetLink::parse(uri);
+        assert!(result.is_err());
+    }
+
+    // ===== Parameter Parsing =====
+
+    #[test]
+    fn test_parse_only_xt_parameter() {
+        let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.info_hash.len(), 20);
+        assert!(magnet.display_name.is_none());
+        assert!(magnet.trackers.is_empty());
+        assert!(magnet.peers.is_empty());
+        assert!(!magnet.is_v2);
+    }
+
+    #[test]
+    fn test_parse_with_display_name() {
+        let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=My%20File.txt";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.display_name, Some("My File.txt".to_string()));
+    }
+
+    #[test]
+    fn test_parse_with_unicode_display_name() {
+        let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=%E6%96%87%E4%BB%B6.txt";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.display_name, Some("文件.txt".to_string()));
+    }
+
+    #[test]
+    fn test_parse_many_trackers() {
+        let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&tr=http://t1.com&tr=http://t2.com&tr=http://t3.com&tr=http://t4.com&tr=http://t5.com";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.trackers.len(), 5);
+        assert_eq!(magnet.trackers[0], "http://t1.com");
+        assert_eq!(magnet.trackers[4], "http://t5.com");
+    }
+
+    #[test]
+    fn test_parse_many_peers() {
+        let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&x.pe=1.1.1.1:6881&x.pe=2.2.2.2:6882&x.pe=3.3.3.3:6883";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.peers.len(), 3);
+        assert_eq!(magnet.peers[0], "1.1.1.1:6881");
+        assert_eq!(magnet.peers[2], "3.3.3.3:6883");
+    }
+
+    #[test]
+    fn test_parse_ignores_unknown_params() {
+        let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&unknown=value&kt=some+keywords&xl=12345";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.info_hash.len(), 20);
+        // Unknown params should be silently ignored
+    }
+
+    #[test]
+    fn test_parse_params_in_different_order() {
+        let uri1 =
+            "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test&tr=http://t.com";
+        let uri2 =
+            "magnet:?dn=test&tr=http://t.com&xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709";
+
+        let magnet1 = MagnetLink::parse(uri1).unwrap();
+        let magnet2 = MagnetLink::parse(uri2).unwrap();
+
+        assert_eq!(magnet1.info_hash, magnet2.info_hash);
+        assert_eq!(magnet1.display_name, magnet2.display_name);
+        assert_eq!(magnet1.trackers, magnet2.trackers);
+    }
+
+    // ===== Error Cases =====
+
+    #[test]
+    fn test_not_magnet_scheme() {
+        // http:// is a valid URL but not a magnet link
+        // The URL parser succeeds, then we check the scheme
+        let uri = "http://example.com/?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709";
+        let result = MagnetLink::parse(uri);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Not a magnet link"));
+    }
+
+    #[test]
+    fn test_invalid_xt_prefix() {
+        let uri = "magnet:?xt=urn:sha1:da39a3ee5e6b4b0d3255bfef95601890afd80709";
+        let result = MagnetLink::parse(uri);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("urn:btih"));
+    }
+
+    #[test]
+    fn test_missing_xt_value() {
+        let uri = "magnet:?xt=";
+        let result = MagnetLink::parse(uri);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_uri() {
+        let result = MagnetLink::parse("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_garbage_uri() {
+        let result = MagnetLink::parse("not a valid uri at all {{{}}}");
+        assert!(result.is_err());
+    }
+
+    // ===== to_uri Generation =====
+
+    #[test]
+    fn test_to_uri_minimal() {
+        let magnet = MagnetLink {
+            info_hash: vec![
+                0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d, 0x32, 0x55, 0xbf, 0xef, 0x95, 0x60,
+                0x18, 0x90, 0xaf, 0xd8, 0x07, 0x09,
+            ],
+            display_name: None,
+            trackers: vec![],
+            peers: vec![],
+            is_v2: false,
+        };
+
+        let uri = magnet.to_uri();
+        assert!(uri.starts_with("magnet:?xt=urn:btih:"));
+        assert!(uri.contains("da39a3ee5e6b4b0d3255bfef95601890afd80709"));
+        assert!(!uri.contains("&dn="));
+        assert!(!uri.contains("&tr="));
+        assert!(!uri.contains("&x.pe="));
+    }
+
+    #[test]
+    fn test_to_uri_with_display_name() {
+        let magnet = MagnetLink {
+            info_hash: vec![0; 20],
+            display_name: Some("test file.txt".to_string()),
+            trackers: vec![],
+            peers: vec![],
+            is_v2: false,
+        };
+
+        let uri = magnet.to_uri();
+        assert!(uri.contains("&dn=test%20file.txt"));
+    }
+
+    #[test]
+    fn test_to_uri_with_trackers() {
+        let magnet = MagnetLink {
+            info_hash: vec![0; 20],
+            display_name: None,
+            trackers: vec![
+                "http://tracker1.com".to_string(),
+                "http://tracker2.com".to_string(),
+            ],
+            peers: vec![],
+            is_v2: false,
+        };
+
+        let uri = magnet.to_uri();
+        assert!(uri.contains("&tr=http%3A%2F%2Ftracker1.com"));
+        assert!(uri.contains("&tr=http%3A%2F%2Ftracker2.com"));
+    }
+
+    #[test]
+    fn test_to_uri_with_peers() {
+        let magnet = MagnetLink {
+            info_hash: vec![0; 20],
+            display_name: None,
+            trackers: vec![],
+            peers: vec!["192.168.1.1:6881".to_string()],
+            is_v2: false,
+        };
+
+        let uri = magnet.to_uri();
+        assert!(uri.contains("&x.pe=192.168.1.1:6881"));
+    }
+
+    #[test]
+    fn test_to_uri_v2() {
+        let magnet = MagnetLink {
+            info_hash: vec![0xAA; 32],
+            display_name: None,
+            trackers: vec![],
+            peers: vec![],
+            is_v2: true,
+        };
+
+        let uri = magnet.to_uri();
+        assert!(uri.starts_with("magnet:?xt=urn:btmh:"));
+        assert!(uri.contains(&"aa".repeat(32)));
+    }
+
+    #[test]
+    fn test_to_uri_all_params() {
+        let magnet = MagnetLink {
+            info_hash: vec![0x12; 20],
+            display_name: Some("file.mp4".to_string()),
+            trackers: vec!["http://t.com".to_string()],
+            peers: vec!["1.2.3.4:6881".to_string()],
+            is_v2: false,
+        };
+
+        let uri = magnet.to_uri();
+        assert!(uri.contains("xt=urn:btih:"));
+        assert!(uri.contains("&dn=file.mp4"));
+        assert!(uri.contains("&tr="));
+        assert!(uri.contains("&x.pe="));
+    }
+
+    // ===== Roundtrip =====
+
+    #[test]
+    fn test_parse_to_uri_roundtrip() {
+        let original_uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test&tr=http%3A%2F%2Ftracker.com";
+        let magnet = MagnetLink::parse(original_uri).unwrap();
+        let generated_uri = magnet.to_uri();
+
+        // Parse the generated URI again
+        let magnet2 = MagnetLink::parse(&generated_uri).unwrap();
+
+        assert_eq!(magnet.info_hash, magnet2.info_hash);
+        assert_eq!(magnet.display_name, magnet2.display_name);
+        assert_eq!(magnet.trackers, magnet2.trackers);
+    }
+
+    #[test]
+    fn test_to_uri_parse_roundtrip_v2() {
+        let magnet = MagnetLink {
+            info_hash: vec![0xBB; 32],
+            display_name: Some("v2 file".to_string()),
+            trackers: vec!["http://t.com".to_string()],
+            peers: vec![],
+            is_v2: true,
+        };
+
+        let uri = magnet.to_uri();
+        let parsed = MagnetLink::parse(&uri).unwrap();
+
+        assert_eq!(parsed.info_hash, magnet.info_hash);
+        assert_eq!(parsed.display_name, magnet.display_name);
+        assert_eq!(parsed.trackers, magnet.trackers);
+        assert!(parsed.is_v2);
+    }
+
+    // ===== Error Display =====
+
+    #[test]
+    fn test_error_display_invalid_format() {
+        let err = MagnetError::InvalidFormat("bad format".to_string());
+        assert_eq!(err.to_string(), "Invalid magnet link format: bad format");
+    }
+
+    #[test]
+    fn test_error_display_unsupported() {
+        let err = MagnetError::Unsupported("feature X".to_string());
+        assert_eq!(err.to_string(), "Unsupported feature: feature X");
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let err = MagnetError::InvalidFormat("test".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("InvalidFormat"));
+    }
+
+    // ===== Traits =====
+
+    #[test]
+    fn test_magnet_link_clone() {
+        let magnet = MagnetLink {
+            info_hash: vec![0xAA; 20],
+            display_name: Some("test".to_string()),
+            trackers: vec!["http://t.com".to_string()],
+            peers: vec!["1.2.3.4:6881".to_string()],
+            is_v2: false,
+        };
+
+        let cloned = magnet.clone();
+        assert_eq!(cloned.info_hash, magnet.info_hash);
+        assert_eq!(cloned.display_name, magnet.display_name);
+        assert_eq!(cloned.trackers, magnet.trackers);
+        assert_eq!(cloned.peers, magnet.peers);
+        assert_eq!(cloned.is_v2, magnet.is_v2);
+    }
+
+    #[test]
+    fn test_magnet_link_debug() {
+        let magnet = MagnetLink {
+            info_hash: vec![0; 20],
+            display_name: None,
+            trackers: vec![],
+            peers: vec![],
+            is_v2: false,
+        };
+
+        let debug = format!("{:?}", magnet);
+        assert!(debug.contains("MagnetLink"));
+        assert!(debug.contains("info_hash"));
+    }
+
+    // ===== Edge Cases =====
+
+    #[test]
+    fn test_all_zeros_hash() {
+        let uri = "magnet:?xt=urn:btih:0000000000000000000000000000000000000000";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.info_hash.len(), 20);
+        assert!(magnet.info_hash.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_all_ff_hash() {
+        let uri = "magnet:?xt=urn:btih:ffffffffffffffffffffffffffffffffffffffff";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.info_hash.len(), 20);
+        assert!(magnet.info_hash.iter().all(|&b| b == 0xFF));
+    }
+
+    #[test]
+    fn test_mixed_case_hex() {
+        let uri = "magnet:?xt=urn:btih:Da39A3Ee5e6B4B0d3255BfEf95601890AFd80709";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.info_hash.len(), 20);
+    }
+
+    #[test]
+    fn test_empty_display_name() {
+        let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.display_name, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_special_chars_in_tracker() {
+        let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&tr=http%3A%2F%2Ftracker.com%2Fannounce%3Fpass%3Dsecret";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.trackers.len(), 1);
+        assert!(magnet.trackers[0].contains("tracker.com"));
+    }
+
+    #[test]
+    fn test_ipv6_peer() {
+        let uri = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&x.pe=[::1]:6881";
+        let magnet = MagnetLink::parse(uri).unwrap();
+
+        assert_eq!(magnet.peers.len(), 1);
+        assert_eq!(magnet.peers[0], "[::1]:6881");
+    }
 }
