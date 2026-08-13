@@ -1039,4 +1039,597 @@ mod tests {
         assert_eq!(summary.outcome_stats.completed_bytes, 1000);
         assert_eq!(summary.outcome_stats.attempted_bytes, 1500);
     }
+
+    // ===== Serialization tests =====
+
+    #[test]
+    fn test_config_serialization_roundtrip() {
+        let config = HistoryAnalyticsConfig {
+            enabled: false,
+            default_period_days: 14,
+            max_entries: 5000,
+            include_tag_stats: false,
+            include_domain_stats: true,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: HistoryAnalyticsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.enabled, config.enabled);
+        assert_eq!(deserialized.default_period_days, config.default_period_days);
+        assert_eq!(deserialized.max_entries, config.max_entries);
+        assert_eq!(deserialized.include_tag_stats, config.include_tag_stats);
+        assert_eq!(
+            deserialized.include_domain_stats,
+            config.include_domain_stats
+        );
+    }
+
+    #[test]
+    fn test_config_serialization_default_values() {
+        let config = HistoryAnalyticsConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: HistoryAnalyticsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.enabled, true);
+        assert_eq!(deserialized.default_period_days, 30);
+        assert_eq!(deserialized.max_entries, 10000);
+    }
+
+    #[test]
+    fn test_config_json_structure() {
+        let config = HistoryAnalyticsConfig::default();
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        assert!(json.contains("\"enabled\""));
+        assert!(json.contains("\"default_period_days\""));
+        assert!(json.contains("\"max_entries\""));
+        assert!(json.contains("\"include_tag_stats\""));
+        assert!(json.contains("\"include_domain_stats\""));
+    }
+
+    #[test]
+    fn test_protocol_stats_serialization() {
+        let stats = ProtocolStats {
+            count: 10,
+            total_bytes: 5000,
+            percentage: 50.0,
+            avg_size: 500,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: ProtocolStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.count, 10);
+        assert_eq!(deserialized.total_bytes, 5000);
+        assert_eq!(deserialized.percentage, 50.0);
+        assert_eq!(deserialized.avg_size, 500);
+    }
+
+    #[test]
+    fn test_outcome_stats_serialization() {
+        let stats = OutcomeStats {
+            completed: 8,
+            failed: 2,
+            success_rate: 80.0,
+            completed_bytes: 8000,
+            attempted_bytes: 10000,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: OutcomeStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.completed, 8);
+        assert_eq!(deserialized.failed, 2);
+        assert_eq!(deserialized.success_rate, 80.0);
+    }
+
+    #[test]
+    fn test_domain_stats_serialization() {
+        let stats = DomainStats {
+            domain: "example.com".to_string(),
+            count: 5,
+            total_bytes: 2500,
+            success_count: 4,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: DomainStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.domain, "example.com");
+        assert_eq!(deserialized.count, 5);
+        assert_eq!(deserialized.success_count, 4);
+    }
+
+    #[test]
+    fn test_tag_stats_serialization() {
+        let stats = TagStats {
+            tag: "video".to_string(),
+            count: 15,
+            total_bytes: 75000,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: TagStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.tag, "video");
+        assert_eq!(deserialized.count, 15);
+    }
+
+    #[test]
+    fn test_size_bucket_serialization() {
+        let bucket = SizeBucket {
+            label: "1-10MB".to_string(),
+            count: 42,
+        };
+        let json = serde_json::to_string(&bucket).unwrap();
+        let deserialized: SizeBucket = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.label, "1-10MB");
+        assert_eq!(deserialized.count, 42);
+    }
+
+    #[test]
+    fn test_period_stats_serialization() {
+        let now = Utc::now();
+        let stats = PeriodStats {
+            start_date: now - Duration::days(30),
+            end_date: now,
+            days: 30,
+            avg_downloads_per_day: 5.5,
+            avg_bytes_per_day: 1024000,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: PeriodStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.days, 30);
+        assert_eq!(deserialized.avg_downloads_per_day, 5.5);
+    }
+
+    #[test]
+    fn test_summary_serialization() {
+        let now = Utc::now();
+        let summary = HistoryAnalyticsSummary {
+            period_start: now - Duration::days(30),
+            period_end: now,
+            total_entries: 100,
+            protocol_stats: HashMap::new(),
+            outcome_stats: OutcomeStats {
+                completed: 80,
+                failed: 20,
+                success_rate: 80.0,
+                completed_bytes: 80000,
+                attempted_bytes: 100000,
+            },
+            avg_download_size: 1000,
+            median_download_size: 900,
+            largest_download: 5000,
+            smallest_download: 100,
+            size_distribution: vec![],
+            top_domains: vec![],
+            tag_stats: vec![],
+            period_stats: PeriodStats {
+                start_date: now - Duration::days(30),
+                end_date: now,
+                days: 30,
+                avg_downloads_per_day: 3.33,
+                avg_bytes_per_day: 2666,
+            },
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: HistoryAnalyticsSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.total_entries, 100);
+        assert_eq!(deserialized.outcome_stats.completed, 80);
+    }
+
+    // ===== Default value tests =====
+
+    #[test]
+    fn test_protocol_stats_default() {
+        let stats = ProtocolStats::default();
+        assert_eq!(stats.count, 0);
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.percentage, 0.0);
+        assert_eq!(stats.avg_size, 0);
+    }
+
+    #[test]
+    fn test_outcome_stats_default() {
+        let stats = OutcomeStats::default();
+        assert_eq!(stats.completed, 0);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.success_rate, 0.0);
+    }
+
+    #[test]
+    fn test_manager_default() {
+        let manager = HistoryAnalyticsManager::default();
+        assert!(manager.config.enabled);
+        assert_eq!(manager.config.default_period_days, 30);
+    }
+
+    // ===== Boundary condition tests =====
+
+    #[test]
+    fn test_zero_period_days() {
+        let mut config = HistoryAnalyticsConfig::default();
+        config.default_period_days = 0;
+        let manager = HistoryAnalyticsManager::with_config(config);
+        let now = Utc::now();
+
+        let entries = vec![make_entry(
+            "file.txt",
+            HistoryProtocol::Xunlei,
+            HistoryOutcome::Completed,
+            1000,
+            1000,
+            now - Duration::days(1),
+        )];
+
+        let summary = manager.analyze(&entries);
+        // With 0 period days, avg_downloads_per_day should be 0
+        assert_eq!(summary.period_stats.avg_downloads_per_day, 0.0);
+    }
+
+    #[test]
+    fn test_single_entry_analytics() {
+        let manager = HistoryAnalyticsManager::new();
+        let now = Utc::now();
+
+        let entries = vec![make_entry(
+            "single.txt",
+            HistoryProtocol::Xunlei,
+            HistoryOutcome::Completed,
+            1024,
+            1024,
+            now - Duration::days(1),
+        )];
+
+        let summary = manager.analyze(&entries);
+        assert_eq!(summary.total_entries, 1);
+        assert_eq!(summary.avg_download_size, 1024);
+        assert_eq!(summary.median_download_size, 1024);
+        assert_eq!(summary.largest_download, 1024);
+        assert_eq!(summary.smallest_download, 1024);
+    }
+
+    #[test]
+    fn test_all_failed_entries() {
+        let manager = HistoryAnalyticsManager::new();
+        let now = Utc::now();
+
+        let entries = vec![
+            make_entry(
+                "fail1.txt",
+                HistoryProtocol::Xunlei,
+                HistoryOutcome::Failed,
+                1000,
+                500,
+                now - Duration::days(1),
+            ),
+            make_entry(
+                "fail2.txt",
+                HistoryProtocol::Xunlei,
+                HistoryOutcome::Failed,
+                2000,
+                1000,
+                now - Duration::days(2),
+            ),
+        ];
+
+        let summary = manager.analyze(&entries);
+        assert_eq!(summary.outcome_stats.completed, 0);
+        assert_eq!(summary.outcome_stats.failed, 2);
+        assert_eq!(summary.outcome_stats.success_rate, 0.0);
+        assert_eq!(summary.outcome_stats.completed_bytes, 0);
+    }
+
+    #[test]
+    fn test_max_entries_zero() {
+        let mut config = HistoryAnalyticsConfig::default();
+        config.max_entries = 0;
+        let manager = HistoryAnalyticsManager::with_config(config);
+        let now = Utc::now();
+
+        let entries = vec![make_entry(
+            "file.txt",
+            HistoryProtocol::Xunlei,
+            HistoryOutcome::Completed,
+            1000,
+            1000,
+            now - Duration::days(1),
+        )];
+
+        let summary = manager.analyze(&entries);
+        assert_eq!(summary.total_entries, 0);
+    }
+
+    // ===== Size distribution boundary tests =====
+
+    #[test]
+    fn test_size_distribution_empty() {
+        let sizes: Vec<u64> = vec![];
+        let buckets = compute_size_distribution(&sizes);
+        assert_eq!(buckets.len(), 6);
+        for bucket in buckets {
+            assert_eq!(bucket.count, 0);
+        }
+    }
+
+    #[test]
+    fn test_size_distribution_exact_boundaries() {
+        let sizes = vec![
+            0,
+            1_000_000,
+            10_000_000,
+            100_000_000,
+            1_000_000_000,
+            10_000_000_000,
+        ];
+        let buckets = compute_size_distribution(&sizes);
+        assert_eq!(buckets[0].count, 1); // 0 is in < 1MB
+        assert_eq!(buckets[1].count, 1); // 1MB is in 1-10MB
+        assert_eq!(buckets[2].count, 1); // 10MB is in 10-100MB
+        assert_eq!(buckets[3].count, 1); // 100MB is in 100MB-1GB
+        assert_eq!(buckets[4].count, 1); // 1GB is in 1-10GB
+        assert_eq!(buckets[5].count, 1); // 10GB is in > 10GB
+    }
+
+    #[test]
+    fn test_size_distribution_all_in_one_bucket() {
+        let sizes = vec![500_000, 600_000, 700_000, 800_000, 900_000];
+        let buckets = compute_size_distribution(&sizes);
+        assert_eq!(buckets[0].count, 5); // All in < 1MB
+        assert_eq!(buckets[1].count, 0);
+    }
+
+    // ===== Format bytes boundary tests =====
+
+    #[test]
+    fn test_format_bytes_zero() {
+        assert_eq!(format_bytes(0), "0 B");
+    }
+
+    #[test]
+    fn test_format_bytes_boundary_values() {
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.00 KB");
+        assert_eq!(format_bytes(1025), "1.00 KB");
+        assert_eq!(format_bytes(1024 * 1024 - 1), "1024.00 KB");
+        assert_eq!(format_bytes(1024 * 1024), "1.00 MB");
+    }
+
+    #[test]
+    fn test_format_bytes_large_values() {
+        assert_eq!(format_bytes(1024u64.pow(4) * 2), "2.00 TB");
+        assert_eq!(format_bytes(1024u64.pow(5)), "1024.00 TB");
+    }
+
+    // ===== Config management tests =====
+
+    #[test]
+    fn test_with_config() {
+        let config = HistoryAnalyticsConfig {
+            enabled: false,
+            default_period_days: 7,
+            max_entries: 100,
+            include_tag_stats: false,
+            include_domain_stats: false,
+        };
+        let manager = HistoryAnalyticsManager::with_config(config);
+        assert_eq!(manager.config.enabled, false);
+        assert_eq!(manager.config.default_period_days, 7);
+    }
+
+    #[test]
+    fn test_get_config() {
+        let manager = HistoryAnalyticsManager::new();
+        let config = manager.get_config();
+        assert!(config.enabled);
+        assert_eq!(config.default_period_days, 30);
+    }
+
+    #[test]
+    fn test_set_config() {
+        let mut manager = HistoryAnalyticsManager::new();
+        let new_config = HistoryAnalyticsConfig {
+            enabled: false,
+            default_period_days: 14,
+            max_entries: 5000,
+            include_tag_stats: false,
+            include_domain_stats: false,
+        };
+        manager.set_config(new_config);
+        assert_eq!(manager.config.enabled, false);
+        assert_eq!(manager.config.default_period_days, 14);
+    }
+
+    // ===== Persistence edge case tests =====
+
+    #[test]
+    fn test_save_load_config_invalid_json() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+        let config_path = data_dir.join("history_analytics_config.json");
+
+        // Write invalid JSON
+        std::fs::write(&config_path, "not valid json").unwrap();
+
+        let result = load_analytics_config(data_dir);
+        assert!(matches!(result, Err(HistoryAnalyticsError::Serialize(_))));
+    }
+
+    #[test]
+    fn test_save_load_config_extra_fields() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+        let config_path = data_dir.join("history_analytics_config.json");
+
+        // Write JSON with extra fields
+        let json = r#"{
+            "enabled": true,
+            "default_period_days": 30,
+            "max_entries": 10000,
+            "include_tag_stats": true,
+            "include_domain_stats": true,
+            "extra_field": "should be ignored"
+        }"#;
+        std::fs::write(&config_path, json).unwrap();
+
+        let loaded = load_analytics_config(data_dir).unwrap().unwrap();
+        assert!(loaded.enabled);
+        assert_eq!(loaded.default_period_days, 30);
+    }
+
+    // ===== Clone and Debug trait tests =====
+
+    #[test]
+    fn test_clone_manager() {
+        let manager = HistoryAnalyticsManager::new();
+        let cloned = manager.clone();
+        assert_eq!(cloned.config.enabled, manager.config.enabled);
+    }
+
+    #[test]
+    fn test_debug_impl_manager() {
+        let manager = HistoryAnalyticsManager::new();
+        let debug_str = format!("{:?}", manager);
+        assert!(debug_str.contains("HistoryAnalyticsManager"));
+    }
+
+    #[test]
+    fn test_debug_impl_config() {
+        let config = HistoryAnalyticsConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("HistoryAnalyticsConfig"));
+    }
+
+    #[test]
+    fn test_debug_impl_error() {
+        let err = HistoryAnalyticsError::Io("test error".to_string());
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("Io"));
+    }
+
+    // ===== Error Display tests =====
+
+    #[test]
+    fn test_error_display_io() {
+        let err = HistoryAnalyticsError::Io("permission denied".to_string());
+        assert_eq!(err.to_string(), "I/O error: permission denied");
+    }
+
+    #[test]
+    fn test_error_display_serialize() {
+        let err = HistoryAnalyticsError::Serialize("invalid data".to_string());
+        assert_eq!(err.to_string(), "Serialization error: invalid data");
+    }
+
+    // ===== Complex scenario tests =====
+
+    #[test]
+    fn test_mixed_protocols_and_outcomes() {
+        let manager = HistoryAnalyticsManager::new();
+        let now = Utc::now();
+
+        let entries = vec![
+            make_entry(
+                "xunlei1.txt",
+                HistoryProtocol::Xunlei,
+                HistoryOutcome::Completed,
+                1000,
+                1000,
+                now - Duration::days(1),
+            ),
+            make_entry(
+                "torrent1.txt",
+                HistoryProtocol::Torrent,
+                HistoryOutcome::Completed,
+                2000,
+                2000,
+                now - Duration::days(2),
+            ),
+            make_entry(
+                "xunlei2.txt",
+                HistoryProtocol::Xunlei,
+                HistoryOutcome::Failed,
+                3000,
+                1500,
+                now - Duration::days(3),
+            ),
+            make_entry(
+                "ed2k1.txt",
+                HistoryProtocol::Ed2k,
+                HistoryOutcome::Completed,
+                500,
+                500,
+                now - Duration::days(4),
+            ),
+        ];
+
+        let summary = manager.analyze(&entries);
+        assert_eq!(summary.total_entries, 4);
+        assert_eq!(summary.outcome_stats.completed, 3);
+        assert_eq!(summary.outcome_stats.failed, 1);
+        assert!(summary.protocol_stats.contains_key("Xunlei"));
+        assert!(summary.protocol_stats.contains_key("Torrent"));
+        assert!(summary.protocol_stats.contains_key("Ed2k"));
+    }
+
+    #[test]
+    fn test_multiple_tags_per_entry() {
+        let manager = HistoryAnalyticsManager::new();
+        let now = Utc::now();
+
+        let entries = vec![make_entry_with_tags(
+            "multi_tag.txt",
+            HistoryProtocol::Xunlei,
+            HistoryOutcome::Completed,
+            1000,
+            1000,
+            now - Duration::days(1),
+            vec!["video".to_string(), "hd".to_string(), "english".to_string()],
+        )];
+
+        let summary = manager.analyze(&entries);
+        assert_eq!(summary.tag_stats.len(), 3);
+        for tag in &["video", "hd", "english"] {
+            assert!(summary.tag_stats.iter().any(|t| &t.tag == tag));
+        }
+    }
+
+    #[test]
+    fn test_format_summary_comprehensive() {
+        let manager = HistoryAnalyticsManager::new();
+        let now = Utc::now();
+
+        let entries = vec![
+            make_entry_with_tags(
+                "file1.txt",
+                HistoryProtocol::Xunlei,
+                HistoryOutcome::Completed,
+                1000,
+                1000,
+                now - Duration::days(1),
+                vec!["video".to_string()],
+            ),
+            make_entry_with_tags(
+                "file2.txt",
+                HistoryProtocol::Torrent,
+                HistoryOutcome::Failed,
+                2000,
+                1000,
+                now - Duration::days(2),
+                vec!["audio".to_string()],
+            ),
+        ];
+
+        let summary = manager.analyze(&entries);
+        let formatted = manager.format_summary(&summary);
+
+        assert!(formatted.contains("Download History Analytics"));
+        assert!(formatted.contains("Completed: 1"));
+        assert!(formatted.contains("Failed: 1"));
+        assert!(formatted.contains("Xunlei"));
+        assert!(formatted.contains("Torrent"));
+        assert!(formatted.contains("Size Statistics"));
+        assert!(formatted.contains("Daily Averages"));
+    }
+
+    #[test]
+    fn test_format_summary_empty() {
+        let manager = HistoryAnalyticsManager::new();
+        let entries: Vec<HistoryEntry> = vec![];
+        let summary = manager.analyze(&entries);
+        let formatted = manager.format_summary(&summary);
+
+        assert!(formatted.contains("Download History Analytics"));
+        assert!(formatted.contains("Total entries: 0"));
+    }
 }
