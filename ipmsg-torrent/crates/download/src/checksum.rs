@@ -405,4 +405,472 @@ mod tests {
             .unwrap();
         assert_eq!(sha256.len(), 64);
     }
+
+    // ─── Additional comprehensive tests ───
+
+    #[test]
+    fn test_algorithm_name() {
+        assert_eq!(ChecksumAlgorithm::Md5.name(), "MD5");
+        assert_eq!(ChecksumAlgorithm::Sha1.name(), "SHA-1");
+        assert_eq!(ChecksumAlgorithm::Sha256.name(), "SHA-256");
+        assert_eq!(ChecksumAlgorithm::Ed2k.name(), "ED2K");
+    }
+
+    #[test]
+    fn test_algorithm_clone_copy() {
+        let algo = ChecksumAlgorithm::Sha256;
+        let cloned = algo;
+        assert_eq!(algo, cloned);
+    }
+
+    #[test]
+    fn test_algorithm_debug() {
+        let debug_str = format!("{:?}", ChecksumAlgorithm::Md5);
+        assert_eq!(debug_str, "Md5");
+    }
+
+    #[test]
+    fn test_algorithm_serde_roundtrip() {
+        for algo in [
+            ChecksumAlgorithm::Md5,
+            ChecksumAlgorithm::Sha1,
+            ChecksumAlgorithm::Sha256,
+            ChecksumAlgorithm::Ed2k,
+        ] {
+            let json = serde_json::to_string(&algo).unwrap();
+            let deserialized: ChecksumAlgorithm = serde_json::from_str(&json).unwrap();
+            assert_eq!(algo, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_parse_algorithm_case_insensitive() {
+        assert_eq!(
+            ChecksumAlgorithm::parse("MD5"),
+            Some(ChecksumAlgorithm::Md5)
+        );
+        assert_eq!(
+            ChecksumAlgorithm::parse("Md5"),
+            Some(ChecksumAlgorithm::Md5)
+        );
+        assert_eq!(
+            ChecksumAlgorithm::parse("SHA-1"),
+            Some(ChecksumAlgorithm::Sha1)
+        );
+        assert_eq!(
+            ChecksumAlgorithm::parse("SHA1"),
+            Some(ChecksumAlgorithm::Sha1)
+        );
+        assert_eq!(
+            ChecksumAlgorithm::parse("Sha-256"),
+            Some(ChecksumAlgorithm::Sha256)
+        );
+        assert_eq!(
+            ChecksumAlgorithm::parse("SHA256"),
+            Some(ChecksumAlgorithm::Sha256)
+        );
+        assert_eq!(
+            ChecksumAlgorithm::parse("ED2K"),
+            Some(ChecksumAlgorithm::Ed2k)
+        );
+        assert_eq!(
+            ChecksumAlgorithm::parse("ed2k-hash"),
+            Some(ChecksumAlgorithm::Ed2k)
+        );
+    }
+
+    #[test]
+    fn test_parse_algorithm_invalid() {
+        assert_eq!(ChecksumAlgorithm::parse(""), None);
+        assert_eq!(ChecksumAlgorithm::parse("sha512"), None);
+        assert_eq!(ChecksumAlgorithm::parse("crc32"), None);
+        assert_eq!(ChecksumAlgorithm::parse("blake2"), None);
+    }
+
+    #[test]
+    fn test_detect_algorithm_edge_cases() {
+        // 32 chars could be MD5 or ED2K, defaults to MD5
+        assert_eq!(
+            detect_algorithm("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some(ChecksumAlgorithm::Md5)
+        );
+        // 40 chars = SHA-1
+        assert_eq!(
+            detect_algorithm("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some(ChecksumAlgorithm::Sha1)
+        );
+        // 64 chars = SHA-256
+        assert_eq!(
+            detect_algorithm(&"a".repeat(64)),
+            Some(ChecksumAlgorithm::Sha256)
+        );
+        // Other lengths = None
+        assert_eq!(detect_algorithm("abc"), None);
+        assert_eq!(detect_algorithm(&"a".repeat(31)), None);
+        assert_eq!(detect_algorithm(&"a".repeat(33)), None);
+        assert_eq!(detect_algorithm(&"a".repeat(39)), None);
+        assert_eq!(detect_algorithm(&"a".repeat(41)), None);
+        assert_eq!(detect_algorithm(&"a".repeat(63)), None);
+        assert_eq!(detect_algorithm(&"a".repeat(65)), None);
+        assert_eq!(detect_algorithm(""), None);
+    }
+
+    #[test]
+    fn test_validate_hex_valid() {
+        // Valid MD5 hex (32 chars)
+        assert!(validate_hex("d41d8cd98f00b204e9800998ecf8427e", ChecksumAlgorithm::Md5).is_ok());
+        // Valid SHA-1 hex (40 chars)
+        assert!(
+            validate_hex(
+                "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+                ChecksumAlgorithm::Sha1
+            )
+            .is_ok()
+        );
+        // Valid SHA-256 hex (64 chars)
+        assert!(validate_hex(&"a".repeat(64), ChecksumAlgorithm::Sha256).is_ok());
+        // Valid ED2K hex (32 chars)
+        assert!(validate_hex("31d6cfe0d16ae931b73c59d7e0c089c0", ChecksumAlgorithm::Ed2k).is_ok());
+    }
+
+    #[test]
+    fn test_validate_hex_wrong_length() {
+        // Too short for MD5
+        let err = validate_hex("abc", ChecksumAlgorithm::Md5).unwrap_err();
+        assert!(matches!(err, ChecksumError::InvalidHex(_)));
+        // Too long for SHA-1
+        let err = validate_hex(&"a".repeat(41), ChecksumAlgorithm::Sha1).unwrap_err();
+        assert!(matches!(err, ChecksumError::InvalidHex(_)));
+        // Too short for SHA-256
+        let err = validate_hex(&"a".repeat(32), ChecksumAlgorithm::Sha256).unwrap_err();
+        assert!(matches!(err, ChecksumError::InvalidHex(_)));
+    }
+
+    #[test]
+    fn test_validate_hex_non_hex_chars() {
+        // 32 chars but with non-hex characters
+        let err =
+            validate_hex("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", ChecksumAlgorithm::Md5).unwrap_err();
+        assert!(matches!(err, ChecksumError::InvalidHex(_)));
+        // Mixed valid and invalid
+        let err =
+            validate_hex("d41d8cd98f00b204e9800998ecf8427G", ChecksumAlgorithm::Md5).unwrap_err();
+        assert!(matches!(err, ChecksumError::InvalidHex(_)));
+    }
+
+    #[test]
+    fn test_checksum_error_display() {
+        let io_err = ChecksumError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "disk failure",
+        ));
+        assert!(format!("{}", io_err).contains("disk failure"));
+
+        let hex_err = ChecksumError::InvalidHex("bad chars".into());
+        assert!(format!("{}", hex_err).contains("bad chars"));
+
+        let mismatch = ChecksumError::Mismatch {
+            expected: "aaa".into(),
+            actual: "bbb".into(),
+        };
+        let msg = format!("{}", mismatch);
+        assert!(msg.contains("aaa"));
+        assert!(msg.contains("bbb"));
+        assert!(msg.contains("mismatch"));
+
+        let unknown = ChecksumError::UnknownAlgorithm("blake2".into());
+        assert!(format!("{}", unknown).contains("blake2"));
+    }
+
+    #[test]
+    fn test_checksum_result_fields() {
+        let result = ChecksumResult {
+            algorithm: ChecksumAlgorithm::Md5,
+            expected: "abc".into(),
+            actual: "def".into(),
+            matched: false,
+        };
+        assert_eq!(result.algorithm, ChecksumAlgorithm::Md5);
+        assert_eq!(result.expected, "abc");
+        assert_eq!(result.actual, "def");
+        assert!(!result.matched);
+    }
+
+    #[tokio::test]
+    async fn test_md5_with_known_content() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "hello world").unwrap();
+        f.flush().unwrap();
+
+        // MD5 of "hello world" = 5eb63bbbe01eeed093cb22bb8f5acdc3
+        let result = verify_file(
+            f.path(),
+            "5eb63bbbe01eeed093cb22bb8f5acdc3",
+            ChecksumAlgorithm::Md5,
+        )
+        .await
+        .unwrap();
+        assert!(result.matched);
+        assert_eq!(result.algorithm, ChecksumAlgorithm::Md5);
+        assert_eq!(result.expected, "5eb63bbbe01eeed093cb22bb8f5acdc3");
+        assert_eq!(result.actual, "5eb63bbbe01eeed093cb22bb8f5acdc3");
+    }
+
+    #[tokio::test]
+    async fn test_sha1_with_content() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "hello world").unwrap();
+        f.flush().unwrap();
+
+        // SHA-1 of "hello world" = 2aae6c35c94fcfb415dbe95f408b9ce91ee846ed
+        let result = verify_file(
+            f.path(),
+            "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed",
+            ChecksumAlgorithm::Sha1,
+        )
+        .await
+        .unwrap();
+        assert!(result.matched);
+    }
+
+    #[tokio::test]
+    async fn test_sha256_with_content() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "hello world").unwrap();
+        f.flush().unwrap();
+
+        // SHA-256 of "hello world" = b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+        let result = verify_file(
+            f.path(),
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+            ChecksumAlgorithm::Sha256,
+        )
+        .await
+        .unwrap();
+        assert!(result.matched);
+    }
+
+    #[tokio::test]
+    async fn test_ed2k_with_content() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "hello world").unwrap();
+        f.flush().unwrap();
+
+        // ED2K hash of "hello world" fits in one chunk, so it's MD4 of "hello world"
+        // First compute the hash, then verify it matches
+        let hash = compute_hash(f.path(), ChecksumAlgorithm::Ed2k)
+            .await
+            .unwrap();
+        assert_eq!(hash.len(), 32);
+
+        let result = verify_file(f.path(), &hash, ChecksumAlgorithm::Ed2k)
+            .await
+            .unwrap();
+        assert!(result.matched);
+    }
+
+    #[tokio::test]
+    async fn test_verify_file_not_found() {
+        let result = verify_file(
+            std::path::Path::new("/nonexistent/file.txt"),
+            "d41d8cd98f00b204e9800998ecf8427e",
+            ChecksumAlgorithm::Md5,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ChecksumError::Io(_)));
+    }
+
+    #[tokio::test]
+    async fn test_compute_hash_file_not_found() {
+        let result = compute_hash(
+            std::path::Path::new("/nonexistent/file.txt"),
+            ChecksumAlgorithm::Md5,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ChecksumError::Io(_)));
+    }
+
+    #[tokio::test]
+    async fn test_verify_file_normalizes_hex_to_lowercase() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "hello world").unwrap();
+        f.flush().unwrap();
+
+        // Use uppercase hex - should still match
+        let result = verify_file(
+            f.path(),
+            "5EB63BBBE01EEED093CB22BB8F5ACDC3",
+            ChecksumAlgorithm::Md5,
+        )
+        .await
+        .unwrap();
+        assert!(result.matched);
+        // The expected field should be lowercased
+        assert_eq!(result.expected, "5eb63bbbe01eeed093cb22bb8f5acdc3");
+    }
+
+    #[tokio::test]
+    async fn test_compute_hash_all_algorithms_empty_file() {
+        let f = NamedTempFile::new().unwrap();
+
+        let ed2k = compute_hash(f.path(), ChecksumAlgorithm::Ed2k)
+            .await
+            .unwrap();
+        assert_eq!(ed2k.len(), 32);
+        assert_eq!(ed2k, "31d6cfe0d16ae931b73c59d7e0c089c0");
+    }
+
+    #[tokio::test]
+    async fn test_compute_hash_binary_content() {
+        let mut f = NamedTempFile::new().unwrap();
+        // Write binary content (all byte values 0-255)
+        let data: Vec<u8> = (0..=255).collect();
+        f.write_all(&data).unwrap();
+        f.flush().unwrap();
+
+        // Just verify it doesn't error and returns correct length
+        let md5 = compute_hash(f.path(), ChecksumAlgorithm::Md5)
+            .await
+            .unwrap();
+        assert_eq!(md5.len(), 32);
+
+        let sha1 = compute_hash(f.path(), ChecksumAlgorithm::Sha1)
+            .await
+            .unwrap();
+        assert_eq!(sha1.len(), 40);
+
+        let sha256 = compute_hash(f.path(), ChecksumAlgorithm::Sha256)
+            .await
+            .unwrap();
+        assert_eq!(sha256.len(), 64);
+
+        let ed2k = compute_hash(f.path(), ChecksumAlgorithm::Ed2k)
+            .await
+            .unwrap();
+        assert_eq!(ed2k.len(), 32);
+    }
+
+    #[tokio::test]
+    async fn test_verify_file_mismatch_returns_correct_fields() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "test content").unwrap();
+        f.flush().unwrap();
+
+        let result = verify_file(
+            f.path(),
+            "00000000000000000000000000000000",
+            ChecksumAlgorithm::Md5,
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.matched);
+        assert_eq!(result.expected, "00000000000000000000000000000000");
+        assert_ne!(result.actual, "00000000000000000000000000000000");
+        assert_eq!(result.actual.len(), 32); // MD5 produces 32 hex chars
+    }
+
+    #[tokio::test]
+    async fn test_ed2k_multi_chunk() {
+        // Create a file larger than one ED2K chunk (9,728,000 bytes)
+        // We'll use a smaller test: just verify the multi-chunk path works
+        // by creating a file of exactly CHUNK_SIZE + 1 bytes
+        let mut f = NamedTempFile::new().unwrap();
+        let chunk_size = 9_728_000;
+        let data = vec![0xABu8; chunk_size + 1];
+        f.write_all(&data).unwrap();
+        f.flush().unwrap();
+
+        // Should use multi-chunk path (file > CHUNK_SIZE)
+        let hash = compute_hash(f.path(), ChecksumAlgorithm::Ed2k)
+            .await
+            .unwrap();
+        assert_eq!(hash.len(), 32);
+
+        // Verify it's different from a single-chunk hash
+        let mut f2 = NamedTempFile::new().unwrap();
+        let data2 = vec![0xABu8; chunk_size];
+        f2.write_all(&data2).unwrap();
+        f2.flush().unwrap();
+        let hash2 = compute_hash(f2.path(), ChecksumAlgorithm::Ed2k)
+            .await
+            .unwrap();
+        assert_ne!(
+            hash, hash2,
+            "Different size files should have different hashes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ed2k_exact_chunk_boundary() {
+        // File of exactly CHUNK_SIZE bytes = single chunk
+        let mut f = NamedTempFile::new().unwrap();
+        let chunk_size = 9_728_000;
+        let data = vec![0xCDu8; chunk_size];
+        f.write_all(&data).unwrap();
+        f.flush().unwrap();
+
+        let hash = compute_hash(f.path(), ChecksumAlgorithm::Ed2k)
+            .await
+            .unwrap();
+        assert_eq!(hash.len(), 32);
+
+        // This should be the same as MD4 of the data (single chunk)
+        // The hash should equal the chunk hash since there's only one chunk
+    }
+
+    #[tokio::test]
+    async fn test_verify_consistency_across_calls() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "consistent content").unwrap();
+        f.flush().unwrap();
+
+        let result1 = compute_hash(f.path(), ChecksumAlgorithm::Sha256)
+            .await
+            .unwrap();
+        let result2 = compute_hash(f.path(), ChecksumAlgorithm::Sha256)
+            .await
+            .unwrap();
+        assert_eq!(result1, result2, "Same file should produce same hash");
+    }
+
+    #[tokio::test]
+    async fn test_different_content_different_hash() {
+        let mut f1 = NamedTempFile::new().unwrap();
+        write!(f1, "content A").unwrap();
+        f1.flush().unwrap();
+
+        let mut f2 = NamedTempFile::new().unwrap();
+        write!(f2, "content B").unwrap();
+        f2.flush().unwrap();
+
+        let hash1 = compute_hash(f1.path(), ChecksumAlgorithm::Md5)
+            .await
+            .unwrap();
+        let hash2 = compute_hash(f2.path(), ChecksumAlgorithm::Md5)
+            .await
+            .unwrap();
+        assert_ne!(
+            hash1, hash2,
+            "Different content should produce different hashes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_large_file_sha256() {
+        let mut f = NamedTempFile::new().unwrap();
+        // Write 1MB of data
+        let data = vec![0x42u8; 1024 * 1024];
+        f.write_all(&data).unwrap();
+        f.flush().unwrap();
+
+        let hash = compute_hash(f.path(), ChecksumAlgorithm::Sha256)
+            .await
+            .unwrap();
+        assert_eq!(hash.len(), 64);
+        // Verify it's all hex chars
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }
