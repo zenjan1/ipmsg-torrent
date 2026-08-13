@@ -932,4 +932,869 @@ mod tests {
         assert_eq!(deserialized.sample_count, 30);
         assert!((deserialized.overall.avg_download_bps - 1000.0).abs() < 0.1);
     }
+
+    // === Serialization tests ===
+
+    #[test]
+    fn test_bandwidth_stats_serialization() {
+        let stats = BandwidthStats {
+            avg_download_bps: 1500.0,
+            peak_download_bps: 3000.0,
+            avg_upload_bps: 750.0,
+            peak_upload_bps: 1500.0,
+            total_downloaded: 500_000,
+            total_uploaded: 250_000,
+            sample_count: 30,
+            window_secs: 300,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let de: BandwidthStats = serde_json::from_str(&json).unwrap();
+        assert!((de.avg_download_bps - 1500.0).abs() < 0.1);
+        assert!((de.peak_download_bps - 3000.0).abs() < 0.1);
+        assert_eq!(de.total_downloaded, 500_000);
+        assert_eq!(de.sample_count, 30);
+        assert_eq!(de.window_secs, 300);
+    }
+
+    #[test]
+    fn test_bandwidth_stats_default() {
+        let stats = BandwidthStats::default();
+        assert_eq!(stats.avg_download_bps, 0.0);
+        assert_eq!(stats.peak_download_bps, 0.0);
+        assert_eq!(stats.avg_upload_bps, 0.0);
+        assert_eq!(stats.peak_upload_bps, 0.0);
+        assert_eq!(stats.total_downloaded, 0);
+        assert_eq!(stats.total_uploaded, 0);
+        assert_eq!(stats.sample_count, 0);
+        assert_eq!(stats.window_secs, 0);
+    }
+
+    #[test]
+    fn test_task_bandwidth_serialization() {
+        let tb = TaskBandwidth {
+            task_id: "task-1".to_string(),
+            task_name: "myfile.zip".to_string(),
+            current_bps: 2048.0,
+            avg_bps: 1024.0,
+            peak_bps: 4096.0,
+            total_downloaded: 1_000_000,
+        };
+        let json = serde_json::to_string(&tb).unwrap();
+        let de: TaskBandwidth = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.task_id, "task-1");
+        assert_eq!(de.task_name, "myfile.zip");
+        assert!((de.current_bps - 2048.0).abs() < 0.1);
+        assert_eq!(de.total_downloaded, 1_000_000);
+    }
+
+    #[test]
+    fn test_bandwidth_dashboard_serialization() {
+        let dashboard = BandwidthDashboard {
+            current_download_bps: 5000.0,
+            current_upload_bps: 2500.0,
+            last_5min: BandwidthStats::default(),
+            last_15min: BandwidthStats::default(),
+            last_60min: BandwidthStats::default(),
+            tasks: vec![TaskBandwidth {
+                task_id: "t1".to_string(),
+                task_name: "file.txt".to_string(),
+                current_bps: 1000.0,
+                avg_bps: 800.0,
+                peak_bps: 1200.0,
+                total_downloaded: 50_000,
+            }],
+            history: vec![BandwidthSample {
+                timestamp: 1000,
+                download_bps: 1000.0,
+                upload_bps: 500.0,
+            }],
+        };
+        let json = serde_json::to_string(&dashboard).unwrap();
+        let de: BandwidthDashboard = serde_json::from_str(&json).unwrap();
+        assert!((de.current_download_bps - 5000.0).abs() < 0.1);
+        assert_eq!(de.tasks.len(), 1);
+        assert_eq!(de.history.len(), 1);
+    }
+
+    #[test]
+    fn test_trend_direction_serialization() {
+        for dir in [
+            TrendDirection::Rising,
+            TrendDirection::Falling,
+            TrendDirection::Stable,
+            TrendDirection::Unknown,
+        ] {
+            let json = serde_json::to_string(&dir).unwrap();
+            let de: TrendDirection = serde_json::from_str(&json).unwrap();
+            assert_eq!(de, dir);
+        }
+    }
+
+    #[test]
+    fn test_trend_direction_serde_renames() {
+        // Verify the serde rename_all = "lowercase" attribute
+        let json = serde_json::to_string(&TrendDirection::Rising).unwrap();
+        assert_eq!(json, "\"rising\"");
+        let json = serde_json::to_string(&TrendDirection::Falling).unwrap();
+        assert_eq!(json, "\"falling\"");
+        let json = serde_json::to_string(&TrendDirection::Stable).unwrap();
+        assert_eq!(json, "\"stable\"");
+        let json = serde_json::to_string(&TrendDirection::Unknown).unwrap();
+        assert_eq!(json, "\"unknown\"");
+    }
+
+    #[test]
+    fn test_trend_stats_serialization() {
+        let stats = TrendStats {
+            avg_download_bps: 2000.0,
+            max_download_bps: 5000.0,
+            min_download_bps: 100.0,
+            stddev_bps: 500.0,
+            total_bytes: 1_000_000,
+            duration_secs: 600,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let de: TrendStats = serde_json::from_str(&json).unwrap();
+        assert!((de.avg_download_bps - 2000.0).abs() < 0.1);
+        assert_eq!(de.total_bytes, 1_000_000);
+        assert_eq!(de.duration_secs, 600);
+    }
+
+    #[test]
+    fn test_trend_stats_default() {
+        let stats = TrendStats::default();
+        assert_eq!(stats.avg_download_bps, 0.0);
+        assert_eq!(stats.max_download_bps, 0.0);
+        assert_eq!(stats.min_download_bps, 0.0);
+        assert_eq!(stats.stddev_bps, 0.0);
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.duration_secs, 0);
+    }
+
+    #[test]
+    fn test_window_trend_serialization() {
+        let wt = WindowTrend {
+            label: "5min".to_string(),
+            window_secs: 300,
+            stats: BandwidthStats {
+                avg_download_bps: 1000.0,
+                peak_download_bps: 2000.0,
+                avg_upload_bps: 0.0,
+                peak_upload_bps: 0.0,
+                total_downloaded: 50_000,
+                total_uploaded: 0,
+                sample_count: 10,
+                window_secs: 90,
+            },
+            direction: TrendDirection::Rising,
+        };
+        let json = serde_json::to_string(&wt).unwrap();
+        let de: WindowTrend = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.label, "5min");
+        assert_eq!(de.window_secs, 300);
+        assert_eq!(de.direction, TrendDirection::Rising);
+        assert_eq!(de.stats.sample_count, 10);
+    }
+
+    #[test]
+    fn test_moving_avg_point_serialization() {
+        let pt = MovingAvgPoint {
+            timestamp: 1700000000,
+            avg_bps: 3500.0,
+        };
+        let json = serde_json::to_string(&pt).unwrap();
+        let de: MovingAvgPoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.timestamp, 1700000000);
+        assert!((de.avg_bps - 3500.0).abs() < 0.1);
+    }
+
+    // === Edge case tests ===
+
+    #[tokio::test]
+    async fn test_with_config_custom_values() {
+        let monitor = BandwidthMonitor::with_config(50, Duration::from_secs(5));
+        assert_eq!(monitor.max_samples(), 50);
+        assert_eq!(monitor.sample_interval(), Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn test_update_current_speed_overwrite() {
+        let monitor = BandwidthMonitor::new();
+        monitor.update_current_speed(100.0, 50.0).await;
+        monitor.update_current_speed(200.0, 100.0).await;
+        let (dl, ul) = monitor.current_speed().await;
+        assert_eq!(dl, 200.0);
+        assert_eq!(ul, 100.0);
+    }
+
+    #[tokio::test]
+    async fn test_update_current_speed_zero() {
+        let monitor = BandwidthMonitor::new();
+        monitor.update_current_speed(1000.0, 500.0).await;
+        monitor.update_current_speed(0.0, 0.0).await;
+        let (dl, ul) = monitor.current_speed().await;
+        assert_eq!(dl, 0.0);
+        assert_eq!(ul, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_stats_single_sample() {
+        let monitor = BandwidthMonitor::with_config(100, Duration::from_secs(3600));
+        {
+            let mut history = monitor.history.write().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            history.push_back(BandwidthSample {
+                timestamp: now,
+                download_bps: 5000.0,
+                upload_bps: 2500.0,
+            });
+        }
+        let stats = monitor.stats_for_window(Duration::from_secs(300)).await;
+        assert_eq!(stats.sample_count, 1);
+        assert!((stats.avg_download_bps - 5000.0).abs() < 0.1);
+        assert!((stats.peak_download_bps - 5000.0).abs() < 0.1);
+        // Single sample: actual_window = 0, so total_downloaded = 0
+        assert_eq!(stats.total_downloaded, 0);
+        assert_eq!(stats.window_secs, 0);
+    }
+
+    #[tokio::test]
+    async fn test_stats_all_samples_outside_window() {
+        let monitor = BandwidthMonitor::with_config(100, Duration::from_secs(3600));
+        {
+            let mut history = monitor.history.write().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            // All samples 1 hour old
+            for i in 0..5 {
+                history.push_back(BandwidthSample {
+                    timestamp: now - 3600 - (4 - i) * 60,
+                    download_bps: 1000.0,
+                    upload_bps: 500.0,
+                });
+            }
+        }
+        // 5-min window should have no samples
+        let stats = monitor.stats_for_window(Duration::from_secs(300)).await;
+        assert_eq!(stats.sample_count, 0);
+        assert_eq!(stats.avg_download_bps, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_with_history() {
+        let monitor = BandwidthMonitor::with_config(100, Duration::from_secs(3600));
+        monitor.update_current_speed(3000.0, 1500.0).await;
+        {
+            let mut history = monitor.history.write().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            for i in 0..5 {
+                history.push_back(BandwidthSample {
+                    timestamp: now - (4 - i) * 10,
+                    download_bps: 1000.0 * (i + 1) as f64,
+                    upload_bps: 500.0,
+                });
+            }
+        }
+        let dashboard = monitor.dashboard(vec![]).await;
+        assert!((dashboard.current_download_bps - 3000.0).abs() < 0.1);
+        assert!((dashboard.current_upload_bps - 1500.0).abs() < 0.1);
+        assert_eq!(dashboard.history.len(), 5);
+        assert_eq!(dashboard.tasks.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_multiple_tasks() {
+        let monitor = BandwidthMonitor::new();
+        let task_speeds = vec![
+            ("t1".to_string(), "a.txt".to_string(), 100.0, 1000),
+            ("t2".to_string(), "b.txt".to_string(), 200.0, 2000),
+            ("t3".to_string(), "c.txt".to_string(), 300.0, 3000),
+        ];
+        let dashboard = monitor.dashboard(task_speeds).await;
+        assert_eq!(dashboard.tasks.len(), 3);
+        assert_eq!(dashboard.tasks[0].task_id, "t1");
+        assert_eq!(dashboard.tasks[2].current_bps, 300.0);
+        assert_eq!(dashboard.tasks[2].total_downloaded, 3000);
+    }
+
+    // === compute_trend_stats edge cases ===
+
+    #[test]
+    fn test_compute_trend_stats_empty() {
+        let stats = BandwidthMonitor::compute_trend_stats(&[]);
+        assert_eq!(stats.avg_download_bps, 0.0);
+        assert_eq!(stats.max_download_bps, 0.0);
+        assert_eq!(stats.min_download_bps, 0.0);
+        assert_eq!(stats.stddev_bps, 0.0);
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.duration_secs, 0);
+    }
+
+    #[test]
+    fn test_compute_trend_stats_single_sample() {
+        let samples = vec![BandwidthSample {
+            timestamp: 100,
+            download_bps: 5000.0,
+            upload_bps: 2500.0,
+        }];
+        let stats = BandwidthMonitor::compute_trend_stats(&samples);
+        assert!((stats.avg_download_bps - 5000.0).abs() < 0.1);
+        assert!((stats.max_download_bps - 5000.0).abs() < 0.1);
+        assert!((stats.min_download_bps - 5000.0).abs() < 0.1);
+        assert!((stats.stddev_bps - 0.0).abs() < 0.1);
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.duration_secs, 0);
+    }
+
+    #[test]
+    fn test_compute_trend_stats_constant_speed() {
+        let samples = vec![
+            BandwidthSample {
+                timestamp: 100,
+                download_bps: 5000.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 110,
+                download_bps: 5000.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 120,
+                download_bps: 5000.0,
+                upload_bps: 0.0,
+            },
+        ];
+        let stats = BandwidthMonitor::compute_trend_stats(&samples);
+        assert!((stats.avg_download_bps - 5000.0).abs() < 0.1);
+        assert!((stats.stddev_bps - 0.0).abs() < 0.1);
+        // 5000 bps * 20s / 8 = 12500 bytes
+        assert_eq!(stats.total_bytes, 12500);
+        assert_eq!(stats.duration_secs, 20);
+    }
+
+    #[test]
+    fn test_compute_trend_stats_known_values() {
+        let samples = vec![
+            BandwidthSample {
+                timestamp: 0,
+                download_bps: 8000.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 10,
+                download_bps: 16000.0,
+                upload_bps: 0.0,
+            },
+        ];
+        let stats = BandwidthMonitor::compute_trend_stats(&samples);
+        // avg = (8000 + 16000) / 2 = 12000
+        assert!((stats.avg_download_bps - 12000.0).abs() < 0.1);
+        assert!((stats.max_download_bps - 16000.0).abs() < 0.1);
+        assert!((stats.min_download_bps - 8000.0).abs() < 0.1);
+        // avg_speed = (8000 + 16000) / 2 = 12000, interval = 10
+        // bytes = 12000 * 10 / 8 = 15000
+        assert_eq!(stats.total_bytes, 15000);
+    }
+
+    // === compute_window_trend edge cases ===
+
+    #[test]
+    fn test_compute_window_trend_empty_window() {
+        let samples = vec![
+            BandwidthSample {
+                timestamp: 100,
+                download_bps: 1000.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 110,
+                download_bps: 2000.0,
+                upload_bps: 0.0,
+            },
+        ];
+        // Window that doesn't include any samples: now=110, cutoff=110-5=105, both samples at 100 and 110
+        // Sample at 110 has timestamp >= 105, so it IS included. Use window_secs=0 to exclude all.
+        let wt = BandwidthMonitor::compute_window_trend(&samples, "tiny", 0);
+        // now=110, cutoff=110-0=110, samples with timestamp >= 110: only the one at 110
+        assert_eq!(wt.stats.sample_count, 1);
+        // With 1 sample, direction is Unknown
+        assert_eq!(wt.direction, TrendDirection::Unknown);
+    }
+
+    #[test]
+    fn test_compute_window_trend_single_sample_in_window() {
+        let samples = vec![BandwidthSample {
+            timestamp: 100,
+            download_bps: 5000.0,
+            upload_bps: 0.0,
+        }];
+        let wt = BandwidthMonitor::compute_window_trend(&samples, "5min", 300);
+        assert_eq!(wt.stats.sample_count, 1);
+        assert!((wt.stats.avg_download_bps - 5000.0).abs() < 0.1);
+        assert_eq!(wt.stats.window_secs, 0); // single sample
+        assert_eq!(wt.direction, TrendDirection::Unknown);
+    }
+
+    #[test]
+    fn test_compute_window_trend_label() {
+        let samples = vec![BandwidthSample {
+            timestamp: 100,
+            download_bps: 1000.0,
+            upload_bps: 0.0,
+        }];
+        let wt = BandwidthMonitor::compute_window_trend(&samples, "1h", 3600);
+        assert_eq!(wt.label, "1h");
+        assert_eq!(wt.window_secs, 3600);
+    }
+
+    // === detect_trend edge cases ===
+
+    #[test]
+    fn test_detect_trend_too_few_samples() {
+        assert_eq!(BandwidthMonitor::detect_trend(&[]), TrendDirection::Unknown);
+        let one = vec![BandwidthSample {
+            timestamp: 0,
+            download_bps: 100.0,
+            upload_bps: 0.0,
+        }];
+        assert_eq!(
+            BandwidthMonitor::detect_trend(&one),
+            TrendDirection::Unknown
+        );
+        let two = vec![
+            BandwidthSample {
+                timestamp: 0,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 10,
+                download_bps: 200.0,
+                upload_bps: 0.0,
+            },
+        ];
+        assert_eq!(
+            BandwidthMonitor::detect_trend(&two),
+            TrendDirection::Unknown
+        );
+    }
+
+    #[test]
+    fn test_detect_trend_exactly_three_samples() {
+        let samples = vec![
+            BandwidthSample {
+                timestamp: 0,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 10,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 20,
+                download_bps: 500.0,
+                upload_bps: 0.0,
+            },
+        ];
+        // third = 1, first_third avg = 100, last_third avg = 500
+        // change_ratio = (500-100)/100 = 4.0 > 0.15 => Rising
+        assert_eq!(
+            BandwidthMonitor::detect_trend(&samples),
+            TrendDirection::Rising
+        );
+    }
+
+    #[test]
+    fn test_detect_trend_all_zero() {
+        let samples = vec![
+            BandwidthSample {
+                timestamp: 0,
+                download_bps: 0.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 10,
+                download_bps: 0.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 20,
+                download_bps: 0.0,
+                upload_bps: 0.0,
+            },
+        ];
+        // Both zero => change_ratio = 0.0 => Stable
+        assert_eq!(
+            BandwidthMonitor::detect_trend(&samples),
+            TrendDirection::Stable
+        );
+    }
+
+    #[test]
+    fn test_detect_trend_zero_to_nonzero() {
+        let samples = vec![
+            BandwidthSample {
+                timestamp: 0,
+                download_bps: 0.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 10,
+                download_bps: 0.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 20,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+        ];
+        // first_third = 0, last_third = 100 => change_ratio = 1.0 => Rising
+        assert_eq!(
+            BandwidthMonitor::detect_trend(&samples),
+            TrendDirection::Rising
+        );
+    }
+
+    #[test]
+    fn test_detect_trend_mild_rise_below_threshold() {
+        // 6 samples: first 2 avg=100, last 2 avg=110 => ratio=0.1 < 0.15 => Stable
+        let samples = vec![
+            BandwidthSample {
+                timestamp: 0,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 10,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 20,
+                download_bps: 105.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 30,
+                download_bps: 105.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 40,
+                download_bps: 110.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 50,
+                download_bps: 110.0,
+                upload_bps: 0.0,
+            },
+        ];
+        assert_eq!(
+            BandwidthMonitor::detect_trend(&samples),
+            TrendDirection::Stable
+        );
+    }
+
+    // === detect_trend_from_refs tests ===
+
+    #[test]
+    fn test_detect_trend_from_refs_too_few() {
+        let s1 = BandwidthSample {
+            timestamp: 0,
+            download_bps: 100.0,
+            upload_bps: 0.0,
+        };
+        let s2 = BandwidthSample {
+            timestamp: 10,
+            download_bps: 200.0,
+            upload_bps: 0.0,
+        };
+        let refs: Vec<&BandwidthSample> = vec![];
+        assert_eq!(
+            BandwidthMonitor::detect_trend_from_refs(&refs),
+            TrendDirection::Unknown
+        );
+        let refs: Vec<&BandwidthSample> = vec![&s1];
+        assert_eq!(
+            BandwidthMonitor::detect_trend_from_refs(&refs),
+            TrendDirection::Unknown
+        );
+        let refs: Vec<&BandwidthSample> = vec![&s1, &s2];
+        assert_eq!(
+            BandwidthMonitor::detect_trend_from_refs(&refs),
+            TrendDirection::Unknown
+        );
+    }
+
+    #[test]
+    fn test_detect_trend_from_refs_rising() {
+        let samples = vec![
+            BandwidthSample {
+                timestamp: 0,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 10,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 20,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 30,
+                download_bps: 500.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 40,
+                download_bps: 500.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 50,
+                download_bps: 500.0,
+                upload_bps: 0.0,
+            },
+        ];
+        let refs: Vec<&BandwidthSample> = samples.iter().collect();
+        assert_eq!(
+            BandwidthMonitor::detect_trend_from_refs(&refs),
+            TrendDirection::Rising
+        );
+    }
+
+    // === compute_moving_average edge cases ===
+
+    #[test]
+    fn test_compute_moving_average_window_zero() {
+        let samples = vec![BandwidthSample {
+            timestamp: 0,
+            download_bps: 100.0,
+            upload_bps: 0.0,
+        }];
+        let ma = BandwidthMonitor::compute_moving_average(&samples, 0);
+        assert!(ma.is_empty());
+    }
+
+    #[test]
+    fn test_compute_moving_average_window_larger_than_samples() {
+        let samples = vec![
+            BandwidthSample {
+                timestamp: 0,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 10,
+                download_bps: 200.0,
+                upload_bps: 0.0,
+            },
+        ];
+        let ma = BandwidthMonitor::compute_moving_average(&samples, 5);
+        assert!(ma.is_empty());
+    }
+
+    #[test]
+    fn test_compute_moving_average_window_equals_samples() {
+        let samples = vec![
+            BandwidthSample {
+                timestamp: 100,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 110,
+                download_bps: 200.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 120,
+                download_bps: 300.0,
+                upload_bps: 0.0,
+            },
+        ];
+        let ma = BandwidthMonitor::compute_moving_average(&samples, 3);
+        assert_eq!(ma.len(), 1);
+        // avg(100, 200, 300) = 200
+        assert!((ma[0].avg_bps - 200.0).abs() < 0.1);
+        assert_eq!(ma[0].timestamp, 120);
+    }
+
+    #[test]
+    fn test_compute_moving_average_window_one() {
+        let samples = vec![
+            BandwidthSample {
+                timestamp: 100,
+                download_bps: 100.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 110,
+                download_bps: 200.0,
+                upload_bps: 0.0,
+            },
+            BandwidthSample {
+                timestamp: 120,
+                download_bps: 300.0,
+                upload_bps: 0.0,
+            },
+        ];
+        let ma = BandwidthMonitor::compute_moving_average(&samples, 1);
+        assert_eq!(ma.len(), 3);
+        assert!((ma[0].avg_bps - 100.0).abs() < 0.1);
+        assert!((ma[1].avg_bps - 200.0).abs() < 0.1);
+        assert!((ma[2].avg_bps - 300.0).abs() < 0.1);
+    }
+
+    // === Rolling window capacity tests ===
+
+    #[tokio::test]
+    async fn test_history_returns_cloned_samples() {
+        let monitor = BandwidthMonitor::with_config(100, Duration::from_secs(3600));
+        {
+            let mut history = monitor.history.write().await;
+            history.push_back(BandwidthSample {
+                timestamp: 1000,
+                download_bps: 100.0,
+                upload_bps: 50.0,
+            });
+            history.push_back(BandwidthSample {
+                timestamp: 1010,
+                download_bps: 200.0,
+                upload_bps: 100.0,
+            });
+        }
+        let h = monitor.history().await;
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].timestamp, 1000);
+        assert_eq!(h[1].timestamp, 1010);
+    }
+
+    #[tokio::test]
+    async fn test_clear_history_then_add() {
+        let monitor = BandwidthMonitor::with_config(100, Duration::from_secs(3600));
+        {
+            let mut history = monitor.history.write().await;
+            history.push_back(BandwidthSample {
+                timestamp: 1000,
+                download_bps: 100.0,
+                upload_bps: 50.0,
+            });
+        }
+        monitor.clear_history().await;
+        assert_eq!(monitor.history().await.len(), 0);
+
+        // Add after clear
+        {
+            let mut history = monitor.history.write().await;
+            history.push_back(BandwidthSample {
+                timestamp: 2000,
+                download_bps: 500.0,
+                upload_bps: 250.0,
+            });
+        }
+        let h = monitor.history().await;
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].timestamp, 2000);
+    }
+
+    #[tokio::test]
+    async fn test_trend_summary_with_few_samples() {
+        // 2 samples => trend = Unknown (< 3 samples)
+        let monitor = BandwidthMonitor::with_config(100, Duration::from_secs(3600));
+        {
+            let mut history = monitor.history.write().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            history.push_back(BandwidthSample {
+                timestamp: now - 10,
+                download_bps: 1000.0,
+                upload_bps: 0.0,
+            });
+            history.push_back(BandwidthSample {
+                timestamp: now,
+                download_bps: 2000.0,
+                upload_bps: 0.0,
+            });
+        }
+        let summary = monitor.compute_trend_summary().await;
+        assert_eq!(summary.sample_count, 2);
+        assert_eq!(summary.trend_direction, TrendDirection::Unknown);
+        assert_eq!(summary.time_range_secs, 10);
+        assert!(summary.moving_avg.is_empty()); // window=5 > 2 samples
+    }
+
+    #[tokio::test]
+    async fn test_trend_summary_windows_structure() {
+        let monitor = BandwidthMonitor::with_config(100, Duration::from_secs(3600));
+        {
+            let mut history = monitor.history.write().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            for i in 0..10 {
+                history.push_back(BandwidthSample {
+                    timestamp: now - (9 - i) * 10,
+                    download_bps: 1000.0,
+                    upload_bps: 0.0,
+                });
+            }
+        }
+        let summary = monitor.compute_trend_summary().await;
+        assert_eq!(summary.windows.len(), 3);
+        assert_eq!(summary.windows[0].label, "5min");
+        assert_eq!(summary.windows[1].label, "15min");
+        assert_eq!(summary.windows[2].label, "1h");
+        // All windows should have the same data since all samples are within 5min
+        assert_eq!(summary.windows[0].stats.sample_count, 10);
+        assert_eq!(summary.windows[1].stats.sample_count, 10);
+        assert_eq!(summary.windows[2].stats.sample_count, 10);
+    }
+
+    #[test]
+    fn test_bandwidth_sample_zero_values() {
+        let sample = BandwidthSample {
+            timestamp: 0,
+            download_bps: 0.0,
+            upload_bps: 0.0,
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let de: BandwidthSample = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.timestamp, 0);
+        assert_eq!(de.download_bps, 0.0);
+        assert_eq!(de.upload_bps, 0.0);
+    }
+
+    #[test]
+    fn test_bandwidth_sample_large_values() {
+        let sample = BandwidthSample {
+            timestamp: u64::MAX,
+            download_bps: f64::MAX,
+            upload_bps: f64::MIN_POSITIVE,
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let de: BandwidthSample = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.timestamp, u64::MAX);
+        assert!((de.download_bps - f64::MAX).abs() < f64::EPSILON);
+    }
 }
