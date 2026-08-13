@@ -1269,4 +1269,1562 @@ mod tests {
         assert!(summary.critical_count >= 2);
         assert!(summary.health_score < 50);
     }
+
+    // ========== Serialization tests ==========
+
+    #[test]
+    fn test_diagnostic_category_serde_roundtrip() {
+        let categories = vec![
+            DiagnosticCategory::Network,
+            DiagnosticCategory::Dns,
+            DiagnosticCategory::Disk,
+            DiagnosticCategory::Server,
+            DiagnosticCategory::Configuration,
+            DiagnosticCategory::Performance,
+            DiagnosticCategory::Proxy,
+            DiagnosticCategory::Queue,
+        ];
+        for cat in categories {
+            let json = serde_json::to_string(&cat).unwrap();
+            let back: DiagnosticCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(cat, back);
+        }
+    }
+
+    #[test]
+    fn test_diagnostic_category_serde_snake_case() {
+        // Verify serde uses default (lowercase) representation
+        let json = serde_json::to_string(&DiagnosticCategory::Network).unwrap();
+        assert_eq!(json, "\"network\"");
+        let json = serde_json::to_string(&DiagnosticCategory::Dns).unwrap();
+        assert_eq!(json, "\"dns\"");
+    }
+
+    #[test]
+    fn test_diagnostic_severity_serde_roundtrip() {
+        let severities = vec![
+            DiagnosticSeverity::Info,
+            DiagnosticSeverity::Warning,
+            DiagnosticSeverity::Error,
+            DiagnosticSeverity::Critical,
+        ];
+        for sev in severities {
+            let json = serde_json::to_string(&sev).unwrap();
+            let back: DiagnosticSeverity = serde_json::from_str(&json).unwrap();
+            assert_eq!(sev, back);
+        }
+    }
+
+    #[test]
+    fn test_diagnostic_severity_serde_lowercase() {
+        let json = serde_json::to_string(&DiagnosticSeverity::Critical).unwrap();
+        assert_eq!(json, "\"critical\"");
+    }
+
+    #[test]
+    fn test_diagnostic_finding_serde_roundtrip() {
+        let finding = DiagnosticFinding {
+            category: DiagnosticCategory::Network,
+            severity: DiagnosticSeverity::Critical,
+            title: "Test Title".to_string(),
+            description: "Test Description".to_string(),
+            recommendations: vec!["Rec 1".to_string(), "Rec 2".to_string()],
+            related_task_ids: vec!["t1".to_string(), "t2".to_string()],
+        };
+        let json = serde_json::to_string(&finding).unwrap();
+        let back: DiagnosticFinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.category, DiagnosticCategory::Network);
+        assert_eq!(back.severity, DiagnosticSeverity::Critical);
+        assert_eq!(back.title, "Test Title");
+        assert_eq!(back.recommendations.len(), 2);
+        assert_eq!(back.related_task_ids.len(), 2);
+    }
+
+    #[test]
+    fn test_diagnostic_finding_serde_empty_vecs() {
+        let finding = DiagnosticFinding {
+            category: DiagnosticCategory::Disk,
+            severity: DiagnosticSeverity::Info,
+            title: "T".to_string(),
+            description: "D".to_string(),
+            recommendations: vec![],
+            related_task_ids: vec![],
+        };
+        let json = serde_json::to_string(&finding).unwrap();
+        let back: DiagnosticFinding = serde_json::from_str(&json).unwrap();
+        assert!(back.recommendations.is_empty());
+        assert!(back.related_task_ids.is_empty());
+    }
+
+    #[test]
+    fn test_diagnostics_config_serde_roundtrip() {
+        let config = DiagnosticsConfig {
+            enabled: false,
+            slow_download_threshold_bps: 50_000,
+            stuck_task_threshold_secs: 600,
+            min_disk_space_bytes: 2_000_000_000,
+            max_retry_threshold: 10,
+            max_consecutive_failures: 5,
+            check_network: false,
+            check_disk: true,
+            check_performance: false,
+            check_queue: true,
+            max_findings_per_category: 5,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: DiagnosticsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.enabled, false);
+        assert_eq!(back.slow_download_threshold_bps, 50_000);
+        assert_eq!(back.stuck_task_threshold_secs, 600);
+        assert_eq!(back.min_disk_space_bytes, 2_000_000_000);
+        assert_eq!(back.max_retry_threshold, 10);
+        assert_eq!(back.max_consecutive_failures, 5);
+        assert_eq!(back.check_network, false);
+        assert_eq!(back.check_disk, true);
+        assert_eq!(back.check_performance, false);
+        assert_eq!(back.check_queue, true);
+        assert_eq!(back.max_findings_per_category, 5);
+    }
+
+    #[test]
+    fn test_diagnostics_config_serde_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"slow_download_threshold_bps":10000,"stuck_task_threshold_secs":1800,"min_disk_space_bytes":1073741824,"max_retry_threshold":5,"max_consecutive_failures":3,"check_network":true,"check_disk":true,"check_performance":true,"check_queue":true,"max_findings_per_category":10,"unknown_field":"value"}"#;
+        let config: DiagnosticsConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_task_diagnostic_data_serde_roundtrip() {
+        let task = TaskDiagnosticData {
+            task_id: "t1".to_string(),
+            task_name: "Test Task".to_string(),
+            state: "Downloading".to_string(),
+            speed_bps: 100_000,
+            progress_percent: 42.5,
+            secs_since_last_progress: 30,
+            retry_count: 3,
+            consecutive_failures: 1,
+            last_error: Some("Connection reset".to_string()),
+            age_secs: 7200,
+            total_size: 1_000_000_000,
+            downloaded_bytes: 425_000_000,
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        let back: TaskDiagnosticData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.task_id, "t1");
+        assert_eq!(back.progress_percent, 42.5);
+        assert_eq!(back.last_error, Some("Connection reset".to_string()));
+    }
+
+    #[test]
+    fn test_task_diagnostic_data_serde_none_error() {
+        let task = TaskDiagnosticData {
+            task_id: "t1".to_string(),
+            task_name: "Test".to_string(),
+            state: "Downloading".to_string(),
+            speed_bps: 0,
+            progress_percent: 0.0,
+            secs_since_last_progress: 0,
+            retry_count: 0,
+            consecutive_failures: 0,
+            last_error: None,
+            age_secs: 0,
+            total_size: 0,
+            downloaded_bytes: 0,
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        let back: TaskDiagnosticData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.last_error, None);
+    }
+
+    #[test]
+    fn test_diagnostics_summary_serde_roundtrip() {
+        let mut summary = DiagnosticsSummary {
+            total_findings: 5,
+            findings_by_severity: HashMap::new(),
+            findings_by_category: HashMap::new(),
+            critical_count: 1,
+            error_count: 2,
+            warning_count: 1,
+            info_count: 1,
+            health_score: 65,
+            top_recommendations: vec!["Fix network".to_string()],
+        };
+        summary
+            .findings_by_severity
+            .insert("CRITICAL".to_string(), 1);
+        summary
+            .findings_by_category
+            .insert("Network".to_string(), 3);
+
+        let json = serde_json::to_string(&summary).unwrap();
+        let back: DiagnosticsSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.total_findings, 5);
+        assert_eq!(back.critical_count, 1);
+        assert_eq!(back.health_score, 65);
+        assert_eq!(back.top_recommendations.len(), 1);
+    }
+
+    #[test]
+    fn test_download_diagnostics_serde_roundtrip() {
+        let diag = DownloadDiagnostics::with_config(DiagnosticsConfig {
+            enabled: false,
+            slow_download_threshold_bps: 99_999,
+            ..Default::default()
+        });
+        let json = serde_json::to_string(&diag).unwrap();
+        let back: DownloadDiagnostics = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.get_config().enabled, false);
+        assert_eq!(back.get_config().slow_download_threshold_bps, 99_999);
+    }
+
+    // ========== Default value tests ==========
+
+    #[test]
+    fn test_diagnostics_config_default_values() {
+        let config = DiagnosticsConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.slow_download_threshold_bps, 10_000);
+        assert_eq!(config.stuck_task_threshold_secs, 1800);
+        assert_eq!(config.min_disk_space_bytes, 1_073_741_824);
+        assert_eq!(config.max_retry_threshold, 5);
+        assert_eq!(config.max_consecutive_failures, 3);
+        assert!(config.check_network);
+        assert!(config.check_disk);
+        assert!(config.check_performance);
+        assert!(config.check_queue);
+        assert_eq!(config.max_findings_per_category, 10);
+    }
+
+    #[test]
+    fn test_download_diagnostics_default_equals_new() {
+        let diag_default = DownloadDiagnostics::default();
+        let diag_new = DownloadDiagnostics::new();
+        assert_eq!(
+            diag_default.get_config().enabled,
+            diag_new.get_config().enabled
+        );
+        assert_eq!(
+            diag_default.get_config().slow_download_threshold_bps,
+            diag_new.get_config().slow_download_threshold_bps
+        );
+    }
+
+    #[test]
+    fn test_diagnostics_input_default() {
+        let input = DiagnosticsInput::default();
+        assert_eq!(input.current_speed_bps, 0);
+        assert_eq!(input.avg_speed_bps, 0);
+        assert_eq!(input.available_disk_bytes, 0);
+        assert_eq!(input.total_disk_bytes, 0);
+        assert!(!input.network_connected);
+        assert!(!input.dns_working);
+        assert!(!input.proxy_configured);
+        assert_eq!(input.proxy_reachable, None);
+        assert_eq!(input.active_downloads, 0);
+        assert_eq!(input.queued_downloads, 0);
+        assert_eq!(input.failed_downloads, 0);
+        assert_eq!(input.stalled_downloads, 0);
+        assert_eq!(input.max_concurrent, 0);
+        assert!(input.task_diagnostics.is_empty());
+    }
+
+    // ========== Clone/Debug trait tests ==========
+
+    #[test]
+    fn test_diagnostic_category_clone_copy_debug() {
+        let cat = DiagnosticCategory::Network;
+        let cloned = cat.clone();
+        assert_eq!(cat, cloned);
+        // Copy trait
+        let copied = cat;
+        assert_eq!(copied, DiagnosticCategory::Network);
+        // Debug trait
+        let debug_str = format!("{:?}", cat);
+        assert_eq!(debug_str, "Network");
+    }
+
+    #[test]
+    fn test_diagnostic_severity_clone_copy_debug() {
+        let sev = DiagnosticSeverity::Critical;
+        let cloned = sev.clone();
+        assert_eq!(sev, cloned);
+        let copied = sev;
+        assert_eq!(copied, DiagnosticSeverity::Critical);
+        let debug_str = format!("{:?}", sev);
+        assert_eq!(debug_str, "Critical");
+    }
+
+    #[test]
+    fn test_diagnostic_finding_clone_debug() {
+        let finding = DiagnosticFinding {
+            category: DiagnosticCategory::Disk,
+            severity: DiagnosticSeverity::Error,
+            title: "T".to_string(),
+            description: "D".to_string(),
+            recommendations: vec!["R".to_string()],
+            related_task_ids: vec!["t1".to_string()],
+        };
+        let cloned = finding.clone();
+        assert_eq!(cloned.title, "T");
+        assert_eq!(cloned.recommendations.len(), 1);
+        let debug_str = format!("{:?}", finding);
+        assert!(debug_str.contains("Disk"));
+    }
+
+    #[test]
+    fn test_diagnostics_config_clone_debug() {
+        let config = DiagnosticsConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.enabled, config.enabled);
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("DiagnosticsConfig"));
+    }
+
+    #[test]
+    fn test_task_diagnostic_data_clone_debug() {
+        let task = make_task("t1", "Downloading", 100_000, 10);
+        let cloned = task.clone();
+        assert_eq!(cloned.task_id, "t1");
+        let debug_str = format!("{:?}", task);
+        assert!(debug_str.contains("TaskDiagnosticData"));
+    }
+
+    #[test]
+    fn test_diagnostics_summary_clone_debug() {
+        let summary = DiagnosticsSummary {
+            total_findings: 0,
+            findings_by_severity: HashMap::new(),
+            findings_by_category: HashMap::new(),
+            critical_count: 0,
+            error_count: 0,
+            warning_count: 0,
+            info_count: 0,
+            health_score: 100,
+            top_recommendations: vec![],
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_findings, 0);
+        let debug_str = format!("{:?}", summary);
+        assert!(debug_str.contains("DiagnosticsSummary"));
+    }
+
+    #[test]
+    fn test_download_diagnostics_clone_debug() {
+        let diag = DownloadDiagnostics::new();
+        let cloned = diag.clone();
+        assert_eq!(cloned.get_config().enabled, diag.get_config().enabled);
+        let debug_str = format!("{:?}", diag);
+        assert!(debug_str.contains("DownloadDiagnostics"));
+    }
+
+    // ========== PartialOrd/Ord for severity ==========
+
+    #[test]
+    fn test_severity_partial_ord() {
+        assert!(DiagnosticSeverity::Critical > DiagnosticSeverity::Error);
+        assert!(DiagnosticSeverity::Error > DiagnosticSeverity::Warning);
+        assert!(DiagnosticSeverity::Warning > DiagnosticSeverity::Info);
+    }
+
+    #[test]
+    fn test_severity_partial_ord_equal() {
+        assert_eq!(
+            DiagnosticSeverity::Warning.partial_cmp(&DiagnosticSeverity::Warning),
+            Some(std::cmp::Ordering::Equal)
+        );
+    }
+
+    // ========== Eq/Hash for category ==========
+
+    #[test]
+    fn test_diagnostic_category_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(DiagnosticCategory::Network);
+        set.insert(DiagnosticCategory::Dns);
+        set.insert(DiagnosticCategory::Network); // duplicate
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn test_diagnostic_category_eq() {
+        assert_eq!(DiagnosticCategory::Network, DiagnosticCategory::Network);
+        assert_ne!(DiagnosticCategory::Network, DiagnosticCategory::Dns);
+    }
+
+    // ========== Constructor and config tests ==========
+
+    #[test]
+    fn test_with_config() {
+        let config = DiagnosticsConfig {
+            enabled: false,
+            slow_download_threshold_bps: 123_456,
+            ..Default::default()
+        };
+        let diag = DownloadDiagnostics::with_config(config);
+        assert!(!diag.get_config().enabled);
+        assert_eq!(diag.get_config().slow_download_threshold_bps, 123_456);
+    }
+
+    #[test]
+    fn test_set_config_updates() {
+        let mut diag = DownloadDiagnostics::new();
+        assert!(diag.get_config().enabled);
+
+        diag.set_config(DiagnosticsConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        assert!(!diag.get_config().enabled);
+    }
+
+    #[test]
+    fn test_get_config_returns_reference() {
+        let diag = DownloadDiagnostics::new();
+        let config = diag.get_config();
+        assert!(config.enabled);
+    }
+
+    // ========== Analyze with disabled checks ==========
+
+    #[test]
+    fn test_check_network_disabled_still_detects_stalled() {
+        // check_network=false should skip network disconnected check
+        // but stalled tasks are in check_network_issues, so they should also be skipped
+        let mut diag = DownloadDiagnostics::new();
+        diag.set_config(DiagnosticsConfig {
+            check_network: false,
+            ..Default::default()
+        });
+        let mut input = default_input();
+        input.network_connected = false; // Would trigger critical
+        input.task_diagnostics = vec![make_task("t1", "Downloading", 0, 2000)]; // stalled
+
+        let findings = diag.analyze(&input);
+        // No network findings because check_network=false
+        let network: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Network)
+            .collect();
+        assert!(network.is_empty());
+    }
+
+    #[test]
+    fn test_check_disk_disabled() {
+        let mut diag = DownloadDiagnostics::new();
+        diag.set_config(DiagnosticsConfig {
+            check_disk: false,
+            ..Default::default()
+        });
+        let mut input = default_input();
+        input.available_disk_bytes = 0; // Would trigger critical disk
+
+        let findings = diag.analyze(&input);
+        let disk: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Disk)
+            .collect();
+        assert!(disk.is_empty());
+    }
+
+    #[test]
+    fn test_check_performance_disabled() {
+        let mut diag = DownloadDiagnostics::new();
+        diag.set_config(DiagnosticsConfig {
+            check_performance: false,
+            ..Default::default()
+        });
+        let mut input = default_input();
+        input.current_speed_bps = 1_000; // Would trigger slow download
+
+        let findings = diag.analyze(&input);
+        let perf: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Performance)
+            .collect();
+        assert!(perf.is_empty());
+    }
+
+    #[test]
+    fn test_check_queue_disabled() {
+        let mut diag = DownloadDiagnostics::new();
+        diag.set_config(DiagnosticsConfig {
+            check_queue: false,
+            ..Default::default()
+        });
+        let mut input = default_input();
+        input.active_downloads = 0;
+        input.queued_downloads = 10; // Would trigger queue not starting
+
+        let findings = diag.analyze(&input);
+        let queue: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Queue)
+            .collect();
+        assert!(queue.is_empty());
+    }
+
+    // ========== Boundary tests ==========
+
+    #[test]
+    fn test_disk_space_exact_threshold() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        // Exactly at threshold (1 GB) - should NOT trigger
+        input.available_disk_bytes = 1_073_741_824;
+
+        let findings = diag.analyze(&input);
+        let disk: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Disk && f.title.contains("Low Disk"))
+            .collect();
+        assert!(disk.is_empty(), "Exactly at threshold should not trigger");
+    }
+
+    #[test]
+    fn test_disk_space_one_below_threshold() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.available_disk_bytes = 1_073_741_823; // 1 byte below 1 GB
+
+        let findings = diag.analyze(&input);
+        let disk: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Disk && f.title.contains("Low Disk"))
+            .collect();
+        assert_eq!(disk.len(), 1);
+    }
+
+    #[test]
+    fn test_disk_critical_at_10_percent_boundary() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        // Exactly 10% of 1GB = 107374182.4 bytes
+        input.available_disk_bytes = 107_374_182; // Just below 10%
+
+        let findings = diag.analyze(&input);
+        let disk = findings
+            .iter()
+            .find(|f| f.category == DiagnosticCategory::Disk && f.title.contains("Low Disk"))
+            .expect("Should have disk finding");
+        assert_eq!(disk.severity, DiagnosticSeverity::Critical);
+    }
+
+    #[test]
+    fn test_slow_download_exact_threshold() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.current_speed_bps = 10_000; // Exactly at threshold
+        input.task_diagnostics = vec![make_task("t1", "Downloading", 10_000, 10)];
+
+        let findings = diag.analyze(&input);
+        // Speed is NOT < threshold, so no slow finding
+        let slow: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Slow"))
+            .collect();
+        assert!(slow.is_empty(), "Exactly at threshold should not trigger");
+    }
+
+    #[test]
+    fn test_slow_download_one_below_threshold() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.current_speed_bps = 9_999; // Just below threshold
+        input.task_diagnostics = vec![make_task("t1", "Downloading", 9_999, 10)];
+
+        let findings = diag.analyze(&input);
+        let slow: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Slow"))
+            .collect();
+        assert_eq!(slow.len(), 1);
+    }
+
+    #[test]
+    fn test_stalled_exact_threshold() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        // Exactly at threshold (1800s) - should NOT trigger
+        input.task_diagnostics = vec![make_task("t1", "Downloading", 0, 1800)];
+
+        let findings = diag.analyze(&input);
+        let stalled: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Stalled"))
+            .collect();
+        assert!(
+            stalled.is_empty(),
+            "Exactly at threshold should not trigger"
+        );
+    }
+
+    #[test]
+    fn test_stalled_one_above_threshold() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.task_diagnostics = vec![make_task("t1", "Downloading", 0, 1801)];
+
+        let findings = diag.analyze(&input);
+        let stalled: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Stalled"))
+            .collect();
+        assert_eq!(stalled.len(), 1);
+    }
+
+    #[test]
+    fn test_stalled_not_triggered_when_network_disconnected() {
+        // Stalled tasks should only be flagged when network IS connected
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.network_connected = false;
+        input.task_diagnostics = vec![make_task("t1", "Downloading", 0, 2000)];
+
+        let findings = diag.analyze(&input);
+        let stalled: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Stalled"))
+            .collect();
+        assert!(
+            stalled.is_empty(),
+            "Should not flag stalled when network disconnected"
+        );
+    }
+
+    // ========== Zero progress edge cases ==========
+
+    #[test]
+    fn test_zero_progress_task_with_zero_total_size() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        let mut task = make_task("t1", "Downloading", 0, 10);
+        task.downloaded_bytes = 0;
+        task.total_size = 0; // Unknown size
+        task.age_secs = 120;
+        input.task_diagnostics = vec![task];
+
+        let findings = diag.analyze(&input);
+        let zero: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Zero Progress"))
+            .collect();
+        assert!(
+            zero.is_empty(),
+            "Should not flag zero progress when total_size=0"
+        );
+    }
+
+    #[test]
+    fn test_zero_progress_task_young() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        let mut task = make_task("t1", "Downloading", 0, 10);
+        task.downloaded_bytes = 0;
+        task.total_size = 1_000_000;
+        task.age_secs = 30; // Only 30 seconds old (< 60s threshold)
+        input.task_diagnostics = vec![task];
+
+        let findings = diag.analyze(&input);
+        let zero: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Zero Progress"))
+            .collect();
+        assert!(
+            zero.is_empty(),
+            "Should not flag zero progress for young tasks"
+        );
+    }
+
+    #[test]
+    fn test_zero_progress_non_downloading_state() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        let mut task = make_task("t1", "Paused", 0, 10);
+        task.downloaded_bytes = 0;
+        task.total_size = 1_000_000;
+        task.age_secs = 120;
+        input.task_diagnostics = vec![task];
+
+        let findings = diag.analyze(&input);
+        let zero: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Zero Progress"))
+            .collect();
+        assert!(
+            zero.is_empty(),
+            "Should not flag zero progress for non-Downloading state"
+        );
+    }
+
+    // ========== Failure rate edge cases ==========
+
+    #[test]
+    fn test_failure_rate_exactly_50_percent() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.active_downloads = 1;
+        input.queued_downloads = 1;
+        input.failed_downloads = 2; // 2/4 = 50%
+
+        let findings = diag.analyze(&input);
+        let failure: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Failure Rate"))
+            .collect();
+        assert!(
+            failure.is_empty(),
+            "Exactly 50% should not trigger (>50% required)"
+        );
+    }
+
+    #[test]
+    fn test_failure_rate_above_50_percent() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.active_downloads = 1;
+        input.queued_downloads = 1;
+        input.failed_downloads = 3; // 3/5 = 60%
+
+        let findings = diag.analyze(&input);
+        let failure: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Failure Rate"))
+            .collect();
+        assert_eq!(failure.len(), 1);
+    }
+
+    #[test]
+    fn test_failure_rate_total_less_than_3() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.active_downloads = 0;
+        input.queued_downloads = 0;
+        input.failed_downloads = 2; // 2/2 = 100% but total < 3
+
+        let findings = diag.analyze(&input);
+        let failure: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Failure Rate"))
+            .collect();
+        assert!(
+            failure.is_empty(),
+            "Total < 3 should not trigger failure rate"
+        );
+    }
+
+    #[test]
+    fn test_failure_rate_zero_failures() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.active_downloads = 5;
+        input.queued_downloads = 3;
+        input.failed_downloads = 0;
+
+        let findings = diag.analyze(&input);
+        let failure: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Failure Rate"))
+            .collect();
+        assert!(failure.is_empty());
+    }
+
+    // ========== Proxy tests ==========
+
+    #[test]
+    fn test_proxy_not_configured_no_finding() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.proxy_configured = false;
+        input.proxy_reachable = None;
+
+        let findings = diag.analyze(&input);
+        let proxy: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Proxy)
+            .collect();
+        assert!(proxy.is_empty());
+    }
+
+    #[test]
+    fn test_proxy_configured_and_reachable() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.proxy_configured = true;
+        input.proxy_reachable = Some(true);
+
+        let findings = diag.analyze(&input);
+        let proxy: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Proxy)
+            .collect();
+        assert!(
+            proxy.is_empty(),
+            "Reachable proxy should not trigger finding"
+        );
+    }
+
+    #[test]
+    fn test_proxy_configured_no_reachability_info() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.proxy_configured = true;
+        input.proxy_reachable = None; // Unknown
+
+        let findings = diag.analyze(&input);
+        let proxy: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Proxy)
+            .collect();
+        assert!(
+            proxy.is_empty(),
+            "Unknown reachability should not trigger finding"
+        );
+    }
+
+    // ========== Max concurrent edge cases ==========
+
+    #[test]
+    fn test_max_concurrent_reached_exactly() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.active_downloads = 5;
+        input.max_concurrent = 5;
+
+        let findings = diag.analyze(&input);
+        let max: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Maximum Concurrent"))
+            .collect();
+        assert_eq!(max.len(), 1);
+        assert_eq!(max[0].severity, DiagnosticSeverity::Info);
+    }
+
+    #[test]
+    fn test_max_concurrent_zero_with_small_queue() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.max_concurrent = 0;
+        input.active_downloads = 5;
+        input.queued_downloads = 10; // < 20, so no config finding
+
+        let findings = diag.analyze(&input);
+        let config: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Configuration)
+            .collect();
+        assert!(config.is_empty());
+    }
+
+    #[test]
+    fn test_max_concurrent_zero_with_exactly_20_queued() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.max_concurrent = 0;
+        input.active_downloads = 5;
+        input.queued_downloads = 20; // Not > 20
+
+        let findings = diag.analyze(&input);
+        let config: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Configuration)
+            .collect();
+        assert!(config.is_empty());
+    }
+
+    #[test]
+    fn test_max_concurrent_zero_with_over_20_queued() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.max_concurrent = 0;
+        input.active_downloads = 5;
+        input.queued_downloads = 21; // > 20
+
+        let findings = diag.analyze(&input);
+        let config: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Configuration)
+            .collect();
+        assert_eq!(config.len(), 1);
+    }
+
+    // ========== Format report tests ==========
+
+    #[test]
+    fn test_format_report_contains_health_score() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.network_connected = false;
+
+        let findings = diag.analyze(&input);
+        let report = diag.format_report(&findings);
+        assert!(report.contains("Health Score:"));
+        assert!(report.contains("/100"));
+    }
+
+    #[test]
+    fn test_format_report_contains_recommendations() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.network_connected = false;
+
+        let findings = diag.analyze(&input);
+        let report = diag.format_report(&findings);
+        assert!(report.contains("Recommendations:"));
+        assert!(report.contains("Check your network"));
+    }
+
+    #[test]
+    fn test_format_report_contains_related_tasks() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.task_diagnostics = vec![make_task("task-abc", "Downloading", 0, 2000)];
+
+        let findings = diag.analyze(&input);
+        let report = diag.format_report(&findings);
+        assert!(report.contains("Related tasks: task-abc"));
+    }
+
+    #[test]
+    fn test_format_report_contains_priority_actions() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.network_connected = false;
+
+        let findings = diag.analyze(&input);
+        let report = diag.format_report(&findings);
+        assert!(report.contains("Priority Actions:"));
+    }
+
+    #[test]
+    fn test_format_report_no_priority_actions_when_only_info() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.active_downloads = 5;
+        input.max_concurrent = 5;
+
+        let findings = diag.analyze(&input);
+        let report = diag.format_report(&findings);
+        // Only Info findings, so top_recommendations should be empty
+        // Priority Actions section should not appear
+        assert!(!report.contains("Priority Actions:"));
+    }
+
+    // ========== Summarize tests ==========
+
+    #[test]
+    fn test_summarize_empty_findings() {
+        let diag = DownloadDiagnostics::new();
+        let summary = diag.summarize(&[]);
+        assert_eq!(summary.total_findings, 0);
+        assert_eq!(summary.critical_count, 0);
+        assert_eq!(summary.error_count, 0);
+        assert_eq!(summary.warning_count, 0);
+        assert_eq!(summary.info_count, 0);
+        assert_eq!(summary.health_score, 100);
+        assert!(summary.top_recommendations.is_empty());
+    }
+
+    #[test]
+    fn test_summarize_recommendation_deduplication() {
+        let diag = DownloadDiagnostics::new();
+        let findings = vec![
+            DiagnosticFinding {
+                category: DiagnosticCategory::Network,
+                severity: DiagnosticSeverity::Critical,
+                title: "Net".to_string(),
+                description: "D".to_string(),
+                recommendations: vec!["Same advice".to_string()],
+                related_task_ids: vec![],
+            },
+            DiagnosticFinding {
+                category: DiagnosticCategory::Dns,
+                severity: DiagnosticSeverity::Critical,
+                title: "DNS".to_string(),
+                description: "D".to_string(),
+                recommendations: vec!["Same advice".to_string()],
+                related_task_ids: vec![],
+            },
+        ];
+        let summary = diag.summarize(&findings);
+        // "Same advice" appears in both findings but should only appear once in all_recommendations
+        let count = summary
+            .top_recommendations
+            .iter()
+            .filter(|r| r.as_str() == "Same advice")
+            .count();
+        // top_recommendations comes from Error+ findings, deduped
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_summarize_findings_by_category() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.network_connected = false; // Critical Network
+        input.dns_working = false; // Critical DNS
+
+        let findings = diag.analyze(&input);
+        let summary = diag.summarize(&findings);
+
+        assert!(summary.findings_by_category.contains_key("Network"));
+        assert!(summary.findings_by_category.contains_key("DNS"));
+    }
+
+    #[test]
+    fn test_summarize_findings_by_severity() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.network_connected = false; // Critical
+
+        let findings = diag.analyze(&input);
+        let summary = diag.summarize(&findings);
+
+        assert!(summary.findings_by_severity.contains_key("CRITICAL"));
+    }
+
+    // ========== Health score boundary tests ==========
+
+    #[test]
+    fn test_health_score_many_findings_clamps_to_zero() {
+        let diag = DownloadDiagnostics::new();
+        // 5 critical findings = 100 - 5*25 = -25, clamped to 0
+        let findings: Vec<DiagnosticFinding> = (0..5)
+            .map(|_| DiagnosticFinding {
+                category: DiagnosticCategory::Network,
+                severity: DiagnosticSeverity::Critical,
+                title: "T".to_string(),
+                description: "D".to_string(),
+                recommendations: vec![],
+                related_task_ids: vec![],
+            })
+            .collect();
+        let score = diag.calculate_health_score(&findings);
+        assert_eq!(score, 0);
+    }
+
+    #[test]
+    fn test_health_score_single_info() {
+        let diag = DownloadDiagnostics::new();
+        let findings = vec![DiagnosticFinding {
+            category: DiagnosticCategory::Performance,
+            severity: DiagnosticSeverity::Info,
+            title: "T".to_string(),
+            description: "D".to_string(),
+            recommendations: vec![],
+            related_task_ids: vec![],
+        }];
+        let score = diag.calculate_health_score(&findings);
+        assert_eq!(score, 99);
+    }
+
+    #[test]
+    fn test_health_score_single_warning() {
+        let diag = DownloadDiagnostics::new();
+        let findings = vec![DiagnosticFinding {
+            category: DiagnosticCategory::Performance,
+            severity: DiagnosticSeverity::Warning,
+            title: "T".to_string(),
+            description: "D".to_string(),
+            recommendations: vec![],
+            related_task_ids: vec![],
+        }];
+        let score = diag.calculate_health_score(&findings);
+        assert_eq!(score, 95);
+    }
+
+    #[test]
+    fn test_health_score_single_error() {
+        let diag = DownloadDiagnostics::new();
+        let findings = vec![DiagnosticFinding {
+            category: DiagnosticCategory::Queue,
+            severity: DiagnosticSeverity::Error,
+            title: "T".to_string(),
+            description: "D".to_string(),
+            recommendations: vec![],
+            related_task_ids: vec![],
+        }];
+        let score = diag.calculate_health_score(&findings);
+        assert_eq!(score, 85);
+    }
+
+    // ========== Health emoji boundary tests ==========
+
+    #[test]
+    fn test_health_emoji_boundaries() {
+        assert!(health_emoji(90).contains("Excellent"));
+        assert!(health_emoji(89).contains("Good"));
+        assert!(health_emoji(70).contains("Good"));
+        assert!(health_emoji(69).contains("Fair"));
+        assert!(health_emoji(50).contains("Fair"));
+        assert!(health_emoji(49).contains("Poor"));
+        assert!(health_emoji(20).contains("Poor"));
+        assert!(health_emoji(19).contains("Critical"));
+        assert!(health_emoji(0).contains("Critical"));
+    }
+
+    // ========== Persistence tests ==========
+
+    #[test]
+    fn test_persistence_overwrite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Write first config
+        let config1 = DiagnosticsConfig {
+            enabled: true,
+            slow_download_threshold_bps: 10_000,
+            ..Default::default()
+        };
+        save_diagnostics_config(&config1, temp_dir.path()).unwrap();
+
+        // Overwrite with second config
+        let config2 = DiagnosticsConfig {
+            enabled: false,
+            slow_download_threshold_bps: 99_999,
+            ..Default::default()
+        };
+        save_diagnostics_config(&config2, temp_dir.path()).unwrap();
+
+        let loaded = load_diagnostics_config(temp_dir.path()).unwrap();
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.slow_download_threshold_bps, 99_999);
+    }
+
+    #[test]
+    fn test_persistence_invalid_json() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("download_diagnostics_config.json");
+        std::fs::write(&path, "not valid json {{{").unwrap();
+
+        let loaded = load_diagnostics_config(temp_dir.path());
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_persistence_all_config_fields() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = DiagnosticsConfig {
+            enabled: false,
+            slow_download_threshold_bps: 77_777,
+            stuck_task_threshold_secs: 999,
+            min_disk_space_bytes: 5_000_000_000,
+            max_retry_threshold: 20,
+            max_consecutive_failures: 10,
+            check_network: false,
+            check_disk: false,
+            check_performance: false,
+            check_queue: false,
+            max_findings_per_category: 3,
+        };
+        save_diagnostics_config(&config, temp_dir.path()).unwrap();
+        let loaded = load_diagnostics_config(temp_dir.path()).unwrap();
+
+        assert_eq!(loaded.enabled, false);
+        assert_eq!(loaded.slow_download_threshold_bps, 77_777);
+        assert_eq!(loaded.stuck_task_threshold_secs, 999);
+        assert_eq!(loaded.min_disk_space_bytes, 5_000_000_000);
+        assert_eq!(loaded.max_retry_threshold, 20);
+        assert_eq!(loaded.max_consecutive_failures, 10);
+        assert!(!loaded.check_network);
+        assert!(!loaded.check_disk);
+        assert!(!loaded.check_performance);
+        assert!(!loaded.check_queue);
+        assert_eq!(loaded.max_findings_per_category, 3);
+    }
+
+    // ========== Unicode tests ==========
+
+    #[test]
+    fn test_unicode_task_name_in_analysis() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        let mut task = make_task("t1", "Downloading", 5_000, 10);
+        task.task_name = "下载文件_测试_日本語".to_string();
+        task.speed_bps = 5_000;
+        input.current_speed_bps = 5_000;
+        input.task_diagnostics = vec![task];
+
+        let findings = diag.analyze(&input);
+        let slow = findings
+            .iter()
+            .find(|f| f.title.contains("Slow"))
+            .expect("Should detect slow download with Unicode task name");
+        assert!(slow.related_task_ids.contains(&"t1".to_string()));
+    }
+
+    #[test]
+    fn test_unicode_task_name_zero_progress() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        let mut task = make_task("t-emoji-🚀", "Downloading", 0, 10);
+        task.task_name = "🎉文件🎉".to_string();
+        task.downloaded_bytes = 0;
+        task.total_size = 1_000_000;
+        task.age_secs = 120;
+        input.task_diagnostics = vec![task];
+
+        let findings = diag.analyze(&input);
+        let zero = findings
+            .iter()
+            .find(|f| f.title.contains("Zero Progress"))
+            .expect("Should detect zero progress with Unicode task name");
+        assert!(zero.related_task_ids.contains(&"t-emoji-🚀".to_string()));
+    }
+
+    // ========== Multiple slow tasks ==========
+
+    #[test]
+    fn test_multiple_slow_tasks() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.current_speed_bps = 5_000;
+        input.task_diagnostics = vec![
+            make_task("t1", "Downloading", 5_000, 10),
+            make_task("t2", "Downloading", 3_000, 10),
+            make_task("t3", "Downloading", 8_000, 10),
+        ];
+
+        let findings = diag.analyze(&input);
+        let slow = findings
+            .iter()
+            .find(|f| f.title.contains("Slow"))
+            .expect("Should detect slow downloads");
+        assert_eq!(slow.related_task_ids.len(), 3);
+    }
+
+    // ========== Excessive retries boundary ==========
+
+    #[test]
+    fn test_excessive_retries_exact_threshold() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        let mut task = make_task("t1", "Downloading", 100_000, 10);
+        task.retry_count = 5; // Exactly at threshold
+        input.task_diagnostics = vec![task];
+
+        let findings = diag.analyze(&input);
+        let retry = findings
+            .iter()
+            .find(|f| f.title.contains("Retries"))
+            .expect("Should flag at exact threshold");
+        assert_eq!(retry.severity, DiagnosticSeverity::Warning);
+    }
+
+    #[test]
+    fn test_excessive_retries_below_threshold() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        let mut task = make_task("t1", "Downloading", 100_000, 10);
+        task.retry_count = 4; // Below threshold (5)
+        input.task_diagnostics = vec![task];
+
+        let findings = diag.analyze(&input);
+        let retry: Vec<_> = findings
+            .iter()
+            .filter(|f| f.title.contains("Retries"))
+            .collect();
+        assert!(retry.is_empty(), "Below threshold should not trigger");
+    }
+
+    // ========== Consecutive failures boundary ==========
+
+    #[test]
+    fn test_consecutive_failures_exact_threshold() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        let mut task = make_task("t1", "Downloading", 0, 10);
+        task.consecutive_failures = 3; // Exactly at threshold
+        input.task_diagnostics = vec![task];
+
+        let findings = diag.analyze(&input);
+        let server = findings
+            .iter()
+            .find(|f| f.category == DiagnosticCategory::Server)
+            .expect("Should flag at exact threshold");
+        assert_eq!(server.severity, DiagnosticSeverity::Error);
+    }
+
+    #[test]
+    fn test_consecutive_failures_below_threshold() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        let mut task = make_task("t1", "Downloading", 0, 10);
+        task.consecutive_failures = 2; // Below threshold (3)
+        input.task_diagnostics = vec![task];
+
+        let findings = diag.analyze(&input);
+        let server: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Server)
+            .collect();
+        assert!(server.is_empty(), "Below threshold should not trigger");
+    }
+
+    // ========== Recommendation content verification ==========
+
+    #[test]
+    fn test_network_disconnected_recommendations() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.network_connected = false;
+
+        let findings = diag.analyze(&input);
+        let net = findings
+            .iter()
+            .find(|f| f.title.contains("Network Disconnected"))
+            .unwrap();
+        assert_eq!(net.recommendations.len(), 3);
+        assert!(net.recommendations[0].contains("network connection"));
+    }
+
+    #[test]
+    fn test_dns_failure_recommendations() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.dns_working = false;
+
+        let findings = diag.analyze(&input);
+        let dns = findings.iter().find(|f| f.title.contains("DNS")).unwrap();
+        assert_eq!(dns.recommendations.len(), 3);
+        assert!(dns.recommendations[0].contains("DNS settings"));
+    }
+
+    #[test]
+    fn test_proxy_unreachable_recommendations() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.proxy_configured = true;
+        input.proxy_reachable = Some(false);
+
+        let findings = diag.analyze(&input);
+        let proxy = findings
+            .iter()
+            .find(|f| f.title.contains("Proxy Unreachable"))
+            .unwrap();
+        assert_eq!(proxy.recommendations.len(), 4);
+    }
+
+    // ========== Server issues with multiple tasks ==========
+
+    #[test]
+    fn test_consecutive_failures_multiple_tasks() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        let mut t1 = make_task("t1", "Downloading", 0, 10);
+        t1.consecutive_failures = 5;
+        let mut t2 = make_task("t2", "Downloading", 0, 10);
+        t2.consecutive_failures = 3;
+        let t3 = make_task("t3", "Downloading", 100_000, 10); // healthy
+        input.task_diagnostics = vec![t1, t2, t3];
+
+        let findings = diag.analyze(&input);
+        let server = findings
+            .iter()
+            .find(|f| f.category == DiagnosticCategory::Server)
+            .unwrap();
+        assert_eq!(server.related_task_ids.len(), 2);
+        assert!(server.related_task_ids.contains(&"t1".to_string()));
+        assert!(server.related_task_ids.contains(&"t2".to_string()));
+    }
+
+    // ========== Queue not starting edge case ==========
+
+    #[test]
+    fn test_queue_not_starting_with_one_queued() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.active_downloads = 0;
+        input.queued_downloads = 1;
+
+        let findings = diag.analyze(&input);
+        let queue = findings
+            .iter()
+            .find(|f| f.title.contains("Queue Not Starting"))
+            .unwrap();
+        assert!(queue.description.contains("1 task(s)"));
+    }
+
+    // ========== Custom config thresholds ==========
+
+    #[test]
+    fn test_custom_slow_threshold() {
+        let diag = DownloadDiagnostics::with_config(DiagnosticsConfig {
+            slow_download_threshold_bps: 100_000, // 100 KB/s
+            ..Default::default()
+        });
+        let mut input = default_input();
+        input.current_speed_bps = 50_000; // 50 KB/s
+        input.task_diagnostics = vec![make_task("t1", "Downloading", 50_000, 10)];
+
+        let findings = diag.analyze(&input);
+        let slow = findings
+            .iter()
+            .find(|f| f.title.contains("Slow"))
+            .expect("Should detect slow with custom threshold");
+        assert!(slow.description.contains("100 KB/s"));
+    }
+
+    #[test]
+    fn test_custom_stuck_threshold() {
+        let diag = DownloadDiagnostics::with_config(DiagnosticsConfig {
+            stuck_task_threshold_secs: 600, // 10 minutes
+            ..Default::default()
+        });
+        let mut input = default_input();
+        input.task_diagnostics = vec![make_task("t1", "Downloading", 0, 700)]; // 11.6 min
+
+        let findings = diag.analyze(&input);
+        let stalled = findings
+            .iter()
+            .find(|f| f.title.contains("Stalled"))
+            .expect("Should detect stalled with custom threshold");
+        assert!(stalled.description.contains("10 minutes"));
+    }
+
+    #[test]
+    fn test_custom_max_retry_threshold() {
+        let diag = DownloadDiagnostics::with_config(DiagnosticsConfig {
+            max_retry_threshold: 2,
+            ..Default::default()
+        });
+        let mut input = default_input();
+        let mut task = make_task("t1", "Downloading", 100_000, 10);
+        task.retry_count = 2;
+        input.task_diagnostics = vec![task];
+
+        let findings = diag.analyze(&input);
+        let retry = findings
+            .iter()
+            .find(|f| f.title.contains("Retries"))
+            .expect("Should flag with custom threshold=2");
+        assert!(retry.description.contains("2+ times"));
+    }
+
+    #[test]
+    fn test_custom_max_consecutive_failures() {
+        let diag = DownloadDiagnostics::with_config(DiagnosticsConfig {
+            max_consecutive_failures: 1,
+            ..Default::default()
+        });
+        let mut input = default_input();
+        let mut task = make_task("t1", "Downloading", 0, 10);
+        task.consecutive_failures = 1;
+        input.task_diagnostics = vec![task];
+
+        let findings = diag.analyze(&input);
+        let server = findings
+            .iter()
+            .find(|f| f.category == DiagnosticCategory::Server)
+            .expect("Should flag with custom threshold=1");
+        assert!(server.description.contains("1+ consecutive"));
+    }
+
+    // ========== Pretty serde ==========
+
+    #[test]
+    fn test_config_pretty_serde() {
+        let config = DiagnosticsConfig::default();
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        let back: DiagnosticsConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(back.enabled, config.enabled);
+        assert_eq!(
+            back.slow_download_threshold_bps,
+            config.slow_download_threshold_bps
+        );
+    }
+
+    // ========== All checks disabled ==========
+
+    #[test]
+    fn test_all_checks_disabled_except_proxy_and_server() {
+        let mut diag = DownloadDiagnostics::new();
+        diag.set_config(DiagnosticsConfig {
+            check_network: false,
+            check_disk: false,
+            check_performance: false,
+            check_queue: false,
+            ..Default::default()
+        });
+        let mut input = default_input();
+        input.network_connected = false;
+        input.available_disk_bytes = 0;
+        input.proxy_configured = true;
+        input.proxy_reachable = Some(false);
+
+        let findings = diag.analyze(&input);
+        // Only proxy should be detected (proxy/server checks are always on)
+        let network: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Network)
+            .collect();
+        assert!(network.is_empty());
+        let disk: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Disk)
+            .collect();
+        assert!(disk.is_empty());
+        let proxy: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == DiagnosticCategory::Proxy)
+            .collect();
+        assert_eq!(proxy.len(), 1);
+    }
+
+    // ========== top_recommendations limit ==========
+
+    #[test]
+    fn test_top_recommendations_max_5() {
+        let diag = DownloadDiagnostics::new();
+        // Create many findings each with unique recommendations
+        let findings: Vec<DiagnosticFinding> = (0..10)
+            .map(|i| DiagnosticFinding {
+                category: DiagnosticCategory::Network,
+                severity: DiagnosticSeverity::Critical,
+                title: format!("Issue {}", i),
+                description: "D".to_string(),
+                recommendations: vec![format!("Rec {}", i)],
+                related_task_ids: vec![],
+            })
+            .collect();
+        let summary = diag.summarize(&findings);
+        assert!(
+            summary.top_recommendations.len() <= 5,
+            "Top recommendations should be capped at 5"
+        );
+    }
+
+    // ========== Finding description content ==========
+
+    #[test]
+    fn test_low_disk_description_contains_mb_values() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.available_disk_bytes = 500_000_000; // ~476 MB
+
+        let findings = diag.analyze(&input);
+        let disk = findings
+            .iter()
+            .find(|f| f.title.contains("Low Disk"))
+            .unwrap();
+        // Should contain actual MB and minimum MB
+        assert!(disk.description.contains("MB available"));
+        assert!(disk.description.contains("minimum:"));
+    }
+
+    #[test]
+    fn test_high_failure_rate_description_contains_percentage() {
+        let diag = DownloadDiagnostics::new();
+        let mut input = default_input();
+        input.active_downloads = 2;
+        input.queued_downloads = 1;
+        input.failed_downloads = 5; // 5/8 = 62.5%
+
+        let findings = diag.analyze(&input);
+        let failure = findings
+            .iter()
+            .find(|f| f.title.contains("Failure Rate"))
+            .unwrap();
+        assert!(failure.description.contains("62%") || failure.description.contains("63%"));
+    }
 }
