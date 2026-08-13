@@ -1101,6 +1101,8 @@ pub struct DownloadManager {
     queue_health_config: Arc<tokio::sync::RwLock<queue_health::HealthMonitorConfig>>,
     /// Health dashboard configuration (Phase 174)
     health_dashboard_config: Arc<tokio::sync::RwLock<health_dashboard::HealthDashboardConfig>>,
+    /// CSV export configuration (Phase 175)
+    csv_export_config: Arc<tokio::sync::RwLock<csv_export::CsvExportConfig>>,
 }
 
 impl DownloadManager {
@@ -1223,6 +1225,9 @@ impl DownloadManager {
             )),
             health_dashboard_config: Arc::new(tokio::sync::RwLock::new(
                 health_dashboard::HealthDashboardConfig::default(),
+            )),
+            csv_export_config: Arc::new(tokio::sync::RwLock::new(
+                csv_export::CsvExportConfig::default(),
             )),
             task_snooze: Arc::new(Mutex::new(task_snooze::TaskSnoozeManager::new())),
             task_scheduler: Arc::new(Mutex::new(task_scheduler::TaskSchedulerManager::new())),
@@ -1533,6 +1538,9 @@ impl DownloadManager {
             )),
             health_dashboard_config: Arc::new(tokio::sync::RwLock::new(
                 health_dashboard::HealthDashboardConfig::default(),
+            )),
+            csv_export_config: Arc::new(tokio::sync::RwLock::new(
+                csv_export::CsvExportConfig::default(),
             )),
             speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
             speed_anomaly: Arc::new(Mutex::new(speed_anomaly::SpeedAnomalyDetector::new(
@@ -2119,6 +2127,8 @@ impl DownloadManager {
         }
         // Restore health dashboard config from disk (Phase 174)
         let _ = dm.load_health_dashboard_config().await;
+        // Restore CSV export config from disk (Phase 175)
+        dm.load_csv_export_config_from_disk().await;
         // Restore download templates from disk
         if let Ok(templates) = download_templates::load_templates(&dm.data_dir) {
             let mut mgr = dm.download_templates.lock().await;
@@ -14224,6 +14234,52 @@ impl DownloadManager {
     pub async fn get_csv_summary(&self) -> String {
         let tasks = self.tasks.lock().await;
         csv_export::generate_csv_summary(&tasks)
+    }
+
+    // ========== Phase 175: CSV Export Config API ==========
+
+    /// Get the current CSV export configuration.
+    pub async fn get_csv_export_config(&self) -> csv_export::CsvExportConfig {
+        self.csv_export_config.read().await.clone()
+    }
+
+    /// Set the CSV export configuration and persist to disk.
+    pub async fn set_csv_export_config(
+        &self,
+        config: csv_export::CsvExportConfig,
+    ) -> Result<(), String> {
+        {
+            let mut cfg = self.csv_export_config.write().await;
+            *cfg = config.clone();
+        }
+        let path = self.data_dir.join("csv_export_config.json");
+        csv_export::save_csv_export_config(&config, &path)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Export tasks to CSV string using the stored configuration.
+    pub async fn export_csv_with_config(&self) -> Result<String, String> {
+        let config = self.get_csv_export_config().await;
+        self.export_tasks_to_csv_string(Some(config)).await
+    }
+
+    /// Export tasks to CSV file using the stored configuration.
+    pub async fn export_csv_file_with_config(
+        &self,
+        output_path: &std::path::Path,
+    ) -> Result<csv_export::CsvExportResult, String> {
+        let config = self.get_csv_export_config().await;
+        self.export_tasks_to_csv(output_path, Some(config)).await
+    }
+
+    /// Load CSV export config from disk during startup.
+    pub async fn load_csv_export_config_from_disk(&self) {
+        let path = self.data_dir.join("csv_export_config.json");
+        if let Some(config) = csv_export::load_csv_export_config(&path).await {
+            let mut cfg = self.csv_export_config.write().await;
+            *cfg = config;
+        }
     }
 
     // ========== Phase 89: URL Allowlist ==========

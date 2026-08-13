@@ -7,8 +7,10 @@
 
 use crate::DownloadTask;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::Path;
+use tokio::fs;
 
 /// CSV column headers
 const CSV_HEADERS: &[&str] = &[
@@ -37,16 +39,32 @@ const CSV_HEADERS: &[&str] = &[
 ];
 
 /// CSV export configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CsvExportConfig {
     /// Field delimiter (default: comma)
+    #[serde(default = "default_delimiter")]
     pub delimiter: char,
     /// Include header row (default: true)
+    #[serde(default = "default_true")]
     pub include_headers: bool,
     /// Quote all fields (default: false, only quote when needed)
+    #[serde(default)]
     pub quote_all: bool,
     /// Date/time format (default: RFC3339)
+    #[serde(default = "default_datetime_format")]
     pub datetime_format: String,
+}
+
+fn default_delimiter() -> char {
+    ','
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_datetime_format() -> String {
+    "%+".to_string()
 }
 
 impl Default for CsvExportConfig {
@@ -281,6 +299,25 @@ pub fn generate_csv_summary(tasks: &[DownloadTask]) -> String {
     output.push_str("#\n");
 
     output
+}
+
+/// Save CSV export config to disk (atomic write)
+pub async fn save_csv_export_config(
+    config: &CsvExportConfig,
+    path: &Path,
+) -> Result<(), CsvExportError> {
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let tmp = path.with_extension("csv_config.tmp");
+    fs::write(&tmp, json.as_bytes()).await?;
+    fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
+/// Load CSV export config from disk
+pub async fn load_csv_export_config(path: &Path) -> Option<CsvExportConfig> {
+    let data = fs::read_to_string(path).await.ok()?;
+    serde_json::from_str(&data).ok()
 }
 
 /// CSV export errors

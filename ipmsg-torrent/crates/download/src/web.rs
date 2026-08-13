@@ -698,6 +698,13 @@ pub fn create_router(state: Arc<WebState>) -> Router {
         .route("/api/archive/config", post(set_archive_config_handler))
         .route("/api/export/csv", get(export_csv_handler))
         .route("/api/export/csv/summary", get(export_csv_summary_handler))
+        // Phase 175: CSV Export Config + Enhanced API
+        .route(
+            "/api/csv-export/config",
+            get(get_csv_export_config_handler).post(set_csv_export_config_handler),
+        )
+        .route("/api/csv-export/string", get(export_csv_string_handler))
+        .route("/api/csv-export/file", post(export_csv_file_handler))
         // Phase 161: Task Export/Import REST API
         .route("/api/task-export", get(export_tasks_json_handler))
         .route("/api/task-export/csv", get(export_tasks_csv_handler))
@@ -3646,6 +3653,76 @@ async fn export_csv_summary_handler(
         [("Content-Type", "text/plain; charset=utf-8")],
         summary,
     )
+}
+
+// ===== Phase 175: CSV Export Config + Enhanced API Handlers =====
+
+/// GET /api/csv-export/config - Get CSV export configuration
+async fn get_csv_export_config_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    let config = state.manager.get_csv_export_config().await;
+    Json(config)
+}
+
+/// POST /api/csv-export/config - Update CSV export configuration
+async fn set_csv_export_config_handler(
+    State(state): State<Arc<WebState>>,
+    Json(config): Json<crate::csv_export::CsvExportConfig>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.set_csv_export_config(config).await {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"error": e})),
+    }
+}
+
+/// GET /api/csv-export/string - Export tasks to CSV string using stored config
+async fn export_csv_string_handler(
+    State(state): State<Arc<WebState>>,
+) -> impl axum::response::IntoResponse {
+    match state.manager.export_csv_with_config().await {
+        Ok(csv) => (
+            StatusCode::OK,
+            [("Content-Type", "text/csv; charset=utf-8")],
+            csv,
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/csv-export/file - Export tasks to CSV file with optional path override
+async fn export_csv_file_handler(
+    State(state): State<Arc<WebState>>,
+    body: Option<Json<serde_json::Value>>,
+) -> impl axum::response::IntoResponse {
+    let output_path = body
+        .and_then(|b| {
+            b.0.get("path")
+                .and_then(|p| p.as_str().map(|s| s.to_string()))
+        })
+        .unwrap_or_else(|| {
+            let now = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+            format!("downloads_{}.csv", now)
+        });
+
+    match state
+        .manager
+        .export_csv_file_with_config(std::path::Path::new(&output_path))
+        .await
+    {
+        Ok(result) => Json(serde_json::json!({
+            "status": "ok",
+            "task_count": result.task_count,
+            "path": result.path.to_string_lossy(),
+            "file_size": result.file_size
+        })),
+        Err(e) => Json(serde_json::json!({"error": e})),
+    }
 }
 
 // ===== Phase 161: Task Export/Import Handlers =====

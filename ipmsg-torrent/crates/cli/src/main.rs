@@ -624,8 +624,10 @@ enum Command {
     },
     /// Export tasks to CSV format for spreadsheet analysis
     DlExportCsv {
-        /// Output file path
-        path: String,
+        /// Subcommand: export|string|summary|config
+        subcommand: String,
+        /// Arguments for the subcommand
+        args: Vec<String>,
     },
     /// Task export/import management (Phase 161)
     DlTaskExport {
@@ -2106,14 +2108,28 @@ fn parse_command(input: &str) -> Command {
             }
         }
         "dlexportcsv" | "dl-exportcsv" | "dlec" => {
-            // /dlexportcsv <output_path>
+            // /dlec <subcommand> [args...]
             let args: Vec<&str> = input.splitn(2, ' ').collect();
             if args.len() >= 2 {
+                let rest = args[1].trim();
+                let sub_parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                let subcommand = sub_parts[0].to_string();
+                let sub_args = if sub_parts.len() > 1 {
+                    sub_parts[1]
+                        .split_whitespace()
+                        .map(|s| s.to_string())
+                        .collect()
+                } else {
+                    vec![]
+                };
                 Command::DlExportCsv {
-                    path: args[1].to_string(),
+                    subcommand,
+                    args: sub_args,
                 }
             } else {
-                Command::Unknown("/dlexportcsv <output_path>".to_string())
+                Command::Unknown(
+                    "/dlec <subcommand> [args...] (export|string|summary|config)".to_string(),
+                )
             }
         }
         "dltaskexport" | "dl-taskexport" | "dlte" => {
@@ -14246,29 +14262,135 @@ async fn handle_command(
                 }
             }
         }
-        Command::DlExportCsv { path } => {
+        Command::DlExportCsv { subcommand, args } => {
             let s = state.lock().await;
             let download_manager = s.download_manager.clone();
             drop(s);
 
-            match download_manager
-                .export_tasks_to_csv(std::path::Path::new(&path), None)
-                .await
-            {
-                Ok(result) => {
+            match subcommand.as_str() {
+                "export" | "file" => {
+                    // /dlec export [output_path]
+                    let output_path = if !args.is_empty() {
+                        args[0].clone()
+                    } else {
+                        let now = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                        format!("downloads_{}.csv", now)
+                    };
+
+                    match download_manager
+                        .export_csv_file_with_config(std::path::Path::new(&output_path))
+                        .await
+                    {
+                        Ok(result) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message(
+                                "main",
+                                format!(
+                                    "✅ Exported {} tasks to CSV: {} ({} bytes)",
+                                    result.task_count,
+                                    result.path.display(),
+                                    result.file_size
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("❌ Failed to export CSV: {}", e));
+                        }
+                    }
+                }
+                "string" => {
+                    // /dlec string - export to CSV string and display
+                    match download_manager.export_csv_with_config().await {
+                        Ok(csv) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("📊 CSV Export:\n{}", csv));
+                        }
+                        Err(e) => {
+                            let mut s = state.lock().await;
+                            s.add_system_message("main", format!("❌ Failed to export CSV: {}", e));
+                        }
+                    }
+                }
+                "summary" => {
+                    // /dlec summary - show CSV summary statistics
+                    let summary = download_manager.get_csv_summary().await;
+                    let mut s = state.lock().await;
+                    s.add_system_message("main", format!("📊 CSV Summary:\n{}", summary));
+                }
+                "config" => {
+                    // /dlec config [field] [value] - view or modify config
+                    if args.is_empty() {
+                        // Show current config
+                        let config = download_manager.get_csv_export_config().await;
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            format!(
+                                "📋 CSV Export Config:\n  delimiter: {:?}\n  include_headers: {}\n  quote_all: {}\n  datetime_format: {}",
+                                config.delimiter, config.include_headers, config.quote_all, config.datetime_format
+                            ),
+                        );
+                    } else if args.len() == 1 {
+                        let mut s = state.lock().await;
+                        s.add_system_message(
+                            "main",
+                            "Usage: /dlec config [field] [value]\nFields: delimiter, include_headers, quote_all, datetime_format".to_string(),
+                        );
+                    } else {
+                        let field = &args[0];
+                        let value = &args[1];
+                        let mut config = download_manager.get_csv_export_config().await;
+
+                        match field.as_str() {
+                            "delimiter" => {
+                                if let Some(ch) = value.chars().next() {
+                                    config.delimiter = ch;
+                                }
+                            }
+                            "include_headers" => {
+                                config.include_headers = value.parse().unwrap_or(true);
+                            }
+                            "quote_all" => {
+                                config.quote_all = value.parse().unwrap_or(false);
+                            }
+                            "datetime_format" => {
+                                config.datetime_format = value.to_string();
+                            }
+                            _ => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    "Unknown field. Fields: delimiter, include_headers, quote_all, datetime_format".to_string(),
+                                );
+                                return;
+                            }
+                        }
+
+                        match download_manager.set_csv_export_config(config).await {
+                            Ok(()) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("✅ CSV export config updated: {} = {}", field, value),
+                                );
+                            }
+                            Err(e) => {
+                                let mut s = state.lock().await;
+                                s.add_system_message(
+                                    "main",
+                                    format!("❌ Failed to update config: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {
                     let mut s = state.lock().await;
                     s.add_system_message(
                         "main",
-                        format!(
-                            "✅ Exported {} tasks to CSV: {}",
-                            result.task_count,
-                            result.path.display()
-                        ),
+                        "Usage: /dlec <subcommand> [args...]\nSubcommands: export [path], string, summary, config [field] [value]".to_string(),
                     );
-                }
-                Err(e) => {
-                    let mut s = state.lock().await;
-                    s.add_system_message("main", format!("❌ Failed to export CSV: {}", e));
                 }
             }
         }
@@ -24702,6 +24824,61 @@ mod save_path_tests {
                 assert_eq!(path, "/tmp/tasks.json");
             }
             other => panic!("Expected DlImport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlec_export() {
+        match parse_command("/dlec export /tmp/tasks.csv") {
+            Command::DlExportCsv { subcommand, args } => {
+                assert_eq!(subcommand, "export");
+                assert_eq!(args, vec!["/tmp/tasks.csv"]);
+            }
+            other => panic!("Expected DlExportCsv, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlec_string() {
+        match parse_command("/dlec string") {
+            Command::DlExportCsv { subcommand, args } => {
+                assert_eq!(subcommand, "string");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlExportCsv, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlec_summary() {
+        match parse_command("/dlec summary") {
+            Command::DlExportCsv { subcommand, args } => {
+                assert_eq!(subcommand, "summary");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlExportCsv, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlec_config() {
+        match parse_command("/dlec config delimiter ;") {
+            Command::DlExportCsv { subcommand, args } => {
+                assert_eq!(subcommand, "config");
+                assert_eq!(args, vec!["delimiter", ";"]);
+            }
+            other => panic!("Expected DlExportCsv, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dlec_alias() {
+        match parse_command("/dl-exportcsv export") {
+            Command::DlExportCsv { subcommand, args } => {
+                assert_eq!(subcommand, "export");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected DlExportCsv, got {:?}", other),
         }
     }
 
