@@ -756,4 +756,738 @@ mod tests {
         manager.reset_categories();
         assert!(!manager.config.categories.is_empty());
     }
+
+    // ===== Phase 218: Comprehensive Test Coverage =====
+
+    // --- FileCategory serde + traits ---
+    #[test]
+    fn file_category_serde_roundtrip() {
+        let cat = FileCategory::new(
+            "test".into(),
+            vec!["a".into(), "b".into()],
+            "test_dir".into(),
+        );
+        let json = serde_json::to_string(&cat).unwrap();
+        let back: FileCategory = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "test");
+        assert_eq!(back.extensions, vec!["a", "b"]);
+        assert_eq!(back.directory, "test_dir");
+    }
+
+    #[test]
+    fn file_category_extra_fields_ignored() {
+        let json = r#"{"name":"x","extensions":["z"],"directory":"d","extra":123}"#;
+        let cat: FileCategory = serde_json::from_str(json).unwrap();
+        assert_eq!(cat.name, "x");
+        assert_eq!(cat.extensions, vec!["z"]);
+    }
+
+    #[test]
+    fn file_category_clone_debug() {
+        let cat = FileCategory::new("v".into(), vec!["mp4".into()], "v".into());
+        let cloned = cat.clone();
+        assert_eq!(cloned.name, cat.name);
+        let _ = format!("{:?}", cat);
+    }
+
+    #[test]
+    fn file_category_eq_hash() {
+        let a = FileCategory::new("v".into(), vec!["mp4".into()], "v".into());
+        let b = FileCategory::new("v".into(), vec!["mp4".into()], "v".into());
+        assert_eq!(a, b);
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(a);
+        assert!(set.contains(&b));
+    }
+
+    // --- matches_extension edge cases ---
+    #[test]
+    fn matches_extension_empty() {
+        let cat = FileCategory::new("v".into(), vec!["mp4".into()], "v".into());
+        assert!(!cat.matches_extension(""));
+    }
+
+    #[test]
+    fn matches_extension_unicode() {
+        let cat = FileCategory::new("v".into(), vec!["视频".into()], "v".into());
+        assert!(cat.matches_extension("视频"));
+        assert!(!cat.matches_extension("VIDEO"));
+    }
+
+    #[test]
+    fn matches_extension_mixed_case() {
+        let cat = FileCategory::new("v".into(), vec!["Mp4".into()], "v".into());
+        assert!(cat.matches_extension("mp4"));
+        assert!(cat.matches_extension("MP4"));
+        assert!(cat.matches_extension("Mp4"));
+    }
+
+    // --- PathOrganizerConfig serde ---
+    #[test]
+    fn config_serde_roundtrip() {
+        let cfg = PathOrganizerConfig {
+            enabled: true,
+            base_directory: Some(PathBuf::from("/tmp/test")),
+            categories: vec![FileCategory::new("x".into(), vec!["y".into()], "z".into())],
+            create_directories: false,
+            skip_if_organized: false,
+        };
+        let json = serde_json::to_string_pretty(&cfg).unwrap();
+        let back: PathOrganizerConfig = serde_json::from_str(&json).unwrap();
+        assert!(back.enabled);
+        assert_eq!(back.base_directory, Some(PathBuf::from("/tmp/test")));
+        assert!(!back.create_directories);
+        assert!(!back.skip_if_organized);
+        assert_eq!(back.categories.len(), 1);
+    }
+
+    #[test]
+    fn config_default_values() {
+        let cfg = PathOrganizerConfig::default();
+        assert!(!cfg.enabled);
+        assert!(cfg.base_directory.is_none());
+        assert!(cfg.create_directories);
+        assert!(cfg.skip_if_organized);
+        assert_eq!(cfg.categories.len(), 6);
+    }
+
+    #[test]
+    fn config_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"base_directory":null,"categories":[],"create_directories":true,"skip_if_organized":true,"unknown_field":"val"}"#;
+        let cfg: PathOrganizerConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.enabled);
+    }
+
+    // --- OrganizeResult serde ---
+    #[test]
+    fn organize_result_serde_roundtrip() {
+        let r = OrganizeResult {
+            original_path: PathBuf::from("/a/b.mp4"),
+            new_path: PathBuf::from("/a/videos/b.mp4"),
+            category: "videos".into(),
+            moved: true,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: OrganizeResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.original_path, r.original_path);
+        assert_eq!(back.new_path, r.new_path);
+        assert_eq!(back.category, "videos");
+        assert!(back.moved);
+    }
+
+    // --- PathOrganizerSummary serde ---
+    #[test]
+    fn summary_serde_roundtrip() {
+        let mut s = PathOrganizerSummary::default();
+        s.total_organized = 42;
+        s.total_bytes_moved = 1_000_000;
+        s.by_category.insert("videos".into(), 20);
+        s.by_category.insert("music".into(), 22);
+        let json = serde_json::to_string(&s).unwrap();
+        let back: PathOrganizerSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.total_organized, 42);
+        assert_eq!(back.total_bytes_moved, 1_000_000);
+        assert_eq!(back.by_category.len(), 2);
+    }
+
+    #[test]
+    fn summary_default_is_zero() {
+        let s = PathOrganizerSummary::default();
+        assert_eq!(s.total_organized, 0);
+        assert_eq!(s.total_bytes_moved, 0);
+        assert!(s.by_category.is_empty());
+    }
+
+    // --- PathOrganizerManager Clone/Debug ---
+    #[test]
+    fn manager_clone_debug() {
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(true);
+        let cloned = m.clone();
+        assert!(cloned.is_enabled());
+        let _ = format!("{:?}", m);
+    }
+
+    #[test]
+    fn manager_default_equals_new() {
+        let a = PathOrganizerManager::new();
+        let b = PathOrganizerManager::default();
+        assert_eq!(a.is_enabled(), b.is_enabled());
+        assert_eq!(a.config.categories.len(), b.config.categories.len());
+    }
+
+    // --- Category management edge cases ---
+    #[test]
+    fn add_category_replaces_existing() {
+        let mut m = PathOrganizerManager::new();
+        let initial_count = m.config.categories.len();
+        let new_videos =
+            FileCategory::new("videos".into(), vec!["new_ext".into()], "new_videos".into());
+        m.add_category(new_videos);
+        assert_eq!(m.config.categories.len(), initial_count);
+        let cat = m.get_category("videos").unwrap();
+        assert_eq!(cat.directory, "new_videos");
+        assert!(cat.extensions.contains(&"new_ext".to_string()));
+    }
+
+    #[test]
+    fn remove_category_nonexistent() {
+        let mut m = PathOrganizerManager::new();
+        assert!(!m.remove_category("nonexistent_category"));
+    }
+
+    #[test]
+    fn list_categories_returns_all() {
+        let m = PathOrganizerManager::new();
+        let cats = m.list_categories();
+        assert_eq!(cats.len(), 6);
+        let names: Vec<&str> = cats.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"videos"));
+        assert!(names.contains(&"music"));
+        assert!(names.contains(&"images"));
+        assert!(names.contains(&"documents"));
+        assert!(names.contains(&"archives"));
+        assert!(names.contains(&"programs"));
+    }
+
+    #[test]
+    fn find_category_all_default_extensions() {
+        let m = PathOrganizerManager::new();
+        assert_eq!(m.find_category_for_extension("mkv").unwrap().name, "videos");
+        assert_eq!(m.find_category_for_extension("avi").unwrap().name, "videos");
+        assert_eq!(m.find_category_for_extension("flv").unwrap().name, "videos");
+        assert_eq!(m.find_category_for_extension("flac").unwrap().name, "music");
+        assert_eq!(m.find_category_for_extension("ogg").unwrap().name, "music");
+        assert_eq!(m.find_category_for_extension("png").unwrap().name, "images");
+        assert_eq!(m.find_category_for_extension("gif").unwrap().name, "images");
+        assert_eq!(
+            m.find_category_for_extension("webp").unwrap().name,
+            "images"
+        );
+        assert_eq!(
+            m.find_category_for_extension("docx").unwrap().name,
+            "documents"
+        );
+        assert_eq!(
+            m.find_category_for_extension("epub").unwrap().name,
+            "documents"
+        );
+        assert_eq!(
+            m.find_category_for_extension("zip").unwrap().name,
+            "archives"
+        );
+        assert_eq!(
+            m.find_category_for_extension("7z").unwrap().name,
+            "archives"
+        );
+        assert_eq!(
+            m.find_category_for_extension("tar").unwrap().name,
+            "archives"
+        );
+        assert_eq!(
+            m.find_category_for_extension("exe").unwrap().name,
+            "programs"
+        );
+        assert_eq!(
+            m.find_category_for_extension("deb").unwrap().name,
+            "programs"
+        );
+    }
+
+    // --- get_target_directory edge cases ---
+    #[test]
+    fn get_target_directory_no_extension() {
+        let m = PathOrganizerManager::new();
+        let save = PathBuf::from("/dl");
+        let file = PathBuf::from("/dl/README");
+        assert!(m.get_target_directory(&file, &save).is_none());
+    }
+
+    #[test]
+    fn get_target_directory_unknown_extension() {
+        let m = PathOrganizerManager::new();
+        let save = PathBuf::from("/dl");
+        let file = PathBuf::from("/dl/file.xyz123");
+        assert!(m.get_target_directory(&file, &save).is_none());
+    }
+
+    #[test]
+    fn get_target_directory_case_insensitive() {
+        let m = PathOrganizerManager::new();
+        let save = PathBuf::from("/dl");
+        let file = PathBuf::from("/dl/video.MP4");
+        let target = m.get_target_directory(&file, &save).unwrap();
+        assert_eq!(target, PathBuf::from("/dl/videos"));
+    }
+
+    // --- organize_file edge cases ---
+    #[tokio::test]
+    async fn organize_file_not_found() {
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(true);
+        let temp = TempDir::new().unwrap();
+        let file = temp.path().join("nonexistent.mp4");
+        let result = m.organize_file(&file, temp.path()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("not found") || err.to_string().contains("File not found")
+        );
+    }
+
+    #[tokio::test]
+    async fn organize_file_multiple_files_stats() {
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(true);
+        let temp = TempDir::new().unwrap();
+
+        let f1 = temp.path().join("video1.mp4");
+        let f2 = temp.path().join("video2.mkv");
+        let f3 = temp.path().join("song1.mp3");
+        fs::write(&f1, b"vid1").await.unwrap();
+        fs::write(&f2, b"vid2").await.unwrap();
+        fs::write(&f3, b"song1").await.unwrap();
+
+        m.organize_file(&f1, temp.path()).await.unwrap();
+        m.organize_file(&f2, temp.path()).await.unwrap();
+        m.organize_file(&f3, temp.path()).await.unwrap();
+
+        assert_eq!(m.summary.total_organized, 3);
+        assert_eq!(*m.summary.by_category.get("videos").unwrap(), 2);
+        assert_eq!(*m.summary.by_category.get("music").unwrap(), 1);
+        assert!(m.summary.total_bytes_moved > 0);
+    }
+
+    #[tokio::test]
+    async fn organize_file_skip_if_organized_disabled() {
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(true);
+        m.config.skip_if_organized = false;
+
+        let temp = TempDir::new().unwrap();
+        let videos_dir = temp.path().join("videos");
+        fs::create_dir_all(&videos_dir).await.unwrap();
+
+        let file_path = videos_dir.join("video.mp4");
+        fs::write(&file_path, b"test").await.unwrap();
+
+        let result = m.organize_file(&file_path, temp.path()).await.unwrap();
+        assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn organize_file_create_directories_false() {
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(true);
+        m.config.create_directories = false;
+
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("video.mp4");
+        fs::write(&file_path, b"test").await.unwrap();
+
+        let result = m.organize_file(&file_path, temp.path()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn organize_file_name_collision_multiple() {
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(true);
+
+        let temp = TempDir::new().unwrap();
+        let videos_dir = temp.path().join("videos");
+        fs::create_dir_all(&videos_dir).await.unwrap();
+
+        fs::write(videos_dir.join("video.mp4"), b"orig")
+            .await
+            .unwrap();
+        fs::write(videos_dir.join("video (1).mp4"), b"1")
+            .await
+            .unwrap();
+        fs::write(videos_dir.join("video (2).mp4"), b"2")
+            .await
+            .unwrap();
+
+        let file_path = temp.path().join("video.mp4");
+        fs::write(&file_path, b"new").await.unwrap();
+
+        let result = m
+            .organize_file(&file_path, temp.path())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.new_path.to_str().unwrap().contains("(3)"));
+        assert!(result.new_path.exists());
+    }
+
+    #[tokio::test]
+    async fn organize_file_unicode_filename() {
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(true);
+
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("日本語ビデオ.mp4");
+        fs::write(&file_path, b"unicode").await.unwrap();
+
+        let result = m
+            .organize_file(&file_path, temp.path())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.category, "videos");
+        assert!(result.new_path.exists());
+        assert!(result.new_path.to_str().unwrap().contains("日本語ビデオ"));
+    }
+
+    #[tokio::test]
+    async fn organize_file_emoji_filename() {
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(true);
+
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("🎬movie🎥.mkv");
+        fs::write(&file_path, b"emoji").await.unwrap();
+
+        let result = m
+            .organize_file(&file_path, temp.path())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.category, "videos");
+        assert!(result.new_path.exists());
+    }
+
+    // --- Persistence edge cases ---
+    #[tokio::test]
+    async fn save_creates_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.json");
+        assert!(!path.exists());
+
+        let m = PathOrganizerManager::new();
+        save_path_organizer_config(&m, &path).await.unwrap();
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn save_overwrites_existing() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.json");
+
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(false);
+        save_path_organizer_config(&m, &path).await.unwrap();
+
+        m.set_enabled(true);
+        save_path_organizer_config(&m, &path).await.unwrap();
+
+        let loaded = load_path_organizer_config(&path).await.unwrap();
+        assert!(loaded.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn save_no_tmp_leftover() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.json");
+        let tmp_path = path.with_extension("json.tmp");
+
+        let m = PathOrganizerManager::new();
+        save_path_organizer_config(&m, &path).await.unwrap();
+        assert!(!tmp_path.exists());
+    }
+
+    #[tokio::test]
+    async fn load_corrupt_json() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.json");
+        fs::write(&path, "this is not json").await.unwrap();
+
+        let result = load_path_organizer_config(&path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn load_empty_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.json");
+        fs::write(&path, "").await.unwrap();
+
+        let result = load_path_organizer_config(&path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn load_empty_json_object() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.json");
+        fs::write(&path, "{}").await.unwrap();
+
+        // {} is missing required "config" field, so it should fail
+        let result = load_path_organizer_config(&path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn load_minimal_valid_json() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.json");
+        let minimal = r#"{"config":{"enabled":false,"base_directory":null,"categories":[],"create_directories":true,"skip_if_organized":true},"summary":{"total_organized":0,"by_category":{},"total_bytes_moved":0}}"#;
+        fs::write(&path, minimal).await.unwrap();
+
+        let loaded = load_path_organizer_config(&path).await.unwrap();
+        assert!(!loaded.is_enabled());
+        assert_eq!(loaded.summary.total_organized, 0);
+    }
+
+    #[tokio::test]
+    async fn save_load_full_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.json");
+
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(true);
+        m.set_base_directory(Some(temp.path().to_path_buf()));
+        m.summary.total_organized = 99;
+        m.summary.by_category.insert("videos".into(), 50);
+
+        save_path_organizer_config(&m, &path).await.unwrap();
+        let loaded = load_path_organizer_config(&path).await.unwrap();
+
+        assert!(loaded.is_enabled());
+        assert_eq!(loaded.summary.total_organized, 99);
+        assert_eq!(*loaded.summary.by_category.get("videos").unwrap(), 50);
+    }
+
+    // --- Error Display ---
+    #[test]
+    fn error_display_io() {
+        let err = PathOrganizerError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
+        let s = format!("{}", err);
+        assert!(s.contains("I/O error") || s.contains("gone"));
+    }
+
+    #[test]
+    fn error_display_json() {
+        let err = PathOrganizerError::Json(
+            serde_json::from_str::<PathOrganizerConfig>("bad").unwrap_err(),
+        );
+        let s = format!("{}", err);
+        assert!(s.contains("JSON error") || s.contains("json"));
+    }
+
+    #[test]
+    fn error_display_file_not_found() {
+        let err = PathOrganizerError::FileNotFound("/path/to/file".into());
+        let s = format!("{}", err);
+        assert!(s.contains("not found") || s.contains("File not found"));
+    }
+
+    #[test]
+    fn error_display_invalid_category() {
+        let err = PathOrganizerError::InvalidCategory("bad_cat".into());
+        let s = format!("{}", err);
+        assert!(s.contains("bad_cat"));
+    }
+
+    #[test]
+    fn error_debug() {
+        let err = PathOrganizerError::FileNotFound("test".into());
+        let _ = format!("{:?}", err);
+    }
+
+    // --- Complete workflow ---
+    #[tokio::test]
+    async fn complete_lifecycle() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.json");
+
+        let mut m = PathOrganizerManager::new();
+        assert!(!m.is_enabled());
+
+        m.set_enabled(true);
+        m.set_base_directory(Some(temp.path().to_path_buf()));
+
+        m.add_category(FileCategory::new(
+            "custom".into(),
+            vec!["custom_ext".into()],
+            "custom_dir".into(),
+        ));
+        assert!(m.find_category_for_extension("custom_ext").is_some());
+
+        let f1 = temp.path().join("test.mp4");
+        let f2 = temp.path().join("test.custom_ext");
+        fs::write(&f1, b"video").await.unwrap();
+        fs::write(&f2, b"custom").await.unwrap();
+
+        let r1 = m.organize_file(&f1, temp.path()).await.unwrap().unwrap();
+        let r2 = m.organize_file(&f2, temp.path()).await.unwrap().unwrap();
+
+        assert_eq!(r1.category, "videos");
+        assert_eq!(r2.category, "custom");
+        assert_eq!(m.summary.total_organized, 2);
+
+        save_path_organizer_config(&m, &config_path).await.unwrap();
+        let loaded = load_path_organizer_config(&config_path).await.unwrap();
+        assert!(loaded.is_enabled());
+        assert_eq!(loaded.summary.total_organized, 2);
+        assert!(loaded.find_category_for_extension("custom_ext").is_some());
+
+        let mut loaded = loaded;
+        loaded.reset_summary();
+        assert_eq!(loaded.summary.total_organized, 0);
+        loaded.reset_categories();
+        assert!(loaded.find_category_for_extension("custom_ext").is_none());
+        assert!(loaded.find_category_for_extension("mp4").is_some());
+    }
+
+    // --- Default categories content verification ---
+    #[test]
+    fn default_categories_all_six() {
+        let cats = default_categories();
+        assert_eq!(cats.len(), 6);
+        let names: Vec<&str> = cats.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"videos"));
+        assert!(names.contains(&"music"));
+        assert!(names.contains(&"images"));
+        assert!(names.contains(&"documents"));
+        assert!(names.contains(&"archives"));
+        assert!(names.contains(&"programs"));
+    }
+
+    #[test]
+    fn default_categories_directories_match_names() {
+        for cat in default_categories() {
+            assert_eq!(cat.name, cat.directory);
+        }
+    }
+
+    #[test]
+    fn default_categories_no_empty_extensions() {
+        for cat in default_categories() {
+            assert!(
+                !cat.extensions.is_empty(),
+                "category {} has no extensions",
+                cat.name
+            );
+        }
+    }
+
+    #[test]
+    fn default_categories_extensions_lowercase() {
+        for cat in default_categories() {
+            for ext in &cat.extensions {
+                assert_eq!(
+                    ext,
+                    &ext.to_lowercase(),
+                    "extension {} in {} not lowercase",
+                    ext,
+                    cat.name
+                );
+            }
+        }
+    }
+
+    // --- get_summary ---
+    #[test]
+    fn get_summary_returns_reference() {
+        let mut m = PathOrganizerManager::new();
+        m.summary.total_organized = 10;
+        let s = m.get_summary();
+        assert_eq!(s.total_organized, 10);
+    }
+
+    // --- set_base_directory ---
+    #[test]
+    fn set_base_directory_none() {
+        let mut m = PathOrganizerManager::new();
+        m.set_base_directory(Some(PathBuf::from("/tmp")));
+        assert!(m.get_base_directory().is_some());
+        m.set_base_directory(None);
+        assert!(m.get_base_directory().is_none());
+    }
+
+    #[tokio::test]
+    async fn organize_file_collision_preserves_original_content() {
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(true);
+
+        let temp = TempDir::new().unwrap();
+        let videos_dir = temp.path().join("videos");
+        fs::create_dir_all(&videos_dir).await.unwrap();
+
+        let existing = videos_dir.join("video.mp4");
+        fs::write(&existing, b"original_content").await.unwrap();
+
+        let new_file = temp.path().join("video.mp4");
+        fs::write(&new_file, b"new_content").await.unwrap();
+
+        let result = m
+            .organize_file(&new_file, temp.path())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let orig_content = fs::read_to_string(&existing).await.unwrap();
+        assert_eq!(orig_content, "original_content");
+
+        let new_content = fs::read_to_string(&result.new_path).await.unwrap();
+        assert_eq!(new_content, "new_content");
+    }
+
+    // --- PathOrganizerManager serde ---
+    #[test]
+    fn manager_serde_roundtrip() {
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(true);
+        m.set_base_directory(Some(PathBuf::from("/test")));
+        m.summary.total_organized = 5;
+
+        let json = serde_json::to_string_pretty(&m).unwrap();
+        let back: PathOrganizerManager = serde_json::from_str(&json).unwrap();
+        assert!(back.is_enabled());
+        assert_eq!(back.summary.total_organized, 5);
+    }
+
+    #[test]
+    fn manager_serde_extra_fields_ignored() {
+        let m = PathOrganizerManager::new();
+        let mut json: serde_json::Value = serde_json::to_value(&m).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("extra".into(), serde_json::json!(42));
+        let back: PathOrganizerManager = serde_json::from_value(json).unwrap();
+        assert_eq!(back.is_enabled(), m.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn organize_file_chinese_path() {
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(true);
+
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("中文文件.mp4");
+        fs::write(&file_path, b"chinese").await.unwrap();
+
+        let result = m
+            .organize_file(&file_path, temp.path())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.category, "videos");
+        assert!(result.new_path.exists());
+    }
+
+    #[tokio::test]
+    async fn organize_file_dot_only_name() {
+        let mut m = PathOrganizerManager::new();
+        m.set_enabled(true);
+
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join(".hidden");
+        fs::write(&file_path, b"hidden").await.unwrap();
+
+        let result = m.organize_file(&file_path, temp.path()).await.unwrap();
+        assert!(result.is_none());
+    }
 }
