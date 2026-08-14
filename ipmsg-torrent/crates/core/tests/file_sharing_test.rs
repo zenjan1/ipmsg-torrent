@@ -3,7 +3,7 @@
 
 use ipmsg_core::file_sharing::FileSharingManager;
 use ipmsg_protocol::message::{FileRef, FileShareInfo};
-use std::path::PathBuf;
+
 use tempfile::TempDir;
 
 fn make_file_ref(name: &str, size: u64, chunk_size: u32) -> FileRef {
@@ -109,7 +109,7 @@ async fn test_search_shared_files() {
     let test_file = temp_dir.path().join("test_shared.txt");
     std::fs::write(&test_file, b"Hello, world!").unwrap();
 
-    let info = manager
+    let _info = manager
         .share_file(
             &test_file,
             vec!["text".to_string()],
@@ -135,7 +135,7 @@ async fn test_unshare_file() {
     let test_file = temp_dir.path().join("to_unshare.txt");
     std::fs::write(&test_file, b"temp content").unwrap();
 
-    let info = manager
+    let _info = manager
         .share_file(&test_file, vec![], None, "local_peer".to_string())
         .await
         .unwrap();
@@ -157,7 +157,7 @@ async fn test_read_chunk() {
     let content: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
     std::fs::write(&test_file, &content).unwrap();
 
-    let info = manager
+    let _info = manager
         .share_file(&test_file, vec![], None, "local_peer".to_string())
         .await
         .unwrap();

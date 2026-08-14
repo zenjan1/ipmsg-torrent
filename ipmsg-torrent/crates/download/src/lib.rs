@@ -9644,7 +9644,7 @@ impl DownloadManager {
         let path = self.data_dir.join("queue_health_config.json");
         queue_health::save_health_monitor_config(&path, &config)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     /// Get queue health monitor configuration
@@ -9658,7 +9658,7 @@ impl DownloadManager {
         let path = self.data_dir.join("queue_health_config.json");
         queue_health::save_health_monitor_config(&path, &config)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     /// Load queue health config from disk
@@ -16013,7 +16013,7 @@ impl DownloadManager {
         let tracker = self.bandwidth_usage.lock().await;
         let path = self.data_dir.join("bandwidth_usage.json");
         let json = serde_json::to_string_pretty(&*tracker)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(|e| std::io::Error::other(e))?;
         tokio::fs::write(&path, json).await
     }
 
@@ -16482,7 +16482,7 @@ impl DownloadManager {
         let path = self.data_dir.join("retry_budget_config.json");
         retry_budget::save_retry_budget_config(&path, &config)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     /// Save retry budget state to disk
@@ -16491,7 +16491,7 @@ impl DownloadManager {
         let path = self.data_dir.join("retry_budget_state.json");
         retry_budget::save_retry_budget_state(&path, &manager)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     // ── System Uptime API ──────────────────────────────────────────────
