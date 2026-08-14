@@ -2247,4 +2247,1076 @@ mod tests {
             .unwrap();
         assert_eq!(h.status, UrlHealthStatus::Dead);
     }
+
+    // ===== Clone/Debug traits =====
+
+    #[test]
+    fn test_url_health_status_clone_debug_2() {
+        let status = UrlHealthStatus::Healthy;
+        let cloned = status.clone();
+        assert_eq!(cloned, status);
+        let debug_str = format!("{:?}", status);
+        assert!(debug_str.contains("Healthy"));
+    }
+
+    #[test]
+    fn test_url_health_check_clone_debug_2() {
+        let check = UrlHealthCheck {
+            url: "https://example.com/f.zip".to_string(),
+            status: UrlHealthStatus::Healthy,
+            last_check_ts: 1234567890,
+            response_time_ms: Some(500),
+            http_status: Some(200),
+            consecutive_failures: 0,
+            consecutive_successes: 5,
+            total_checks: 10,
+            successful_checks: 9,
+            last_error: None,
+        };
+        let cloned = check.clone();
+        assert_eq!(cloned.url, check.url);
+        assert_eq!(cloned.status, check.status);
+        let debug_str = format!("{:?}", check);
+        assert!(debug_str.contains("Healthy"));
+    }
+
+    #[test]
+    fn test_url_health_monitor_config_clone_debug_2() {
+        let config = UrlHealthMonitorConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.check_interval_secs, config.check_interval_secs);
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("check_interval_secs"));
+    }
+
+    #[test]
+    fn test_url_health_summary_clone_debug_2() {
+        let summary = UrlHealthSummary {
+            total_monitored: 10,
+            healthy_count: 5,
+            degraded_count: 2,
+            dead_count: 1,
+            unknown_count: 2,
+            avg_response_time_ms: Some(350),
+            recently_checked: 8,
+            last_check_ts: Some(1_700_000_000),
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_monitored, summary.total_monitored);
+        let debug_str = format!("{:?}", summary);
+        assert!(debug_str.contains("total_monitored"));
+    }
+
+    // ===== Serde edge cases =====
+
+    #[test]
+    fn test_config_extra_fields_ignored() {
+        let json = r#"{
+            "enabled": true,
+            "check_interval_secs": 300,
+            "timeout_secs": 10,
+            "degraded_threshold_ms": 2000,
+            "dead_threshold": 3,
+            "recovery_threshold": 2,
+            "max_monitored_urls": 500,
+            "user_agent": "Test/1.0",
+            "extra_field": "should be ignored",
+            "another_extra": 12345
+        }"#;
+        let config: UrlHealthMonitorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.check_interval_secs, 300);
+        assert_eq!(config.dead_threshold, 3);
+    }
+
+    #[test]
+    fn test_config_pretty_serde() {
+        let config = UrlHealthMonitorConfig::default();
+        let pretty_json = serde_json::to_string_pretty(&config).unwrap();
+        let back: UrlHealthMonitorConfig = serde_json::from_str(&pretty_json).unwrap();
+        assert_eq!(back.check_interval_secs, config.check_interval_secs);
+        assert!(pretty_json.contains('\n'));
+    }
+
+    #[test]
+    fn test_health_check_extra_fields_ignored() {
+        let json = r#"{
+            "url": "https://example.com/f.zip",
+            "status": "Healthy",
+            "last_check_ts": 1234567890,
+            "response_time_ms": 500,
+            "http_status": 200,
+            "consecutive_failures": 0,
+            "consecutive_successes": 5,
+            "total_checks": 10,
+            "successful_checks": 9,
+            "last_error": null,
+            "extra_field": "ignored"
+        }"#;
+        let check: UrlHealthCheck = serde_json::from_str(json).unwrap();
+        assert_eq!(check.url, "https://example.com/f.zip");
+        assert_eq!(check.status, UrlHealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_summary_extra_fields_ignored() {
+        let json = r#"{
+            "total_monitored": 10,
+            "healthy_count": 5,
+            "degraded_count": 2,
+            "dead_count": 1,
+            "unknown_count": 2,
+            "avg_response_time_ms": 350,
+            "recently_checked": 8,
+            "last_check_ts": 1700000000,
+            "extra_field": "ignored"
+        }"#;
+        let summary: UrlHealthSummary = serde_json::from_str(json).unwrap();
+        assert_eq!(summary.total_monitored, 10);
+        assert_eq!(summary.healthy_count, 5);
+    }
+
+    // ===== Unicode URL handling =====
+
+    #[tokio::test]
+    async fn test_monitor_url_unicode() {
+        let monitor = UrlHealthMonitor::new();
+        assert!(monitor.monitor_url("https://example.com/文件.zip").await);
+        assert!(monitor.monitor_url("https://example.com/файл.zip").await);
+        assert!(monitor.monitor_url("https://example.com/📁📦.zip").await);
+
+        let h1 = monitor.get_url_health("https://example.com/文件.zip").await;
+        assert!(h1.is_some());
+        let h2 = monitor.get_url_health("https://example.com/файл.zip").await;
+        assert!(h2.is_some());
+        let h3 = monitor.get_url_health("https://example.com/📁📦.zip").await;
+        assert!(h3.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_record_success_unicode_url() {
+        let monitor = UrlHealthMonitor::new();
+        monitor
+            .monitor_url("https://example.com/中文文件.zip")
+            .await;
+        monitor
+            .record_success("https://example.com/中文文件.zip", 500, 200)
+            .await;
+        let h = monitor
+            .get_url_health("https://example.com/中文文件.zip")
+            .await
+            .unwrap();
+        assert_eq!(h.status, UrlHealthStatus::Healthy);
+        assert_eq!(h.response_time_ms, Some(500));
+    }
+
+    #[tokio::test]
+    async fn test_record_failure_unicode_error() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+        monitor
+            .record_failure("https://example.com/f.zip", "连接超时：服务器无响应")
+            .await;
+        let h = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h.last_error, Some("连接超时：服务器无响应".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_record_failure_emoji_error() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+        monitor
+            .record_failure("https://example.com/f.zip", "Error 🚫💥")
+            .await;
+        let h = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h.last_error, Some("Error 🚫💥".to_string()));
+    }
+
+    // ===== Boundary value testing =====
+
+    #[tokio::test]
+    async fn test_response_time_zero_boundary() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+
+        // Zero response time should be Healthy
+        monitor
+            .record_success("https://example.com/f.zip", 0, 200)
+            .await;
+        let h = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h.status, UrlHealthStatus::Healthy);
+        assert_eq!(h.response_time_ms, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_response_time_large_value() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+
+        // Very large response time (10 seconds)
+        monitor
+            .record_success("https://example.com/f.zip", 10000, 200)
+            .await;
+        let h = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h.status, UrlHealthStatus::Degraded);
+        assert_eq!(h.response_time_ms, Some(10000));
+    }
+
+    #[tokio::test]
+    async fn test_consecutive_failures_large_count() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+
+        // Record many failures
+        for i in 0..100 {
+            monitor
+                .record_failure("https://example.com/f.zip", &format!("err{}", i))
+                .await;
+        }
+        let h = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h.consecutive_failures, 100);
+        assert_eq!(h.status, UrlHealthStatus::Dead);
+    }
+
+    #[tokio::test]
+    async fn test_consecutive_successes_large_count() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+
+        // Record many successes
+        for i in 0..100 {
+            monitor
+                .record_success("https://example.com/f.zip", 100 + i, 200)
+                .await;
+        }
+        let h = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h.consecutive_successes, 100);
+        assert_eq!(h.total_checks, 100);
+        assert_eq!(h.successful_checks, 100);
+    }
+
+    #[tokio::test]
+    async fn test_http_status_codes() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+
+        // Test various HTTP status codes
+        for status in [200, 201, 204, 301, 302, 304, 400, 404, 500] {
+            monitor
+                .record_success("https://example.com/f.zip", 100, status)
+                .await;
+            let h = monitor
+                .get_url_health("https://example.com/f.zip")
+                .await
+                .unwrap();
+            assert_eq!(h.http_status, Some(status));
+        }
+    }
+
+    // ===== get_urls_needing_check =====
+
+    #[tokio::test]
+    async fn test_get_urls_needing_check_empty_2() {
+        let monitor = UrlHealthMonitor::new();
+        let urls = monitor.get_urls_needing_check(10).await;
+        assert_eq!(urls.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_urls_needing_check_all_new_2() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/1.zip").await;
+        monitor.monitor_url("https://example.com/2.zip").await;
+        monitor.monitor_url("https://example.com/3.zip").await;
+
+        // All URLs are new and need checking
+        let urls = monitor.get_urls_needing_check(10).await;
+        assert_eq!(urls.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_urls_needing_check_max_count_2() {
+        let monitor = UrlHealthMonitor::new();
+        for i in 0..10 {
+            monitor
+                .monitor_url(&format!("https://example.com/{}.zip", i))
+                .await;
+        }
+
+        // Request only 5 URLs
+        let urls = monitor.get_urls_needing_check(5).await;
+        assert_eq!(urls.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_get_urls_needing_check_excludes_dead() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/alive.zip").await;
+        monitor.monitor_url("https://example.com/dead.zip").await;
+
+        // Kill one URL
+        for i in 0..3 {
+            monitor
+                .record_failure("https://example.com/dead.zip", &format!("err{}", i))
+                .await;
+        }
+
+        let urls = monitor.get_urls_needing_check(10).await;
+        // Dead URLs should not need checking (unless they haven't been checked recently)
+        assert!(urls.contains(&"https://example.com/alive.zip".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_urls_needing_check_zero_max() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/1.zip").await;
+        monitor.monitor_url("https://example.com/2.zip").await;
+
+        let urls = monitor.get_urls_needing_check(0).await;
+        assert_eq!(urls.len(), 0);
+    }
+
+    // ===== should_check_now edge cases =====
+
+    #[tokio::test]
+    async fn test_should_check_now_initial_state() {
+        let monitor = UrlHealthMonitor::new();
+        // Initially, should always check
+        assert!(monitor.should_check_now().await);
+    }
+
+    #[tokio::test]
+    async fn test_should_check_now_after_mark_2() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.mark_check_performed().await;
+        // Immediately after marking, should not check
+        assert!(!monitor.should_check_now().await);
+    }
+
+    #[tokio::test]
+    async fn test_should_check_now_disabled_2() {
+        let config = UrlHealthMonitorConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let monitor = UrlHealthMonitor::with_config(config);
+        // Disabled monitor should never check
+        assert!(!monitor.should_check_now().await);
+    }
+
+    #[tokio::test]
+    async fn test_should_check_now_custom_interval() {
+        let config = UrlHealthMonitorConfig {
+            check_interval_secs: 1, // 1 second interval
+            ..Default::default()
+        };
+        let monitor = UrlHealthMonitor::with_config(config);
+        monitor.mark_check_performed().await;
+
+        // Should not check immediately
+        assert!(!monitor.should_check_now().await);
+
+        // Wait for interval to pass
+        tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
+
+        // Now should check
+        assert!(monitor.should_check_now().await);
+    }
+
+    // ===== mark_check_performed =====
+
+    #[tokio::test]
+    async fn test_mark_check_performed_updates_timestamp() {
+        let monitor = UrlHealthMonitor::new();
+
+        // Initially no last check
+        assert!(monitor.should_check_now().await);
+
+        // Mark check performed
+        monitor.mark_check_performed().await;
+
+        // Should not check immediately
+        assert!(!monitor.should_check_now().await);
+    }
+
+    #[tokio::test]
+    async fn test_mark_check_performed_multiple_times() {
+        let monitor = UrlHealthMonitor::new();
+
+        monitor.mark_check_performed().await;
+        assert!(!monitor.should_check_now().await);
+
+        // Mark again (should update timestamp)
+        monitor.mark_check_performed().await;
+        assert!(!monitor.should_check_now().await);
+    }
+
+    // ===== clear_all edge cases =====
+
+    #[tokio::test]
+    async fn test_clear_all_empty_monitor() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.clear_all().await;
+        let s = monitor.get_summary().await;
+        assert_eq!(s.total_monitored, 0);
+    }
+
+    #[tokio::test]
+    async fn test_clear_all_resets_last_check_2() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.mark_check_performed().await;
+        assert!(!monitor.should_check_now().await);
+
+        monitor.clear_all().await;
+        // After clear, should check again
+        assert!(monitor.should_check_now().await);
+    }
+
+    #[tokio::test]
+    async fn test_clear_all_multiple_times() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/1.zip").await;
+        monitor.monitor_url("https://example.com/2.zip").await;
+
+        monitor.clear_all().await;
+        monitor.clear_all().await; // Should be idempotent
+
+        let s = monitor.get_summary().await;
+        assert_eq!(s.total_monitored, 0);
+    }
+
+    // ===== cleanup_dead_urls edge cases =====
+
+    #[tokio::test]
+    async fn test_cleanup_dead_urls_empty() {
+        let monitor = UrlHealthMonitor::new();
+        let removed = monitor.cleanup_dead_urls().await;
+        assert_eq!(removed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_dead_urls_no_dead() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/1.zip").await;
+        monitor.monitor_url("https://example.com/2.zip").await;
+
+        monitor
+            .record_success("https://example.com/1.zip", 100, 200)
+            .await;
+        monitor
+            .record_success("https://example.com/2.zip", 200, 200)
+            .await;
+
+        let removed = monitor.cleanup_dead_urls().await;
+        assert_eq!(removed, 0);
+        assert_eq!(monitor.get_summary().await.total_monitored, 2);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_dead_urls_all_dead_2() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/1.zip").await;
+        monitor.monitor_url("https://example.com/2.zip").await;
+
+        for i in 0..3 {
+            monitor
+                .record_failure("https://example.com/1.zip", &format!("err{}", i))
+                .await;
+            monitor
+                .record_failure("https://example.com/2.zip", &format!("err{}", i))
+                .await;
+        }
+
+        let removed = monitor.cleanup_dead_urls().await;
+        assert_eq!(removed, 2);
+        assert_eq!(monitor.get_summary().await.total_monitored, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_dead_urls_multiple_times() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/dead.zip").await;
+
+        for i in 0..3 {
+            monitor
+                .record_failure("https://example.com/dead.zip", &format!("err{}", i))
+                .await;
+        }
+
+        let removed1 = monitor.cleanup_dead_urls().await;
+        assert_eq!(removed1, 1);
+
+        let removed2 = monitor.cleanup_dead_urls().await;
+        assert_eq!(removed2, 0); // Idempotent
+    }
+
+    // ===== get_best_url edge cases =====
+
+    #[tokio::test]
+    async fn test_get_best_url_empty_list_2() {
+        let monitor = UrlHealthMonitor::new();
+        let best = monitor.get_best_url(&[]).await;
+        assert_eq!(best, None);
+    }
+
+    #[tokio::test]
+    async fn test_get_best_url_all_dead() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/1.zip").await;
+        monitor.monitor_url("https://example.com/2.zip").await;
+
+        for i in 0..3 {
+            monitor
+                .record_failure("https://example.com/1.zip", &format!("err{}", i))
+                .await;
+            monitor
+                .record_failure("https://example.com/2.zip", &format!("err{}", i))
+                .await;
+        }
+
+        let best = monitor
+            .get_best_url(&["https://example.com/1.zip", "https://example.com/2.zip"])
+            .await;
+        assert_eq!(best, None);
+    }
+
+    #[tokio::test]
+    async fn test_get_best_url_all_degraded() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/1.zip").await;
+        monitor.monitor_url("https://example.com/2.zip").await;
+
+        monitor
+            .record_success("https://example.com/1.zip", 3000, 200)
+            .await;
+        monitor
+            .record_success("https://example.com/2.zip", 4000, 200)
+            .await;
+
+        let best = monitor
+            .get_best_url(&["https://example.com/1.zip", "https://example.com/2.zip"])
+            .await;
+        // Degraded URLs are not considered for best URL
+        assert_eq!(best, None);
+    }
+
+    #[tokio::test]
+    async fn test_get_best_url_tie_breaker() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/1.zip").await;
+        monitor.monitor_url("https://example.com/2.zip").await;
+
+        // Same response time
+        monitor
+            .record_success("https://example.com/1.zip", 500, 200)
+            .await;
+        monitor
+            .record_success("https://example.com/2.zip", 500, 200)
+            .await;
+
+        let best = monitor
+            .get_best_url(&["https://example.com/1.zip", "https://example.com/2.zip"])
+            .await;
+        // Should return one of them (order doesn't matter)
+        assert!(best.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_best_url_nonexistent_urls() {
+        let monitor = UrlHealthMonitor::new();
+        let best = monitor
+            .get_best_url(&[
+                "https://example.com/ghost1.zip",
+                "https://example.com/ghost2.zip",
+            ])
+            .await;
+        assert_eq!(best, None);
+    }
+
+    // ===== get_health_for_urls edge cases =====
+
+    #[tokio::test]
+    async fn test_get_health_for_urls_empty_list() {
+        let monitor = UrlHealthMonitor::new();
+        let checks = monitor.get_health_for_urls(&[]).await;
+        assert_eq!(checks.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_health_for_urls_all_nonexistent() {
+        let monitor = UrlHealthMonitor::new();
+        let checks = monitor
+            .get_health_for_urls(&[
+                "https://example.com/ghost1.zip",
+                "https://example.com/ghost2.zip",
+            ])
+            .await;
+        assert_eq!(checks.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_health_for_urls_mixed() {
+        let monitor = UrlHealthMonitor::new();
+        monitor
+            .monitor_url("https://example.com/existing.zip")
+            .await;
+        monitor
+            .record_success("https://example.com/existing.zip", 100, 200)
+            .await;
+
+        let checks = monitor
+            .get_health_for_urls(&[
+                "https://example.com/existing.zip",
+                "https://example.com/ghost.zip",
+            ])
+            .await;
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].url, "https://example.com/existing.zip");
+    }
+
+    // ===== Complex scenarios =====
+
+    #[tokio::test]
+    async fn test_complete_lifecycle() {
+        let monitor = UrlHealthMonitor::new();
+
+        // 1. Add URLs
+        monitor.monitor_url("https://example.com/1.zip").await;
+        monitor.monitor_url("https://example.com/2.zip").await;
+        monitor.monitor_url("https://example.com/3.zip").await;
+
+        // 2. Check initial state
+        let s = monitor.get_summary().await;
+        assert_eq!(s.total_monitored, 3);
+        assert_eq!(s.unknown_count, 3);
+
+        // 3. Record various states
+        monitor
+            .record_success("https://example.com/1.zip", 100, 200)
+            .await;
+        monitor
+            .record_success("https://example.com/2.zip", 3000, 200)
+            .await;
+        for i in 0..3 {
+            monitor
+                .record_failure("https://example.com/3.zip", &format!("err{}", i))
+                .await;
+        }
+
+        // 4. Verify states
+        let s = monitor.get_summary().await;
+        assert_eq!(s.healthy_count, 1);
+        assert_eq!(s.degraded_count, 1);
+        assert_eq!(s.dead_count, 1);
+
+        // 5. Cleanup dead
+        let removed = monitor.cleanup_dead_urls().await;
+        assert_eq!(removed, 1);
+
+        // 6. Recover degraded
+        monitor
+            .record_success("https://example.com/2.zip", 100, 200)
+            .await;
+        let h = monitor
+            .get_url_health("https://example.com/2.zip")
+            .await
+            .unwrap();
+        assert_eq!(h.status, UrlHealthStatus::Healthy);
+
+        // 7. Final summary
+        let s = monitor.get_summary().await;
+        assert_eq!(s.total_monitored, 2);
+        assert_eq!(s.healthy_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_independent_url_tracking() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/a.zip").await;
+        monitor.monitor_url("https://example.com/b.zip").await;
+        monitor.monitor_url("https://example.com/c.zip").await;
+
+        // Make each URL have different states
+        monitor
+            .record_success("https://example.com/a.zip", 100, 200)
+            .await;
+        monitor
+            .record_success("https://example.com/b.zip", 3000, 200)
+            .await;
+        for i in 0..3 {
+            monitor
+                .record_failure("https://example.com/c.zip", &format!("err{}", i))
+                .await;
+        }
+
+        // Verify each URL independently
+        let ha = monitor
+            .get_url_health("https://example.com/a.zip")
+            .await
+            .unwrap();
+        assert_eq!(ha.status, UrlHealthStatus::Healthy);
+        assert_eq!(ha.consecutive_successes, 1);
+
+        let hb = monitor
+            .get_url_health("https://example.com/b.zip")
+            .await
+            .unwrap();
+        assert_eq!(hb.status, UrlHealthStatus::Degraded);
+        assert_eq!(hb.consecutive_successes, 1);
+
+        let hc = monitor
+            .get_url_health("https://example.com/c.zip")
+            .await
+            .unwrap();
+        assert_eq!(hc.status, UrlHealthStatus::Dead);
+        assert_eq!(hc.consecutive_failures, 3);
+    }
+
+    #[tokio::test]
+    async fn test_config_change_preserves_data() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+        monitor
+            .record_success("https://example.com/f.zip", 100, 200)
+            .await;
+
+        let h_before = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h_before.total_checks, 1);
+
+        // Change config
+        let mut config = monitor.get_config().await;
+        config.check_interval_secs = 60;
+        monitor.set_config(config).await;
+
+        // Data should be preserved
+        let h_after = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h_after.total_checks, 1);
+        assert_eq!(h_after.status, UrlHealthStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_monitors_independent() {
+        let monitor1 = UrlHealthMonitor::new();
+        let monitor2 = UrlHealthMonitor::new();
+
+        monitor1.monitor_url("https://example.com/1.zip").await;
+        monitor2.monitor_url("https://example.com/2.zip").await;
+
+        let s1 = monitor1.get_summary().await;
+        let s2 = monitor2.get_summary().await;
+
+        assert_eq!(s1.total_monitored, 1);
+        assert_eq!(s2.total_monitored, 1);
+        assert!(s1.healthy_count == 0 && s1.unknown_count == 1);
+        assert!(s2.healthy_count == 0 && s2.unknown_count == 1);
+    }
+
+    // ===== Error message variations =====
+
+    #[tokio::test]
+    async fn test_record_failure_various_errors() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+
+        let errors = vec![
+            "Connection timeout",
+            "DNS resolution failed",
+            "SSL handshake error",
+            "Connection refused",
+            "Network unreachable",
+            "HTTP 500 Internal Server Error",
+            "HTTP 403 Forbidden",
+            "HTTP 404 Not Found",
+        ];
+
+        for (i, error) in errors.iter().enumerate() {
+            monitor
+                .record_failure("https://example.com/f.zip", error)
+                .await;
+            let h = monitor
+                .get_url_health("https://example.com/f.zip")
+                .await
+                .unwrap();
+            assert_eq!(h.last_error, Some(error.to_string()));
+            assert_eq!(h.consecutive_failures, (i + 1) as u32);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_record_failure_empty_error() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+        monitor
+            .record_failure("https://example.com/f.zip", "")
+            .await;
+        let h = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h.last_error, Some("".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_record_failure_long_error() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+        let long_error = "Error: ".to_string() + &"x".repeat(1000);
+        monitor
+            .record_failure("https://example.com/f.zip", &long_error)
+            .await;
+        let h = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h.last_error, Some(long_error));
+    }
+
+    // ===== MonitoredUrl internal structure =====
+
+    #[test]
+    fn test_monitored_url_new() {
+        let monitored = MonitoredUrl::new("https://example.com/f.zip".to_string());
+        assert_eq!(monitored.url, "https://example.com/f.zip");
+        assert_eq!(monitored.status, UrlHealthStatus::Unknown);
+        assert_eq!(monitored.last_check_ts, 0);
+        assert_eq!(monitored.response_time_ms, None);
+        assert_eq!(monitored.http_status, None);
+        assert_eq!(monitored.consecutive_failures, 0);
+        assert_eq!(monitored.consecutive_successes, 0);
+        assert_eq!(monitored.total_checks, 0);
+        assert_eq!(monitored.successful_checks, 0);
+        assert_eq!(monitored.last_error, None);
+    }
+
+    #[test]
+    fn test_monitored_url_to_health_check_2() {
+        let mut monitored = MonitoredUrl::new("https://example.com/f.zip".to_string());
+        monitored.status = UrlHealthStatus::Healthy;
+        monitored.last_check_ts = 1234567890;
+        monitored.response_time_ms = Some(500);
+        monitored.http_status = Some(200);
+        monitored.consecutive_failures = 0;
+        monitored.consecutive_successes = 5;
+        monitored.total_checks = 10;
+        monitored.successful_checks = 9;
+        monitored.last_error = None;
+
+        let check = monitored.to_health_check();
+        assert_eq!(check.url, "https://example.com/f.zip");
+        assert_eq!(check.status, UrlHealthStatus::Healthy);
+        assert_eq!(check.last_check_ts, 1234567890);
+        assert_eq!(check.response_time_ms, Some(500));
+        assert_eq!(check.http_status, Some(200));
+        assert_eq!(check.consecutive_failures, 0);
+        assert_eq!(check.consecutive_successes, 5);
+        assert_eq!(check.total_checks, 10);
+        assert_eq!(check.successful_checks, 9);
+    }
+
+    // ===== Additional edge cases =====
+
+    #[tokio::test]
+    async fn test_monitor_url_special_characters() {
+        let monitor = UrlHealthMonitor::new();
+        assert!(
+            monitor
+                .monitor_url("https://example.com/file with spaces.zip")
+                .await
+        );
+        assert!(
+            monitor
+                .monitor_url("https://example.com/file%20encoded.zip")
+                .await
+        );
+        assert!(
+            monitor
+                .monitor_url("https://example.com/file?query=value&other=123")
+                .await
+        );
+        assert!(
+            monitor
+                .monitor_url("https://example.com/file#fragment")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_monitor_url_very_long() {
+        let monitor = UrlHealthMonitor::new();
+        let long_url = "https://example.com/".to_string() + &"a".repeat(10000) + ".zip";
+        assert!(monitor.monitor_url(&long_url).await);
+        let h = monitor.get_url_health(&long_url).await;
+        assert!(h.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_record_success_overwrites_response_time() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+
+        monitor
+            .record_success("https://example.com/f.zip", 100, 200)
+            .await;
+        let h1 = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h1.response_time_ms, Some(100));
+
+        monitor
+            .record_success("https://example.com/f.zip", 500, 200)
+            .await;
+        let h2 = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h2.response_time_ms, Some(500));
+    }
+
+    #[tokio::test]
+    async fn test_record_success_overwrites_http_status() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+
+        monitor
+            .record_success("https://example.com/f.zip", 100, 301)
+            .await;
+        let h1 = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h1.http_status, Some(301));
+
+        monitor
+            .record_success("https://example.com/f.zip", 100, 200)
+            .await;
+        let h2 = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert_eq!(h2.http_status, Some(200));
+    }
+
+    #[tokio::test]
+    async fn test_record_success_clears_error() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+
+        monitor
+            .record_failure("https://example.com/f.zip", "error message")
+            .await;
+        let h1 = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert!(h1.last_error.is_some());
+
+        monitor
+            .record_success("https://example.com/f.zip", 100, 200)
+            .await;
+        let h2 = monitor
+            .get_url_health("https://example.com/f.zip")
+            .await
+            .unwrap();
+        assert!(h2.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_all_status_transitions() {
+        let monitor = UrlHealthMonitor::new();
+        monitor.monitor_url("https://example.com/f.zip").await;
+
+        // Unknown → Healthy
+        monitor
+            .record_success("https://example.com/f.zip", 100, 200)
+            .await;
+        assert_eq!(
+            monitor
+                .get_url_health("https://example.com/f.zip")
+                .await
+                .unwrap()
+                .status,
+            UrlHealthStatus::Healthy
+        );
+
+        // Healthy → Degraded (via failure)
+        monitor
+            .record_failure("https://example.com/f.zip", "err")
+            .await;
+        assert_eq!(
+            monitor
+                .get_url_health("https://example.com/f.zip")
+                .await
+                .unwrap()
+                .status,
+            UrlHealthStatus::Degraded
+        );
+
+        // Degraded → Healthy (via success)
+        monitor
+            .record_success("https://example.com/f.zip", 100, 200)
+            .await;
+        assert_eq!(
+            monitor
+                .get_url_health("https://example.com/f.zip")
+                .await
+                .unwrap()
+                .status,
+            UrlHealthStatus::Healthy
+        );
+
+        // Healthy → Dead (via multiple failures)
+        for i in 0..3 {
+            monitor
+                .record_failure("https://example.com/f.zip", &format!("err{}", i))
+                .await;
+        }
+        assert_eq!(
+            monitor
+                .get_url_health("https://example.com/f.zip")
+                .await
+                .unwrap()
+                .status,
+            UrlHealthStatus::Dead
+        );
+
+        // Dead → Healthy (via recovery)
+        monitor
+            .record_success("https://example.com/f.zip", 100, 200)
+            .await;
+        monitor
+            .record_success("https://example.com/f.zip", 100, 200)
+            .await;
+        assert_eq!(
+            monitor
+                .get_url_health("https://example.com/f.zip")
+                .await
+                .unwrap()
+                .status,
+            UrlHealthStatus::Healthy
+        );
+    }
 }

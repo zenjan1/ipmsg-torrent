@@ -804,4 +804,964 @@ mod tests {
         assert_eq!(deserialized.task_count(), 1);
         assert_eq!(deserialized.total_events(), 1);
     }
+
+    // ===== Phase 221: Comprehensive Test Coverage =====
+
+    // --- ActivityEventType: all 23 variants Display ---
+    #[test]
+    fn test_all_event_types_display() {
+        assert_eq!(ActivityEventType::Created.to_string(), "created");
+        assert_eq!(ActivityEventType::Started.to_string(), "started");
+        assert_eq!(ActivityEventType::Paused.to_string(), "paused");
+        assert_eq!(ActivityEventType::Resumed.to_string(), "resumed");
+        assert_eq!(ActivityEventType::Completed.to_string(), "completed");
+        assert_eq!(ActivityEventType::Failed.to_string(), "failed");
+        assert_eq!(ActivityEventType::Removed.to_string(), "removed");
+        assert_eq!(ActivityEventType::AutoRetry.to_string(), "auto_retry");
+        assert_eq!(
+            ActivityEventType::SpeedLimitChanged.to_string(),
+            "speed_limit_changed"
+        );
+        assert_eq!(
+            ActivityEventType::MirrorSwitched.to_string(),
+            "mirror_switched"
+        );
+        assert_eq!(
+            ActivityEventType::ConnectionError.to_string(),
+            "connection_error"
+        );
+        assert_eq!(ActivityEventType::Timeout.to_string(), "timeout");
+        assert_eq!(
+            ActivityEventType::ChecksumVerify.to_string(),
+            "checksum_verify"
+        );
+        assert_eq!(
+            ActivityEventType::ChecksumResult.to_string(),
+            "checksum_result"
+        );
+        assert_eq!(ActivityEventType::HookExecuted.to_string(), "hook_executed");
+        assert_eq!(ActivityEventType::CooldownTriggered.to_string(), "cooldown");
+        assert_eq!(
+            ActivityEventType::ConflictResolved.to_string(),
+            "conflict_resolved"
+        );
+        assert_eq!(ActivityEventType::ProgressMilestone.to_string(), "progress");
+        assert_eq!(ActivityEventType::NoteChanged.to_string(), "note_changed");
+        assert_eq!(ActivityEventType::CommentAdded.to_string(), "comment_added");
+        assert_eq!(ActivityEventType::TagsChanged.to_string(), "tags_changed");
+        assert_eq!(ActivityEventType::Info.to_string(), "info");
+        assert_eq!(ActivityEventType::Warning.to_string(), "warning");
+    }
+
+    // --- ActivityEventType: all 23 variants icon ---
+    #[test]
+    fn test_all_event_types_icons() {
+        assert_eq!(ActivityEventType::Created.icon(), "🆕");
+        assert_eq!(ActivityEventType::Started.icon(), "▶️");
+        assert_eq!(ActivityEventType::Paused.icon(), "⏸️");
+        assert_eq!(ActivityEventType::Resumed.icon(), "🔄");
+        assert_eq!(ActivityEventType::Completed.icon(), "✅");
+        assert_eq!(ActivityEventType::Failed.icon(), "❌");
+        assert_eq!(ActivityEventType::Removed.icon(), "🗑️");
+        assert_eq!(ActivityEventType::AutoRetry.icon(), "🔁");
+        assert_eq!(ActivityEventType::SpeedLimitChanged.icon(), "🚦");
+        assert_eq!(ActivityEventType::MirrorSwitched.icon(), "🔀");
+        assert_eq!(ActivityEventType::ConnectionError.icon(), "🔌");
+        assert_eq!(ActivityEventType::Timeout.icon(), "⏰");
+        assert_eq!(ActivityEventType::ChecksumVerify.icon(), "🔍");
+        assert_eq!(ActivityEventType::ChecksumResult.icon(), "🔐");
+        assert_eq!(ActivityEventType::HookExecuted.icon(), "🪝");
+        assert_eq!(ActivityEventType::CooldownTriggered.icon(), "🧊");
+        assert_eq!(ActivityEventType::ConflictResolved.icon(), "⚖️");
+        assert_eq!(ActivityEventType::ProgressMilestone.icon(), "📊");
+        assert_eq!(ActivityEventType::NoteChanged.icon(), "📝");
+        assert_eq!(ActivityEventType::CommentAdded.icon(), "💬");
+        assert_eq!(ActivityEventType::TagsChanged.icon(), "🏷️");
+        assert_eq!(ActivityEventType::Info.icon(), "ℹ️");
+        assert_eq!(ActivityEventType::Warning.icon(), "⚠️");
+    }
+
+    // --- ActivityEventType: all is_error variants ---
+    #[test]
+    fn test_all_is_error_variants() {
+        let error_types = [
+            ActivityEventType::Failed,
+            ActivityEventType::ConnectionError,
+            ActivityEventType::Timeout,
+            ActivityEventType::Warning,
+        ];
+        for et in &error_types {
+            assert!(et.is_error(), "{:?} should be error", et);
+        }
+
+        let non_error_types = [
+            ActivityEventType::Created,
+            ActivityEventType::Started,
+            ActivityEventType::Paused,
+            ActivityEventType::Resumed,
+            ActivityEventType::Completed,
+            ActivityEventType::Removed,
+            ActivityEventType::AutoRetry,
+            ActivityEventType::SpeedLimitChanged,
+            ActivityEventType::MirrorSwitched,
+            ActivityEventType::ChecksumVerify,
+            ActivityEventType::ChecksumResult,
+            ActivityEventType::HookExecuted,
+            ActivityEventType::CooldownTriggered,
+            ActivityEventType::ConflictResolved,
+            ActivityEventType::ProgressMilestone,
+            ActivityEventType::NoteChanged,
+            ActivityEventType::CommentAdded,
+            ActivityEventType::TagsChanged,
+            ActivityEventType::Info,
+        ];
+        for et in &non_error_types {
+            assert!(!et.is_error(), "{:?} should not be error", et);
+        }
+    }
+
+    // --- ActivityEventType: serde roundtrip all variants ---
+    #[test]
+    fn test_event_type_serde_all_variants() {
+        let all_types = vec![
+            ActivityEventType::Created,
+            ActivityEventType::Started,
+            ActivityEventType::Paused,
+            ActivityEventType::Resumed,
+            ActivityEventType::Completed,
+            ActivityEventType::Failed,
+            ActivityEventType::Removed,
+            ActivityEventType::AutoRetry,
+            ActivityEventType::SpeedLimitChanged,
+            ActivityEventType::MirrorSwitched,
+            ActivityEventType::ConnectionError,
+            ActivityEventType::Timeout,
+            ActivityEventType::ChecksumVerify,
+            ActivityEventType::ChecksumResult,
+            ActivityEventType::HookExecuted,
+            ActivityEventType::CooldownTriggered,
+            ActivityEventType::ConflictResolved,
+            ActivityEventType::ProgressMilestone,
+            ActivityEventType::NoteChanged,
+            ActivityEventType::CommentAdded,
+            ActivityEventType::TagsChanged,
+            ActivityEventType::Info,
+            ActivityEventType::Warning,
+        ];
+        for et in &all_types {
+            let json = serde_json::to_string(et).unwrap();
+            let de: ActivityEventType = serde_json::from_str(&json).unwrap();
+            assert_eq!(&de, et);
+        }
+    }
+
+    // --- ActivityEventType: snake_case serde values ---
+    #[test]
+    fn test_event_type_snake_case_serde() {
+        let json = r#""speed_limit_changed""#;
+        let et: ActivityEventType = serde_json::from_str(json).unwrap();
+        assert_eq!(et, ActivityEventType::SpeedLimitChanged);
+
+        let json = r#""mirror_switched""#;
+        let et: ActivityEventType = serde_json::from_str(json).unwrap();
+        assert_eq!(et, ActivityEventType::MirrorSwitched);
+
+        let json = r#""connection_error""#;
+        let et: ActivityEventType = serde_json::from_str(json).unwrap();
+        assert_eq!(et, ActivityEventType::ConnectionError);
+
+        let json = r#""checksum_verify""#;
+        let et: ActivityEventType = serde_json::from_str(json).unwrap();
+        assert_eq!(et, ActivityEventType::ChecksumVerify);
+
+        let json = r#""cooldown_triggered""#;
+        let et: ActivityEventType = serde_json::from_str(json).unwrap();
+        assert_eq!(et, ActivityEventType::CooldownTriggered);
+
+        let json = r#""conflict_resolved""#;
+        let et: ActivityEventType = serde_json::from_str(json).unwrap();
+        assert_eq!(et, ActivityEventType::ConflictResolved);
+
+        let json = r#""progress_milestone""#;
+        let et: ActivityEventType = serde_json::from_str(json).unwrap();
+        assert_eq!(et, ActivityEventType::ProgressMilestone);
+
+        let json = r#""note_changed""#;
+        let et: ActivityEventType = serde_json::from_str(json).unwrap();
+        assert_eq!(et, ActivityEventType::NoteChanged);
+
+        let json = r#""comment_added""#;
+        let et: ActivityEventType = serde_json::from_str(json).unwrap();
+        assert_eq!(et, ActivityEventType::CommentAdded);
+
+        let json = r#""tags_changed""#;
+        let et: ActivityEventType = serde_json::from_str(json).unwrap();
+        assert_eq!(et, ActivityEventType::TagsChanged);
+    }
+
+    // --- ActivityEventType: Clone/Copy/Debug/Eq ---
+    #[test]
+    fn test_event_type_traits() {
+        let et = ActivityEventType::Created;
+        let cloned = et.clone();
+        assert_eq!(et, cloned);
+        // Debug
+        let debug = format!("{:?}", et);
+        assert!(debug.contains("Created"));
+    }
+
+    // --- ActivityEvent: serde roundtrip with/without numeric_value ---
+    #[test]
+    fn test_activity_event_serde_with_value() {
+        let event =
+            ActivityEvent::new(ActivityEventType::ProgressMilestone, "50%").with_value(50.0);
+        let json = serde_json::to_string(&event).unwrap();
+        let de: ActivityEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.event_type, ActivityEventType::ProgressMilestone);
+        assert_eq!(de.message, "50%");
+        assert_eq!(de.numeric_value, Some(50.0));
+    }
+
+    #[test]
+    fn test_activity_event_serde_without_value() {
+        let event = ActivityEvent::new(ActivityEventType::Created, "new task");
+        let json = serde_json::to_string(&event).unwrap();
+        let de: ActivityEvent = serde_json::from_str(&json).unwrap();
+        assert!(de.numeric_value.is_none());
+    }
+
+    // --- ActivityEvent: empty message ---
+    #[test]
+    fn test_activity_event_empty_message() {
+        let event = ActivityEvent::new(ActivityEventType::Info, "");
+        assert_eq!(event.message, "");
+        let display = event.format_display();
+        assert!(display.contains("info"));
+    }
+
+    // --- ActivityEvent: Unicode message ---
+    #[test]
+    fn test_activity_event_unicode_message() {
+        let event = ActivityEvent::new(ActivityEventType::Info, "中文消息 🎉");
+        assert_eq!(event.message, "中文消息 🎉");
+    }
+
+    // --- ActivityEvent: with_value chaining ---
+    #[test]
+    fn test_activity_event_with_value_chaining() {
+        let event =
+            ActivityEvent::new(ActivityEventType::SpeedLimitChanged, "limited").with_value(1024.0);
+        assert_eq!(event.numeric_value, Some(1024.0));
+        assert_eq!(event.event_type, ActivityEventType::SpeedLimitChanged);
+    }
+
+    // --- ActivityEvent: zero/negative numeric values ---
+    #[test]
+    fn test_activity_event_numeric_edge_values() {
+        let zero = ActivityEvent::new(ActivityEventType::Info, "zero").with_value(0.0);
+        assert_eq!(zero.numeric_value, Some(0.0));
+
+        let neg = ActivityEvent::new(ActivityEventType::Info, "neg").with_value(-42.5);
+        assert_eq!(neg.numeric_value, Some(-42.5));
+
+        let big = ActivityEvent::new(ActivityEventType::Info, "big").with_value(f64::MAX);
+        assert_eq!(big.numeric_value, Some(f64::MAX));
+    }
+
+    // --- ActivityEvent: format_display without numeric value ---
+    #[test]
+    fn test_activity_event_format_no_value() {
+        let event = ActivityEvent::new(ActivityEventType::Created, "new task");
+        let display = event.format_display();
+        assert!(display.contains("🆕"));
+        assert!(display.contains("created"));
+        assert!(display.contains("new task"));
+        // Should not have parentheses for value
+        assert!(!display.contains("("));
+    }
+
+    // --- TaskActivityLog: events_reverse ---
+    #[test]
+    fn test_task_activity_log_events_reverse() {
+        let mut log = TaskActivityLog::new("t1", "test");
+        for i in 0..5 {
+            log.log(ActivityEvent::new(
+                ActivityEventType::Info,
+                format!("{}", i),
+            ));
+        }
+        let rev: Vec<_> = log.events_reverse().collect();
+        assert_eq!(rev.len(), 5);
+        assert_eq!(rev[0].message, "4");
+        assert_eq!(rev[4].message, "0");
+    }
+
+    // --- TaskActivityLog: events_reverse empty ---
+    #[test]
+    fn test_task_activity_log_events_reverse_empty() {
+        let log = TaskActivityLog::new("t1", "test");
+        let rev: Vec<_> = log.events_reverse().collect();
+        assert!(rev.is_empty());
+    }
+
+    // --- TaskActivityLog: recent with n > len ---
+    #[test]
+    fn test_task_activity_log_recent_more_than_available() {
+        let mut log = TaskActivityLog::new("t1", "test");
+        log.log(ActivityEvent::new(ActivityEventType::Info, "a"));
+        log.log(ActivityEvent::new(ActivityEventType::Info, "b"));
+        let recent = log.recent(100);
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].message, "b");
+    }
+
+    // --- TaskActivityLog: recent(0) ---
+    #[test]
+    fn test_task_activity_log_recent_zero() {
+        let mut log = TaskActivityLog::new("t1", "test");
+        log.log(ActivityEvent::new(ActivityEventType::Info, "a"));
+        let recent = log.recent(0);
+        assert!(recent.is_empty());
+    }
+
+    // --- TaskActivityLog: events_by_type with no matches ---
+    #[test]
+    fn test_task_activity_log_events_by_type_no_match() {
+        let mut log = TaskActivityLog::new("t1", "test");
+        log.log(ActivityEvent::new(ActivityEventType::Info, "a"));
+        let result = log.events_by_type(&ActivityEventType::Failed);
+        assert!(result.is_empty());
+    }
+
+    // --- TaskActivityLog: events_by_type with multiple matches ---
+    #[test]
+    fn test_task_activity_log_events_by_type_multiple() {
+        let mut log = TaskActivityLog::new("t1", "test");
+        for _ in 0..5 {
+            log.log(ActivityEvent::new(ActivityEventType::Info, "x"));
+        }
+        let result = log.events_by_type(&ActivityEventType::Info);
+        assert_eq!(result.len(), 5);
+    }
+
+    // --- TaskActivityLog: errors empty ---
+    #[test]
+    fn test_task_activity_log_errors_empty() {
+        let mut log = TaskActivityLog::new("t1", "test");
+        log.log(ActivityEvent::new(ActivityEventType::Info, "ok"));
+        log.log(ActivityEvent::new(ActivityEventType::Completed, "done"));
+        assert!(log.errors().is_empty());
+    }
+
+    // --- TaskActivityLog: with_max_events(0) allows nothing ---
+    #[test]
+    fn test_task_activity_log_max_events_zero() {
+        let mut log = TaskActivityLog::new("t1", "test").with_max_events(0);
+        log.log(ActivityEvent::new(ActivityEventType::Info, "a"));
+        // With max_events=0, each log pops front before push, so only 1 remains
+        assert_eq!(log.len(), 1);
+    }
+
+    // --- TaskActivityLog: with_max_events(1) keeps only latest ---
+    #[test]
+    fn test_task_activity_log_max_events_one() {
+        let mut log = TaskActivityLog::new("t1", "test").with_max_events(1);
+        log.log(ActivityEvent::new(ActivityEventType::Info, "first"));
+        log.log(ActivityEvent::new(ActivityEventType::Info, "second"));
+        assert_eq!(log.len(), 1);
+        let ev = log.events().next().unwrap();
+        assert_eq!(ev.message, "second");
+    }
+
+    // --- TaskActivityLog: task_id and task_name fields ---
+    #[test]
+    fn test_task_activity_log_fields() {
+        let log = TaskActivityLog::new("my-id", "my-name");
+        assert_eq!(log.task_id, "my-id");
+        assert_eq!(log.task_name, "my-name");
+    }
+
+    // --- TaskActivityLog: summary type_counts correctness ---
+    #[test]
+    fn test_task_activity_summary_type_counts() {
+        let mut log = TaskActivityLog::new("t1", "test");
+        log.log(ActivityEvent::new(ActivityEventType::Info, "a"));
+        log.log(ActivityEvent::new(ActivityEventType::Info, "b"));
+        log.log(ActivityEvent::new(ActivityEventType::Info, "c"));
+        log.log(ActivityEvent::new(ActivityEventType::Failed, "err"));
+
+        let summary = log.summary();
+        assert_eq!(*summary.type_counts.get("info").unwrap(), 3);
+        assert_eq!(*summary.type_counts.get("failed").unwrap(), 1);
+        assert_eq!(summary.type_counts.len(), 2);
+    }
+
+    // --- TaskActivityLog: summary on empty log ---
+    #[test]
+    fn test_task_activity_summary_empty() {
+        let log = TaskActivityLog::new("t1", "test");
+        let summary = log.summary();
+        assert_eq!(summary.total_events, 0);
+        assert_eq!(summary.error_count, 0);
+        assert!(summary.first_event.is_none());
+        assert!(summary.last_event.is_none());
+        assert!(summary.type_counts.is_empty());
+    }
+
+    // --- TaskActivityLog: summary error_count ---
+    #[test]
+    fn test_task_activity_summary_error_count() {
+        let mut log = TaskActivityLog::new("t1", "test");
+        log.log(ActivityEvent::new(ActivityEventType::Failed, "f1"));
+        log.log(ActivityEvent::new(ActivityEventType::Timeout, "t1"));
+        log.log(ActivityEvent::new(ActivityEventType::ConnectionError, "c1"));
+        log.log(ActivityEvent::new(ActivityEventType::Warning, "w1"));
+        log.log(ActivityEvent::new(ActivityEventType::Info, "ok"));
+
+        let summary = log.summary();
+        assert_eq!(summary.error_count, 4);
+    }
+
+    // --- TaskActivityLog: serde roundtrip ---
+    #[test]
+    fn test_task_activity_log_serde_roundtrip() {
+        let mut log = TaskActivityLog::new("t1", "test.txt").with_max_events(50);
+        log.log(ActivityEvent::new(ActivityEventType::Created, "created").with_value(1.0));
+        log.log(ActivityEvent::new(ActivityEventType::Started, "started"));
+
+        let json = serde_json::to_string(&log).unwrap();
+        let de: TaskActivityLog = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.task_id, "t1");
+        assert_eq!(de.task_name, "test.txt");
+        assert_eq!(de.len(), 2);
+        let events: Vec<_> = de.events().collect();
+        assert_eq!(events[0].numeric_value, Some(1.0));
+    }
+
+    // --- TaskActivityLog: serde extra fields ignored ---
+    #[test]
+    fn test_task_activity_log_serde_extra_fields() {
+        let mut log = TaskActivityLog::new("t1", "test");
+        log.log(ActivityEvent::new(ActivityEventType::Info, "x"));
+        let mut json: serde_json::Value = serde_json::to_value(&log).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("extra_field".into(), serde_json::json!("ignored"));
+        let de: TaskActivityLog = serde_json::from_value(json).unwrap();
+        assert_eq!(de.task_id, "t1");
+        assert_eq!(de.len(), 1);
+    }
+
+    // --- TaskActivityLog: format_display with errors ---
+    #[test]
+    fn test_task_activity_log_format_display_with_errors() {
+        let mut log = TaskActivityLog::new("t1", "movie.mkv");
+        log.log(ActivityEvent::new(ActivityEventType::Created, "added"));
+        log.log(ActivityEvent::new(
+            ActivityEventType::ConnectionError,
+            "conn refused",
+        ));
+        log.log(ActivityEvent::new(ActivityEventType::Failed, "gave up"));
+
+        let display = log.format_display(100);
+        assert!(display.contains("Errors: 2"));
+        assert!(display.contains("connection_error"));
+        assert!(display.contains("failed"));
+    }
+
+    // --- TaskActivityLog: format_display respects max_lines ---
+    #[test]
+    fn test_task_activity_log_format_display_max_lines() {
+        let mut log = TaskActivityLog::new("t1", "test");
+        for i in 0..20 {
+            log.log(ActivityEvent::new(
+                ActivityEventType::Info,
+                format!("event {}", i),
+            ));
+        }
+        let display = log.format_display(5);
+        // Header lines + 5 event lines
+        let lines: Vec<_> = display.lines().collect();
+        // header: name, total events, errors line (if any), blank line, then 5 events
+        // With 20 events and no errors: name + total + blank + 5 events = 8 lines
+        assert_eq!(lines.len(), 8);
+    }
+
+    // --- TaskActivitySummary: serde roundtrip ---
+    #[test]
+    fn test_task_activity_summary_serde() {
+        let mut log = TaskActivityLog::new("t1", "test");
+        log.log(ActivityEvent::new(ActivityEventType::Created, "x"));
+        let summary = log.summary();
+        let json = serde_json::to_string(&summary).unwrap();
+        let de: TaskActivitySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.task_id, "t1");
+        assert_eq!(de.total_events, 1);
+    }
+
+    // --- TaskActivitySummary: Clone/Debug ---
+    #[test]
+    fn test_task_activity_summary_clone_debug() {
+        let mut log = TaskActivityLog::new("t1", "test");
+        log.log(ActivityEvent::new(ActivityEventType::Info, "x"));
+        let summary = log.summary();
+        let cloned = summary.clone();
+        assert_eq!(cloned.task_id, "t1");
+        let debug = format!("{:?}", summary);
+        assert!(debug.contains("TaskActivitySummary"));
+    }
+
+    // --- ActivityLogManager: default trait ---
+    #[test]
+    fn test_activity_log_manager_default() {
+        let mgr = ActivityLogManager::default();
+        assert_eq!(mgr.task_count(), 0);
+        assert_eq!(mgr.total_events(), 0);
+    }
+
+    // --- ActivityLogManager: default equals new ---
+    #[test]
+    fn test_activity_log_manager_default_equals_new() {
+        let d = ActivityLogManager::default();
+        let n = ActivityLogManager::new();
+        assert_eq!(d.task_count(), n.task_count());
+        assert_eq!(d.total_events(), n.total_events());
+    }
+
+    // --- ActivityLogManager: with_limits ---
+    #[test]
+    fn test_activity_log_manager_with_limits() {
+        let mgr = ActivityLogManager::new().with_limits(5, 20);
+        assert_eq!(mgr.max_tasks, 5);
+        assert_eq!(mgr.default_max_events, 20);
+    }
+
+    // --- ActivityLogManager: get_or_create creates new ---
+    #[test]
+    fn test_activity_log_manager_get_or_create_new() {
+        let mut mgr = ActivityLogManager::new();
+        let log = mgr.get_or_create("t1", "file.txt");
+        assert_eq!(log.task_id, "t1");
+        assert_eq!(log.task_name, "file.txt");
+        assert!(log.is_empty());
+    }
+
+    // --- ActivityLogManager: get_or_create returns existing ---
+    #[test]
+    fn test_activity_log_manager_get_or_create_existing() {
+        let mut mgr = ActivityLogManager::new();
+        mgr.log_event(
+            "t1",
+            "file.txt",
+            ActivityEvent::new(ActivityEventType::Info, "x"),
+        );
+        let log = mgr.get_or_create("t1", "file.txt");
+        assert_eq!(log.len(), 1);
+    }
+
+    // --- ActivityLogManager: remove idempotent ---
+    #[test]
+    fn test_activity_log_manager_remove_idempotent() {
+        let mut mgr = ActivityLogManager::new();
+        assert!(mgr.remove("nonexistent").is_none());
+        mgr.log_event("t1", "f", ActivityEvent::new(ActivityEventType::Info, "x"));
+        assert!(mgr.remove("t1").is_some());
+        assert!(mgr.remove("t1").is_none());
+    }
+
+    // --- ActivityLogManager: clear_all ---
+    #[test]
+    fn test_activity_log_manager_clear_all() {
+        let mut mgr = ActivityLogManager::new();
+        mgr.log_event("t1", "a", ActivityEvent::new(ActivityEventType::Info, "x"));
+        mgr.log_event("t2", "b", ActivityEvent::new(ActivityEventType::Info, "y"));
+        assert_eq!(mgr.task_count(), 2);
+        mgr.clear_all();
+        assert_eq!(mgr.task_count(), 0);
+        assert_eq!(mgr.total_events(), 0);
+    }
+
+    // --- ActivityLogManager: clear_task on nonexistent ---
+    #[test]
+    fn test_activity_log_manager_clear_task_nonexistent() {
+        let mut mgr = ActivityLogManager::new();
+        mgr.clear_task("nonexistent"); // should not panic
+    }
+
+    // --- ActivityLogManager: task_summary ---
+    #[test]
+    fn test_activity_log_manager_task_summary() {
+        let mut mgr = ActivityLogManager::new();
+        mgr.log_event(
+            "t1",
+            "a",
+            ActivityEvent::new(ActivityEventType::Created, "x"),
+        );
+        mgr.log_event(
+            "t1",
+            "a",
+            ActivityEvent::new(ActivityEventType::Failed, "err"),
+        );
+
+        let summary = mgr.task_summary("t1").unwrap();
+        assert_eq!(summary.total_events, 2);
+        assert_eq!(summary.error_count, 1);
+    }
+
+    // --- ActivityLogManager: task_summary nonexistent ---
+    #[test]
+    fn test_activity_log_manager_task_summary_nonexistent() {
+        let mgr = ActivityLogManager::new();
+        assert!(mgr.task_summary("nonexistent").is_none());
+    }
+
+    // --- ActivityLogManager: all_summaries empty ---
+    #[test]
+    fn test_activity_log_manager_all_summaries_empty() {
+        let mgr = ActivityLogManager::new();
+        assert!(mgr.all_summaries().is_empty());
+    }
+
+    // --- ActivityLogManager: task_ids empty ---
+    #[test]
+    fn test_activity_log_manager_task_ids_empty() {
+        let mgr = ActivityLogManager::new();
+        assert!(mgr.task_ids().is_empty());
+    }
+
+    // --- ActivityLogManager: eviction with max_tasks=1 ---
+    #[test]
+    fn test_activity_log_manager_eviction_max_one() {
+        let mut mgr = ActivityLogManager::new().with_limits(1, 10);
+        mgr.log_event("t1", "a", ActivityEvent::new(ActivityEventType::Info, "1"));
+        assert_eq!(mgr.task_count(), 1);
+        mgr.log_event("t2", "b", ActivityEvent::new(ActivityEventType::Info, "2"));
+        assert_eq!(mgr.task_count(), 1);
+        // t1 should be evicted
+        assert!(mgr.get("t1").is_none());
+        assert!(mgr.get("t2").is_some());
+    }
+
+    // --- ActivityLogManager: Unicode task_id and name ---
+    #[test]
+    fn test_activity_log_manager_unicode() {
+        let mut mgr = ActivityLogManager::new();
+        mgr.log_event(
+            "任务-1",
+            "文件名.txt",
+            ActivityEvent::new(ActivityEventType::Created, "创建"),
+        );
+        let log = mgr.get("任务-1").unwrap();
+        assert_eq!(log.task_name, "文件名.txt");
+    }
+
+    // --- ActivityLogManager: emoji task_id ---
+    #[test]
+    fn test_activity_log_manager_emoji_id() {
+        let mut mgr = ActivityLogManager::new();
+        mgr.log_event(
+            "🎯",
+            "target",
+            ActivityEvent::new(ActivityEventType::Info, "x"),
+        );
+        assert!(mgr.get("🎯").is_some());
+    }
+
+    // --- ActivityLogManager: Clone/Debug ---
+    #[test]
+    fn test_activity_log_manager_clone_debug() {
+        let mut mgr = ActivityLogManager::new();
+        mgr.log_event("t1", "a", ActivityEvent::new(ActivityEventType::Info, "x"));
+        let cloned = mgr.clone();
+        assert_eq!(cloned.task_count(), 1);
+        let debug = format!("{:?}", mgr);
+        assert!(debug.contains("ActivityLogManager"));
+    }
+
+    // --- ActivityLogManager: cloned independence ---
+    #[test]
+    fn test_activity_log_manager_clone_independence() {
+        let mut mgr = ActivityLogManager::new();
+        mgr.log_event("t1", "a", ActivityEvent::new(ActivityEventType::Info, "x"));
+        let mut cloned = mgr.clone();
+        cloned.log_event("t2", "b", ActivityEvent::new(ActivityEventType::Info, "y"));
+        assert_eq!(mgr.task_count(), 1);
+        assert_eq!(cloned.task_count(), 2);
+    }
+
+    // --- Persistence: save creates file ---
+    #[test]
+    fn test_save_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = ActivityLogManager::new();
+        save_activity_logs(&mgr, dir.path()).unwrap();
+        assert!(dir.path().join("task_activity_logs.json").exists());
+    }
+
+    // --- Persistence: overwrite ---
+    #[test]
+    fn test_persistence_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = ActivityLogManager::new();
+        mgr.log_event("t1", "a", ActivityEvent::new(ActivityEventType::Info, "1"));
+        save_activity_logs(&mgr, dir.path()).unwrap();
+
+        let mut mgr2 = ActivityLogManager::new();
+        mgr2.log_event("t2", "b", ActivityEvent::new(ActivityEventType::Info, "2"));
+        save_activity_logs(&mgr2, dir.path()).unwrap();
+
+        let loaded = load_activity_logs(dir.path()).unwrap();
+        assert!(loaded.get("t1").is_none());
+        assert!(loaded.get("t2").is_some());
+    }
+
+    // --- Persistence: no tmp file left ---
+    #[test]
+    fn test_persistence_no_tmp_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = ActivityLogManager::new();
+        save_activity_logs(&mgr, dir.path()).unwrap();
+        let tmp = dir.path().join("task_activity_logs.json.tmp");
+        assert!(!tmp.exists());
+    }
+
+    // --- Persistence: corrupt JSON ---
+    #[test]
+    fn test_persistence_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("task_activity_logs.json"),
+            "not valid json{{{",
+        )
+        .unwrap();
+        let result = load_activity_logs(dir.path());
+        assert!(result.is_none());
+    }
+
+    // --- Persistence: empty file ---
+    #[test]
+    fn test_persistence_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("task_activity_logs.json"), "").unwrap();
+        let result = load_activity_logs(dir.path());
+        assert!(result.is_none());
+    }
+
+    // --- Persistence: full roundtrip with data ---
+    #[test]
+    fn test_persistence_full_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = ActivityLogManager::new().with_limits(10, 50);
+        mgr.log_event(
+            "t1",
+            "电影.mkv",
+            ActivityEvent::new(ActivityEventType::Created, "添加"),
+        );
+        mgr.log_event(
+            "t1",
+            "电影.mkv",
+            ActivityEvent::new(ActivityEventType::Started, "开始下载").with_value(3.0),
+        );
+        mgr.log_event(
+            "t1",
+            "电影.mkv",
+            ActivityEvent::new(ActivityEventType::ConnectionError, "连接失败"),
+        );
+        mgr.log_event(
+            "t2",
+            "文档.pdf",
+            ActivityEvent::new(ActivityEventType::Completed, "完成"),
+        );
+
+        save_activity_logs(&mgr, dir.path()).unwrap();
+        let loaded = load_activity_logs(dir.path()).unwrap();
+
+        assert_eq!(loaded.task_count(), 2);
+        assert_eq!(loaded.total_events(), 4);
+        let log1 = loaded.get("t1").unwrap();
+        assert_eq!(log1.task_name, "电影.mkv");
+        assert_eq!(log1.len(), 3);
+        let events: Vec<_> = log1.events().collect();
+        assert_eq!(events[1].numeric_value, Some(3.0));
+    }
+
+    // --- Persistence: pretty JSON ---
+    #[test]
+    fn test_persistence_pretty_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = ActivityLogManager::new();
+        mgr.log_event(
+            "t1",
+            "test",
+            ActivityEvent::new(ActivityEventType::Info, "x"),
+        );
+        save_activity_logs(&mgr, dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("task_activity_logs.json")).unwrap();
+        // Pretty JSON should have newlines and indentation
+        assert!(content.contains('\n'));
+        assert!(content.contains("  "));
+    }
+
+    // --- Constants ---
+    #[test]
+    fn test_default_constants() {
+        assert_eq!(DEFAULT_MAX_EVENTS, 100);
+        assert_eq!(DEFAULT_MAX_TASKS, 200);
+    }
+
+    // --- Complex workflow: full lifecycle ---
+    #[test]
+    fn test_complex_workflow_full_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = ActivityLogManager::new();
+
+        // Create tasks
+        mgr.log_event(
+            "t1",
+            "movie.mkv",
+            ActivityEvent::new(ActivityEventType::Created, "added"),
+        );
+        mgr.log_event(
+            "t2",
+            "doc.pdf",
+            ActivityEvent::new(ActivityEventType::Created, "added"),
+        );
+
+        // Start downloading
+        mgr.log_event(
+            "t1",
+            "movie.mkv",
+            ActivityEvent::new(ActivityEventType::Started, "downloading"),
+        );
+
+        // Error and retry
+        mgr.log_event(
+            "t1",
+            "movie.mkv",
+            ActivityEvent::new(ActivityEventType::ConnectionError, "timeout"),
+        );
+        mgr.log_event(
+            "t1",
+            "movie.mkv",
+            ActivityEvent::new(ActivityEventType::AutoRetry, "retry #1"),
+        );
+
+        // Progress milestones
+        mgr.log_event(
+            "t1",
+            "movie.mkv",
+            ActivityEvent::new(ActivityEventType::ProgressMilestone, "25%").with_value(25.0),
+        );
+        mgr.log_event(
+            "t1",
+            "movie.mkv",
+            ActivityEvent::new(ActivityEventType::ProgressMilestone, "50%").with_value(50.0),
+        );
+
+        // Mirror switch
+        mgr.log_event(
+            "t1",
+            "movie.mkv",
+            ActivityEvent::new(ActivityEventType::MirrorSwitched, "to mirror2"),
+        );
+
+        // Complete
+        mgr.log_event(
+            "t1",
+            "movie.mkv",
+            ActivityEvent::new(ActivityEventType::Completed, "done"),
+        );
+
+        // Verify
+        assert_eq!(mgr.task_count(), 2);
+        let summary = mgr.task_summary("t1").unwrap();
+        assert_eq!(summary.total_events, 8);
+        assert_eq!(summary.error_count, 1);
+
+        // Save and reload
+        save_activity_logs(&mgr, dir.path()).unwrap();
+        let loaded = load_activity_logs(dir.path()).unwrap();
+        assert_eq!(loaded.task_count(), 2);
+        let log = loaded.get("t1").unwrap();
+        assert_eq!(log.len(), 8);
+
+        // Format display
+        let display = log.format_display(5);
+        assert!(display.contains("movie.mkv"));
+        assert!(display.contains("Errors: 1"));
+    }
+
+    // --- Complex workflow: many tasks independent ---
+    #[test]
+    fn test_complex_many_tasks_independent() {
+        let mut mgr = ActivityLogManager::new();
+        for i in 0..10 {
+            let task_id = format!("task-{}", i);
+            let name = format!("file-{}.txt", i);
+            mgr.log_event(
+                &task_id,
+                &name,
+                ActivityEvent::new(ActivityEventType::Created, "new"),
+            );
+            mgr.log_event(
+                &task_id,
+                &name,
+                ActivityEvent::new(ActivityEventType::Started, "go"),
+            );
+        }
+        assert_eq!(mgr.task_count(), 10);
+        assert_eq!(mgr.total_events(), 20);
+
+        // Remove some
+        mgr.remove("task-0");
+        mgr.remove("task-5");
+        assert_eq!(mgr.task_count(), 8);
+        assert_eq!(mgr.total_events(), 16);
+    }
+
+    // --- ActivityLogManager: serde extra fields ignored ---
+    #[test]
+    fn test_activity_log_manager_serde_extra_fields() {
+        let mut mgr = ActivityLogManager::new();
+        mgr.log_event("t1", "a", ActivityEvent::new(ActivityEventType::Info, "x"));
+        let mut json: serde_json::Value = serde_json::to_value(&mgr).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("unknown_key".into(), serde_json::json!(42));
+        let de: ActivityLogManager = serde_json::from_value(json).unwrap();
+        assert_eq!(de.task_count(), 1);
+    }
+
+    // --- ActivityLogManager: serde roundtrip preserves limits ---
+    #[test]
+    fn test_activity_log_manager_serde_preserves_limits() {
+        let mgr = ActivityLogManager::new().with_limits(50, 25);
+        let json = serde_json::to_string(&mgr).unwrap();
+        let de: ActivityLogManager = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.max_tasks, 50);
+        assert_eq!(de.default_max_events, 25);
+    }
+
+    // --- ActivityEvent: Clone/Debug ---
+    #[test]
+    fn test_activity_event_clone_debug() {
+        let event = ActivityEvent::new(ActivityEventType::Created, "test").with_value(42.0);
+        let cloned = event.clone();
+        assert_eq!(cloned.message, "test");
+        assert_eq!(cloned.numeric_value, Some(42.0));
+        let debug = format!("{:?}", event);
+        assert!(debug.contains("ActivityEvent"));
+    }
+
+    // --- TaskActivityLog: Clone/Debug ---
+    #[test]
+    fn test_task_activity_log_clone_debug() {
+        let mut log = TaskActivityLog::new("t1", "test");
+        log.log(ActivityEvent::new(ActivityEventType::Info, "x"));
+        let cloned = log.clone();
+        assert_eq!(cloned.len(), 1);
+        let debug = format!("{:?}", log);
+        assert!(debug.contains("TaskActivityLog"));
+    }
 }
