@@ -263,8 +263,6 @@ impl SourceBenchmarkManager {
             let mut handles = Vec::new();
             for url in chunk {
                 let url = url.clone();
-                let timeout = timeout;
-                let test_size = test_size;
                 handles.push(tokio::spawn(async move {
                     benchmark_single_source(&url, test_size, timeout).await
                 }));
@@ -343,10 +341,10 @@ impl SourceBenchmarkManager {
         let mut cached_scores: HashMap<String, f64> = HashMap::new();
         self.refresh_cache();
         for url in urls {
-            if let Some(domain) = extract_domain(url) {
-                if let Some(cached) = self.cache.domains.get(&domain) {
-                    cached_scores.insert(url.clone(), cached.avg_speed_bps);
-                }
+            if let Some(domain) = extract_domain(url)
+                && let Some(cached) = self.cache.domains.get(&domain)
+            {
+                cached_scores.insert(url.clone(), cached.avg_speed_bps);
             }
         }
 
@@ -472,8 +470,7 @@ impl SourceBenchmarkManager {
     /// Save benchmark cache to disk.
     pub async fn save_cache(&self) -> std::io::Result<()> {
         let path = self.data_dir.join("source_benchmark_cache.json");
-        let json = serde_json::to_string_pretty(&self.cache)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(&self.cache).map_err(std::io::Error::other)?;
         let tmp = path.with_extension("tmp");
         fs::write(&tmp, &json).await?;
         fs::rename(&tmp, &path).await?;
@@ -663,6 +660,8 @@ fn format_speed_bps(bps: f64) -> String {
 fn truncate_url(url: &str, max_len: usize) -> String {
     if url.len() <= max_len {
         url.to_string()
+    } else if max_len < 3 {
+        url[..max_len].to_string()
     } else {
         format!("{}...", &url[..max_len - 3])
     }
@@ -674,8 +673,7 @@ pub async fn save_benchmark_config(
     data_dir: &Path,
 ) -> std::io::Result<()> {
     let path = data_dir.join("source_benchmark_config.json");
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(config).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, &json).await?;
     fs::rename(&tmp, &path).await?;
@@ -1265,5 +1263,1372 @@ mod tests {
         assert!(report.contains("0 ✅"));
         assert!(report.contains("2 ❌"));
         assert!(!report.contains("🏆 Fastest"));
+    }
+
+    // ==================== Comprehensive Test Coverage ====================
+
+    // --- SourceBenchmarkError Display ---
+
+    #[test]
+    fn test_error_display_no_sources() {
+        let err = SourceBenchmarkError::NoSources;
+        assert_eq!(err.to_string(), "no sources to benchmark");
+    }
+
+    #[test]
+    fn test_error_display_all_failed() {
+        let err = SourceBenchmarkError::AllFailed;
+        assert_eq!(err.to_string(), "all sources failed benchmark");
+    }
+
+    #[test]
+    fn test_error_display_invalid_url() {
+        let err = SourceBenchmarkError::InvalidUrl("bad://url".to_string());
+        let msg = err.to_string();
+        assert!(msg.contains("bad://url"));
+    }
+
+    #[test]
+    fn test_error_display_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let err = SourceBenchmarkError::Io(io_err);
+        let msg = err.to_string();
+        assert!(msg.contains("file missing"));
+    }
+
+    #[test]
+    fn test_error_display_serialize() {
+        let json_err = serde_json::from_str::<BenchmarkConfig>("invalid").unwrap_err();
+        let err = SourceBenchmarkError::Serialize(json_err);
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let err = SourceBenchmarkError::NoSources;
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("NoSources"));
+    }
+
+    #[test]
+    fn test_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err: SourceBenchmarkError = SourceBenchmarkError::from(io_err);
+        assert!(err.to_string().contains("denied"));
+    }
+
+    #[test]
+    fn test_error_from_serde() {
+        let json_err = serde_json::from_str::<BenchmarkConfig>("{{bad").unwrap_err();
+        let err: SourceBenchmarkError = SourceBenchmarkError::from(json_err);
+        assert!(!err.to_string().is_empty());
+    }
+
+    // --- BenchmarkConfig ---
+
+    #[test]
+    fn test_config_default_values() {
+        let config = BenchmarkConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.test_size_bytes, 65536);
+        assert_eq!(config.timeout_secs, 10);
+        assert_eq!(config.max_concurrent, 5);
+        assert_eq!(config.min_samples_for_cache, 1);
+        assert_eq!(config.cache_ttl_hours, 24);
+        assert_eq!(config.max_cache_entries, 200);
+    }
+
+    #[test]
+    fn test_config_serde_roundtrip() {
+        let config = BenchmarkConfig {
+            enabled: true,
+            test_size_bytes: 256 * 1024,
+            timeout_secs: 30,
+            max_concurrent: 10,
+            min_samples_for_cache: 5,
+            cache_ttl_hours: 48,
+            max_cache_entries: 500,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: BenchmarkConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.enabled, true);
+        assert_eq!(loaded.test_size_bytes, 256 * 1024);
+        assert_eq!(loaded.timeout_secs, 30);
+        assert_eq!(loaded.max_concurrent, 10);
+        assert_eq!(loaded.min_samples_for_cache, 5);
+        assert_eq!(loaded.cache_ttl_hours, 48);
+        assert_eq!(loaded.max_cache_entries, 500);
+    }
+
+    #[test]
+    fn test_config_serde_extra_fields_ignored() {
+        let json = r#"{
+            "enabled": true,
+            "test_size_bytes": 65536,
+            "timeout_secs": 10,
+            "max_concurrent": 5,
+            "min_samples_for_cache": 1,
+            "cache_ttl_hours": 24,
+            "max_cache_entries": 200,
+            "unknown_field": "should be ignored"
+        }"#;
+        let config: BenchmarkConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.test_size_bytes, 65536);
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config = BenchmarkConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.enabled, config.enabled);
+        assert_eq!(cloned.test_size_bytes, config.test_size_bytes);
+        assert_eq!(cloned.timeout_secs, config.timeout_secs);
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = BenchmarkConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("BenchmarkConfig"));
+        assert!(debug.contains("enabled"));
+    }
+
+    #[test]
+    fn test_config_pretty_serde() {
+        let config = BenchmarkConfig::default();
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        assert!(pretty.contains('\n'));
+        let loaded: BenchmarkConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(loaded.enabled, config.enabled);
+    }
+
+    // --- SourceBenchmarkResult ---
+
+    #[test]
+    fn test_result_serde_roundtrip_success() {
+        let result = SourceBenchmarkResult {
+            url: "https://example.com/file.zip".to_string(),
+            success: true,
+            speed_bps: 1_500_000.0,
+            latency_ms: 42.5,
+            http_status: 206,
+            bytes_downloaded: 65536,
+            duration_ms: 43.7,
+            error: None,
+            tested_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let loaded: SourceBenchmarkResult = serde_json::from_str(&json).unwrap();
+        assert!(loaded.success);
+        assert_eq!(loaded.speed_bps, 1_500_000.0);
+        assert_eq!(loaded.http_status, 206);
+        assert!(loaded.error.is_none());
+    }
+
+    #[test]
+    fn test_result_serde_roundtrip_failure() {
+        let result = SourceBenchmarkResult::failed(
+            "https://dead.com/file".to_string(),
+            "connection refused".to_string(),
+        );
+        let json = serde_json::to_string(&result).unwrap();
+        let loaded: SourceBenchmarkResult = serde_json::from_str(&json).unwrap();
+        assert!(!loaded.success);
+        assert_eq!(loaded.speed_bps, 0.0);
+        assert_eq!(loaded.error, Some("connection refused".to_string()));
+    }
+
+    #[test]
+    fn test_result_clone() {
+        let result =
+            SourceBenchmarkResult::failed("https://example.com".to_string(), "timeout".to_string());
+        let cloned = result.clone();
+        assert_eq!(cloned.url, result.url);
+        assert_eq!(cloned.success, result.success);
+        assert_eq!(cloned.error, result.error);
+    }
+
+    #[test]
+    fn test_result_debug() {
+        let result =
+            SourceBenchmarkResult::failed("https://example.com".to_string(), "err".to_string());
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("SourceBenchmarkResult"));
+    }
+
+    #[test]
+    fn test_result_zero_speed() {
+        let result = SourceBenchmarkResult {
+            url: "https://example.com".to_string(),
+            success: true,
+            speed_bps: 0.0,
+            latency_ms: 0.0,
+            http_status: 200,
+            bytes_downloaded: 0,
+            duration_ms: 0.0,
+            error: None,
+            tested_at: Utc::now(),
+        };
+        assert_eq!(result.speed_bps, 0.0);
+        assert_eq!(result.bytes_downloaded, 0);
+    }
+
+    #[test]
+    fn test_result_large_values() {
+        let result = SourceBenchmarkResult {
+            url: "https://example.com".to_string(),
+            success: true,
+            speed_bps: 1e15,
+            latency_ms: f64::MAX,
+            http_status: 200,
+            bytes_downloaded: u64::MAX,
+            duration_ms: f64::MAX,
+            error: None,
+            tested_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let loaded: SourceBenchmarkResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.speed_bps, 1e15);
+        assert_eq!(loaded.bytes_downloaded, u64::MAX);
+    }
+
+    #[test]
+    fn test_result_unicode_url() {
+        let result = SourceBenchmarkResult {
+            url: "https://中文域名.com/文件.zip".to_string(),
+            success: true,
+            speed_bps: 100_000.0,
+            latency_ms: 50.0,
+            http_status: 200,
+            bytes_downloaded: 1024,
+            duration_ms: 10.0,
+            error: None,
+            tested_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let loaded: SourceBenchmarkResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.url, "https://中文域名.com/文件.zip");
+    }
+
+    // --- BenchmarkSummary ---
+
+    #[test]
+    fn test_summary_serde_roundtrip() {
+        let summary = BenchmarkSummary {
+            total_sources: 2,
+            successful: 1,
+            failed: 1,
+            fastest_url: Some("https://fast.com".to_string()),
+            fastest_speed_bps: 5_000_000.0,
+            slowest_speed_bps: 5_000_000.0,
+            avg_speed_bps: 5_000_000.0,
+            results: vec![],
+            total_duration_ms: 100.0,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let loaded: BenchmarkSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.total_sources, 2);
+        assert_eq!(loaded.successful, 1);
+        assert_eq!(loaded.failed, 1);
+        assert_eq!(loaded.fastest_url, Some("https://fast.com".to_string()));
+    }
+
+    #[test]
+    fn test_summary_serde_no_fastest() {
+        let summary = BenchmarkSummary {
+            total_sources: 0,
+            successful: 0,
+            failed: 0,
+            fastest_url: None,
+            fastest_speed_bps: 0.0,
+            slowest_speed_bps: 0.0,
+            avg_speed_bps: 0.0,
+            results: vec![],
+            total_duration_ms: 0.0,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let loaded: BenchmarkSummary = serde_json::from_str(&json).unwrap();
+        assert!(loaded.fastest_url.is_none());
+    }
+
+    #[test]
+    fn test_summary_clone() {
+        let summary = BenchmarkSummary {
+            total_sources: 1,
+            successful: 1,
+            failed: 0,
+            fastest_url: Some("https://a.com".to_string()),
+            fastest_speed_bps: 1_000_000.0,
+            slowest_speed_bps: 1_000_000.0,
+            avg_speed_bps: 1_000_000.0,
+            results: vec![],
+            total_duration_ms: 50.0,
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_sources, summary.total_sources);
+        assert_eq!(cloned.fastest_url, summary.fastest_url);
+    }
+
+    #[test]
+    fn test_summary_debug() {
+        let summary = BenchmarkSummary {
+            total_sources: 0,
+            successful: 0,
+            failed: 0,
+            fastest_url: None,
+            fastest_speed_bps: 0.0,
+            slowest_speed_bps: 0.0,
+            avg_speed_bps: 0.0,
+            results: vec![],
+            total_duration_ms: 0.0,
+        };
+        let debug = format!("{:?}", summary);
+        assert!(debug.contains("BenchmarkSummary"));
+    }
+
+    #[test]
+    fn test_summary_format_empty() {
+        let summary = BenchmarkSummary {
+            total_sources: 0,
+            successful: 0,
+            failed: 0,
+            fastest_url: None,
+            fastest_speed_bps: 0.0,
+            slowest_speed_bps: 0.0,
+            avg_speed_bps: 0.0,
+            results: vec![],
+            total_duration_ms: 0.0,
+        };
+        let report = summary.format_report();
+        assert!(report.contains("Source Benchmark Report"));
+        assert!(report.contains("0 ✅"));
+        assert!(report.contains("0 ❌"));
+        assert!(!report.contains("🏆 Fastest"));
+        assert!(!report.contains("📊 Average"));
+    }
+
+    #[test]
+    fn test_summary_format_unicode() {
+        let summary = BenchmarkSummary {
+            total_sources: 1,
+            successful: 1,
+            failed: 0,
+            fastest_url: Some("https://中文域名.com/文件.zip".to_string()),
+            fastest_speed_bps: 1_000_000.0,
+            slowest_speed_bps: 1_000_000.0,
+            avg_speed_bps: 1_000_000.0,
+            results: vec![SourceBenchmarkResult {
+                url: "https://中文域名.com/文件.zip".to_string(),
+                success: true,
+                speed_bps: 1_000_000.0,
+                latency_ms: 50.0,
+                http_status: 200,
+                bytes_downloaded: 65536,
+                duration_ms: 65.0,
+                error: None,
+                tested_at: Utc::now(),
+            }],
+            total_duration_ms: 65.0,
+        };
+        let report = summary.format_report();
+        assert!(report.contains("1 ✅"));
+        assert!(report.contains("🏆 Fastest"));
+    }
+
+    // --- CachedDomainBenchmark ---
+
+    #[test]
+    fn test_cached_domain_serde_roundtrip() {
+        let cached = CachedDomainBenchmark {
+            domain: "example.com".to_string(),
+            avg_speed_bps: 2_500_000.0,
+            sample_count: 10,
+            last_tested_at: Utc::now(),
+            is_fast: true,
+            is_slow: false,
+        };
+        let json = serde_json::to_string(&cached).unwrap();
+        let loaded: CachedDomainBenchmark = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.domain, "example.com");
+        assert_eq!(loaded.avg_speed_bps, 2_500_000.0);
+        assert_eq!(loaded.sample_count, 10);
+        assert!(loaded.is_fast);
+        assert!(!loaded.is_slow);
+    }
+
+    #[test]
+    fn test_cached_domain_clone() {
+        let cached = CachedDomainBenchmark {
+            domain: "test.com".to_string(),
+            avg_speed_bps: 100_000.0,
+            sample_count: 1,
+            last_tested_at: Utc::now(),
+            is_fast: false,
+            is_slow: true,
+        };
+        let cloned = cached.clone();
+        assert_eq!(cloned.domain, cached.domain);
+        assert_eq!(cloned.avg_speed_bps, cached.avg_speed_bps);
+        assert_eq!(cloned.is_slow, cached.is_slow);
+    }
+
+    #[test]
+    fn test_cached_domain_debug() {
+        let cached = CachedDomainBenchmark {
+            domain: "debug.com".to_string(),
+            avg_speed_bps: 0.0,
+            sample_count: 0,
+            last_tested_at: Utc::now(),
+            is_fast: false,
+            is_slow: false,
+        };
+        let debug = format!("{:?}", cached);
+        assert!(debug.contains("CachedDomainBenchmark"));
+        assert!(debug.contains("debug.com"));
+    }
+
+    // --- BenchmarkCache ---
+
+    #[test]
+    fn test_cache_default_is_empty() {
+        let cache = BenchmarkCache::default();
+        assert!(cache.domains.is_empty());
+    }
+
+    #[test]
+    fn test_cache_serde_roundtrip() {
+        let mut cache = BenchmarkCache::default();
+        cache.domains.insert(
+            "a.com".to_string(),
+            CachedDomainBenchmark {
+                domain: "a.com".to_string(),
+                avg_speed_bps: 100_000.0,
+                sample_count: 1,
+                last_tested_at: Utc::now(),
+                is_fast: false,
+                is_slow: true,
+            },
+        );
+        cache.domains.insert(
+            "b.com".to_string(),
+            CachedDomainBenchmark {
+                domain: "b.com".to_string(),
+                avg_speed_bps: 5_000_000.0,
+                sample_count: 5,
+                last_tested_at: Utc::now(),
+                is_fast: true,
+                is_slow: false,
+            },
+        );
+        let json = serde_json::to_string(&cache).unwrap();
+        let loaded: BenchmarkCache = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.domains.len(), 2);
+        assert!(loaded.domains.contains_key("a.com"));
+        assert!(loaded.domains.contains_key("b.com"));
+    }
+
+    #[test]
+    fn test_cache_clone() {
+        let mut cache = BenchmarkCache::default();
+        cache.domains.insert(
+            "x.com".to_string(),
+            CachedDomainBenchmark {
+                domain: "x.com".to_string(),
+                avg_speed_bps: 1.0,
+                sample_count: 1,
+                last_tested_at: Utc::now(),
+                is_fast: false,
+                is_slow: false,
+            },
+        );
+        let cloned = cache.clone();
+        assert_eq!(cloned.domains.len(), 1);
+    }
+
+    #[test]
+    fn test_cache_debug() {
+        let cache = BenchmarkCache::default();
+        let debug = format!("{:?}", cache);
+        assert!(debug.contains("BenchmarkCache"));
+    }
+
+    // --- BenchmarkCacheSummary ---
+
+    #[test]
+    fn test_cache_summary_serde_roundtrip() {
+        let summary = BenchmarkCacheSummary {
+            total_domains: 10,
+            fast_domains: 3,
+            slow_domains: 2,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let loaded: BenchmarkCacheSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.total_domains, 10);
+        assert_eq!(loaded.fast_domains, 3);
+        assert_eq!(loaded.slow_domains, 2);
+    }
+
+    #[test]
+    fn test_cache_summary_clone() {
+        let summary = BenchmarkCacheSummary {
+            total_domains: 5,
+            fast_domains: 1,
+            slow_domains: 1,
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_domains, 5);
+    }
+
+    #[test]
+    fn test_cache_summary_debug() {
+        let summary = BenchmarkCacheSummary {
+            total_domains: 0,
+            fast_domains: 0,
+            slow_domains: 0,
+        };
+        let debug = format!("{:?}", summary);
+        assert!(debug.contains("BenchmarkCacheSummary"));
+    }
+
+    // --- extract_domain ---
+
+    #[test]
+    fn test_extract_domain_http() {
+        assert_eq!(
+            extract_domain("http://example.com/path"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_domain_https() {
+        assert_eq!(
+            extract_domain("https://secure.example.com/path"),
+            Some("secure.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_domain_with_port() {
+        assert_eq!(
+            extract_domain("https://example.com:8080/path"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_domain_ipv4() {
+        assert_eq!(
+            extract_domain("http://192.168.1.1/file"),
+            Some("192.168.1.1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_domain_empty_string() {
+        assert_eq!(extract_domain(""), None);
+    }
+
+    #[test]
+    fn test_extract_domain_invalid_url() {
+        assert_eq!(extract_domain("not a url at all"), None);
+    }
+
+    #[test]
+    fn test_extract_domain_ftp() {
+        assert_eq!(
+            extract_domain("ftp://files.example.com/pub"),
+            Some("files.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_domain_unicode() {
+        let result = extract_domain("https://中文域名.com/file");
+        assert!(result.is_some());
+    }
+
+    // --- format_speed_bps ---
+
+    #[test]
+    fn test_format_speed_zero() {
+        assert_eq!(format_speed_bps(0.0), "0 B/s");
+    }
+
+    #[test]
+    fn test_format_speed_exact_1kb() {
+        assert_eq!(format_speed_bps(1_000.0), "1.0 KB/s");
+    }
+
+    #[test]
+    fn test_format_speed_exact_1mb() {
+        assert_eq!(format_speed_bps(1_000_000.0), "1.0 MB/s");
+    }
+
+    #[test]
+    fn test_format_speed_exact_1gb() {
+        assert_eq!(format_speed_bps(1_000_000_000.0), "1.0 GB/s");
+    }
+
+    #[test]
+    fn test_format_speed_just_below_1kb() {
+        assert_eq!(format_speed_bps(999.0), "999 B/s");
+    }
+
+    #[test]
+    fn test_format_speed_just_below_1mb() {
+        assert_eq!(format_speed_bps(999_999.0), "1000.0 KB/s");
+    }
+
+    #[test]
+    fn test_format_speed_just_below_1gb() {
+        assert_eq!(format_speed_bps(999_999_999.0), "1000.0 MB/s");
+    }
+
+    #[test]
+    fn test_format_speed_very_large() {
+        let result = format_speed_bps(5e12);
+        assert!(result.contains("GB/s"));
+    }
+
+    #[test]
+    fn test_format_speed_negative() {
+        // Negative speed shouldn't crash, should format as B/s
+        let result = format_speed_bps(-100.0);
+        assert!(result.contains("B/s"));
+    }
+
+    // --- truncate_url ---
+
+    #[test]
+    fn test_truncate_url_short() {
+        assert_eq!(truncate_url("https://a.com", 50), "https://a.com");
+    }
+
+    #[test]
+    fn test_truncate_url_exact_boundary() {
+        let url = "https://example.com/exactly30chars";
+        let len = url.len();
+        assert_eq!(truncate_url(url, len), url);
+    }
+
+    #[test]
+    fn test_truncate_url_just_over() {
+        let url = "https://example.com/file.zip";
+        let truncated = truncate_url(url, url.len() - 1);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.len() <= url.len() - 1);
+    }
+
+    #[test]
+    fn test_truncate_url_unicode() {
+        let url = "https://中文.com/文件.zip";
+        let result = truncate_url(url, 100);
+        assert_eq!(result, url); // fits within max_len
+    }
+
+    // --- SourceBenchmarkManager ---
+
+    #[test]
+    fn test_manager_new_has_default_config() {
+        let mgr = SourceBenchmarkManager::new(PathBuf::from("/tmp/test"));
+        assert!(mgr.config().enabled);
+        assert_eq!(mgr.config().test_size_bytes, 65536);
+    }
+
+    #[test]
+    fn test_manager_with_config() {
+        let config = BenchmarkConfig {
+            enabled: false,
+            test_size_bytes: 32 * 1024,
+            timeout_secs: 5,
+            max_concurrent: 2,
+            min_samples_for_cache: 3,
+            cache_ttl_hours: 12,
+            max_cache_entries: 50,
+        };
+        let mgr = SourceBenchmarkManager::with_config(config.clone(), PathBuf::from("/tmp/test"));
+        assert!(!mgr.config().enabled);
+        assert_eq!(mgr.config().test_size_bytes, 32 * 1024);
+        assert_eq!(mgr.config().timeout_secs, 5);
+    }
+
+    #[test]
+    fn test_manager_set_config() {
+        let mut mgr = SourceBenchmarkManager::new(PathBuf::from("/tmp/test"));
+        let new_config = BenchmarkConfig {
+            enabled: false,
+            test_size_bytes: 1024,
+            ..BenchmarkConfig::default()
+        };
+        mgr.set_config(new_config);
+        assert!(!mgr.config().enabled);
+        assert_eq!(mgr.config().test_size_bytes, 1024);
+    }
+
+    #[test]
+    fn test_manager_cache_summary_empty() {
+        let mgr = SourceBenchmarkManager::new(PathBuf::from("/tmp/test"));
+        let summary = mgr.cache_summary();
+        assert_eq!(summary.total_domains, 0);
+        assert_eq!(summary.fast_domains, 0);
+        assert_eq!(summary.slow_domains, 0);
+    }
+
+    #[test]
+    fn test_manager_get_cached_domain_not_found() {
+        let mgr = SourceBenchmarkManager::new(PathBuf::from("/tmp/test"));
+        assert!(mgr.get_cached_domain("nonexistent.com").is_none());
+    }
+
+    #[test]
+    fn test_manager_update_cache_skips_failed() {
+        let mut mgr = SourceBenchmarkManager::new(PathBuf::from("/tmp/test"));
+        let summary = BenchmarkSummary {
+            total_sources: 1,
+            successful: 0,
+            failed: 1,
+            fastest_url: None,
+            fastest_speed_bps: 0.0,
+            slowest_speed_bps: 0.0,
+            avg_speed_bps: 0.0,
+            results: vec![SourceBenchmarkResult::failed(
+                "https://failed.com/file".to_string(),
+                "timeout".to_string(),
+            )],
+            total_duration_ms: 100.0,
+        };
+        mgr.update_cache_from_summary(&summary);
+        assert!(mgr.cache.domains.is_empty());
+    }
+
+    #[test]
+    fn test_manager_update_cache_multiple_domains() {
+        let mut mgr = SourceBenchmarkManager::new(PathBuf::from("/tmp/test"));
+        let summary = BenchmarkSummary {
+            total_sources: 3,
+            successful: 3,
+            failed: 0,
+            fastest_url: Some("https://a.com/f".to_string()),
+            fastest_speed_bps: 3_000_000.0,
+            slowest_speed_bps: 50_000.0,
+            avg_speed_bps: 1_350_000.0,
+            results: vec![
+                SourceBenchmarkResult {
+                    url: "https://a.com/f".to_string(),
+                    success: true,
+                    speed_bps: 3_000_000.0,
+                    latency_ms: 10.0,
+                    http_status: 200,
+                    bytes_downloaded: 65536,
+                    duration_ms: 21.0,
+                    error: None,
+                    tested_at: Utc::now(),
+                },
+                SourceBenchmarkResult {
+                    url: "https://b.com/f".to_string(),
+                    success: true,
+                    speed_bps: 1_000_000.0,
+                    latency_ms: 30.0,
+                    http_status: 200,
+                    bytes_downloaded: 65536,
+                    duration_ms: 65.0,
+                    error: None,
+                    tested_at: Utc::now(),
+                },
+                SourceBenchmarkResult {
+                    url: "https://c.com/f".to_string(),
+                    success: true,
+                    speed_bps: 50_000.0,
+                    latency_ms: 100.0,
+                    http_status: 200,
+                    bytes_downloaded: 65536,
+                    duration_ms: 1310.0,
+                    error: None,
+                    tested_at: Utc::now(),
+                },
+            ],
+            total_duration_ms: 1396.0,
+        };
+        mgr.update_cache_from_summary(&summary);
+        assert_eq!(mgr.cache.domains.len(), 3);
+        assert!(mgr.cache.domains.get("a.com").unwrap().is_fast);
+        assert!(mgr.cache.domains.get("c.com").unwrap().is_slow);
+    }
+
+    #[test]
+    fn test_manager_update_cache_ema_second_sample() {
+        let mut mgr = SourceBenchmarkManager::new(PathBuf::from("/tmp/test"));
+        // First sample: 1 MB/s
+        let summary1 = BenchmarkSummary {
+            total_sources: 1,
+            successful: 1,
+            failed: 0,
+            fastest_url: Some("https://example.com/a".to_string()),
+            fastest_speed_bps: 1_000_000.0,
+            slowest_speed_bps: 1_000_000.0,
+            avg_speed_bps: 1_000_000.0,
+            results: vec![SourceBenchmarkResult {
+                url: "https://example.com/a".to_string(),
+                success: true,
+                speed_bps: 1_000_000.0,
+                latency_ms: 50.0,
+                http_status: 200,
+                bytes_downloaded: 65536,
+                duration_ms: 65.0,
+                error: None,
+                tested_at: Utc::now(),
+            }],
+            total_duration_ms: 65.0,
+        };
+        mgr.update_cache_from_summary(&summary1);
+
+        // Second sample: 3 MB/s
+        let summary2 = BenchmarkSummary {
+            total_sources: 1,
+            successful: 1,
+            failed: 0,
+            fastest_url: Some("https://example.com/b".to_string()),
+            fastest_speed_bps: 3_000_000.0,
+            slowest_speed_bps: 3_000_000.0,
+            avg_speed_bps: 3_000_000.0,
+            results: vec![SourceBenchmarkResult {
+                url: "https://example.com/b".to_string(),
+                success: true,
+                speed_bps: 3_000_000.0,
+                latency_ms: 20.0,
+                http_status: 200,
+                bytes_downloaded: 65536,
+                duration_ms: 21.0,
+                error: None,
+                tested_at: Utc::now(),
+            }],
+            total_duration_ms: 21.0,
+        };
+        mgr.update_cache_from_summary(&summary2);
+
+        let cached = mgr.cache.domains.get("example.com").unwrap();
+        // EMA: 0.3 * 3_000_000 + 0.7 * 1_000_000 = 1_600_000
+        assert!((cached.avg_speed_bps - 1_600_000.0).abs() < 1.0);
+        assert_eq!(cached.sample_count, 2);
+    }
+
+    #[test]
+    fn test_manager_refresh_cache_zero_ttl() {
+        let mut mgr = SourceBenchmarkManager::new(PathBuf::from("/tmp/test"));
+        mgr.config.cache_ttl_hours = 0;
+        mgr.cache.domains.insert(
+            "any.com".to_string(),
+            CachedDomainBenchmark {
+                domain: "any.com".to_string(),
+                avg_speed_bps: 100_000.0,
+                sample_count: 1,
+                last_tested_at: Utc::now(),
+                is_fast: false,
+                is_slow: false,
+            },
+        );
+        // With zero TTL, everything should be expired
+        mgr.refresh_cache();
+        assert!(mgr.cache.domains.is_empty());
+    }
+
+    // --- Persistence ---
+
+    #[tokio::test]
+    async fn test_save_cache_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = SourceBenchmarkManager::new(dir.path().to_path_buf());
+        mgr.cache.domains.insert(
+            "test.com".to_string(),
+            CachedDomainBenchmark {
+                domain: "test.com".to_string(),
+                avg_speed_bps: 500_000.0,
+                sample_count: 1,
+                last_tested_at: Utc::now(),
+                is_fast: false,
+                is_slow: false,
+            },
+        );
+        mgr.save_cache().await.unwrap();
+        let path = dir.path().join("source_benchmark_cache.json");
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_save_cache_no_tmp_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SourceBenchmarkManager::new(dir.path().to_path_buf());
+        mgr.save_cache().await.unwrap();
+        let tmp_path = dir.path().join("source_benchmark_cache.tmp");
+        assert!(!tmp_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_save_cache_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = SourceBenchmarkManager::new(dir.path().to_path_buf());
+
+        // First save with one domain
+        mgr.cache.domains.insert(
+            "first.com".to_string(),
+            CachedDomainBenchmark {
+                domain: "first.com".to_string(),
+                avg_speed_bps: 100_000.0,
+                sample_count: 1,
+                last_tested_at: Utc::now(),
+                is_fast: false,
+                is_slow: false,
+            },
+        );
+        mgr.save_cache().await.unwrap();
+
+        // Second save with different domain
+        mgr.cache.domains.clear();
+        mgr.cache.domains.insert(
+            "second.com".to_string(),
+            CachedDomainBenchmark {
+                domain: "second.com".to_string(),
+                avg_speed_bps: 200_000.0,
+                sample_count: 2,
+                last_tested_at: Utc::now(),
+                is_fast: false,
+                is_slow: false,
+            },
+        );
+        mgr.save_cache().await.unwrap();
+
+        // Load and verify
+        let mut mgr2 = SourceBenchmarkManager::new(dir.path().to_path_buf());
+        mgr2.load_cache().await.unwrap();
+        assert_eq!(mgr2.cache.domains.len(), 1);
+        assert!(mgr2.cache.domains.contains_key("second.com"));
+        assert!(!mgr2.cache.domains.contains_key("first.com"));
+    }
+
+    #[tokio::test]
+    async fn test_save_config_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BenchmarkConfig::default();
+        save_benchmark_config(&config, dir.path()).await.unwrap();
+        let path = dir.path().join("source_benchmark_config.json");
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_save_config_no_tmp_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BenchmarkConfig::default();
+        save_benchmark_config(&config, dir.path()).await.unwrap();
+        let tmp_path = dir.path().join("source_benchmark_config.tmp");
+        assert!(!tmp_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_config_pretty_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BenchmarkConfig {
+            enabled: false,
+            test_size_bytes: 512 * 1024,
+            timeout_secs: 60,
+            max_concurrent: 20,
+            min_samples_for_cache: 10,
+            cache_ttl_hours: 168,
+            max_cache_entries: 1000,
+        };
+        // Save as pretty (default for save_benchmark_config)
+        save_benchmark_config(&config, dir.path()).await.unwrap();
+        let loaded = load_benchmark_config(dir.path()).await.unwrap();
+        assert_eq!(loaded.enabled, false);
+        assert_eq!(loaded.test_size_bytes, 512 * 1024);
+        assert_eq!(loaded.timeout_secs, 60);
+        assert_eq!(loaded.max_concurrent, 20);
+        assert_eq!(loaded.min_samples_for_cache, 10);
+        assert_eq!(loaded.cache_ttl_hours, 168);
+        assert_eq!(loaded.max_cache_entries, 1000);
+    }
+
+    #[tokio::test]
+    async fn test_save_load_cache_unicode_domain() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = SourceBenchmarkManager::new(dir.path().to_path_buf());
+        mgr.cache.domains.insert(
+            "中文域名.com".to_string(),
+            CachedDomainBenchmark {
+                domain: "中文域名.com".to_string(),
+                avg_speed_bps: 1_000_000.0,
+                sample_count: 5,
+                last_tested_at: Utc::now(),
+                is_fast: true,
+                is_slow: false,
+            },
+        );
+        mgr.save_cache().await.unwrap();
+
+        let mut mgr2 = SourceBenchmarkManager::new(dir.path().to_path_buf());
+        mgr2.load_cache().await.unwrap();
+        let cached = mgr2.cache.domains.get("中文域名.com").unwrap();
+        assert_eq!(cached.domain, "中文域名.com");
+        assert!(cached.is_fast);
+    }
+
+    #[tokio::test]
+    async fn test_load_cache_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source_benchmark_cache.json");
+        fs::write(&path, "").await.unwrap();
+
+        let mut mgr = SourceBenchmarkManager::new(dir.path().to_path_buf());
+        mgr.load_cache().await.unwrap(); // Should not error
+        assert!(mgr.cache.domains.is_empty());
+    }
+
+    // --- Complex workflows ---
+
+    #[tokio::test]
+    async fn test_full_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = SourceBenchmarkManager::new(dir.path().to_path_buf());
+
+        // 1. Start with empty cache
+        assert!(mgr.cache.domains.is_empty());
+
+        // 2. Simulate benchmark results
+        let summary = BenchmarkSummary {
+            total_sources: 2,
+            successful: 2,
+            failed: 0,
+            fastest_url: Some("https://fast.com/file".to_string()),
+            fastest_speed_bps: 5_000_000.0,
+            slowest_speed_bps: 50_000.0,
+            avg_speed_bps: 2_525_000.0,
+            results: vec![
+                SourceBenchmarkResult {
+                    url: "https://fast.com/file".to_string(),
+                    success: true,
+                    speed_bps: 5_000_000.0,
+                    latency_ms: 20.0,
+                    http_status: 206,
+                    bytes_downloaded: 65536,
+                    duration_ms: 13.0,
+                    error: None,
+                    tested_at: Utc::now(),
+                },
+                SourceBenchmarkResult {
+                    url: "https://slow.com/file".to_string(),
+                    success: true,
+                    speed_bps: 50_000.0,
+                    latency_ms: 200.0,
+                    http_status: 200,
+                    bytes_downloaded: 65536,
+                    duration_ms: 1310.0,
+                    error: None,
+                    tested_at: Utc::now(),
+                },
+            ],
+            total_duration_ms: 1323.0,
+        };
+
+        // 3. Update cache from results
+        mgr.update_cache_from_summary(&summary);
+        assert_eq!(mgr.cache.domains.len(), 2);
+
+        // 4. Save cache
+        mgr.save_cache().await.unwrap();
+
+        // 5. Load in new manager
+        let mut mgr2 = SourceBenchmarkManager::new(dir.path().to_path_buf());
+        mgr2.load_cache().await.unwrap();
+        assert_eq!(mgr2.cache.domains.len(), 2);
+
+        // 6. Verify cached data
+        let fast = mgr2.get_cached_domain("fast.com").unwrap();
+        assert!(fast.is_fast);
+        let slow = mgr2.get_cached_domain("slow.com").unwrap();
+        assert!(slow.is_slow);
+
+        // 7. Clear cache
+        mgr2.clear_cache();
+        assert!(mgr2.cache.domains.is_empty());
+    }
+
+    #[test]
+    fn test_multi_domain_independent_tracking() {
+        let mut mgr = SourceBenchmarkManager::new(PathBuf::from("/tmp/test"));
+
+        // Add results for domain A
+        let summary_a = BenchmarkSummary {
+            total_sources: 1,
+            successful: 1,
+            failed: 0,
+            fastest_url: Some("https://a.com/f".to_string()),
+            fastest_speed_bps: 1_000_000.0,
+            slowest_speed_bps: 1_000_000.0,
+            avg_speed_bps: 1_000_000.0,
+            results: vec![SourceBenchmarkResult {
+                url: "https://a.com/f".to_string(),
+                success: true,
+                speed_bps: 1_000_000.0,
+                latency_ms: 50.0,
+                http_status: 200,
+                bytes_downloaded: 65536,
+                duration_ms: 65.0,
+                error: None,
+                tested_at: Utc::now(),
+            }],
+            total_duration_ms: 65.0,
+        };
+        mgr.update_cache_from_summary(&summary_a);
+
+        // Add results for domain B
+        let summary_b = BenchmarkSummary {
+            total_sources: 1,
+            successful: 1,
+            failed: 0,
+            fastest_url: Some("https://b.com/f".to_string()),
+            fastest_speed_bps: 5_000_000.0,
+            slowest_speed_bps: 5_000_000.0,
+            avg_speed_bps: 5_000_000.0,
+            results: vec![SourceBenchmarkResult {
+                url: "https://b.com/f".to_string(),
+                success: true,
+                speed_bps: 5_000_000.0,
+                latency_ms: 10.0,
+                http_status: 200,
+                bytes_downloaded: 65536,
+                duration_ms: 13.0,
+                error: None,
+                tested_at: Utc::now(),
+            }],
+            total_duration_ms: 13.0,
+        };
+        mgr.update_cache_from_summary(&summary_b);
+
+        // Verify independence
+        let a = mgr.get_cached_domain("a.com").unwrap();
+        let b = mgr.get_cached_domain("b.com").unwrap();
+        assert_eq!(a.avg_speed_bps, 1_000_000.0);
+        assert_eq!(b.avg_speed_bps, 5_000_000.0);
+        assert!(!a.is_fast);
+        assert!(b.is_fast);
+        assert_eq!(a.sample_count, 1);
+        assert_eq!(b.sample_count, 1);
+    }
+
+    #[test]
+    fn test_cache_summary_mixed() {
+        let mut mgr = SourceBenchmarkManager::new(PathBuf::from("/tmp/test"));
+
+        // 2 fast, 1 slow, 2 medium
+        for (i, (speed, domain)) in [
+            (5_000_000.0, "fast1.com"),
+            (2_000_000.0, "fast2.com"),
+            (50_000.0, "slow1.com"),
+            (500_000.0, "med1.com"),
+            (300_000.0, "med2.com"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut summary = BenchmarkSummary {
+                total_sources: 1,
+                successful: 1,
+                failed: 0,
+                fastest_url: None,
+                fastest_speed_bps: *speed,
+                slowest_speed_bps: *speed,
+                avg_speed_bps: *speed,
+                results: vec![],
+                total_duration_ms: 50.0,
+            };
+            summary.fastest_url = Some(format!("https://{}/f", domain));
+            summary.results.push(SourceBenchmarkResult {
+                url: format!("https://{}/f", domain),
+                success: true,
+                speed_bps: *speed,
+                latency_ms: 50.0,
+                http_status: 200,
+                bytes_downloaded: 65536,
+                duration_ms: 65.0,
+                error: None,
+                tested_at: Utc::now(),
+            });
+            let _ = i;
+            mgr.update_cache_from_summary(&summary);
+        }
+
+        let summary = mgr.cache_summary();
+        assert_eq!(summary.total_domains, 5);
+        assert_eq!(summary.fast_domains, 2);
+        assert_eq!(summary.slow_domains, 1);
+    }
+
+    #[test]
+    fn test_format_report_with_rankings() {
+        let summary = BenchmarkSummary {
+            total_sources: 3,
+            successful: 2,
+            failed: 1,
+            fastest_url: Some("https://fast.com".to_string()),
+            fastest_speed_bps: 10_000_000.0,
+            slowest_speed_bps: 100_000.0,
+            avg_speed_bps: 5_050_000.0,
+            results: vec![
+                SourceBenchmarkResult {
+                    url: "https://fast.com/file".to_string(),
+                    success: true,
+                    speed_bps: 10_000_000.0,
+                    latency_ms: 15.0,
+                    http_status: 206,
+                    bytes_downloaded: 65536,
+                    duration_ms: 6.5,
+                    error: None,
+                    tested_at: Utc::now(),
+                },
+                SourceBenchmarkResult {
+                    url: "https://medium.com/file".to_string(),
+                    success: true,
+                    speed_bps: 100_000.0,
+                    latency_ms: 500.0,
+                    http_status: 200,
+                    bytes_downloaded: 65536,
+                    duration_ms: 655.0,
+                    error: None,
+                    tested_at: Utc::now(),
+                },
+                SourceBenchmarkResult::failed(
+                    "https://dead.com/file".to_string(),
+                    "connection refused".to_string(),
+                ),
+            ],
+            total_duration_ms: 668.0,
+        };
+
+        let report = summary.format_report();
+        // Check sections
+        assert!(report.contains("🏎️ Source Benchmark Report"));
+        assert!(report.contains("3 (2 ✅, 1 ❌)"));
+        assert!(report.contains("🏆 Fastest: https://fast.com"));
+        assert!(report.contains("10.0 MB/s"));
+        assert!(report.contains("📊 Average:"));
+        assert!(report.contains("Rankings:"));
+        assert!(report.contains("1."));
+        assert!(report.contains("2."));
+        assert!(report.contains("3."));
+        assert!(report.contains("❌ connection refused"));
+    }
+
+    #[test]
+    fn test_update_cache_same_domain_multiple_times() {
+        let mut mgr = SourceBenchmarkManager::new(PathBuf::from("/tmp/test"));
+
+        for speed in &[1_000_000.0, 2_000_000.0, 3_000_000.0] {
+            let summary = BenchmarkSummary {
+                total_sources: 1,
+                successful: 1,
+                failed: 0,
+                fastest_url: Some("https://example.com/f".to_string()),
+                fastest_speed_bps: *speed,
+                slowest_speed_bps: *speed,
+                avg_speed_bps: *speed,
+                results: vec![SourceBenchmarkResult {
+                    url: "https://example.com/f".to_string(),
+                    success: true,
+                    speed_bps: *speed,
+                    latency_ms: 50.0,
+                    http_status: 200,
+                    bytes_downloaded: 65536,
+                    duration_ms: 65.0,
+                    error: None,
+                    tested_at: Utc::now(),
+                }],
+                total_duration_ms: 65.0,
+            };
+            mgr.update_cache_from_summary(&summary);
+        }
+
+        let cached = mgr.cache.domains.get("example.com").unwrap();
+        assert_eq!(cached.sample_count, 3);
+        // EMA chain: 1M -> 0.3*2M+0.7*1M=1.3M -> 0.3*3M+0.7*1.3M=1.81M
+        assert!((cached.avg_speed_bps - 1_810_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_extract_domain_with_query_and_fragment() {
+        assert_eq!(
+            extract_domain("https://cdn.example.com/path?q=1#section"),
+            Some("cdn.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_domain_with_auth() {
+        assert_eq!(
+            extract_domain("https://user:pass@example.com/file"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_format_speed_bps_boundary_values() {
+        // Just at boundaries
+        assert_eq!(format_speed_bps(1.0), "1 B/s");
+        assert_eq!(format_speed_bps(999.0), "999 B/s");
+        assert_eq!(format_speed_bps(1000.0), "1.0 KB/s");
+        assert_eq!(format_speed_bps(999_999.0), "1000.0 KB/s");
+        assert_eq!(format_speed_bps(1_000_000.0), "1.0 MB/s");
+        assert_eq!(format_speed_bps(999_999_999.0), "1000.0 MB/s");
+        assert_eq!(format_speed_bps(1_000_000_000.0), "1.0 GB/s");
+    }
+
+    #[test]
+    fn test_truncate_url_max_len_zero() {
+        // Edge case: max_len = 0 should not panic
+        let result = truncate_url("https://example.com", 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_truncate_url_max_len_one() {
+        let result = truncate_url("https://example.com", 1);
+        assert_eq!(result, "h");
+    }
+
+    #[test]
+    fn test_truncate_url_max_len_two() {
+        let result = truncate_url("https://example.com", 2);
+        assert_eq!(result, "ht");
+    }
+
+    #[tokio::test]
+    async fn test_save_cache_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SourceBenchmarkManager::new(dir.path().to_path_buf());
+        mgr.save_cache().await.unwrap();
+
+        let mut mgr2 = SourceBenchmarkManager::new(dir.path().to_path_buf());
+        mgr2.load_cache().await.unwrap();
+        assert!(mgr2.cache.domains.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_config_roundtrip_all_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BenchmarkConfig {
+            enabled: true,
+            test_size_bytes: 1,
+            timeout_secs: 0,
+            max_concurrent: 0,
+            min_samples_for_cache: 0,
+            cache_ttl_hours: 0,
+            max_cache_entries: 0,
+        };
+        save_benchmark_config(&config, dir.path()).await.unwrap();
+        let loaded = load_benchmark_config(dir.path()).await.unwrap();
+        assert_eq!(loaded.test_size_bytes, 1);
+        assert_eq!(loaded.timeout_secs, 0);
+        assert_eq!(loaded.max_concurrent, 0);
     }
 }
