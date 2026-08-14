@@ -16012,8 +16012,7 @@ impl DownloadManager {
     pub async fn save_bandwidth_usage(&self) -> std::io::Result<()> {
         let tracker = self.bandwidth_usage.lock().await;
         let path = self.data_dir.join("bandwidth_usage.json");
-        let json = serde_json::to_string_pretty(&*tracker)
-            .map_err(|e| std::io::Error::other(e))?;
+        let json = serde_json::to_string_pretty(&*tracker).map_err(|e| std::io::Error::other(e))?;
         tokio::fs::write(&path, json).await
     }
 

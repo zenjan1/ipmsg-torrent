@@ -947,7 +947,10 @@ mod tests {
     fn test_dashboard_manager_clone_debug() {
         let manager = DashboardManager::new();
         let cloned = manager.clone();
-        assert_eq!(cloned.get_config().top_active_count, manager.get_config().top_active_count);
+        assert_eq!(
+            cloned.get_config().top_active_count,
+            manager.get_config().top_active_count
+        );
         let debug_str = format!("{:?}", manager);
         assert!(debug_str.contains("DashboardManager"));
     }
@@ -1312,7 +1315,12 @@ mod tests {
                 uptime_seconds: 0,
             };
             let summary = snapshot.format_summary();
-            assert!(summary.contains(label), "Missing label {} for {:?}", label, status);
+            assert!(
+                summary.contains(label),
+                "Missing label {} for {:?}",
+                label,
+                status
+            );
         }
     }
 
@@ -1608,7 +1616,10 @@ mod tests {
         assert!(deserialized.protocol_breakdown.is_some());
         assert!(deserialized.disk_status.is_some());
         assert!(deserialized.disk_status.unwrap().is_low);
-        assert_eq!(deserialized.total_downloaded_bytes, 100 * 1024 * 1024 * 1024);
+        assert_eq!(
+            deserialized.total_downloaded_bytes,
+            100 * 1024 * 1024 * 1024
+        );
         assert_eq!(deserialized.uptime_seconds, 86400);
     }
 
@@ -1620,7 +1631,7 @@ mod tests {
             snapshot_at: "2026-08-10T12:00:00Z".parse().unwrap(),
             queue_status: QueueStatus::default(),
             current_speed_bps: 1024 * 1024, // 1 MB/s
-            current_upload_bps: 512 * 1024,  // 512 KB/s
+            current_upload_bps: 512 * 1024, // 512 KB/s
             health_status: HealthStatus::Healthy,
             health_score: 100,
             issue_count: 0,
@@ -1629,7 +1640,7 @@ mod tests {
             protocol_breakdown: None,
             disk_status: None,
             total_downloaded_bytes: 1024 * 1024 * 1024, // 1 GB
-            total_uploaded_bytes: 512 * 1024 * 1024,     // 512 MB
+            total_uploaded_bytes: 512 * 1024 * 1024,    // 512 MB
             uptime_seconds: 3600,
         };
         let summary = snapshot.format_summary();

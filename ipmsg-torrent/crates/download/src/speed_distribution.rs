@@ -1495,4 +1495,834 @@ mod tests {
         assert_eq!(domains[0], "alpha.com");
         assert_eq!(domains[1], "beta.com");
     }
+
+    // ===== Phase 215: Comprehensive Test Coverage =====
+
+    // --- SpeedProtocol tests ---
+
+    #[test]
+    fn test_speed_protocol_display_all_variants() {
+        assert_eq!(SpeedProtocol::Http.to_string(), "HTTP");
+        assert_eq!(SpeedProtocol::Torrent.to_string(), "Torrent");
+        assert_eq!(SpeedProtocol::Ed2k.to_string(), "Ed2k");
+        assert_eq!(SpeedProtocol::P2p.to_string(), "P2P");
+        assert_eq!(SpeedProtocol::Unknown.to_string(), "Unknown");
+    }
+
+    #[test]
+    fn test_speed_protocol_serde_roundtrip() {
+        for proto in [
+            SpeedProtocol::Http,
+            SpeedProtocol::Torrent,
+            SpeedProtocol::Ed2k,
+            SpeedProtocol::P2p,
+            SpeedProtocol::Unknown,
+        ] {
+            let json = serde_json::to_string(&proto).unwrap();
+            let deserialized: SpeedProtocol = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, proto);
+        }
+    }
+
+    #[test]
+    fn test_speed_protocol_serde_snake_case() {
+        let json = serde_json::to_string(&SpeedProtocol::Http).unwrap();
+        assert_eq!(json, "\"http\"");
+        let json = serde_json::to_string(&SpeedProtocol::Unknown).unwrap();
+        assert_eq!(json, "\"unknown\"");
+    }
+
+    #[test]
+    fn test_speed_protocol_clone_copy_debug() {
+        let proto = SpeedProtocol::Http;
+        let cloned = proto.clone();
+        assert_eq!(cloned, SpeedProtocol::Http);
+        // Copy trait
+        let copied = proto;
+        assert_eq!(copied, SpeedProtocol::Http);
+        // Debug trait
+        let debug_str = format!("{:?}", proto);
+        assert!(debug_str.contains("Http"));
+    }
+
+    #[test]
+    fn test_speed_protocol_default() {
+        let proto: SpeedProtocol = Default::default();
+        assert_eq!(proto, SpeedProtocol::Http);
+    }
+
+    #[test]
+    fn test_speed_protocol_from_str_edge_cases() {
+        assert_eq!(SpeedProtocol::from_str(""), SpeedProtocol::Unknown);
+        assert_eq!(SpeedProtocol::from_str("ftp"), SpeedProtocol::Http);
+        assert_eq!(SpeedProtocol::from_str("HTTPS"), SpeedProtocol::Http);
+        assert_eq!(
+            SpeedProtocol::from_str("BitTorrent"),
+            SpeedProtocol::Torrent
+        );
+        assert_eq!(SpeedProtocol::from_str("bt"), SpeedProtocol::Torrent);
+        assert_eq!(SpeedProtocol::from_str("edonkey"), SpeedProtocol::Ed2k);
+        assert_eq!(
+            SpeedProtocol::from_str("random_string"),
+            SpeedProtocol::Unknown
+        );
+    }
+
+    // --- SpeedStats tests ---
+
+    #[test]
+    fn test_speed_stats_serde_roundtrip() {
+        let stats = SpeedStats {
+            sample_count: 100,
+            min_bps: 1000.0,
+            max_bps: 50000.0,
+            mean_bps: 25000.0,
+            median_bps: 20000.0,
+            p95_bps: 45000.0,
+            p99_bps: 48000.0,
+            stddev_bps: 5000.0,
+            stability: 0.85,
+            total_bytes: 1_000_000,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: SpeedStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.sample_count, stats.sample_count);
+        assert!((deserialized.mean_bps - stats.mean_bps).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_speed_stats_clone_debug() {
+        let stats = SpeedStats::default();
+        let cloned = stats.clone();
+        assert_eq!(cloned.sample_count, 0);
+        let debug_str = format!("{:?}", stats);
+        assert!(debug_str.contains("SpeedStats"));
+    }
+
+    #[test]
+    fn test_speed_stats_single_sample() {
+        let stats = SpeedStats::from_sorted_speedes(&[1000.0], 1000);
+        assert_eq!(stats.sample_count, 1);
+        assert_eq!(stats.min_bps, 1000.0);
+        assert_eq!(stats.max_bps, 1000.0);
+        assert_eq!(stats.mean_bps, 1000.0);
+        assert_eq!(stats.median_bps, 1000.0);
+        assert_eq!(stats.stddev_bps, 0.0);
+        assert_eq!(stats.stability, 1.0);
+    }
+
+    #[test]
+    fn test_speed_stats_stability_calculation() {
+        // All same values = perfect stability
+        let stats = SpeedStats::from_sorted_speedes(&[1000.0, 1000.0, 1000.0], 3000);
+        assert_eq!(stats.stability, 1.0);
+
+        // Moderate variation = lower stability
+        let stats = SpeedStats::from_sorted_speedes(&[800.0, 1000.0, 1200.0], 3000);
+        assert!(stats.stability < 1.0);
+        assert!(stats.stability > 0.0);
+
+        // Extreme variation = stability clamped to 0
+        let stats = SpeedStats::from_sorted_speedes(&[100.0, 1000.0, 10000.0], 11100);
+        assert_eq!(stats.stability, 0.0);
+    }
+
+    #[test]
+    fn test_speed_stats_zero_mean() {
+        let stats = SpeedStats::from_sorted_speedes(&[0.0, 0.0, 0.0], 0);
+        assert_eq!(stats.stability, 0.0);
+    }
+
+    #[test]
+    fn test_speed_stats_format_mean_median() {
+        let stats = SpeedStats {
+            sample_count: 1,
+            min_bps: 1024.0,
+            max_bps: 1024.0,
+            mean_bps: 1024.0,
+            median_bps: 1024.0,
+            p95_bps: 1024.0,
+            p99_bps: 1024.0,
+            stddev_bps: 0.0,
+            stability: 1.0,
+            total_bytes: 1024,
+        };
+        assert_eq!(stats.format_mean(), "1.0 KB/s");
+        assert_eq!(stats.format_median(), "1.0 KB/s");
+    }
+
+    // --- DomainSpeedData tests ---
+
+    #[test]
+    fn test_domain_speed_data_serde_roundtrip() {
+        let mut dsd = DomainSpeedData::new("test.com".to_string(), 100);
+        dsd.record_speed(1000.0, 100);
+        dsd.record_speed(2000.0, 200);
+
+        let json = serde_json::to_string(&dsd).unwrap();
+        let deserialized: DomainSpeedData = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.domain, "test.com");
+        assert_eq!(deserialized.speeds.len(), 2);
+        assert_eq!(deserialized.total_bytes, 300);
+        assert_eq!(deserialized.download_count, 2);
+    }
+
+    #[test]
+    fn test_domain_speed_data_clone_debug() {
+        let dsd = DomainSpeedData::new("test.com".to_string(), 100);
+        let cloned = dsd.clone();
+        assert_eq!(cloned.domain, "test.com");
+        let debug_str = format!("{:?}", dsd);
+        assert!(debug_str.contains("DomainSpeedData"));
+    }
+
+    #[test]
+    fn test_domain_speed_data_sorted_insertion() {
+        let mut dsd = DomainSpeedData::new("test.com".to_string(), 100);
+        dsd.record_speed(500.0, 100);
+        dsd.record_speed(100.0, 100);
+        dsd.record_speed(300.0, 100);
+        dsd.record_speed(200.0, 100);
+
+        // Speeds should be sorted
+        assert_eq!(dsd.speeds, vec![100.0, 200.0, 300.0, 500.0]);
+    }
+
+    #[test]
+    fn test_domain_speed_data_max_samples_trimming() {
+        let mut dsd = DomainSpeedData::new("test.com".to_string(), 5);
+        for i in 0..10 {
+            dsd.record_speed((i as f64 + 1.0) * 100.0, 100);
+        }
+        assert!(dsd.speeds.len() <= 5);
+        assert_eq!(dsd.download_count, 10);
+    }
+
+    // --- ProtocolSpeedData tests ---
+
+    #[test]
+    fn test_protocol_speed_data_serde_roundtrip() {
+        let mut psd = ProtocolSpeedData::new(SpeedProtocol::Torrent, 100);
+        psd.record_speed(1_000_000.0, 1_000_000);
+        psd.record_speed(2_000_000.0, 2_000_000);
+
+        let json = serde_json::to_string(&psd).unwrap();
+        let deserialized: ProtocolSpeedData = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.protocol, SpeedProtocol::Torrent);
+        assert_eq!(deserialized.speeds.len(), 2);
+    }
+
+    #[test]
+    fn test_protocol_speed_data_clone_debug() {
+        let psd = ProtocolSpeedData::new(SpeedProtocol::Http, 100);
+        let cloned = psd.clone();
+        assert_eq!(cloned.protocol, SpeedProtocol::Http);
+        let debug_str = format!("{:?}", psd);
+        assert!(debug_str.contains("ProtocolSpeedData"));
+    }
+
+    // --- HourlySpeedBucket tests ---
+
+    #[test]
+    fn test_hourly_speed_bucket_serde_roundtrip() {
+        let mut bucket = HourlySpeedBucket::new(14, 100);
+        bucket.record_speed(1000.0, 100);
+        bucket.record_speed(2000.0, 200);
+
+        let json = serde_json::to_string(&bucket).unwrap();
+        let deserialized: HourlySpeedBucket = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.hour, 14);
+        assert_eq!(deserialized.sample_count, 2);
+    }
+
+    #[test]
+    fn test_hourly_speed_bucket_clone_debug() {
+        let bucket = HourlySpeedBucket::new(0, 100);
+        let cloned = bucket.clone();
+        assert_eq!(cloned.hour, 0);
+        let debug_str = format!("{:?}", bucket);
+        assert!(debug_str.contains("HourlySpeedBucket"));
+    }
+
+    #[test]
+    fn test_hourly_speed_bucket_max_samples() {
+        let mut bucket = HourlySpeedBucket::new(12, 5);
+        for i in 0..10 {
+            bucket.record_speed((i as f64 + 1.0) * 100.0, 100);
+        }
+        assert!(bucket.speeds.len() <= 5);
+        assert_eq!(bucket.sample_count, 10);
+    }
+
+    // --- SpeedHistogram tests ---
+
+    #[test]
+    fn test_speed_histogram_serde_roundtrip() {
+        let mut hist = SpeedHistogram::default();
+        hist.record_speed(5000.0);
+        hist.record_speed(50_000.0);
+
+        let json = serde_json::to_string(&hist).unwrap();
+        let deserialized: SpeedHistogram = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.total_samples, 2);
+        assert_eq!(deserialized.bucket_counts[0], 1);
+    }
+
+    #[test]
+    fn test_speed_histogram_clone_debug() {
+        let hist = SpeedHistogram::default();
+        let cloned = hist.clone();
+        assert_eq!(cloned.total_samples, 0);
+        let debug_str = format!("{:?}", hist);
+        assert!(debug_str.contains("SpeedHistogram"));
+    }
+
+    #[test]
+    fn test_speed_histogram_bucket_index_boundaries() {
+        // Test exact boundaries
+        assert_eq!(SpeedHistogram::bucket_index(0.0), 0);
+        assert_eq!(SpeedHistogram::bucket_index(10.0 * 1024.0 - 1.0), 0);
+        assert_eq!(SpeedHistogram::bucket_index(10.0 * 1024.0), 1);
+        assert_eq!(SpeedHistogram::bucket_index(50.0 * 1024.0 - 1.0), 1);
+        assert_eq!(SpeedHistogram::bucket_index(50.0 * 1024.0), 2);
+        assert_eq!(SpeedHistogram::bucket_index(100.0 * 1024.0), 3);
+        assert_eq!(SpeedHistogram::bucket_index(500.0 * 1024.0), 4);
+        assert_eq!(SpeedHistogram::bucket_index(1024.0 * 1024.0), 5);
+        assert_eq!(SpeedHistogram::bucket_index(5.0 * 1024.0 * 1024.0), 6);
+        assert_eq!(SpeedHistogram::bucket_index(10.0 * 1024.0 * 1024.0), 7);
+        assert_eq!(SpeedHistogram::bucket_index(50.0 * 1024.0 * 1024.0), 8);
+        assert_eq!(SpeedHistogram::bucket_index(100.0 * 1024.0 * 1024.0), 9);
+    }
+
+    #[test]
+    fn test_speed_histogram_all_buckets() {
+        let mut hist = SpeedHistogram::default();
+        // Record one sample in each bucket
+        hist.record_speed(5.0 * 1024.0); // <10KB/s
+        hist.record_speed(20.0 * 1024.0); // 10-50KB/s
+        hist.record_speed(75.0 * 1024.0); // 50-100KB/s
+        hist.record_speed(200.0 * 1024.0); // 100-500KB/s
+        hist.record_speed(750.0 * 1024.0); // 500KB-1MB/s
+        hist.record_speed(2.0 * 1024.0 * 1024.0); // 1-5MB/s
+        hist.record_speed(7.0 * 1024.0 * 1024.0); // 5-10MB/s
+        hist.record_speed(20.0 * 1024.0 * 1024.0); // 10-50MB/s
+        hist.record_speed(75.0 * 1024.0 * 1024.0); // 50-100MB/s
+        hist.record_speed(150.0 * 1024.0 * 1024.0); // >100MB/s
+
+        assert_eq!(hist.total_samples, 10);
+        for i in 0..NUM_HISTOGRAM_BUCKETS {
+            assert_eq!(
+                hist.bucket_counts[i], 1,
+                "bucket {} should have 1 sample",
+                i
+            );
+        }
+    }
+
+    // --- Config tests ---
+
+    #[test]
+    fn test_config_serde_roundtrip() {
+        let config = SpeedDistributionConfig {
+            enabled: false,
+            max_domain_samples: 500,
+            max_hourly_samples: 250,
+            max_tracked_domains: 100,
+            track_protocol_stats: false,
+            track_hourly_distribution: false,
+            track_histogram: false,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: SpeedDistributionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.enabled, false);
+        assert_eq!(deserialized.max_domain_samples, 500);
+        assert_eq!(deserialized.max_hourly_samples, 250);
+        assert_eq!(deserialized.max_tracked_domains, 100);
+        assert_eq!(deserialized.track_protocol_stats, false);
+    }
+
+    #[test]
+    fn test_config_serde_extra_fields_ignored() {
+        let json = r#"{
+            "enabled": true,
+            "max_domain_samples": 1000,
+            "max_hourly_samples": 500,
+            "max_tracked_domains": 200,
+            "track_protocol_stats": true,
+            "track_hourly_distribution": true,
+            "track_histogram": true,
+            "unknown_field": "should be ignored"
+        }"#;
+        let config: SpeedDistributionConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_config_clone_debug() {
+        let config = SpeedDistributionConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.enabled, config.enabled);
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("SpeedDistributionConfig"));
+    }
+
+    // --- Summary struct tests ---
+
+    #[test]
+    fn test_speed_distribution_summary_serde_roundtrip() {
+        let summary = SpeedDistributionSummary {
+            global_stats: SpeedStats::default(),
+            tracked_domains: 5,
+            top_domains: vec![],
+            protocol_stats: vec![],
+            best_hour: None,
+            worst_hour: None,
+            histogram: HistogramSummary {
+                buckets: vec![],
+                modal_range: None,
+                total_samples: 0,
+            },
+            total_samples: 100,
+            overall_stability: 0.9,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: SpeedDistributionSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.tracked_domains, 5);
+        assert_eq!(deserialized.total_samples, 100);
+    }
+
+    #[test]
+    fn test_domain_speed_summary_clone_debug() {
+        let summary = DomainSpeedSummary {
+            domain: "test.com".to_string(),
+            sample_count: 10,
+            mean_bps: 1000.0,
+            median_bps: 900.0,
+            p95_bps: 1500.0,
+            min_bps: 100.0,
+            max_bps: 2000.0,
+            stability: 0.8,
+            total_bytes: 10000,
+            download_count: 5,
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.domain, "test.com");
+        let debug_str = format!("{:?}", summary);
+        assert!(debug_str.contains("DomainSpeedSummary"));
+    }
+
+    #[test]
+    fn test_hourly_speed_summary_serde() {
+        let summary = HourlySpeedSummary {
+            hour: 14,
+            mean_bps: 1_000_000.0,
+            median_bps: 800_000.0,
+            sample_count: 50,
+            hour_label: "14:00".to_string(),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: HourlySpeedSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.hour, 14);
+        assert_eq!(deserialized.hour_label, "14:00");
+    }
+
+    #[test]
+    fn test_histogram_summary_serde() {
+        let summary = HistogramSummary {
+            buckets: vec![HistogramBucket {
+                label: "<10KB/s".to_string(),
+                count: 100,
+                percentage: 50.0,
+            }],
+            modal_range: Some("<10KB/s".to_string()),
+            total_samples: 200,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: HistogramSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.buckets.len(), 1);
+        assert_eq!(deserialized.total_samples, 200);
+    }
+
+    // --- Manager edge case tests ---
+
+    #[tokio::test]
+    async fn test_manager_with_config() {
+        let tmp = TempDir::new().unwrap();
+        let config = SpeedDistributionConfig {
+            max_domain_samples: 100,
+            max_hourly_samples: 50,
+            max_tracked_domains: 10,
+            ..Default::default()
+        };
+        let mgr = SpeedDistributionManager::with_config(tmp.path().to_path_buf(), config);
+        assert_eq!(mgr.config.max_domain_samples, 100);
+        assert_eq!(mgr.config.max_hourly_samples, 50);
+        assert_eq!(mgr.config.max_tracked_domains, 10);
+    }
+
+    #[tokio::test]
+    async fn test_manager_get_config() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+        let config = mgr.get_config();
+        assert!(config.enabled);
+        assert_eq!(config.max_domain_samples, DEFAULT_MAX_DOMAIN_SAMPLES);
+    }
+
+    #[tokio::test]
+    async fn test_manager_protocol_stats() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+
+        mgr.record_speed("example.com", SpeedProtocol::Http, 100.0 * 1024.0, 1000)
+            .await;
+        mgr.record_speed("example.com", SpeedProtocol::Http, 200.0 * 1024.0, 2000)
+            .await;
+        mgr.record_speed("other.com", SpeedProtocol::Torrent, 500.0 * 1024.0, 5000)
+            .await;
+
+        let http_stats = mgr.protocol_stats(SpeedProtocol::Http).unwrap();
+        assert_eq!(http_stats.sample_count, 2);
+
+        let torrent_stats = mgr.protocol_stats(SpeedProtocol::Torrent).unwrap();
+        assert_eq!(torrent_stats.sample_count, 1);
+
+        let ed2k_stats = mgr.protocol_stats(SpeedProtocol::Ed2k);
+        assert!(ed2k_stats.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_manager_hourly_stats() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+
+        // Record some speeds (will go to current hour)
+        mgr.record_speed("example.com", SpeedProtocol::Http, 100.0 * 1024.0, 1000)
+            .await;
+
+        // Get current hour
+        let current_hour = chrono::Utc::now().hour() as u8;
+        let stats = mgr.hourly_stats(current_hour);
+        assert!(stats.is_some());
+        let stats = stats.unwrap();
+        assert_eq!(stats.sample_count, 1);
+
+        // Empty hour should return empty stats
+        let empty_hour = (current_hour + 12) % 24;
+        let empty_stats = mgr.hourly_stats(empty_hour);
+        assert!(empty_stats.is_some());
+        assert_eq!(empty_stats.unwrap().sample_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_manager_global_stats() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+
+        mgr.record_speed("example.com", SpeedProtocol::Http, 100.0 * 1024.0, 1000)
+            .await;
+        mgr.record_speed("example.com", SpeedProtocol::Http, 200.0 * 1024.0, 2000)
+            .await;
+        mgr.record_speed("other.com", SpeedProtocol::Torrent, 300.0 * 1024.0, 3000)
+            .await;
+
+        let global = mgr.global_stats();
+        assert_eq!(global.sample_count, 3);
+        assert_eq!(global.min_bps, 100.0 * 1024.0);
+        assert_eq!(global.max_bps, 300.0 * 1024.0);
+        assert_eq!(global.total_bytes, 6000);
+    }
+
+    #[tokio::test]
+    async fn test_manager_unicode_domain() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+
+        mgr.record_speed("中文域名.com", SpeedProtocol::Http, 100.0 * 1024.0, 1000)
+            .await;
+        mgr.record_speed("日本語.jp", SpeedProtocol::Http, 200.0 * 1024.0, 2000)
+            .await;
+
+        assert_eq!(mgr.domains.len(), 2);
+        let domains = mgr.tracked_domains();
+        assert!(domains.contains(&"中文域名.com".to_string()));
+        assert!(domains.contains(&"日本語.jp".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_manager_domain_normalization() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+
+        // These should all normalize to the same domain
+        mgr.record_speed("Example.COM", SpeedProtocol::Http, 100.0 * 1024.0, 1000)
+            .await;
+        mgr.record_speed(
+            "example.com:8080",
+            SpeedProtocol::Http,
+            200.0 * 1024.0,
+            2000,
+        )
+        .await;
+        mgr.record_speed("www.example.com", SpeedProtocol::Http, 300.0 * 1024.0, 3000)
+            .await;
+
+        // Should all be merged into "example.com"
+        assert_eq!(mgr.domains.len(), 1);
+        let stats = mgr.domain_stats("example.com").unwrap();
+        assert_eq!(stats.sample_count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_manager_remove_domain_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+        assert!(!mgr.remove_domain("nonexistent.com"));
+    }
+
+    #[tokio::test]
+    async fn test_manager_summary_empty() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+
+        let summary = mgr.get_summary();
+        assert_eq!(summary.tracked_domains, 0);
+        assert_eq!(summary.total_samples, 0);
+        assert!(summary.top_domains.is_empty());
+        assert!(summary.protocol_stats.is_empty());
+        assert!(summary.best_hour.is_none());
+        assert!(summary.worst_hour.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_manager_summary_with_data() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+
+        for i in 0..10 {
+            mgr.record_speed(
+                &format!("domain{}.com", i),
+                SpeedProtocol::Http,
+                (i as f64 + 1.0) * 100.0 * 1024.0,
+                (i as u64 + 1) * 1000,
+            )
+            .await;
+        }
+
+        let summary = mgr.get_summary();
+        assert_eq!(summary.tracked_domains, 10);
+        assert_eq!(summary.total_samples, 10);
+        assert!(!summary.top_domains.is_empty());
+        assert!(summary.top_domains.len() <= 10);
+    }
+
+    #[tokio::test]
+    async fn test_manager_persistence_missing_files() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+
+        // Load from non-existent files should not error
+        let result = mgr.load().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_manager_persistence_corrupt_json() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+
+        // Write corrupt JSON
+        fs::write(dir.join("speed_distribution_config.json"), "not json")
+            .await
+            .unwrap();
+        fs::write(dir.join("speed_distribution_data.json"), "not json")
+            .await
+            .unwrap();
+
+        let mut mgr = SpeedDistributionManager::new(dir);
+        // Load should succeed but not load any data
+        let result = mgr.load().await;
+        assert!(result.is_ok());
+        assert!(mgr.domains.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_manager_persistence_overwrite() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+
+        // First save
+        {
+            let mut mgr = SpeedDistributionManager::new(dir.clone());
+            mgr.record_speed("first.com", SpeedProtocol::Http, 100.0 * 1024.0, 1000)
+                .await;
+            mgr.set_config(mgr.config.clone()).await.unwrap();
+        }
+
+        // Second save (overwrite)
+        {
+            let mut mgr = SpeedDistributionManager::new(dir.clone());
+            mgr.record_speed("second.com", SpeedProtocol::Http, 200.0 * 1024.0, 2000)
+                .await;
+            mgr.set_config(mgr.config.clone()).await.unwrap();
+        }
+
+        // Load and verify only second data exists
+        {
+            let mut mgr = SpeedDistributionManager::new(dir);
+            mgr.load().await.unwrap();
+            assert_eq!(mgr.domains.len(), 1);
+            assert!(mgr.domains.contains_key("second.com"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_manager_clear_resets_histogram() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+
+        mgr.record_speed("example.com", SpeedProtocol::Http, 100.0 * 1024.0, 1000)
+            .await;
+        assert_eq!(mgr.histogram.total_samples, 1);
+
+        mgr.clear().await.unwrap();
+        assert_eq!(mgr.histogram.total_samples, 0);
+    }
+
+    #[tokio::test]
+    async fn test_manager_clear_resets_hourly() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+
+        mgr.record_speed("example.com", SpeedProtocol::Http, 100.0 * 1024.0, 1000)
+            .await;
+
+        let current_hour = chrono::Utc::now().hour() as usize;
+        assert!(mgr.hourly[current_hour].sample_count > 0);
+
+        mgr.clear().await.unwrap();
+        for bucket in &mgr.hourly {
+            assert_eq!(bucket.sample_count, 0);
+        }
+    }
+
+    // --- Format function edge cases ---
+
+    #[test]
+    fn test_format_speed_bps_edge_cases() {
+        assert_eq!(format_speed_bps(0.0), "0 B/s");
+        assert_eq!(format_speed_bps(0.5), "0 B/s"); // rounds to 0
+        assert_eq!(format_speed_bps(1023.0), "1023 B/s");
+        assert_eq!(format_speed_bps(1024.0 * 1024.0 - 1.0), "1024.0 KB/s");
+    }
+
+    #[test]
+    fn test_format_bytes_edge_cases() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024 * 1024 - 1), "1024.0 KB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024 - 1), "1024.0 MB");
+    }
+
+    // --- Constants tests ---
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(NUM_HISTOGRAM_BUCKETS, 10);
+        assert_eq!(DEFAULT_MAX_DOMAIN_SAMPLES, 1000);
+        assert_eq!(DEFAULT_MAX_HOURLY_SAMPLES, 500);
+    }
+
+    #[test]
+    fn test_speed_bucket_boundaries_length() {
+        assert_eq!(SPEED_BUCKET_BOUNDARIES.len(), NUM_HISTOGRAM_BUCKETS + 1);
+        assert_eq!(SPEED_BUCKET_LABELS.len(), NUM_HISTOGRAM_BUCKETS);
+    }
+
+    #[test]
+    fn test_speed_bucket_boundaries_sorted() {
+        for i in 0..NUM_HISTOGRAM_BUCKETS {
+            assert!(SPEED_BUCKET_BOUNDARIES[i] < SPEED_BUCKET_BOUNDARIES[i + 1]);
+        }
+    }
+
+    // --- Report format tests ---
+
+    #[tokio::test]
+    async fn test_format_report_empty() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+        let report = mgr.format_report();
+        assert!(report.contains("Speed Distribution Report"));
+        assert!(report.contains("Global Statistics"));
+    }
+
+    #[tokio::test]
+    async fn test_format_report_with_protocol_stats() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+
+        mgr.record_speed("example.com", SpeedProtocol::Http, 100.0 * 1024.0, 1000)
+            .await;
+        mgr.record_speed("other.com", SpeedProtocol::Torrent, 200.0 * 1024.0, 2000)
+            .await;
+
+        let report = mgr.format_report();
+        assert!(report.contains("Protocol Distribution"));
+        assert!(report.contains("HTTP"));
+        assert!(report.contains("Torrent"));
+    }
+
+    #[tokio::test]
+    async fn test_format_report_with_histogram() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = SpeedDistributionManager::new(tmp.path().to_path_buf());
+
+        for i in 0..20 {
+            mgr.record_speed(
+                "example.com",
+                SpeedProtocol::Http,
+                (i as f64 + 1.0) * 10.0 * 1024.0,
+                1000,
+            )
+            .await;
+        }
+
+        let report = mgr.format_report();
+        assert!(report.contains("Speed Distribution"));
+    }
+
+    // --- PersistedData tests ---
+
+    #[test]
+    fn test_persisted_data_serde() {
+        let data = PersistedData {
+            domains: HashMap::new(),
+            protocols: HashMap::new(),
+            hourly: vec![],
+            histogram: SpeedHistogram::default(),
+            global_speeds: vec![100.0, 200.0, 300.0],
+            global_total_bytes: 600,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let deserialized: PersistedData = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.global_speeds.len(), 3);
+        assert_eq!(deserialized.global_total_bytes, 600);
+    }
+
+    #[test]
+    fn test_persisted_data_clone_debug() {
+        let data = PersistedData {
+            domains: HashMap::new(),
+            protocols: HashMap::new(),
+            hourly: vec![],
+            histogram: SpeedHistogram::default(),
+            global_speeds: vec![],
+            global_total_bytes: 0,
+        };
+        let cloned = data.clone();
+        assert_eq!(cloned.global_total_bytes, 0);
+        let debug_str = format!("{:?}", data);
+        assert!(debug_str.contains("PersistedData"));
+    }
 }
