@@ -1,5 +1,14 @@
 {
-  "extensions": {},
-  "total_downloads": 0,
-  "total_bytes": 0
+  "extensions": {
+    "mp4": {
+      "extension": "mp4",
+      "count": 10,
+      "total_bytes": 10000,
+      "total_duration_secs": 100,
+      "avg_speed_bps": 100,
+      "last_download_at": 1786690248
+    }
+  },
+  "total_downloads": 10,
+  "total_bytes": 10000
 }

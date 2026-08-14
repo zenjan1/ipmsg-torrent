@@ -380,9 +380,8 @@ impl BandwidthForecastManager {
         } else {
             1.0
         };
-        let sample_confidence = (sample_count as f64 / (self.config.max_samples as f64 * 0.5))
-            .min(1.0)
-            .max(0.0);
+        let sample_confidence =
+            (sample_count as f64 / (self.config.max_samples as f64 * 0.5)).clamp(0.0, 1.0);
         let stability_confidence = 1.0 - cv;
         let confidence_score = (sample_confidence * 0.5 + stability_confidence * 0.5).max(0.0);
 
@@ -505,28 +504,26 @@ impl BandwidthForecastManager {
 
     /// Save config to disk
     pub fn save_config(&self, path: &Path) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(&self.config)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(&self.config).map_err(std::io::Error::other)?;
         fs::write(path, json)
     }
 
     /// Load config from disk
     pub fn load_config(path: &Path) -> std::io::Result<ForecastConfig> {
         let json = fs::read_to_string(path)?;
-        serde_json::from_str(&json).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::from_str(&json).map_err(std::io::Error::other)
     }
 
     /// Save histories to disk
     pub fn save_histories(&self, path: &Path) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(&self.histories)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(&self.histories).map_err(std::io::Error::other)?;
         fs::write(path, json)
     }
 
     /// Load histories from disk
     pub fn load_histories(path: &Path) -> std::io::Result<HashMap<String, DomainSpeedHistory>> {
         let json = fs::read_to_string(path)?;
-        serde_json::from_str(&json).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::from_str(&json).map_err(std::io::Error::other)
     }
 }
 
@@ -805,5 +802,867 @@ mod tests {
         let display = summary.display();
         assert!(display.contains("Bandwidth Forecast Summary"));
         assert!(display.contains("test.com"));
+    }
+
+    // ========== Phase 222: Comprehensive Test Coverage ==========
+
+    // --- ForecastConfig serialization tests ---
+    #[test]
+    fn test_config_serde_roundtrip() {
+        let config = ForecastConfig {
+            enabled: true,
+            min_samples: 10,
+            max_samples: 500,
+            trend_window_secs: 600,
+            high_confidence_threshold: 0.8,
+            medium_confidence_threshold: 0.5,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: ForecastConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn test_config_default_serde_roundtrip() {
+        let config = ForecastConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: ForecastConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn test_config_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"min_samples":5,"max_samples":200,"trend_window_secs":300,"high_confidence_threshold":0.7,"medium_confidence_threshold":0.4,"extra_field":"ignored"}"#;
+        let config: ForecastConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config, ForecastConfig::default());
+    }
+
+    #[test]
+    fn test_config_default_values() {
+        let config = ForecastConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.min_samples, 5);
+        assert_eq!(config.max_samples, 200);
+        assert_eq!(config.trend_window_secs, 300);
+        assert!((config.high_confidence_threshold - 0.7).abs() < 0.001);
+        assert!((config.medium_confidence_threshold - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_config_clone_debug() {
+        let config = ForecastConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned, config);
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("ForecastConfig"));
+    }
+
+    // --- TimeOfDay serialization and trait tests ---
+    #[test]
+    fn test_time_of_day_serde_roundtrip() {
+        for tod in [
+            TimeOfDay::Night,
+            TimeOfDay::Morning,
+            TimeOfDay::Afternoon,
+            TimeOfDay::Evening,
+        ] {
+            let json = serde_json::to_string(&tod).unwrap();
+            let loaded: TimeOfDay = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded, tod);
+        }
+    }
+
+    #[test]
+    fn test_time_of_day_as_str() {
+        assert_eq!(TimeOfDay::Night.as_str(), "night (00-06)");
+        assert_eq!(TimeOfDay::Morning.as_str(), "morning (06-12)");
+        assert_eq!(TimeOfDay::Afternoon.as_str(), "afternoon (12-18)");
+        assert_eq!(TimeOfDay::Evening.as_str(), "evening (18-24)");
+    }
+
+    #[test]
+    fn test_time_of_day_clone_copy_debug() {
+        let tod = TimeOfDay::Morning;
+        let cloned = tod.clone();
+        let copied = tod;
+        assert_eq!(cloned, copied);
+        let debug_str = format!("{:?}", tod);
+        assert!(debug_str.contains("Morning"));
+    }
+
+    #[test]
+    fn test_time_of_day_eq_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(TimeOfDay::Night);
+        set.insert(TimeOfDay::Morning);
+        set.insert(TimeOfDay::Night); // duplicate
+        assert_eq!(set.len(), 2);
+    }
+
+    // --- ForecastConfidence tests ---
+    #[test]
+    fn test_forecast_confidence_serde_roundtrip() {
+        for conf in [
+            ForecastConfidence::High,
+            ForecastConfidence::Medium,
+            ForecastConfidence::Low,
+            ForecastConfidence::None,
+        ] {
+            let json = serde_json::to_string(&conf).unwrap();
+            let loaded: ForecastConfidence = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded, conf);
+        }
+    }
+
+    #[test]
+    fn test_forecast_confidence_as_str() {
+        assert_eq!(ForecastConfidence::High.as_str(), "high");
+        assert_eq!(ForecastConfidence::Medium.as_str(), "medium");
+        assert_eq!(ForecastConfidence::Low.as_str(), "low");
+        assert_eq!(ForecastConfidence::None.as_str(), "none");
+    }
+
+    #[test]
+    fn test_forecast_confidence_clone_copy() {
+        let conf = ForecastConfidence::High;
+        let cloned = conf.clone();
+        let copied = conf;
+        assert_eq!(cloned, copied);
+    }
+
+    // --- ForecastTrend tests ---
+    #[test]
+    fn test_forecast_trend_serde_roundtrip() {
+        for trend in [
+            ForecastTrend::Increasing,
+            ForecastTrend::Stable,
+            ForecastTrend::Decreasing,
+            ForecastTrend::Unknown,
+        ] {
+            let json = serde_json::to_string(&trend).unwrap();
+            let loaded: ForecastTrend = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded, trend);
+        }
+    }
+
+    #[test]
+    fn test_forecast_trend_as_str() {
+        assert_eq!(ForecastTrend::Increasing.as_str(), "increasing");
+        assert_eq!(ForecastTrend::Stable.as_str(), "stable");
+        assert_eq!(ForecastTrend::Decreasing.as_str(), "decreasing");
+        assert_eq!(ForecastTrend::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn test_forecast_trend_clone_copy() {
+        let trend = ForecastTrend::Increasing;
+        let cloned = trend.clone();
+        let copied = trend;
+        assert_eq!(cloned, copied);
+    }
+
+    // --- ForecastSample tests ---
+    #[test]
+    fn test_forecast_sample_serde_roundtrip() {
+        let sample = ForecastSample {
+            timestamp: Utc::now(),
+            speed_bps: 1_500_000.0,
+            bytes_downloaded: 5_000_000,
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let loaded: ForecastSample = serde_json::from_str(&json).unwrap();
+        assert!((loaded.speed_bps - sample.speed_bps).abs() < 0.001);
+        assert_eq!(loaded.bytes_downloaded, sample.bytes_downloaded);
+    }
+
+    #[test]
+    fn test_forecast_sample_clone_debug() {
+        let sample = ForecastSample {
+            timestamp: Utc::now(),
+            speed_bps: 1_000_000.0,
+            bytes_downloaded: 1000,
+        };
+        let cloned = sample.clone();
+        assert!((cloned.speed_bps - sample.speed_bps).abs() < 0.001);
+        let debug_str = format!("{:?}", sample);
+        assert!(debug_str.contains("ForecastSample"));
+    }
+
+    #[test]
+    fn test_forecast_sample_zero_speed() {
+        let sample = ForecastSample {
+            timestamp: Utc::now(),
+            speed_bps: 0.0,
+            bytes_downloaded: 0,
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let loaded: ForecastSample = serde_json::from_str(&json).unwrap();
+        assert!((loaded.speed_bps).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_forecast_sample_large_values() {
+        let sample = ForecastSample {
+            timestamp: Utc::now(),
+            speed_bps: 1e15, // 1 PB/s - large but JSON-safe
+            bytes_downloaded: u64::MAX,
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let loaded: ForecastSample = serde_json::from_str(&json).unwrap();
+        assert!((loaded.speed_bps - sample.speed_bps).abs() < 1.0);
+        assert_eq!(loaded.bytes_downloaded, u64::MAX);
+    }
+
+    // --- BandwidthForecast tests ---
+    #[test]
+    fn test_bandwidth_forecast_serde_roundtrip() {
+        let forecast = BandwidthForecast {
+            key: "example.com".to_string(),
+            predicted_speed_bps: 2_000_000.0,
+            min_speed_bps: 1_000_000.0,
+            max_speed_bps: 3_000_000.0,
+            confidence: ForecastConfidence::High,
+            confidence_score: 0.85,
+            sample_count: 50,
+            time_pattern: Some(TimeOfDay::Afternoon),
+            generated_at: Utc::now(),
+            trend: ForecastTrend::Increasing,
+        };
+        let json = serde_json::to_string(&forecast).unwrap();
+        let loaded: BandwidthForecast = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.key, forecast.key);
+        assert!((loaded.predicted_speed_bps - forecast.predicted_speed_bps).abs() < 0.001);
+        assert_eq!(loaded.confidence, forecast.confidence);
+        assert_eq!(loaded.trend, forecast.trend);
+    }
+
+    #[test]
+    fn test_bandwidth_forecast_no_time_pattern() {
+        let forecast = BandwidthForecast {
+            key: "test.com".to_string(),
+            predicted_speed_bps: 1_000_000.0,
+            min_speed_bps: 500_000.0,
+            max_speed_bps: 1_500_000.0,
+            confidence: ForecastConfidence::Low,
+            confidence_score: 0.2,
+            sample_count: 2,
+            time_pattern: None,
+            generated_at: Utc::now(),
+            trend: ForecastTrend::Unknown,
+        };
+        let json = serde_json::to_string(&forecast).unwrap();
+        let loaded: BandwidthForecast = serde_json::from_str(&json).unwrap();
+        assert!(loaded.time_pattern.is_none());
+    }
+
+    #[test]
+    fn test_bandwidth_forecast_unicode_domain() {
+        let forecast = BandwidthForecast {
+            key: "中文域名.com".to_string(),
+            predicted_speed_bps: 1_000_000.0,
+            min_speed_bps: 500_000.0,
+            max_speed_bps: 1_500_000.0,
+            confidence: ForecastConfidence::Medium,
+            confidence_score: 0.5,
+            sample_count: 10,
+            time_pattern: Some(TimeOfDay::Morning),
+            generated_at: Utc::now(),
+            trend: ForecastTrend::Stable,
+        };
+        let json = serde_json::to_string(&forecast).unwrap();
+        let loaded: BandwidthForecast = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.key, "中文域名.com");
+    }
+
+    #[test]
+    fn test_bandwidth_forecast_clone_debug() {
+        let forecast = BandwidthForecast {
+            key: "test.com".to_string(),
+            predicted_speed_bps: 1_000_000.0,
+            min_speed_bps: 500_000.0,
+            max_speed_bps: 1_500_000.0,
+            confidence: ForecastConfidence::High,
+            confidence_score: 0.8,
+            sample_count: 20,
+            time_pattern: Some(TimeOfDay::Evening),
+            generated_at: Utc::now(),
+            trend: ForecastTrend::Decreasing,
+        };
+        let cloned = forecast.clone();
+        assert_eq!(cloned.key, forecast.key);
+        let debug_str = format!("{:?}", forecast);
+        assert!(debug_str.contains("BandwidthForecast"));
+    }
+
+    // --- DomainSpeedHistory comprehensive tests ---
+    #[test]
+    fn test_domain_speed_history_serde_roundtrip() {
+        let mut history = DomainSpeedHistory::new("example.com".to_string());
+        let sample = ForecastSample {
+            timestamp: Utc::now(),
+            speed_bps: 1_000_000.0,
+            bytes_downloaded: 5000,
+        };
+        history.add_sample(sample, 50);
+
+        let json = serde_json::to_string(&history).unwrap();
+        let loaded: DomainSpeedHistory = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.domain, "example.com");
+        assert_eq!(loaded.samples.len(), 1);
+    }
+
+    #[test]
+    fn test_domain_speed_history_empty() {
+        let history = DomainSpeedHistory::new("empty.com".to_string());
+        assert_eq!(history.domain, "empty.com");
+        assert!(history.samples.is_empty());
+        assert!(history.tod_averages.is_empty());
+        assert!(history.tod_counts.is_empty());
+        assert!((history.overall_average()).abs() < 0.001);
+        assert!((history.variance()).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_domain_speed_history_variance_single_sample() {
+        let mut history = DomainSpeedHistory::new("single.com".to_string());
+        let sample = ForecastSample {
+            timestamp: Utc::now(),
+            speed_bps: 1_000_000.0,
+            bytes_downloaded: 1000,
+        };
+        history.add_sample(sample, 50);
+        assert!((history.variance()).abs() < 0.001); // < 2 samples returns 0
+    }
+
+    #[test]
+    fn test_domain_speed_history_variance_calculation() {
+        let mut history = DomainSpeedHistory::new("var.com".to_string());
+        let speeds = [1_000_000.0, 2_000_000.0, 3_000_000.0];
+        for speed in speeds {
+            let sample = ForecastSample {
+                timestamp: Utc::now(),
+                speed_bps: speed,
+                bytes_downloaded: 0,
+            };
+            history.add_sample(sample, 50);
+        }
+        // Variance should be non-zero for different speeds
+        assert!(history.variance() > 0.0);
+    }
+
+    #[test]
+    fn test_domain_speed_history_recent_average_empty() {
+        let history = DomainSpeedHistory::new("empty.com".to_string());
+        // When no samples, recent_average falls back to overall_average (0.0)
+        assert!((history.recent_average(60)).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_domain_speed_history_tod_average_missing() {
+        let history = DomainSpeedHistory::new("test.com".to_string());
+        // No data for any time of day
+        assert!(history.get_tod_average(TimeOfDay::Night).is_none());
+        assert!(history.get_tod_average(TimeOfDay::Morning).is_none());
+    }
+
+    #[test]
+    fn test_domain_speed_history_clone_debug() {
+        let mut history = DomainSpeedHistory::new("clone.com".to_string());
+        let sample = ForecastSample {
+            timestamp: Utc::now(),
+            speed_bps: 500_000.0,
+            bytes_downloaded: 1000,
+        };
+        history.add_sample(sample, 50);
+
+        let cloned = history.clone();
+        assert_eq!(cloned.domain, history.domain);
+        assert_eq!(cloned.samples.len(), history.samples.len());
+
+        let debug_str = format!("{:?}", history);
+        assert!(debug_str.contains("DomainSpeedHistory"));
+    }
+
+    // --- BandwidthForecastManager comprehensive tests ---
+    #[test]
+    fn test_manager_default() {
+        let manager = BandwidthForecastManager::default();
+        assert!(manager.histories.is_empty());
+        assert!(manager.config.enabled);
+    }
+
+    #[test]
+    fn test_manager_new_equals_default_config() {
+        let manager = BandwidthForecastManager::new(ForecastConfig::default());
+        let default_manager = BandwidthForecastManager::default();
+        assert_eq!(manager.config, default_manager.config);
+    }
+
+    #[test]
+    fn test_manager_record_sample_disabled() {
+        let config = ForecastConfig {
+            enabled: false,
+            ..ForecastConfig::default()
+        };
+        let mut manager = BandwidthForecastManager::new(config);
+        manager.record_sample("test.com", 1_000_000.0, 1000);
+        assert!(manager.histories.is_empty());
+    }
+
+    #[test]
+    fn test_manager_record_sample_creates_history() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        assert!(manager.histories.is_empty());
+
+        manager.record_sample("new.com", 1_000_000.0, 1000);
+        assert!(manager.histories.contains_key("new.com"));
+        assert_eq!(manager.histories["new.com"].samples.len(), 1);
+    }
+
+    #[test]
+    fn test_manager_record_multiple_samples() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        for i in 0..10 {
+            manager.record_sample("multi.com", (i + 1) as f64 * 100_000.0, 0);
+        }
+        assert_eq!(manager.histories["multi.com"].samples.len(), 10);
+    }
+
+    #[test]
+    fn test_manager_forecast_zero_speed() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        for _ in 0..5 {
+            manager.record_sample("zero.com", 0.0, 0);
+        }
+        let forecast = manager.forecast("zero.com");
+        assert!((forecast.predicted_speed_bps).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_manager_estimate_eta_zero_remaining() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        for _ in 0..5 {
+            manager.record_sample("eta.com", 1_000_000.0, 0);
+        }
+        let eta = manager.estimate_eta("eta.com", 0);
+        assert!(eta.is_some());
+        assert_eq!(eta.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_manager_estimate_eta_zero_speed() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        for _ in 0..5 {
+            manager.record_sample("slow.com", 0.0, 0);
+        }
+        let eta = manager.estimate_eta("slow.com", 1_000_000);
+        assert!(eta.is_none());
+    }
+
+    #[test]
+    fn test_manager_clear_domain_nonexistent() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        manager.record_sample("exists.com", 1_000_000.0, 0);
+        manager.clear_domain("nonexistent.com"); // should not panic
+        assert_eq!(manager.histories.len(), 1);
+    }
+
+    #[test]
+    fn test_manager_clear_all_empty() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        manager.clear_all(); // should not panic on empty
+        assert!(manager.histories.is_empty());
+    }
+
+    #[test]
+    fn test_manager_get_summary_empty() {
+        let manager = BandwidthForecastManager::new(test_config());
+        let summary = manager.get_summary();
+        assert_eq!(summary.total_domains, 0);
+        assert_eq!(summary.high_confidence_count, 0);
+        assert!((summary.avg_predicted_speed_bps).abs() < 0.001);
+        assert!(summary.forecasts.is_empty());
+    }
+
+    #[test]
+    fn test_manager_get_summary_sorted_by_confidence() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        // Add samples for multiple domains with different sample counts
+        for i in 0..3 {
+            for _ in 0..(i + 1) * 5 {
+                manager.record_sample(&format!("domain{}.com", i), 1_000_000.0, 0);
+            }
+        }
+        let summary = manager.get_summary();
+        // Forecasts should be sorted by confidence_score descending
+        for i in 0..summary.forecasts.len().saturating_sub(1) {
+            assert!(
+                summary.forecasts[i].confidence_score >= summary.forecasts[i + 1].confidence_score
+            );
+        }
+    }
+
+    #[test]
+    fn test_manager_unicode_domain() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        manager.record_sample("中文域名.com", 1_000_000.0, 0);
+        manager.record_sample("日本語.jp", 2_000_000.0, 0);
+        manager.record_sample("emoji🎉.com", 3_000_000.0, 0);
+
+        assert!(manager.histories.contains_key("中文域名.com"));
+        assert!(manager.histories.contains_key("日本語.jp"));
+        assert!(manager.histories.contains_key("emoji🎉.com"));
+    }
+
+    #[test]
+    fn test_manager_debug() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        manager.record_sample("test.com", 1_000_000.0, 0);
+
+        let debug_str = format!("{:?}", manager);
+        assert!(debug_str.contains("BandwidthForecastManager"));
+    }
+
+    // --- Persistence tests ---
+    #[test]
+    fn test_config_persistence_missing_file() {
+        let path = std::env::temp_dir().join("nonexistent_forecast_config.json");
+        let result = BandwidthForecastManager::load_config(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_persistence_overwrite() {
+        let path = std::env::temp_dir().join("test_forecast_config_overwrite.json");
+
+        let config1 = ForecastConfig {
+            enabled: true,
+            min_samples: 5,
+            ..ForecastConfig::default()
+        };
+        let manager1 = BandwidthForecastManager::new(config1.clone());
+        manager1.save_config(&path).unwrap();
+
+        let config2 = ForecastConfig {
+            enabled: false,
+            min_samples: 10,
+            ..ForecastConfig::default()
+        };
+        let manager2 = BandwidthForecastManager::new(config2.clone());
+        manager2.save_config(&path).unwrap();
+
+        let loaded = BandwidthForecastManager::load_config(&path).unwrap();
+        assert_eq!(loaded, config2);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_config_persistence_no_tmp_leftover() {
+        let path = std::env::temp_dir().join("test_forecast_config_atomic.json");
+        let manager = BandwidthForecastManager::new(ForecastConfig::default());
+        manager.save_config(&path).unwrap();
+
+        // Check no .tmp files left
+        let tmp_path = path.with_extension("json.tmp");
+        assert!(!tmp_path.exists());
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_config_persistence_corrupted_json() {
+        let path = std::env::temp_dir().join("test_forecast_corrupt.json");
+        fs::write(&path, "not valid json{{{").unwrap();
+
+        let result = BandwidthForecastManager::load_config(&path);
+        assert!(result.is_err());
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_history_persistence_missing_file() {
+        let path = std::env::temp_dir().join("nonexistent_forecast_hist.json");
+        let result = BandwidthForecastManager::load_histories(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_history_persistence_corrupted_json() {
+        let path = std::env::temp_dir().join("test_forecast_hist_corrupt.json");
+        fs::write(&path, "corrupted data").unwrap();
+
+        let result = BandwidthForecastManager::load_histories(&path);
+        assert!(result.is_err());
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_history_persistence_empty() {
+        let manager = BandwidthForecastManager::new(test_config());
+        let path = std::env::temp_dir().join("test_forecast_hist_empty.json");
+        manager.save_histories(&path).unwrap();
+
+        let loaded = BandwidthForecastManager::load_histories(&path).unwrap();
+        assert!(loaded.is_empty());
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_history_persistence_unicode_domains() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        manager.record_sample("中文.com", 1_000_000.0, 0);
+        manager.record_sample("emoji🎉.com", 2_000_000.0, 0);
+
+        let path = std::env::temp_dir().join("test_forecast_hist_unicode.json");
+        manager.save_histories(&path).unwrap();
+
+        let loaded = BandwidthForecastManager::load_histories(&path).unwrap();
+        assert!(loaded.contains_key("中文.com"));
+        assert!(loaded.contains_key("emoji🎉.com"));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    // --- ForecastSummary tests ---
+    #[test]
+    fn test_forecast_summary_serde_roundtrip() {
+        let summary = ForecastSummary {
+            total_domains: 5,
+            high_confidence_count: 2,
+            avg_predicted_speed_bps: 1_500_000.0,
+            forecasts: vec![],
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let loaded: ForecastSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.total_domains, summary.total_domains);
+        assert_eq!(loaded.high_confidence_count, summary.high_confidence_count);
+    }
+
+    #[test]
+    fn test_forecast_summary_clone_debug() {
+        let summary = ForecastSummary {
+            total_domains: 3,
+            high_confidence_count: 1,
+            avg_predicted_speed_bps: 1_000_000.0,
+            forecasts: vec![],
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_domains, summary.total_domains);
+
+        let debug_str = format!("{:?}", summary);
+        assert!(debug_str.contains("ForecastSummary"));
+    }
+
+    #[test]
+    fn test_forecast_summary_display_empty() {
+        let summary = ForecastSummary {
+            total_domains: 0,
+            high_confidence_count: 0,
+            avg_predicted_speed_bps: 0.0,
+            forecasts: vec![],
+        };
+        let display = summary.display();
+        assert!(display.contains("Bandwidth Forecast Summary"));
+        assert!(display.contains("Domains: 0"));
+    }
+
+    #[test]
+    fn test_forecast_summary_display_multiple_forecasts() {
+        let summary = ForecastSummary {
+            total_domains: 3,
+            high_confidence_count: 2,
+            avg_predicted_speed_bps: 2_000_000.0,
+            forecasts: vec![
+                BandwidthForecast {
+                    key: "a.com".to_string(),
+                    predicted_speed_bps: 1_000_000.0,
+                    min_speed_bps: 500_000.0,
+                    max_speed_bps: 1_500_000.0,
+                    confidence: ForecastConfidence::High,
+                    confidence_score: 0.9,
+                    sample_count: 20,
+                    time_pattern: Some(TimeOfDay::Morning),
+                    generated_at: Utc::now(),
+                    trend: ForecastTrend::Increasing,
+                },
+                BandwidthForecast {
+                    key: "b.com".to_string(),
+                    predicted_speed_bps: 3_000_000.0,
+                    min_speed_bps: 2_000_000.0,
+                    max_speed_bps: 4_000_000.0,
+                    confidence: ForecastConfidence::Medium,
+                    confidence_score: 0.6,
+                    sample_count: 10,
+                    time_pattern: Some(TimeOfDay::Afternoon),
+                    generated_at: Utc::now(),
+                    trend: ForecastTrend::Stable,
+                },
+            ],
+        };
+        let display = summary.display();
+        assert!(display.contains("a.com"));
+        assert!(display.contains("b.com"));
+        assert!(display.contains("increasing"));
+        assert!(display.contains("stable"));
+    }
+
+    // --- Trend detection tests ---
+    #[test]
+    fn test_trend_detection_decreasing() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        // Decreasing trend
+        for i in 0..6 {
+            let speed = 1_000_000.0 - (i as f64 * 100_000.0);
+            manager.record_sample("down.com", speed, 0);
+        }
+        let forecast = manager.forecast("down.com");
+        assert_eq!(forecast.trend, ForecastTrend::Decreasing);
+    }
+
+    #[test]
+    fn test_trend_detection_stable() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        // Stable trend (same speed)
+        for _ in 0..6 {
+            manager.record_sample("stable.com", 1_000_000.0, 0);
+        }
+        let forecast = manager.forecast("stable.com");
+        assert_eq!(forecast.trend, ForecastTrend::Stable);
+    }
+
+    #[test]
+    fn test_trend_detection_insufficient_data() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+        manager.record_sample("few.com", 1_000_000.0, 0);
+        manager.record_sample("few.com", 2_000_000.0, 0);
+        let forecast = manager.forecast("few.com");
+        assert_eq!(forecast.trend, ForecastTrend::Unknown);
+    }
+
+    // --- Confidence calculation tests ---
+    #[test]
+    fn test_confidence_thresholds() {
+        let config = ForecastConfig {
+            high_confidence_threshold: 0.7,
+            medium_confidence_threshold: 0.4,
+            ..test_config()
+        };
+        let mut manager = BandwidthForecastManager::new(config);
+
+        // Add enough samples for high confidence
+        for _ in 0..100 {
+            manager.record_sample("high.com", 1_000_000.0, 0);
+        }
+        let forecast = manager.forecast("high.com");
+        // With many samples and low variance, should be high confidence
+        assert!(
+            forecast.confidence == ForecastConfidence::High
+                || forecast.confidence == ForecastConfidence::Medium
+        );
+    }
+
+    // --- Complex workflow tests ---
+    #[test]
+    fn test_complete_lifecycle() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+
+        // Record samples for multiple domains
+        for i in 0..10 {
+            manager.record_sample("domain1.com", 1_000_000.0 + (i as f64 * 50_000.0), 0);
+            manager.record_sample("domain2.com", 2_000_000.0 - (i as f64 * 100_000.0), 0);
+        }
+
+        // Check forecasts
+        let forecast1 = manager.forecast("domain1.com");
+        let forecast2 = manager.forecast("domain2.com");
+        assert!(forecast1.predicted_speed_bps > 0.0);
+        assert!(forecast2.predicted_speed_bps > 0.0);
+
+        // Check summary
+        let summary = manager.get_summary();
+        assert_eq!(summary.total_domains, 2);
+
+        // Estimate ETA
+        let eta1 = manager.estimate_eta("domain1.com", 10_000_000);
+        assert!(eta1.is_some());
+
+        // Save and reload
+        let config_path = std::env::temp_dir().join("test_lifecycle_config.json");
+        let hist_path = std::env::temp_dir().join("test_lifecycle_hist.json");
+
+        manager.save_config(&config_path).unwrap();
+        manager.save_histories(&hist_path).unwrap();
+
+        let loaded_config = BandwidthForecastManager::load_config(&config_path).unwrap();
+        let loaded_histories = BandwidthForecastManager::load_histories(&hist_path).unwrap();
+
+        assert_eq!(loaded_config, manager.config);
+        assert_eq!(loaded_histories.len(), manager.histories.len());
+
+        // Cleanup
+        let _ = fs::remove_file(&config_path);
+        let _ = fs::remove_file(&hist_path);
+    }
+
+    #[test]
+    fn test_multiple_domains_independent() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+
+        // Record different speeds for different domains
+        for _ in 0..10 {
+            manager.record_sample("fast.com", 5_000_000.0, 0);
+            manager.record_sample("slow.com", 100_000.0, 0);
+        }
+
+        let forecast_fast = manager.forecast("fast.com");
+        let forecast_slow = manager.forecast("slow.com");
+
+        assert!(forecast_fast.predicted_speed_bps > forecast_slow.predicted_speed_bps);
+    }
+
+    #[test]
+    fn test_max_samples_enforcement() {
+        let config = ForecastConfig {
+            max_samples: 10,
+            ..test_config()
+        };
+        let mut manager = BandwidthForecastManager::new(config);
+
+        // Record more than max_samples
+        for i in 0..20 {
+            manager.record_sample("limited.com", (i + 1) as f64 * 100_000.0, 0);
+        }
+
+        assert_eq!(manager.histories["limited.com"].samples.len(), 10);
+    }
+
+    #[test]
+    fn test_forecast_with_all_time_periods() {
+        let mut manager = BandwidthForecastManager::new(test_config());
+
+        // Simulate samples across different time periods
+        let now = Utc::now();
+        for hour_offset in 0..24 {
+            let timestamp = now - Duration::hours(hour_offset);
+            let sample = ForecastSample {
+                timestamp,
+                speed_bps: 1_000_000.0 + (hour_offset as f64 * 10_000.0),
+                bytes_downloaded: 0,
+            };
+            let history = manager
+                .histories
+                .entry("allday.com".to_string())
+                .or_insert_with(|| DomainSpeedHistory::new("allday.com".to_string()));
+            history.add_sample(sample, manager.config.max_samples);
+        }
+
+        let forecast = manager.forecast("allday.com");
+        assert!(forecast.predicted_speed_bps > 0.0);
+        assert!(forecast.time_pattern.is_some());
     }
 }

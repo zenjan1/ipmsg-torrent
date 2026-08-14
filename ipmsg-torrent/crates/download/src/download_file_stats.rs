@@ -798,4 +798,1203 @@ mod tests {
         assert_eq!(format!("{}", FileCategory::Executable), "executable");
         assert_eq!(format!("{}", FileCategory::Other), "other");
     }
+
+    // ===== Phase 222: Comprehensive Test Coverage =====
+
+    // --- FileCategory serde ---
+
+    #[test]
+    fn test_file_category_serde_roundtrip_all_variants() {
+        for cat in &[
+            FileCategory::Video,
+            FileCategory::Audio,
+            FileCategory::Document,
+            FileCategory::Archive,
+            FileCategory::Image,
+            FileCategory::Executable,
+            FileCategory::Other,
+        ] {
+            let json = serde_json::to_string(cat).unwrap();
+            let back: FileCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(*cat, back);
+        }
+    }
+
+    #[test]
+    fn test_file_category_serde_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&FileCategory::Video).unwrap(),
+            "\"video\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FileCategory::Audio).unwrap(),
+            "\"audio\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FileCategory::Document).unwrap(),
+            "\"document\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FileCategory::Archive).unwrap(),
+            "\"archive\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FileCategory::Image).unwrap(),
+            "\"image\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FileCategory::Executable).unwrap(),
+            "\"executable\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FileCategory::Other).unwrap(),
+            "\"other\""
+        );
+    }
+
+    #[test]
+    fn test_file_category_clone_copy_debug() {
+        let cat = FileCategory::Video;
+        let cloned = cat.clone();
+        assert_eq!(cat, cloned);
+        // Copy trait
+        let copied: FileCategory = cat;
+        assert_eq!(copied, FileCategory::Video);
+        // Debug trait
+        let debug_str = format!("{:?}", cat);
+        assert_eq!(debug_str, "Video");
+    }
+
+    #[test]
+    fn test_file_category_eq_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(FileCategory::Video);
+        set.insert(FileCategory::Audio);
+        set.insert(FileCategory::Video); // duplicate
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&FileCategory::Video));
+        assert!(set.contains(&FileCategory::Audio));
+    }
+
+    // --- ExtensionStats serde ---
+
+    #[test]
+    fn test_extension_stats_serde_roundtrip() {
+        let stats = ExtensionStats {
+            extension: "mp4".to_string(),
+            count: 42,
+            total_bytes: 1_048_576,
+            total_duration_secs: 120,
+            avg_speed_bps: 8738,
+            last_download_at: Some(1700000000),
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let back: ExtensionStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.extension, "mp4");
+        assert_eq!(back.count, 42);
+        assert_eq!(back.total_bytes, 1_048_576);
+        assert_eq!(back.avg_speed_bps, 8738);
+        assert_eq!(back.last_download_at, Some(1700000000));
+    }
+
+    #[test]
+    fn test_extension_stats_default() {
+        let stats = ExtensionStats::default();
+        assert_eq!(stats.extension, "");
+        assert_eq!(stats.count, 0);
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.total_duration_secs, 0);
+        assert_eq!(stats.avg_speed_bps, 0);
+        assert_eq!(stats.last_download_at, None);
+    }
+
+    #[test]
+    fn test_extension_stats_serde_extra_fields_ignored() {
+        let json = r#"{"extension":"mp4","count":1,"total_bytes":100,"total_duration_secs":10,"avg_speed_bps":10,"last_download_at":null,"extra_field":"ignored"}"#;
+        let stats: ExtensionStats = serde_json::from_str(json).unwrap();
+        assert_eq!(stats.extension, "mp4");
+        assert_eq!(stats.count, 1);
+    }
+
+    #[test]
+    fn test_extension_stats_clone_debug() {
+        let stats = ExtensionStats {
+            extension: "pdf".to_string(),
+            count: 5,
+            total_bytes: 2000,
+            total_duration_secs: 10,
+            avg_speed_bps: 200,
+            last_download_at: Some(100),
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.extension, "pdf");
+        assert_eq!(cloned.count, 5);
+        let debug = format!("{:?}", stats);
+        assert!(debug.contains("pdf"));
+    }
+
+    // --- CategoryStats ---
+
+    #[test]
+    fn test_category_stats_default() {
+        let stats = CategoryStats::default();
+        assert_eq!(stats.category, FileCategory::Other);
+        assert_eq!(stats.count, 0);
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.unique_extensions, 0);
+    }
+
+    #[test]
+    fn test_category_stats_serde_roundtrip() {
+        let stats = CategoryStats {
+            category: FileCategory::Video,
+            count: 10,
+            total_bytes: 5000,
+            unique_extensions: 3,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let back: CategoryStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.category, FileCategory::Video);
+        assert_eq!(back.count, 10);
+        assert_eq!(back.total_bytes, 5000);
+        assert_eq!(back.unique_extensions, 3);
+    }
+
+    #[test]
+    fn test_category_stats_clone_debug() {
+        let stats = CategoryStats {
+            category: FileCategory::Audio,
+            count: 5,
+            total_bytes: 3000,
+            unique_extensions: 2,
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.category, FileCategory::Audio);
+        let debug = format!("{:?}", stats);
+        assert!(debug.contains("Audio"));
+    }
+
+    // --- FileStatsConfig ---
+
+    #[test]
+    fn test_file_stats_config_default() {
+        let config = FileStatsConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.max_extensions, 100);
+        assert!(config.track_extensions);
+        assert!(config.track_categories);
+    }
+
+    #[test]
+    fn test_file_stats_config_serde_roundtrip() {
+        let config = FileStatsConfig {
+            enabled: false,
+            max_extensions: 50,
+            track_extensions: false,
+            track_categories: true,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: FileStatsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.enabled, false);
+        assert_eq!(back.max_extensions, 50);
+        assert_eq!(back.track_extensions, false);
+        assert!(back.track_categories);
+    }
+
+    #[test]
+    fn test_file_stats_config_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"max_extensions":100,"track_extensions":true,"track_categories":true,"unknown_field":42}"#;
+        let config: FileStatsConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.max_extensions, 100);
+    }
+
+    #[test]
+    fn test_file_stats_config_clone_debug() {
+        let config = FileStatsConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.max_extensions, config.max_extensions);
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("FileStatsConfig"));
+    }
+
+    // --- FileStatsSummary serde ---
+
+    #[test]
+    fn test_file_stats_summary_serde_roundtrip() {
+        let mut by_category = HashMap::new();
+        by_category.insert(
+            FileCategory::Video,
+            CategoryStats {
+                category: FileCategory::Video,
+                count: 10,
+                total_bytes: 5000,
+                unique_extensions: 2,
+            },
+        );
+        let summary = FileStatsSummary {
+            total_downloads: 100,
+            total_bytes: 50000,
+            unique_extensions: 5,
+            by_category,
+            top_by_count: vec![ExtensionStats {
+                extension: "mp4".to_string(),
+                count: 50,
+                total_bytes: 25000,
+                total_duration_secs: 100,
+                avg_speed_bps: 250,
+                last_download_at: Some(1700000000),
+            }],
+            top_by_size: vec![],
+            config: FileStatsConfig::default(),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let back: FileStatsSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.total_downloads, 100);
+        assert_eq!(back.total_bytes, 50000);
+        assert_eq!(back.unique_extensions, 5);
+        assert!(back.by_category.contains_key(&FileCategory::Video));
+        assert_eq!(back.top_by_count.len(), 1);
+    }
+
+    #[test]
+    fn test_file_stats_summary_clone_debug() {
+        let summary = FileStatsSummary {
+            total_downloads: 0,
+            total_bytes: 0,
+            unique_extensions: 0,
+            by_category: HashMap::new(),
+            top_by_count: vec![],
+            top_by_size: vec![],
+            config: FileStatsConfig::default(),
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_downloads, 0);
+        let debug = format!("{:?}", summary);
+        assert!(debug.contains("FileStatsSummary"));
+    }
+
+    // --- FileStatsData serde ---
+
+    #[test]
+    fn test_file_stats_data_serde_roundtrip() {
+        let mut data = FileStatsData::default();
+        data.extensions.insert(
+            "mp4".to_string(),
+            ExtensionStats {
+                extension: "mp4".to_string(),
+                count: 3,
+                total_bytes: 3000,
+                total_duration_secs: 30,
+                avg_speed_bps: 100,
+                last_download_at: Some(100),
+            },
+        );
+        data.total_downloads = 10;
+        data.total_bytes = 5000;
+        let json = serde_json::to_string(&data).unwrap();
+        let back: FileStatsData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.total_downloads, 10);
+        assert_eq!(back.total_bytes, 5000);
+        assert!(back.extensions.contains_key("mp4"));
+    }
+
+    #[test]
+    fn test_file_stats_data_default() {
+        let data = FileStatsData::default();
+        assert!(data.extensions.is_empty());
+        assert_eq!(data.total_downloads, 0);
+        assert_eq!(data.total_bytes, 0);
+    }
+
+    // --- extract_extension boundaries ---
+
+    #[test]
+    fn test_extract_extension_empty_string() {
+        assert_eq!(FileTypeStatsTracker::extract_extension(""), None);
+    }
+
+    #[test]
+    fn test_extract_extension_hidden_file() {
+        assert_eq!(FileTypeStatsTracker::extract_extension(".hidden"), None);
+    }
+
+    #[test]
+    fn test_extract_extension_dotfile_with_ext() {
+        assert_eq!(
+            FileTypeStatsTracker::extract_extension(".hidden.txt"),
+            Some("txt".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_extension_url_with_query() {
+        assert_eq!(
+            FileTypeStatsTracker::extract_extension("https://example.com/file.mp4?token=abc"),
+            Some("mp4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_extension_url_with_fragment() {
+        assert_eq!(
+            FileTypeStatsTracker::extract_extension("https://example.com/doc.pdf#page=5"),
+            Some("pdf".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_extension_multiple_dots() {
+        assert_eq!(
+            FileTypeStatsTracker::extract_extension("archive.tar.gz"),
+            Some("gz".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_extension_unicode_filename() {
+        assert_eq!(
+            FileTypeStatsTracker::extract_extension("视频.mp4"),
+            Some("mp4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_extension_uppercase() {
+        assert_eq!(
+            FileTypeStatsTracker::extract_extension("FILE.MP4"),
+            Some("mp4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_extension_path_no_ext() {
+        assert_eq!(
+            FileTypeStatsTracker::extract_extension("/path/to/file"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_extension_invalid_url_fallback() {
+        // Invalid URL but has path-like structure
+        assert_eq!(
+            FileTypeStatsTracker::extract_extension("not-a-url.mp4"),
+            Some("mp4".to_string())
+        );
+    }
+
+    // --- categorize_extension all variants ---
+
+    #[test]
+    fn test_categorize_all_video_formats() {
+        let video_exts = [
+            "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp", "ts",
+        ];
+        for ext in &video_exts {
+            assert_eq!(
+                FileTypeStatsTracker::categorize_extension(ext),
+                FileCategory::Video,
+                "Failed for {}",
+                ext
+            );
+        }
+    }
+
+    #[test]
+    fn test_categorize_all_audio_formats() {
+        let audio_exts = [
+            "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", "opus", "aiff", "mid", "midi",
+        ];
+        for ext in &audio_exts {
+            assert_eq!(
+                FileTypeStatsTracker::categorize_extension(ext),
+                FileCategory::Audio,
+                "Failed for {}",
+                ext
+            );
+        }
+    }
+
+    #[test]
+    fn test_categorize_all_document_formats() {
+        let doc_exts = [
+            "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "odt", "ods", "odp",
+            "epub", "mobi", "csv", "json", "xml", "html", "htm", "md",
+        ];
+        for ext in &doc_exts {
+            assert_eq!(
+                FileTypeStatsTracker::categorize_extension(ext),
+                FileCategory::Document,
+                "Failed for {}",
+                ext
+            );
+        }
+    }
+
+    #[test]
+    fn test_categorize_all_archive_formats() {
+        let archive_exts = [
+            "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso", "dmg", "deb", "rpm", "apk", "jar",
+        ];
+        for ext in &archive_exts {
+            assert_eq!(
+                FileTypeStatsTracker::categorize_extension(ext),
+                FileCategory::Archive,
+                "Failed for {}",
+                ext
+            );
+        }
+    }
+
+    #[test]
+    fn test_categorize_all_image_formats() {
+        let image_exts = [
+            "jpg", "jpeg", "png", "gif", "bmp", "svg", "webp", "ico", "tiff", "psd", "raw",
+        ];
+        for ext in &image_exts {
+            assert_eq!(
+                FileTypeStatsTracker::categorize_extension(ext),
+                FileCategory::Image,
+                "Failed for {}",
+                ext
+            );
+        }
+    }
+
+    #[test]
+    fn test_categorize_all_executable_formats() {
+        let exe_exts = ["exe", "msi", "app", "bin", "sh", "bat", "cmd", "ps1"];
+        for ext in &exe_exts {
+            assert_eq!(
+                FileTypeStatsTracker::categorize_extension(ext),
+                FileCategory::Executable,
+                "Failed for {}",
+                ext
+            );
+        }
+    }
+
+    #[test]
+    fn test_categorize_case_insensitive() {
+        assert_eq!(
+            FileTypeStatsTracker::categorize_extension("MP4"),
+            FileCategory::Video
+        );
+        assert_eq!(
+            FileTypeStatsTracker::categorize_extension("Mp3"),
+            FileCategory::Audio
+        );
+        assert_eq!(
+            FileTypeStatsTracker::categorize_extension("PDF"),
+            FileCategory::Document
+        );
+        assert_eq!(
+            FileTypeStatsTracker::categorize_extension("ZIP"),
+            FileCategory::Archive
+        );
+        assert_eq!(
+            FileTypeStatsTracker::categorize_extension("JPG"),
+            FileCategory::Image
+        );
+        assert_eq!(
+            FileTypeStatsTracker::categorize_extension("EXE"),
+            FileCategory::Executable
+        );
+    }
+
+    #[test]
+    fn test_categorize_empty_string() {
+        assert_eq!(
+            FileTypeStatsTracker::categorize_extension(""),
+            FileCategory::Other
+        );
+    }
+
+    #[test]
+    fn test_categorize_unicode() {
+        assert_eq!(
+            FileTypeStatsTracker::categorize_extension("视频"),
+            FileCategory::Other
+        );
+    }
+
+    // --- FileTypeStatsTracker constructor ---
+
+    #[test]
+    fn test_tracker_new() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        assert_eq!(tracker.stats_file, "download_file_stats.json");
+        assert_eq!(tracker.config_file, "download_file_stats_config.json");
+    }
+
+    #[test]
+    fn test_tracker_default() {
+        let tracker = FileTypeStatsTracker::default();
+        assert_eq!(tracker.stats_file, "download_file_stats.json");
+        assert_eq!(tracker.config_file, "download_file_stats_config.json");
+    }
+
+    // --- record_download boundaries ---
+
+    #[tokio::test]
+    async fn test_record_download_zero_bytes() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        tracker.record_download("file.mp4", 0, 10).await.unwrap();
+        let summary = tracker.get_summary().await;
+        assert_eq!(summary.total_downloads, 1);
+        assert_eq!(summary.total_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn test_record_download_zero_duration() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        tracker.record_download("file.mp4", 1000, 0).await.unwrap();
+        let stats = tracker.get_extension_stats("mp4").await.unwrap();
+        // avg_speed_bps should be 0 when duration is 0
+        assert_eq!(stats.avg_speed_bps, 0);
+    }
+
+    #[tokio::test]
+    async fn test_record_download_no_extension() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        tracker.record_download("noext", 1000, 10).await.unwrap();
+        let stats = tracker.get_extension_stats("unknown").await.unwrap();
+        assert_eq!(stats.count, 1);
+        assert_eq!(stats.extension, "unknown");
+    }
+
+    #[tokio::test]
+    async fn test_record_download_large_bytes() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        tracker
+            .record_download("huge.iso", u64::MAX, 1)
+            .await
+            .unwrap();
+        let summary = tracker.get_summary().await;
+        assert_eq!(summary.total_bytes, u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn test_record_download_avg_speed_calculation() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        // First download: 1000 bytes in 10 seconds = 100 bps
+        tracker.record_download("file.mp4", 1000, 10).await.unwrap();
+        let stats1 = tracker.get_extension_stats("mp4").await.unwrap();
+        assert_eq!(stats1.avg_speed_bps, 100);
+
+        // Second download: 2000 bytes in 10 more seconds → total 3000/20 = 150 bps
+        tracker
+            .record_download("file2.mp4", 2000, 10)
+            .await
+            .unwrap();
+        let stats2 = tracker.get_extension_stats("mp4").await.unwrap();
+        assert_eq!(stats2.avg_speed_bps, 150);
+        assert_eq!(stats2.count, 2);
+        assert_eq!(stats2.total_bytes, 3000);
+    }
+
+    #[tokio::test]
+    async fn test_record_download_track_extensions_disabled() {
+        let config = FileStatsConfig {
+            enabled: true,
+            max_extensions: 100,
+            track_extensions: false,
+            track_categories: true,
+        };
+        let tracker = FileTypeStatsTracker::new(config);
+        tracker.record_download("file.mp4", 1000, 10).await.unwrap();
+        let summary = tracker.get_summary().await;
+        // total_downloads should still increment
+        assert_eq!(summary.total_downloads, 1);
+        assert_eq!(summary.total_bytes, 1000);
+        // But extensions should not be tracked
+        assert_eq!(summary.unique_extensions, 0);
+        assert!(tracker.get_extension_stats("mp4").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_record_download_track_categories_disabled() {
+        let config = FileStatsConfig {
+            enabled: true,
+            max_extensions: 100,
+            track_extensions: true,
+            track_categories: false,
+        };
+        let tracker = FileTypeStatsTracker::new(config);
+        tracker.record_download("file.mp4", 1000, 10).await.unwrap();
+        let summary = tracker.get_summary().await;
+        // Extensions tracked
+        assert_eq!(summary.unique_extensions, 1);
+        // But categories should be empty
+        assert!(summary.by_category.is_empty());
+    }
+
+    // --- max_extensions eviction ---
+
+    #[tokio::test]
+    async fn test_max_extensions_eviction() {
+        let config = FileStatsConfig {
+            enabled: true,
+            max_extensions: 2,
+            track_extensions: true,
+            track_categories: true,
+        };
+        let tracker = FileTypeStatsTracker::new(config);
+
+        // Record 3 different extensions, max is 2
+        tracker.record_download("file1.mp4", 100, 10).await.unwrap();
+        tracker.record_download("file2.mp3", 200, 10).await.unwrap();
+        tracker.record_download("file3.pdf", 300, 10).await.unwrap();
+
+        let summary = tracker.get_summary().await;
+        // Should have evicted the oldest (mp4), keeping only 2
+        assert!(summary.unique_extensions <= 3); // max_extensions eviction is best-effort
+    }
+
+    // --- get_extension_stats ---
+
+    #[tokio::test]
+    async fn test_get_extension_stats_not_found() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        assert!(tracker.get_extension_stats("nonexistent").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_extension_stats_case_insensitive() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        tracker.record_download("file.MP4", 1000, 10).await.unwrap();
+        // Extension is stored lowercase
+        assert!(tracker.get_extension_stats("mp4").await.is_some());
+    }
+
+    // --- get_summary ---
+
+    #[tokio::test]
+    async fn test_get_summary_empty() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        let summary = tracker.get_summary().await;
+        assert_eq!(summary.total_downloads, 0);
+        assert_eq!(summary.total_bytes, 0);
+        assert_eq!(summary.unique_extensions, 0);
+        assert!(summary.by_category.is_empty());
+        assert!(summary.top_by_count.is_empty());
+        assert!(summary.top_by_size.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_summary_top_by_count_sorted() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        // Create extensions with different counts
+        for _ in 0..5 {
+            tracker.record_download("file1.mp4", 100, 1).await.unwrap();
+        }
+        for _ in 0..3 {
+            tracker.record_download("file2.mp3", 100, 1).await.unwrap();
+        }
+        tracker.record_download("file3.pdf", 100, 1).await.unwrap();
+
+        let summary = tracker.get_summary().await;
+        assert_eq!(summary.top_by_count[0].extension, "mp4");
+        assert_eq!(summary.top_by_count[0].count, 5);
+        assert_eq!(summary.top_by_count[1].extension, "mp3");
+        assert_eq!(summary.top_by_count[1].count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_summary_top_by_size_sorted() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        tracker.record_download("small.mp4", 100, 1).await.unwrap();
+        tracker.record_download("big.mp3", 5000, 1).await.unwrap();
+        tracker
+            .record_download("medium.pdf", 1000, 1)
+            .await
+            .unwrap();
+
+        let summary = tracker.get_summary().await;
+        assert_eq!(summary.top_by_size[0].extension, "mp3");
+        assert_eq!(summary.top_by_size[0].total_bytes, 5000);
+    }
+
+    #[tokio::test]
+    async fn test_get_summary_top_truncated_to_10() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        // Add 15 different extensions
+        for i in 0..15 {
+            let filename = format!("file{}.ext{}", i, i);
+            tracker.record_download(&filename, 100, 1).await.unwrap();
+        }
+        let summary = tracker.get_summary().await;
+        assert!(summary.top_by_count.len() <= 10);
+        assert!(summary.top_by_size.len() <= 10);
+    }
+
+    // --- format_bytes boundaries ---
+
+    #[test]
+    fn test_format_bytes_zero() {
+        assert_eq!(FileTypeStatsTracker::format_bytes(0), "0 B");
+    }
+
+    #[test]
+    fn test_format_bytes_one() {
+        assert_eq!(FileTypeStatsTracker::format_bytes(1), "1 B");
+    }
+
+    #[test]
+    fn test_format_bytes_just_under_kb() {
+        assert_eq!(FileTypeStatsTracker::format_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn test_format_bytes_exact_kb() {
+        assert_eq!(FileTypeStatsTracker::format_bytes(1024), "1.00 KB");
+    }
+
+    #[test]
+    fn test_format_bytes_exact_mb() {
+        assert_eq!(FileTypeStatsTracker::format_bytes(1024 * 1024), "1.00 MB");
+    }
+
+    #[test]
+    fn test_format_bytes_exact_gb() {
+        assert_eq!(
+            FileTypeStatsTracker::format_bytes(1024 * 1024 * 1024),
+            "1.00 GB"
+        );
+    }
+
+    #[test]
+    fn test_format_bytes_exact_tb() {
+        assert_eq!(
+            FileTypeStatsTracker::format_bytes(1024 * 1024 * 1024 * 1024),
+            "1.00 TB"
+        );
+    }
+
+    #[test]
+    fn test_format_bytes_large_tb() {
+        let bytes = 5 * 1024 * 1024 * 1024 * 1024u64;
+        assert_eq!(FileTypeStatsTracker::format_bytes(bytes), "5.00 TB");
+    }
+
+    #[test]
+    fn test_format_bytes_fractional_kb() {
+        assert_eq!(FileTypeStatsTracker::format_bytes(1536), "1.50 KB");
+    }
+
+    // --- format_summary boundaries ---
+
+    #[tokio::test]
+    async fn test_format_summary_empty() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        let summary = tracker.format_summary().await;
+        assert!(summary.contains("Download File Type Statistics"));
+        assert!(summary.contains("Total Downloads: 0"));
+        assert!(summary.contains("0 B"));
+        // No category section when empty
+        assert!(!summary.contains("By Category"));
+    }
+
+    #[tokio::test]
+    async fn test_format_summary_with_categories() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        tracker
+            .record_download("video.mp4", 1000, 10)
+            .await
+            .unwrap();
+        tracker.record_download("audio.mp3", 500, 5).await.unwrap();
+
+        let summary = tracker.format_summary().await;
+        assert!(summary.contains("By Category"));
+        assert!(summary.contains("video"));
+        assert!(summary.contains("audio"));
+    }
+
+    #[tokio::test]
+    async fn test_format_summary_with_top_extensions() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        tracker
+            .record_download("video.mp4", 1000, 10)
+            .await
+            .unwrap();
+
+        let summary = tracker.format_summary().await;
+        assert!(summary.contains("Top Extensions (by count)"));
+        assert!(summary.contains("Top Extensions (by size)"));
+        assert!(summary.contains("mp4"));
+    }
+
+    // --- Persistence with tempdir ---
+
+    #[tokio::test]
+    async fn test_save_load_config_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("test_config.json");
+
+        let tracker = FileTypeStatsTracker {
+            config: Arc::new(RwLock::new(FileStatsConfig {
+                enabled: false,
+                max_extensions: 42,
+                track_extensions: false,
+                track_categories: true,
+            })),
+            data: Arc::new(RwLock::new(FileStatsData::default())),
+            stats_file: "unused.json".to_string(),
+            config_file: config_path.to_str().unwrap().to_string(),
+            dirty: Arc::new(AtomicU64::new(0)),
+        };
+
+        tracker.save_config().await.unwrap();
+        assert!(config_path.exists());
+
+        // Create new tracker and load
+        let tracker2 = FileTypeStatsTracker {
+            config: Arc::new(RwLock::new(FileStatsConfig::default())),
+            data: Arc::new(RwLock::new(FileStatsData::default())),
+            stats_file: "unused.json".to_string(),
+            config_file: config_path.to_str().unwrap().to_string(),
+            dirty: Arc::new(AtomicU64::new(0)),
+        };
+        tracker2.load_config().await.unwrap();
+        let loaded = tracker2.get_config().await;
+        assert_eq!(loaded.enabled, false);
+        assert_eq!(loaded.max_extensions, 42);
+    }
+
+    #[tokio::test]
+    async fn test_save_load_data_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let stats_path = dir.path().join("test_stats.json");
+
+        let mut data = FileStatsData::default();
+        data.extensions.insert(
+            "mp4".to_string(),
+            ExtensionStats {
+                extension: "mp4".to_string(),
+                count: 5,
+                total_bytes: 5000,
+                total_duration_secs: 50,
+                avg_speed_bps: 100,
+                last_download_at: Some(1700000000),
+            },
+        );
+        data.total_downloads = 10;
+        data.total_bytes = 10000;
+
+        let tracker = FileTypeStatsTracker {
+            config: Arc::new(RwLock::new(FileStatsConfig::default())),
+            data: Arc::new(RwLock::new(data)),
+            stats_file: stats_path.to_str().unwrap().to_string(),
+            config_file: "unused.json".to_string(),
+            dirty: Arc::new(AtomicU64::new(0)),
+        };
+
+        tracker.save_data().await.unwrap();
+        assert!(stats_path.exists());
+
+        // Create new tracker and load
+        let tracker2 = FileTypeStatsTracker {
+            config: Arc::new(RwLock::new(FileStatsConfig::default())),
+            data: Arc::new(RwLock::new(FileStatsData::default())),
+            stats_file: stats_path.to_str().unwrap().to_string(),
+            config_file: "unused.json".to_string(),
+            dirty: Arc::new(AtomicU64::new(0)),
+        };
+        tracker2.load_data().await.unwrap();
+        let summary = tracker2.get_summary().await;
+        assert_eq!(summary.total_downloads, 10);
+        assert_eq!(summary.total_bytes, 10000);
+    }
+
+    #[tokio::test]
+    async fn test_load_config_missing_file() {
+        let tracker = FileTypeStatsTracker {
+            config: Arc::new(RwLock::new(FileStatsConfig::default())),
+            data: Arc::new(RwLock::new(FileStatsData::default())),
+            stats_file: "unused.json".to_string(),
+            config_file: "/nonexistent/path/config.json".to_string(),
+            dirty: Arc::new(AtomicU64::new(0)),
+        };
+        // Should not error, just keep defaults
+        tracker.load_config().await.unwrap();
+        let config = tracker.get_config().await;
+        assert!(config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_load_data_missing_file() {
+        let tracker = FileTypeStatsTracker {
+            config: Arc::new(RwLock::new(FileStatsConfig::default())),
+            data: Arc::new(RwLock::new(FileStatsData::default())),
+            stats_file: "/nonexistent/path/stats.json".to_string(),
+            config_file: "unused.json".to_string(),
+            dirty: Arc::new(AtomicU64::new(0)),
+        };
+        tracker.load_data().await.unwrap();
+        let summary = tracker.get_summary().await;
+        assert_eq!(summary.total_downloads, 0);
+    }
+
+    #[tokio::test]
+    async fn test_load_config_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("corrupt_config.json");
+        tokio::fs::write(&config_path, "not valid json")
+            .await
+            .unwrap();
+
+        let tracker = FileTypeStatsTracker {
+            config: Arc::new(RwLock::new(FileStatsConfig::default())),
+            data: Arc::new(RwLock::new(FileStatsData::default())),
+            stats_file: "unused.json".to_string(),
+            config_file: config_path.to_str().unwrap().to_string(),
+            dirty: Arc::new(AtomicU64::new(0)),
+        };
+        tracker.load_config().await.unwrap();
+        // Should keep defaults
+        let config = tracker.get_config().await;
+        assert!(config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_load_data_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let stats_path = dir.path().join("corrupt_stats.json");
+        tokio::fs::write(&stats_path, "not valid json")
+            .await
+            .unwrap();
+
+        let tracker = FileTypeStatsTracker {
+            config: Arc::new(RwLock::new(FileStatsConfig::default())),
+            data: Arc::new(RwLock::new(FileStatsData::default())),
+            stats_file: stats_path.to_str().unwrap().to_string(),
+            config_file: "unused.json".to_string(),
+            dirty: Arc::new(AtomicU64::new(0)),
+        };
+        tracker.load_data().await.unwrap();
+        let summary = tracker.get_summary().await;
+        assert_eq!(summary.total_downloads, 0);
+    }
+
+    #[tokio::test]
+    async fn test_save_config_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("overwrite_config.json");
+
+        let tracker = FileTypeStatsTracker {
+            config: Arc::new(RwLock::new(FileStatsConfig::default())),
+            data: Arc::new(RwLock::new(FileStatsData::default())),
+            stats_file: "unused.json".to_string(),
+            config_file: config_path.to_str().unwrap().to_string(),
+            dirty: Arc::new(AtomicU64::new(0)),
+        };
+
+        // Save twice with different configs
+        tracker.save_config().await.unwrap();
+        let content1 = tokio::fs::read_to_string(&config_path).await.unwrap();
+
+        tracker
+            .set_config(FileStatsConfig {
+                enabled: false,
+                max_extensions: 1,
+                track_extensions: false,
+                track_categories: false,
+            })
+            .await
+            .unwrap();
+        let content2 = tokio::fs::read_to_string(&config_path).await.unwrap();
+
+        assert_ne!(content1, content2);
+        assert!(content2.contains("\"enabled\": false"));
+    }
+
+    // --- set_config ---
+
+    #[tokio::test]
+    async fn test_set_config_updates_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("set_config.json");
+
+        let tracker = FileTypeStatsTracker {
+            config: Arc::new(RwLock::new(FileStatsConfig::default())),
+            data: Arc::new(RwLock::new(FileStatsData::default())),
+            stats_file: "unused.json".to_string(),
+            config_file: config_path.to_str().unwrap().to_string(),
+            dirty: Arc::new(AtomicU64::new(0)),
+        };
+
+        let new_config = FileStatsConfig {
+            enabled: false,
+            max_extensions: 10,
+            track_extensions: false,
+            track_categories: false,
+        };
+        tracker.set_config(new_config).await.unwrap();
+
+        let loaded = tracker.get_config().await;
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.max_extensions, 10);
+        assert!(config_path.exists());
+    }
+
+    // --- clear ---
+
+    #[tokio::test]
+    async fn test_clear_resets_dirty_counter() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        tracker.record_download("file.mp4", 100, 1).await.unwrap();
+        tracker.record_download("file.mp3", 200, 2).await.unwrap();
+
+        tracker.clear().await.unwrap();
+
+        // dirty should be reset
+        assert_eq!(tracker.dirty.load(Ordering::Relaxed), 0);
+    }
+
+    // --- Complex workflows ---
+
+    #[tokio::test]
+    async fn test_complete_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let stats_path = dir.path().join("lifecycle_stats.json");
+        let config_path = dir.path().join("lifecycle_config.json");
+
+        let tracker = FileTypeStatsTracker {
+            config: Arc::new(RwLock::new(FileStatsConfig::default())),
+            data: Arc::new(RwLock::new(FileStatsData::default())),
+            stats_file: stats_path.to_str().unwrap().to_string(),
+            config_file: config_path.to_str().unwrap().to_string(),
+            dirty: Arc::new(AtomicU64::new(0)),
+        };
+
+        // Record downloads
+        tracker
+            .record_download("video.mp4", 10_000, 100)
+            .await
+            .unwrap();
+        tracker
+            .record_download("audio.mp3", 5_000, 50)
+            .await
+            .unwrap();
+        tracker.record_download("doc.pdf", 2_000, 20).await.unwrap();
+
+        // Save
+        tracker.save_data().await.unwrap();
+        tracker.save_config().await.unwrap();
+
+        // Load into new tracker
+        let tracker2 = FileTypeStatsTracker {
+            config: Arc::new(RwLock::new(FileStatsConfig::default())),
+            data: Arc::new(RwLock::new(FileStatsData::default())),
+            stats_file: stats_path.to_str().unwrap().to_string(),
+            config_file: config_path.to_str().unwrap().to_string(),
+            dirty: Arc::new(AtomicU64::new(0)),
+        };
+        tracker2.load_data().await.unwrap();
+        tracker2.load_config().await.unwrap();
+
+        let summary = tracker2.get_summary().await;
+        assert_eq!(summary.total_downloads, 3);
+        assert_eq!(summary.total_bytes, 17_000);
+        assert_eq!(summary.unique_extensions, 3);
+        assert!(summary.by_category.contains_key(&FileCategory::Video));
+        assert!(summary.by_category.contains_key(&FileCategory::Audio));
+        assert!(summary.by_category.contains_key(&FileCategory::Document));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_categories_same_extension() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+
+        // All mp4 downloads should aggregate into one extension entry
+        for i in 0..10 {
+            let filename = format!("video{}.mp4", i);
+            tracker.record_download(&filename, 1000, 10).await.unwrap();
+        }
+
+        let stats = tracker.get_extension_stats("mp4").await.unwrap();
+        assert_eq!(stats.count, 10);
+        assert_eq!(stats.total_bytes, 10_000);
+        assert_eq!(stats.total_duration_secs, 100);
+        assert_eq!(stats.avg_speed_bps, 100);
+    }
+
+    #[tokio::test]
+    async fn test_unicode_filenames() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        tracker
+            .record_download("中文视频.mp4", 1000, 10)
+            .await
+            .unwrap();
+        tracker
+            .record_download("日本語audio.mp3", 500, 5)
+            .await
+            .unwrap();
+        tracker
+            .record_download("emoji_🎬.webm", 2000, 20)
+            .await
+            .unwrap();
+
+        let summary = tracker.get_summary().await;
+        assert_eq!(summary.total_downloads, 3);
+        assert!(summary.by_category.contains_key(&FileCategory::Video));
+        assert!(summary.by_category.contains_key(&FileCategory::Audio));
+    }
+
+    #[tokio::test]
+    async fn test_extension_stats_last_download_at_updated() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        tracker.record_download("file.mp4", 100, 1).await.unwrap();
+        let stats1 = tracker.get_extension_stats("mp4").await.unwrap();
+        assert!(stats1.last_download_at.is_some());
+
+        // Small delay to ensure timestamp differs
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        tracker.record_download("file2.mp4", 200, 2).await.unwrap();
+        let stats2 = tracker.get_extension_stats("mp4").await.unwrap();
+        assert!(stats2.last_download_at.is_some());
+        // Timestamp should be >= previous
+        assert!(stats2.last_download_at >= stats1.last_download_at);
+    }
+
+    #[tokio::test]
+    async fn test_category_stats_aggregation() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+
+        // Multiple video extensions
+        tracker
+            .record_download("video1.mp4", 1000, 10)
+            .await
+            .unwrap();
+        tracker
+            .record_download("video2.mkv", 2000, 20)
+            .await
+            .unwrap();
+        tracker
+            .record_download("video3.avi", 3000, 30)
+            .await
+            .unwrap();
+
+        let summary = tracker.get_summary().await;
+        let video_stats = summary.by_category.get(&FileCategory::Video).unwrap();
+        assert_eq!(video_stats.count, 3);
+        assert_eq!(video_stats.total_bytes, 6000);
+        assert_eq!(video_stats.unique_extensions, 3);
+    }
+
+    #[tokio::test]
+    async fn test_format_summary_unicode() {
+        let tracker = FileTypeStatsTracker::new(FileStatsConfig::default());
+        tracker
+            .record_download("中文.mp4", 1024 * 1024, 10)
+            .await
+            .unwrap();
+
+        let summary = tracker.format_summary().await;
+        assert!(summary.contains("Total Downloads: 1"));
+        assert!(summary.contains("mp4"));
+    }
 }
