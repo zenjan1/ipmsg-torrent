@@ -1003,3 +1003,505 @@ pub enum DownloadError {
     #[error("IO error: {0}")]
     Io(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::torrent::meta::{TorrentFile, TorrentInfo, TorrentMeta};
+    use tempfile::tempdir;
+
+    fn create_test_meta() -> TorrentMeta {
+        let mut pieces = Vec::new();
+        for i in 0..5 {
+            let mut hash = [0u8; 20];
+            hash[0] = i as u8;
+            pieces.push(hash);
+        }
+
+        TorrentMeta {
+            info_hash: [0u8; 20],
+            announce_list: vec![],
+            announce: Some("http://tracker.example.com/announce".to_string()),
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            info: TorrentInfo {
+                length: Some(5 * 256 * 1024),
+                piece_length: 256 * 1024,
+                pieces,
+                name: "test-file.txt".to_string(),
+                files: vec![],
+            },
+        }
+    }
+
+    fn create_test_meta_multi_file() -> TorrentMeta {
+        let mut pieces = Vec::new();
+        for i in 0..10 {
+            let mut hash = [0u8; 20];
+            hash[0] = i as u8;
+            pieces.push(hash);
+        }
+
+        TorrentMeta {
+            info_hash: [0u8; 20],
+            announce_list: vec![],
+            announce: Some("http://tracker.example.com/announce".to_string()),
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            info: TorrentInfo {
+                length: None,
+                piece_length: 256 * 1024,
+                pieces,
+                name: "test-torrent".to_string(),
+                files: vec![
+                    TorrentFile {
+                        path: "file1.txt".to_string(),
+                        length: 512 * 1024,
+                    },
+                    TorrentFile {
+                        path: "file2.txt".to_string(),
+                        length: 512 * 1024,
+                    },
+                    TorrentFile {
+                        path: "file3.txt".to_string(),
+                        length: 1536 * 1024,
+                    },
+                ],
+            },
+        }
+    }
+
+    // ===== PieceState tests =====
+
+    #[test]
+    fn test_piece_state_new() {
+        let hash = [1u8; 20];
+        let piece = PieceState::new(0, 256 * 1024, hash);
+        assert_eq!(piece.index, 0);
+        assert_eq!(piece.length, 256 * 1024);
+        assert_eq!(piece.hash, hash);
+        assert!(!piece.complete);
+        assert!(piece.blocks_received.is_empty());
+    }
+
+    #[test]
+    fn test_piece_state_blocks_total_calculation() {
+        let hash = [0u8; 20];
+        // 256KB piece with 16KB blocks = 16 blocks
+        let piece = PieceState::new(0, 256 * 1024, hash);
+        assert_eq!(piece.blocks_total, 16);
+
+        // 1MB piece with 16KB blocks = 64 blocks
+        let piece = PieceState::new(1, 1024 * 1024, hash);
+        assert_eq!(piece.blocks_total, 64);
+
+        // Small piece (less than one block)
+        let piece = PieceState::new(2, 8 * 1024, hash);
+        assert_eq!(piece.blocks_total, 1);
+    }
+
+    #[test]
+    fn test_piece_state_add_block() {
+        let hash = [0u8; 20];
+        let mut piece = PieceState::new(0, 32 * 1024, hash); // 2 blocks
+        assert!(!piece.complete);
+
+        piece.add_block(0, vec![1u8; 16 * 1024]);
+        assert!(!piece.complete);
+        assert_eq!(piece.blocks_received.len(), 1);
+
+        piece.add_block(16 * 1024, vec![2u8; 16 * 1024]);
+        assert!(piece.complete);
+        assert_eq!(piece.blocks_received.len(), 2);
+    }
+
+    #[test]
+    fn test_piece_state_assemble_incomplete() {
+        let hash = [0u8; 20];
+        let piece = PieceState::new(0, 32 * 1024, hash);
+        assert!(piece.assemble().is_none());
+    }
+
+    #[test]
+    fn test_piece_state_assemble_complete() {
+        let hash = [0u8; 20];
+        let mut piece = PieceState::new(0, 32 * 1024, hash);
+        piece.add_block(0, vec![1u8; 16 * 1024]);
+        piece.add_block(16 * 1024, vec![2u8; 16 * 1024]);
+
+        let data = piece.assemble().unwrap();
+        assert_eq!(data.len(), 32 * 1024);
+        assert!(data[..16 * 1024].iter().all(|&b| b == 1));
+        assert!(data[16 * 1024..].iter().all(|&b| b == 2));
+    }
+
+    #[test]
+    fn test_piece_state_verify_correct() {
+        let data = b"test data";
+        let hash = Sha1::digest(data);
+        let mut hash_array = [0u8; 20];
+        hash_array.copy_from_slice(&hash[..20]);
+
+        let piece = PieceState::new(0, data.len() as u64, hash_array);
+        assert!(piece.verify(data));
+    }
+
+    #[test]
+    fn test_piece_state_verify_incorrect() {
+        let data = b"test data";
+        let mut hash_array = [0u8; 20];
+        hash_array[0] = 99; // wrong hash
+
+        let piece = PieceState::new(0, data.len() as u64, hash_array);
+        assert!(!piece.verify(data));
+    }
+
+    // ===== TorrentEngine construction tests =====
+
+    #[test]
+    fn test_torrent_engine_new() {
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        assert_eq!(engine.pieces.len(), 5);
+        assert_eq!(engine.downloaded_pieces.len(), 0);
+        assert_eq!(engine.downloaded, 0);
+        assert_eq!(engine.uploaded, 0);
+        assert!(!engine.sequential_mode);
+    }
+
+    #[test]
+    fn test_torrent_engine_peer_id_generation() {
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        assert_eq!(&engine.peer_id[0..8], b"-IP0001-");
+        // Rest should be random (not all zeros)
+        assert!(engine.peer_id[8..].iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn test_torrent_engine_sequential_mode() {
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let mut engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        assert!(!engine.is_sequential_mode());
+        engine.set_sequential_mode(true);
+        assert!(engine.is_sequential_mode());
+        engine.set_sequential_mode(false);
+        assert!(!engine.is_sequential_mode());
+    }
+
+    #[test]
+    fn test_torrent_engine_initial_progress() {
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        let (downloaded, total) = engine.progress();
+        assert_eq!(downloaded, 0);
+        assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn test_torrent_engine_peer_count() {
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        assert_eq!(engine.peer_count(), 0);
+    }
+
+    // ===== File selection tests =====
+
+    #[test]
+    fn test_torrent_engine_file_selection_all() {
+        let meta = create_test_meta_multi_file();
+        let dir = tempdir().unwrap();
+        let engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        // All pieces should be selected by default
+        assert_eq!(engine.selected_pieces.len(), 10);
+    }
+
+    #[test]
+    fn test_torrent_engine_compute_selected_pieces_single_file() {
+        let meta = create_test_meta(); // single file
+        let dir = tempdir().unwrap();
+        let engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        let selection = FileSelection::all();
+        let pieces = engine.compute_selected_pieces(&selection);
+        assert_eq!(pieces.len(), 5);
+    }
+
+    #[test]
+    fn test_torrent_engine_compute_selected_pieces_multi_file() {
+        let meta = create_test_meta_multi_file();
+        let dir = tempdir().unwrap();
+        let engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        // Select only first file (512KB = 2 pieces)
+        let selection = FileSelection::selected(vec![0]);
+        let pieces = engine.compute_selected_pieces(&selection);
+        assert!(pieces.len() >= 2);
+    }
+
+    #[test]
+    fn test_torrent_engine_compute_selected_pieces_all_except() {
+        let meta = create_test_meta_multi_file();
+        let dir = tempdir().unwrap();
+        let engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        // Exclude last file
+        let selection = FileSelection::all_except(vec![2]);
+        let pieces = engine.compute_selected_pieces(&selection);
+        assert!(pieces.len() < 10);
+    }
+
+    // ===== Tracker tests =====
+
+    #[test]
+    fn test_torrent_engine_add_tracker() {
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let mut engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        assert_eq!(engine.tracker_urls().len(), 1); // primary tracker
+        engine.add_tracker("http://backup.example.com/announce".to_string());
+        assert_eq!(engine.tracker_urls().len(), 2);
+    }
+
+    #[test]
+    fn test_torrent_engine_add_duplicate_tracker() {
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let mut engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        engine.add_tracker("http://backup.example.com/announce".to_string());
+        engine.add_tracker("http://backup.example.com/announce".to_string()); // duplicate
+        assert_eq!(engine.tracker_urls().len(), 2); // should not add duplicate
+    }
+
+    #[test]
+    fn test_torrent_engine_tracker_urls() {
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let mut engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        let urls = engine.tracker_urls();
+        assert!(urls.contains(&"http://tracker.example.com/announce"));
+
+        engine.add_tracker("http://backup1.example.com/announce".to_string());
+        engine.add_tracker("http://backup2.example.com/announce".to_string());
+
+        let urls = engine.tracker_urls();
+        assert_eq!(urls.len(), 3);
+    }
+
+    // ===== Bitfield tests =====
+
+    #[test]
+    fn test_build_bitfield_empty() {
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        let bitfield = engine.build_bitfield();
+        assert_eq!(bitfield.len(), 1); // 5 pieces = 1 byte
+        assert_eq!(bitfield[0], 0); // no pieces downloaded
+    }
+
+    #[test]
+    fn test_build_bitfield_with_pieces() {
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let mut engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        // Mark piece 0 as downloaded
+        engine.downloaded_pieces.insert(0);
+        let bitfield = engine.build_bitfield();
+        assert_eq!(bitfield.len(), 1);
+        assert_eq!(bitfield[0] & 0x80, 0x80); // MSB = piece 0
+
+        // Mark piece 1 as downloaded
+        engine.downloaded_pieces.insert(1);
+        let bitfield = engine.build_bitfield();
+        assert_eq!(bitfield[0] & 0xC0, 0xC0); // MSB and second bit
+    }
+
+    #[test]
+    fn test_build_bitfield_multiple_bytes() {
+        let mut pieces = Vec::new();
+        for i in 0..20 {
+            let mut hash = [0u8; 20];
+            hash[0] = i as u8;
+            pieces.push(hash);
+        }
+
+        let meta = TorrentMeta {
+            info_hash: [0u8; 20],
+            announce_list: vec![],
+            announce: Some("http://tracker.example.com/announce".to_string()),
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            info: TorrentInfo {
+                length: Some(20 * 256 * 1024),
+                piece_length: 256 * 1024,
+                pieces,
+                name: "test-file.txt".to_string(),
+                files: vec![],
+            },
+        };
+
+        let dir = tempdir().unwrap();
+        let mut engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        // Mark piece 0 and piece 8 as downloaded
+        engine.downloaded_pieces.insert(0);
+        engine.downloaded_pieces.insert(8);
+
+        let bitfield = engine.build_bitfield();
+        assert_eq!(bitfield.len(), 3); // 20 pieces = 3 bytes
+        assert_eq!(bitfield[0] & 0x80, 0x80); // piece 0 in first byte
+        assert_eq!(bitfield[1] & 0x80, 0x80); // piece 8 in second byte
+    }
+
+    // ===== is_complete tests =====
+
+    #[test]
+    fn test_is_complete_false() {
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        assert!(!engine.is_complete());
+    }
+
+    #[test]
+    fn test_is_complete_true() {
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let mut engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        // Mark all pieces as downloaded
+        for i in 0..5 {
+            engine.downloaded_pieces.insert(i as u32);
+        }
+
+        assert!(engine.is_complete());
+    }
+
+    #[test]
+    fn test_is_complete_with_selection() {
+        let meta = create_test_meta_multi_file();
+        let dir = tempdir().unwrap();
+        let mut engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        // Select only first file (pieces 0-1)
+        let selection = FileSelection::selected(vec![0]);
+        engine.selected_pieces = engine.compute_selected_pieces(&selection);
+
+        // Mark only selected pieces as downloaded
+        for &piece_idx in &engine.selected_pieces {
+            engine.downloaded_pieces.insert(piece_idx);
+        }
+
+        assert!(engine.is_complete());
+    }
+
+    // ===== DownloadError tests =====
+
+    #[test]
+    fn test_download_error_display() {
+        let err = DownloadError::Tracker("tracker error".to_string());
+        assert_eq!(err.to_string(), "tracker error: tracker error");
+
+        let err = DownloadError::Peer("peer error".to_string());
+        assert_eq!(err.to_string(), "peer error: peer error");
+
+        let err = DownloadError::Io("io error".to_string());
+        assert_eq!(err.to_string(), "IO error: io error");
+    }
+
+    #[test]
+    fn test_download_error_debug() {
+        let err = DownloadError::Tracker("test".to_string());
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("Tracker"));
+    }
+
+    // ===== Constants tests =====
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(CHOKE_INTERVAL_SECS, 10);
+        assert_eq!(MAX_TRACKER_RETRIES, 3);
+        assert_eq!(TRACKER_RETRY_BASE_MS, 2000);
+        assert_eq!(BLOCK_SIZE, 16 * 1024);
+    }
+
+    // ===== File selection integration tests =====
+
+    #[test]
+    fn test_torrent_engine_set_file_selection() {
+        let meta = create_test_meta_multi_file();
+        let dir = tempdir().unwrap();
+        let mut engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        let selection = FileSelection::selected(vec![0, 1]);
+        engine.set_file_selection(selection).unwrap();
+
+        // Should have fewer selected pieces now
+        assert!(engine.selected_pieces.len() < 10);
+    }
+
+    #[test]
+    fn test_torrent_engine_file_selection_accessor() {
+        let meta = create_test_meta_multi_file();
+        let dir = tempdir().unwrap();
+        let mut engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        let selection = FileSelection::selected(vec![0]);
+        engine.set_file_selection(selection.clone()).unwrap();
+
+        assert_eq!(engine.file_selection().mode, selection.mode);
+    }
+
+    // ===== Rate limiter and proxy tests =====
+
+    #[test]
+    fn test_torrent_engine_set_rate_limiter() {
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let mut engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        assert!(engine.rate_limiter.is_none());
+        let limiter = RateLimiter::new(1024 * 1024); // 1MB/s
+        engine.set_rate_limiter(limiter);
+        assert!(engine.rate_limiter.is_some());
+    }
+
+    #[test]
+    fn test_torrent_engine_set_proxy_config() {
+        use crate::proxy::{ProxyConfig, ProxyType};
+
+        let meta = create_test_meta();
+        let dir = tempdir().unwrap();
+        let mut engine = TorrentEngine::new(meta, dir.path().to_path_buf());
+
+        assert!(engine.proxy_config.is_none());
+        let proxy = ProxyConfig::new(ProxyType::Socks5, "127.0.0.1".to_string(), 1080);
+        engine.set_proxy_config(Some(proxy));
+        assert!(engine.proxy_config.is_some());
+
+        engine.set_proxy_config(None);
+        assert!(engine.proxy_config.is_none());
+    }
+}
