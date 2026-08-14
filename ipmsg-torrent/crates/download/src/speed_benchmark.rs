@@ -659,4 +659,959 @@ mod tests {
         assert!(formatted.contains("https://example.com/file.zip"));
         assert!(formatted.contains("1.00 MB/s"));
     }
+
+    // ============================================================================
+    // Phase 216: Comprehensive Test Coverage
+    // ============================================================================
+
+    // --- BenchmarkConfig serialization tests ---
+
+    #[test]
+    fn test_benchmark_config_serde_roundtrip() {
+        let config = BenchmarkConfig {
+            enabled: true,
+            test_duration_secs: 30,
+            max_concurrent: 5,
+            sample_size_bytes: 2_097_152,
+            auto_select_fastest: false,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: BenchmarkConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.enabled, true);
+        assert_eq!(deserialized.test_duration_secs, 30);
+        assert_eq!(deserialized.max_concurrent, 5);
+        assert_eq!(deserialized.sample_size_bytes, 2_097_152);
+        assert!(!deserialized.auto_select_fastest);
+    }
+
+    #[test]
+    fn test_benchmark_config_serde_missing_field_errors() {
+        // BenchmarkConfig doesn't use #[serde(default)], so missing fields cause errors
+        let json = r#"{"enabled":true}"#;
+        let result: Result<BenchmarkConfig, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_benchmark_config_serde_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"test_duration_secs":5,"max_concurrent":2,"sample_size_bytes":524288,"auto_select_fastest":true,"unknown_field":"ignored"}"#;
+        let config: BenchmarkConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.test_duration_secs, 5);
+    }
+
+    #[test]
+    fn test_benchmark_config_clone() {
+        let config = BenchmarkConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.enabled, config.enabled);
+        assert_eq!(cloned.test_duration_secs, config.test_duration_secs);
+        assert_eq!(cloned.max_concurrent, config.max_concurrent);
+        assert_eq!(cloned.sample_size_bytes, config.sample_size_bytes);
+        assert_eq!(cloned.auto_select_fastest, config.auto_select_fastest);
+    }
+
+    #[test]
+    fn test_benchmark_config_debug() {
+        let config = BenchmarkConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("BenchmarkConfig"));
+        assert!(debug_str.contains("enabled"));
+    }
+
+    #[test]
+    fn test_benchmark_config_custom_values() {
+        let config = BenchmarkConfig {
+            enabled: false,
+            test_duration_secs: 0,
+            max_concurrent: 100,
+            sample_size_bytes: 0,
+            auto_select_fastest: false,
+        };
+        assert!(!config.enabled);
+        assert_eq!(config.test_duration_secs, 0);
+        assert_eq!(config.max_concurrent, 100);
+        assert_eq!(config.sample_size_bytes, 0);
+        assert!(!config.auto_select_fastest);
+    }
+
+    // --- BenchmarkResult serialization tests ---
+
+    #[test]
+    fn test_benchmark_result_serde_roundtrip() {
+        let result = BenchmarkResult {
+            url: "https://example.com/test.zip".to_string(),
+            avg_speed_bps: 1_500_000.0,
+            peak_speed_bps: 2_000_000.0,
+            bytes_downloaded: 5_000_000,
+            duration_secs: 3.33,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: BenchmarkResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.url, "https://example.com/test.zip");
+        assert_eq!(deserialized.avg_speed_bps, 1_500_000.0);
+        assert_eq!(deserialized.peak_speed_bps, 2_000_000.0);
+        assert_eq!(deserialized.bytes_downloaded, 5_000_000);
+        assert!(deserialized.success);
+        assert!(deserialized.error.is_none());
+    }
+
+    #[test]
+    fn test_benchmark_result_serde_with_error() {
+        let result = BenchmarkResult {
+            url: "https://example.com/test.zip".to_string(),
+            avg_speed_bps: 0.0,
+            peak_speed_bps: 0.0,
+            bytes_downloaded: 0,
+            duration_secs: 10.0,
+            success: false,
+            error: Some("Connection timeout".to_string()),
+            tested_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: BenchmarkResult = serde_json::from_str(&json).unwrap();
+        assert!(!deserialized.success);
+        assert_eq!(deserialized.error, Some("Connection timeout".to_string()));
+    }
+
+    #[test]
+    fn test_benchmark_result_clone() {
+        let result = BenchmarkResult {
+            url: "https://example.com/test.zip".to_string(),
+            avg_speed_bps: 1_000_000.0,
+            peak_speed_bps: 1_500_000.0,
+            bytes_downloaded: 1_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.url, result.url);
+        assert_eq!(cloned.avg_speed_bps, result.avg_speed_bps);
+        assert_eq!(cloned.bytes_downloaded, result.bytes_downloaded);
+    }
+
+    #[test]
+    fn test_benchmark_result_debug() {
+        let result = BenchmarkResult {
+            url: "https://example.com/test.zip".to_string(),
+            avg_speed_bps: 1_000_000.0,
+            peak_speed_bps: 1_500_000.0,
+            bytes_downloaded: 1_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("BenchmarkResult"));
+        assert!(debug_str.contains("example.com"));
+    }
+
+    #[test]
+    fn test_benchmark_result_zero_speed() {
+        let result = BenchmarkResult {
+            url: "https://example.com/test.zip".to_string(),
+            avg_speed_bps: 0.0,
+            peak_speed_bps: 0.0,
+            bytes_downloaded: 0,
+            duration_secs: 0.0,
+            success: false,
+            error: Some("No data".to_string()),
+            tested_at: chrono::Utc::now(),
+        };
+        assert_eq!(result.avg_speed_bps, 0.0);
+        assert_eq!(result.peak_speed_bps, 0.0);
+    }
+
+    #[test]
+    fn test_benchmark_result_large_values() {
+        let result = BenchmarkResult {
+            url: "https://example.com/large.zip".to_string(),
+            avg_speed_bps: f64::MAX,
+            peak_speed_bps: f64::MAX,
+            bytes_downloaded: u64::MAX,
+            duration_secs: f64::MAX,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        assert_eq!(result.bytes_downloaded, u64::MAX);
+        assert_eq!(result.avg_speed_bps, f64::MAX);
+    }
+
+    #[test]
+    fn test_benchmark_result_unicode_url() {
+        let result = BenchmarkResult {
+            url: "https://example.com/中文文件.zip".to_string(),
+            avg_speed_bps: 1_000_000.0,
+            peak_speed_bps: 1_500_000.0,
+            bytes_downloaded: 1_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        assert_eq!(result.url, "https://example.com/中文文件.zip");
+    }
+
+    // --- BenchmarkSummary serialization tests ---
+
+    #[test]
+    fn test_benchmark_summary_serde_roundtrip() {
+        let summary = BenchmarkSummary {
+            total_tested: 5,
+            successful: 4,
+            failed: 1,
+            fastest: Some(("https://fast.com/file.zip".to_string(), 2_000_000.0)),
+            slowest: Some(("https://slow.com/file.zip".to_string(), 500_000.0)),
+            avg_speed_bps: 1_250_000.0,
+            results: vec![],
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: BenchmarkSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.total_tested, 5);
+        assert_eq!(deserialized.successful, 4);
+        assert_eq!(deserialized.failed, 1);
+        assert_eq!(deserialized.avg_speed_bps, 1_250_000.0);
+    }
+
+    #[test]
+    fn test_benchmark_summary_serde_no_fastest_slowest() {
+        let summary = BenchmarkSummary {
+            total_tested: 0,
+            successful: 0,
+            failed: 0,
+            fastest: None,
+            slowest: None,
+            avg_speed_bps: 0.0,
+            results: vec![],
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: BenchmarkSummary = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.fastest.is_none());
+        assert!(deserialized.slowest.is_none());
+    }
+
+    #[test]
+    fn test_benchmark_summary_clone() {
+        let summary = BenchmarkSummary {
+            total_tested: 3,
+            successful: 2,
+            failed: 1,
+            fastest: Some(("https://fast.com".to_string(), 1_000_000.0)),
+            slowest: Some(("https://slow.com".to_string(), 500_000.0)),
+            avg_speed_bps: 750_000.0,
+            results: vec![],
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_tested, summary.total_tested);
+        assert_eq!(cloned.successful, summary.successful);
+        assert_eq!(cloned.failed, summary.failed);
+    }
+
+    #[test]
+    fn test_benchmark_summary_debug() {
+        let summary = BenchmarkSummary {
+            total_tested: 1,
+            successful: 1,
+            failed: 0,
+            fastest: None,
+            slowest: None,
+            avg_speed_bps: 1_000_000.0,
+            results: vec![],
+        };
+        let debug_str = format!("{:?}", summary);
+        assert!(debug_str.contains("BenchmarkSummary"));
+    }
+
+    // --- SpeedBenchmarkManager Clone tests ---
+
+    #[test]
+    fn test_manager_clone() {
+        let mut manager = SpeedBenchmarkManager::new();
+        manager.set_config(BenchmarkConfig {
+            enabled: false,
+            test_duration_secs: 20,
+            max_concurrent: 10,
+            sample_size_bytes: 2_000_000,
+            auto_select_fastest: false,
+        });
+        let result = BenchmarkResult {
+            url: "https://example.com/test.zip".to_string(),
+            avg_speed_bps: 1_000_000.0,
+            peak_speed_bps: 1_500_000.0,
+            bytes_downloaded: 1_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://example.com/test.zip".to_string(), result);
+
+        let cloned = manager.clone();
+        assert_eq!(cloned.get_config().test_duration_secs, 20);
+        assert_eq!(cloned.get_all_results().len(), 1);
+    }
+
+    #[test]
+    fn test_manager_clone_independence() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let result = BenchmarkResult {
+            url: "https://example.com/test.zip".to_string(),
+            avg_speed_bps: 1_000_000.0,
+            peak_speed_bps: 1_500_000.0,
+            bytes_downloaded: 1_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://example.com/test.zip".to_string(), result);
+
+        let mut cloned = manager.clone();
+        cloned.clear_results();
+        assert_eq!(manager.get_all_results().len(), 1);
+        assert!(cloned.get_all_results().is_empty());
+    }
+
+    // --- get_summary edge cases ---
+
+    #[test]
+    fn test_get_summary_empty() {
+        let manager = SpeedBenchmarkManager::new();
+        let summary = manager.get_summary();
+        assert_eq!(summary.total_tested, 0);
+        assert_eq!(summary.successful, 0);
+        assert_eq!(summary.failed, 0);
+        assert!(summary.fastest.is_none());
+        assert!(summary.slowest.is_none());
+        assert_eq!(summary.avg_speed_bps, 0.0);
+    }
+
+    #[test]
+    fn test_get_summary_all_failed() {
+        let mut manager = SpeedBenchmarkManager::new();
+        for i in 0..3 {
+            let result = BenchmarkResult {
+                url: format!("https://fail{}.com/file.zip", i),
+                avg_speed_bps: 0.0,
+                peak_speed_bps: 0.0,
+                bytes_downloaded: 0,
+                duration_secs: 10.0,
+                success: false,
+                error: Some("Timeout".to_string()),
+                tested_at: chrono::Utc::now(),
+            };
+            manager
+                .results
+                .insert(format!("https://fail{}.com/file.zip", i), result);
+        }
+        let summary = manager.get_summary();
+        assert_eq!(summary.total_tested, 3);
+        assert_eq!(summary.successful, 0);
+        assert_eq!(summary.failed, 3);
+        assert!(summary.fastest.is_none());
+        assert!(summary.slowest.is_none());
+        assert_eq!(summary.avg_speed_bps, 0.0);
+    }
+
+    #[test]
+    fn test_get_summary_all_successful() {
+        let mut manager = SpeedBenchmarkManager::new();
+        for i in 0..3 {
+            let result = BenchmarkResult {
+                url: format!("https://ok{}.com/file.zip", i),
+                avg_speed_bps: 1_000_000.0 * (i as f64 + 1.0),
+                peak_speed_bps: 1_500_000.0 * (i as f64 + 1.0),
+                bytes_downloaded: 1_000_000,
+                duration_secs: 1.0,
+                success: true,
+                error: None,
+                tested_at: chrono::Utc::now(),
+            };
+            manager
+                .results
+                .insert(format!("https://ok{}.com/file.zip", i), result);
+        }
+        let summary = manager.get_summary();
+        assert_eq!(summary.total_tested, 3);
+        assert_eq!(summary.successful, 3);
+        assert_eq!(summary.failed, 0);
+        assert!(summary.fastest.is_some());
+        assert!(summary.slowest.is_some());
+    }
+
+    #[test]
+    fn test_get_summary_single_result() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let result = BenchmarkResult {
+            url: "https://single.com/file.zip".to_string(),
+            avg_speed_bps: 1_000_000.0,
+            peak_speed_bps: 1_500_000.0,
+            bytes_downloaded: 1_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://single.com/file.zip".to_string(), result);
+        let summary = manager.get_summary();
+        assert_eq!(summary.total_tested, 1);
+        assert_eq!(summary.successful, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(
+            summary.fastest.as_ref().unwrap().0,
+            "https://single.com/file.zip"
+        );
+        assert_eq!(
+            summary.slowest.as_ref().unwrap().0,
+            "https://single.com/file.zip"
+        );
+    }
+
+    #[test]
+    fn test_get_summary_same_speed() {
+        let mut manager = SpeedBenchmarkManager::new();
+        for i in 0..3 {
+            let result = BenchmarkResult {
+                url: format!("https://same{}.com/file.zip", i),
+                avg_speed_bps: 1_000_000.0,
+                peak_speed_bps: 1_000_000.0,
+                bytes_downloaded: 1_000_000,
+                duration_secs: 1.0,
+                success: true,
+                error: None,
+                tested_at: chrono::Utc::now(),
+            };
+            manager
+                .results
+                .insert(format!("https://same{}.com/file.zip", i), result);
+        }
+        let summary = manager.get_summary();
+        assert!(summary.fastest.is_some());
+        assert!(summary.slowest.is_some());
+    }
+
+    // --- clear_result edge cases ---
+
+    #[test]
+    fn test_clear_result_nonexistent() {
+        let mut manager = SpeedBenchmarkManager::new();
+        manager.clear_result("https://nonexistent.com/file.zip");
+        assert!(manager.get_all_results().is_empty());
+    }
+
+    #[test]
+    fn test_clear_result_idempotent() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let result = BenchmarkResult {
+            url: "https://example.com/file.zip".to_string(),
+            avg_speed_bps: 1_000_000.0,
+            peak_speed_bps: 1_500_000.0,
+            bytes_downloaded: 1_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://example.com/file.zip".to_string(), result);
+        manager.clear_result("https://example.com/file.zip");
+        manager.clear_result("https://example.com/file.zip");
+        assert!(manager.get_all_results().is_empty());
+    }
+
+    #[test]
+    fn test_clear_results_empty() {
+        let mut manager = SpeedBenchmarkManager::new();
+        manager.clear_results();
+        assert!(manager.get_all_results().is_empty());
+    }
+
+    #[test]
+    fn test_clear_results_idempotent() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let result = BenchmarkResult {
+            url: "https://example.com/file.zip".to_string(),
+            avg_speed_bps: 1_000_000.0,
+            peak_speed_bps: 1_500_000.0,
+            bytes_downloaded: 1_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://example.com/file.zip".to_string(), result);
+        manager.clear_results();
+        manager.clear_results();
+        assert!(manager.get_all_results().is_empty());
+    }
+
+    // --- format_summary edge cases ---
+
+    #[test]
+    fn test_format_summary_empty() {
+        let manager = SpeedBenchmarkManager::new();
+        let formatted = manager.format_summary();
+        assert!(formatted.contains("Speed Benchmark Summary"));
+        assert!(formatted.contains("Total tested: 0"));
+        assert!(formatted.contains("Successful: 0"));
+        assert!(formatted.contains("Failed: 0"));
+    }
+
+    #[test]
+    fn test_format_summary_with_failed_result() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let result = BenchmarkResult {
+            url: "https://example.com/file.zip".to_string(),
+            avg_speed_bps: 0.0,
+            peak_speed_bps: 0.0,
+            bytes_downloaded: 0,
+            duration_secs: 10.0,
+            success: false,
+            error: Some("Connection timeout".to_string()),
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://example.com/file.zip".to_string(), result);
+        let formatted = manager.format_summary();
+        assert!(formatted.contains("Failed: 1"));
+        assert!(formatted.contains("Connection timeout"));
+    }
+
+    #[test]
+    fn test_format_summary_with_fastest_slowest() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let fast = BenchmarkResult {
+            url: "https://fast.com/file.zip".to_string(),
+            avg_speed_bps: 2_000_000.0,
+            peak_speed_bps: 2_500_000.0,
+            bytes_downloaded: 2_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        let slow = BenchmarkResult {
+            url: "https://slow.com/file.zip".to_string(),
+            avg_speed_bps: 500_000.0,
+            peak_speed_bps: 600_000.0,
+            bytes_downloaded: 500_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://fast.com/file.zip".to_string(), fast);
+        manager
+            .results
+            .insert("https://slow.com/file.zip".to_string(), slow);
+        let formatted = manager.format_summary();
+        assert!(formatted.contains("Fastest:"));
+        assert!(formatted.contains("Slowest:"));
+    }
+
+    #[test]
+    fn test_format_summary_unicode_url() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let result = BenchmarkResult {
+            url: "https://example.com/中文文件.zip".to_string(),
+            avg_speed_bps: 1_048_576.0,
+            peak_speed_bps: 1_572_864.0,
+            bytes_downloaded: 1_048_576,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://example.com/中文文件.zip".to_string(), result);
+        let formatted = manager.format_summary();
+        assert!(formatted.contains("中文文件.zip"));
+    }
+
+    #[test]
+    fn test_format_summary_failed_without_error() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let result = BenchmarkResult {
+            url: "https://example.com/file.zip".to_string(),
+            avg_speed_bps: 0.0,
+            peak_speed_bps: 0.0,
+            bytes_downloaded: 0,
+            duration_secs: 10.0,
+            success: false,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://example.com/file.zip".to_string(), result);
+        let formatted = manager.format_summary();
+        assert!(formatted.contains("Unknown error"));
+    }
+
+    // --- benchmark_url edge cases ---
+
+    #[tokio::test]
+    async fn test_benchmark_url_disabled_zero_speed() {
+        let mut manager = SpeedBenchmarkManager::new();
+        manager.set_config(BenchmarkConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        let result = manager.benchmark_url("https://example.com/file.zip").await;
+        assert_eq!(result.avg_speed_bps, 0.0);
+        assert_eq!(result.peak_speed_bps, 0.0);
+        assert_eq!(result.bytes_downloaded, 0);
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_url_caches_result() {
+        let mut manager = SpeedBenchmarkManager::new();
+        manager.set_config(BenchmarkConfig {
+            test_duration_secs: 1,
+            sample_size_bytes: 65_536,
+            ..Default::default()
+        });
+        let result = manager.benchmark_url("https://example.com/file.zip").await;
+        assert!(result.success);
+        let cached = manager.get_cached_result("https://example.com/file.zip");
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().url, "https://example.com/file.zip");
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_url_overwrites_previous() {
+        let mut manager = SpeedBenchmarkManager::new();
+        manager.set_config(BenchmarkConfig {
+            test_duration_secs: 1,
+            sample_size_bytes: 65_536,
+            ..Default::default()
+        });
+        manager.benchmark_url("https://example.com/file.zip").await;
+        let first_duration = manager
+            .get_cached_result("https://example.com/file.zip")
+            .unwrap()
+            .duration_secs;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        manager.benchmark_url("https://example.com/file.zip").await;
+        let second_duration = manager
+            .get_cached_result("https://example.com/file.zip")
+            .unwrap()
+            .duration_secs;
+        assert!(second_duration >= first_duration);
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_url_small_sample() {
+        let mut manager = SpeedBenchmarkManager::new();
+        manager.set_config(BenchmarkConfig {
+            test_duration_secs: 1,
+            sample_size_bytes: 1024,
+            ..Default::default()
+        });
+        let result = manager.benchmark_url("https://example.com/tiny.zip").await;
+        assert!(result.success);
+        assert!(result.bytes_downloaded >= 1024);
+    }
+
+    // --- benchmark_urls edge cases ---
+
+    #[tokio::test]
+    async fn test_benchmark_urls_empty_list() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let summary = manager.benchmark_urls(&[]).await;
+        assert_eq!(summary.total_tested, 0);
+        assert_eq!(summary.successful, 0);
+        assert_eq!(summary.failed, 0);
+        assert!(summary.fastest.is_none());
+        assert!(summary.slowest.is_none());
+        assert_eq!(summary.avg_speed_bps, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_urls_single_url() {
+        let mut manager = SpeedBenchmarkManager::new();
+        manager.set_config(BenchmarkConfig {
+            test_duration_secs: 1,
+            sample_size_bytes: 65_536,
+            ..Default::default()
+        });
+        let urls = vec!["https://example.com/file.zip".to_string()];
+        let summary = manager.benchmark_urls(&urls).await;
+        assert_eq!(summary.total_tested, 1);
+        assert!(summary.successful > 0);
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_urls_max_concurrent_one() {
+        let mut manager = SpeedBenchmarkManager::new();
+        manager.set_config(BenchmarkConfig {
+            test_duration_secs: 1,
+            sample_size_bytes: 65_536,
+            max_concurrent: 1,
+            ..Default::default()
+        });
+        let urls = vec![
+            "https://example.com/file1.zip".to_string(),
+            "https://example.com/file2.zip".to_string(),
+        ];
+        let summary = manager.benchmark_urls(&urls).await;
+        assert_eq!(summary.total_tested, 2);
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_urls_max_concurrent_large() {
+        let mut manager = SpeedBenchmarkManager::new();
+        manager.set_config(BenchmarkConfig {
+            test_duration_secs: 1,
+            sample_size_bytes: 65_536,
+            max_concurrent: 100,
+            ..Default::default()
+        });
+        let urls = vec![
+            "https://example.com/file1.zip".to_string(),
+            "https://example.com/file2.zip".to_string(),
+            "https://example.com/file3.zip".to_string(),
+        ];
+        let summary = manager.benchmark_urls(&urls).await;
+        assert_eq!(summary.total_tested, 3);
+    }
+
+    // --- get_cached_result edge cases ---
+
+    #[test]
+    fn test_get_cached_result_empty_string() {
+        let manager = SpeedBenchmarkManager::new();
+        assert!(manager.get_cached_result("").is_none());
+    }
+
+    #[test]
+    fn test_get_cached_result_unicode() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let result = BenchmarkResult {
+            url: "https://example.com/中文.zip".to_string(),
+            avg_speed_bps: 1_000_000.0,
+            peak_speed_bps: 1_500_000.0,
+            bytes_downloaded: 1_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://example.com/中文.zip".to_string(), result);
+        assert!(
+            manager
+                .get_cached_result("https://example.com/中文.zip")
+                .is_some()
+        );
+        assert!(
+            manager
+                .get_cached_result("https://example.com/other.zip")
+                .is_none()
+        );
+    }
+
+    // --- get_all_results edge cases ---
+
+    #[test]
+    fn test_get_all_results_empty() {
+        let manager = SpeedBenchmarkManager::new();
+        assert!(manager.get_all_results().is_empty());
+    }
+
+    #[test]
+    fn test_get_all_results_many() {
+        let mut manager = SpeedBenchmarkManager::new();
+        for i in 0..50 {
+            let result = BenchmarkResult {
+                url: format!("https://example.com/file{}.zip", i),
+                avg_speed_bps: 1_000_000.0,
+                peak_speed_bps: 1_500_000.0,
+                bytes_downloaded: 1_000_000,
+                duration_secs: 1.0,
+                success: true,
+                error: None,
+                tested_at: chrono::Utc::now(),
+            };
+            manager
+                .results
+                .insert(format!("https://example.com/file{}.zip", i), result);
+        }
+        assert_eq!(manager.get_all_results().len(), 50);
+    }
+
+    // --- set_config edge cases ---
+
+    #[test]
+    fn test_set_config_preserves_results() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let result = BenchmarkResult {
+            url: "https://example.com/file.zip".to_string(),
+            avg_speed_bps: 1_000_000.0,
+            peak_speed_bps: 1_500_000.0,
+            bytes_downloaded: 1_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://example.com/file.zip".to_string(), result);
+        manager.set_config(BenchmarkConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        assert_eq!(manager.get_all_results().len(), 1);
+    }
+
+    #[test]
+    fn test_set_config_multiple_times() {
+        let mut manager = SpeedBenchmarkManager::new();
+        for i in 0..5 {
+            manager.set_config(BenchmarkConfig {
+                test_duration_secs: i,
+                ..Default::default()
+            });
+            assert_eq!(manager.get_config().test_duration_secs, i);
+        }
+    }
+
+    // --- BenchmarkSummary avg_speed_bps calculation ---
+
+    #[test]
+    fn test_summary_avg_speed_calculation() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let r1 = BenchmarkResult {
+            url: "https://a.com/file.zip".to_string(),
+            avg_speed_bps: 1_000_000.0,
+            peak_speed_bps: 1_000_000.0,
+            bytes_downloaded: 1_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        let r2 = BenchmarkResult {
+            url: "https://b.com/file.zip".to_string(),
+            avg_speed_bps: 3_000_000.0,
+            peak_speed_bps: 3_000_000.0,
+            bytes_downloaded: 3_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://a.com/file.zip".to_string(), r1);
+        manager
+            .results
+            .insert("https://b.com/file.zip".to_string(), r2);
+        let summary = manager.get_summary();
+        assert_eq!(summary.avg_speed_bps, 2_000_000.0);
+    }
+
+    #[test]
+    fn test_summary_failed_not_counted_in_avg() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let r1 = BenchmarkResult {
+            url: "https://a.com/file.zip".to_string(),
+            avg_speed_bps: 2_000_000.0,
+            peak_speed_bps: 2_000_000.0,
+            bytes_downloaded: 2_000_000,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        let r2 = BenchmarkResult {
+            url: "https://b.com/file.zip".to_string(),
+            avg_speed_bps: 0.0,
+            peak_speed_bps: 0.0,
+            bytes_downloaded: 0,
+            duration_secs: 10.0,
+            success: false,
+            error: Some("Timeout".to_string()),
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://a.com/file.zip".to_string(), r1);
+        manager
+            .results
+            .insert("https://b.com/file.zip".to_string(), r2);
+        let summary = manager.get_summary();
+        assert_eq!(summary.avg_speed_bps, 2_000_000.0);
+    }
+
+    // --- format_summary sections ---
+
+    #[test]
+    fn test_format_summary_contains_all_sections() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let result = BenchmarkResult {
+            url: "https://example.com/file.zip".to_string(),
+            avg_speed_bps: 1_048_576.0,
+            peak_speed_bps: 2_097_152.0,
+            bytes_downloaded: 1_048_576,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://example.com/file.zip".to_string(), result);
+        let formatted = manager.format_summary();
+        assert!(formatted.contains("Speed Benchmark Summary"));
+        assert!(formatted.contains("Total tested:"));
+        assert!(formatted.contains("Successful:"));
+        assert!(formatted.contains("Failed:"));
+        assert!(formatted.contains("Average speed:"));
+        assert!(formatted.contains("Fastest:"));
+        assert!(formatted.contains("Slowest:"));
+        assert!(formatted.contains("Detailed Results:"));
+    }
+
+    #[test]
+    fn test_format_summary_peak_speed_shown() {
+        let mut manager = SpeedBenchmarkManager::new();
+        let result = BenchmarkResult {
+            url: "https://example.com/file.zip".to_string(),
+            avg_speed_bps: 1_048_576.0,
+            peak_speed_bps: 2_097_152.0,
+            bytes_downloaded: 1_048_576,
+            duration_secs: 1.0,
+            success: true,
+            error: None,
+            tested_at: chrono::Utc::now(),
+        };
+        manager
+            .results
+            .insert("https://example.com/file.zip".to_string(), result);
+        let formatted = manager.format_summary();
+        assert!(formatted.contains("peak:"));
+    }
 }
