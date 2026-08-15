@@ -376,4 +376,812 @@ mod tests {
         assert_eq!(history.peak_speed_in_window(3600), 0.0);
         assert_eq!(history.samples_in_window(3600).len(), 0);
     }
+
+    // ============================================================================
+    // Comprehensive Test Coverage - Phase 232
+    // ============================================================================
+
+    // === SpeedSample Serialization ===
+
+    #[test]
+    fn test_speed_sample_serde_roundtrip() {
+        let sample = SpeedSample {
+            timestamp: Utc::now(),
+            speed_bps: 1024.5,
+            downloaded: 10000,
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let deserialized: SpeedSample = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.speed_bps, 1024.5);
+        assert_eq!(deserialized.downloaded, 10000);
+    }
+
+    #[test]
+    fn test_speed_sample_serde_zero_values() {
+        let sample = SpeedSample {
+            timestamp: Utc::now(),
+            speed_bps: 0.0,
+            downloaded: 0,
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let deserialized: SpeedSample = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.speed_bps, 0.0);
+        assert_eq!(deserialized.downloaded, 0);
+    }
+
+    #[test]
+    fn test_speed_sample_serde_large_values() {
+        let sample = SpeedSample {
+            timestamp: Utc::now(),
+            speed_bps: f64::MAX,
+            downloaded: u64::MAX,
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let deserialized: SpeedSample = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.speed_bps, f64::MAX);
+        assert_eq!(deserialized.downloaded, u64::MAX);
+    }
+
+    #[test]
+    fn test_speed_sample_serde_extra_fields_ignored() {
+        let json = r#"{"timestamp":"2026-08-15T12:00:00Z","speed_bps":1024.0,"downloaded":1000,"extra_field":"ignored"}"#;
+        let sample: SpeedSample = serde_json::from_str(json).unwrap();
+        assert_eq!(sample.speed_bps, 1024.0);
+        assert_eq!(sample.downloaded, 1000);
+    }
+
+    #[test]
+    fn test_speed_sample_serde_pretty() {
+        let sample = SpeedSample {
+            timestamp: Utc::now(),
+            speed_bps: 2048.0,
+            downloaded: 5000,
+        };
+        let pretty = serde_json::to_string_pretty(&sample).unwrap();
+        assert!(pretty.contains('\n'));
+        let deserialized: SpeedSample = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(deserialized.speed_bps, 2048.0);
+    }
+
+    // === SpeedSample Traits ===
+
+    #[test]
+    fn test_speed_sample_clone() {
+        let sample = SpeedSample {
+            timestamp: Utc::now(),
+            speed_bps: 1024.0,
+            downloaded: 1000,
+        };
+        let cloned = sample.clone();
+        assert_eq!(cloned.speed_bps, 1024.0);
+        assert_eq!(cloned.downloaded, 1000);
+    }
+
+    #[test]
+    fn test_speed_sample_debug() {
+        let sample = SpeedSample {
+            timestamp: Utc::now(),
+            speed_bps: 1024.0,
+            downloaded: 1000,
+        };
+        let debug = format!("{:?}", sample);
+        assert!(debug.contains("SpeedSample"));
+        assert!(debug.contains("1024"));
+    }
+
+    // === TaskSpeedHistory Serialization ===
+
+    #[test]
+    fn test_task_speed_history_serde_roundtrip() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(1024.0, 1000);
+        history.add_sample(2048.0, 2000);
+
+        let json = serde_json::to_string(&history).unwrap();
+        let deserialized: TaskSpeedHistory = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.task_id, "task1");
+        assert_eq!(deserialized.max_samples, 100);
+        assert_eq!(deserialized.sample_count(), 2);
+    }
+
+    #[test]
+    fn test_task_speed_history_serde_empty() {
+        let history = TaskSpeedHistory::new("task1".to_string(), 50);
+        let json = serde_json::to_string(&history).unwrap();
+        let deserialized: TaskSpeedHistory = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.sample_count(), 0);
+        assert_eq!(deserialized.max_samples, 50);
+    }
+
+    #[test]
+    fn test_task_speed_history_serde_extra_fields_ignored() {
+        let json = r#"{"task_id":"task1","samples":[],"max_samples":100,"extra":"ignored"}"#;
+        let history: TaskSpeedHistory = serde_json::from_str(json).unwrap();
+        assert_eq!(history.task_id, "task1");
+        assert_eq!(history.max_samples, 100);
+    }
+
+    #[test]
+    fn test_task_speed_history_serde_pretty() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(1024.0, 1000);
+        let pretty = serde_json::to_string_pretty(&history).unwrap();
+        assert!(pretty.contains('\n'));
+        let deserialized: TaskSpeedHistory = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(deserialized.sample_count(), 1);
+    }
+
+    // === TaskSpeedHistory Traits ===
+
+    #[test]
+    fn test_task_speed_history_clone() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(1024.0, 1000);
+
+        let cloned = history.clone();
+        assert_eq!(cloned.task_id, "task1");
+        assert_eq!(cloned.sample_count(), 1);
+        assert_eq!(cloned.max_samples, 100);
+    }
+
+    #[test]
+    fn test_task_speed_history_clone_independence() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(1024.0, 1000);
+
+        let mut cloned = history.clone();
+        cloned.add_sample(2048.0, 2000);
+
+        assert_eq!(history.sample_count(), 1);
+        assert_eq!(cloned.sample_count(), 2);
+    }
+
+    #[test]
+    fn test_task_speed_history_debug() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(1024.0, 1000);
+
+        let debug = format!("{:?}", history);
+        assert!(debug.contains("TaskSpeedHistory"));
+        assert!(debug.contains("task1"));
+        assert!(debug.contains("1024"));
+    }
+
+    // === TaskSpeedHistory Boundary Tests ===
+
+    #[test]
+    fn test_task_speed_history_new_zero_max_samples() {
+        let history = TaskSpeedHistory::new("task1".to_string(), 0);
+        assert_eq!(history.max_samples, 0);
+        assert_eq!(history.sample_count(), 0);
+    }
+
+    #[test]
+    fn test_task_speed_history_add_sample_zero_max_samples() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 0);
+        history.add_sample(1024.0, 1000);
+        // With max_samples=0, samples should be removed immediately
+        assert_eq!(history.sample_count(), 0);
+    }
+
+    #[test]
+    fn test_task_speed_history_add_sample_max_samples_one() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 1);
+        history.add_sample(1024.0, 1000);
+        assert_eq!(history.sample_count(), 1);
+        history.add_sample(2048.0, 2000);
+        assert_eq!(history.sample_count(), 1);
+        assert_eq!(history.latest().unwrap().speed_bps, 2048.0);
+    }
+
+    #[test]
+    fn test_task_speed_history_add_sample_zero_speed() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(0.0, 1000);
+        assert_eq!(history.sample_count(), 1);
+        assert_eq!(history.latest().unwrap().speed_bps, 0.0);
+    }
+
+    #[test]
+    fn test_task_speed_history_add_sample_negative_speed() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(-100.0, 1000);
+        assert_eq!(history.sample_count(), 1);
+        assert_eq!(history.latest().unwrap().speed_bps, -100.0);
+    }
+
+    #[test]
+    fn test_task_speed_history_add_sample_large_values() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(f64::MAX, u64::MAX);
+        assert_eq!(history.sample_count(), 1);
+        assert_eq!(history.latest().unwrap().speed_bps, f64::MAX);
+        assert_eq!(history.latest().unwrap().downloaded, u64::MAX);
+    }
+
+    #[test]
+    fn test_task_speed_history_latest_empty() {
+        let history = TaskSpeedHistory::new("task1".to_string(), 100);
+        assert!(history.latest().is_none());
+    }
+
+    #[test]
+    fn test_task_speed_history_latest_single_sample() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(1024.0, 1000);
+        let latest = history.latest().unwrap();
+        assert_eq!(latest.speed_bps, 1024.0);
+        assert_eq!(latest.downloaded, 1000);
+    }
+
+    #[test]
+    fn test_task_speed_history_samples_in_window_zero_window() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(1024.0, 1000);
+        // Zero second window should return empty (samples are in the past)
+        let samples = history.samples_in_window(0);
+        assert_eq!(samples.len(), 0);
+    }
+
+    #[test]
+    fn test_task_speed_history_samples_in_window_large_window() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(1024.0, 1000);
+        history.add_sample(2048.0, 2000);
+        // Large window should include all samples
+        let samples = history.samples_in_window(3600);
+        assert_eq!(samples.len(), 2);
+    }
+
+    #[test]
+    fn test_task_speed_history_avg_speed_empty() {
+        let history = TaskSpeedHistory::new("task1".to_string(), 100);
+        assert_eq!(history.avg_speed_in_window(3600), 0.0);
+    }
+
+    #[test]
+    fn test_task_speed_history_avg_speed_single_sample() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(1024.0, 1000);
+        let avg = history.avg_speed_in_window(3600);
+        assert_eq!(avg, 1024.0);
+    }
+
+    #[test]
+    fn test_task_speed_history_avg_speed_zero_speeds() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(0.0, 1000);
+        history.add_sample(0.0, 2000);
+        let avg = history.avg_speed_in_window(3600);
+        assert_eq!(avg, 0.0);
+    }
+
+    #[test]
+    fn test_task_speed_history_peak_speed_empty() {
+        let history = TaskSpeedHistory::new("task1".to_string(), 100);
+        assert_eq!(history.peak_speed_in_window(3600), 0.0);
+    }
+
+    #[test]
+    fn test_task_speed_history_peak_speed_single_sample() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(1024.0, 1000);
+        let peak = history.peak_speed_in_window(3600);
+        assert_eq!(peak, 1024.0);
+    }
+
+    #[test]
+    fn test_task_speed_history_peak_speed_negative_speeds() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.add_sample(-100.0, 1000);
+        history.add_sample(-50.0, 2000);
+        // Peak of negative values should be 0.0 (from fold initial value)
+        let peak = history.peak_speed_in_window(3600);
+        assert_eq!(peak, 0.0);
+    }
+
+    #[test]
+    fn test_task_speed_history_clear_empty() {
+        let mut history = TaskSpeedHistory::new("task1".to_string(), 100);
+        history.clear();
+        assert_eq!(history.sample_count(), 0);
+    }
+
+    #[test]
+    fn test_task_speed_history_unicode_task_id() {
+        let mut history = TaskSpeedHistory::new("任务1".to_string(), 100);
+        history.add_sample(1024.0, 1000);
+        assert_eq!(history.task_id, "任务1");
+        assert_eq!(history.sample_count(), 1);
+    }
+
+    #[test]
+    fn test_task_speed_history_emoji_task_id() {
+        let mut history = TaskSpeedHistory::new("🚀task".to_string(), 100);
+        history.add_sample(1024.0, 1000);
+        assert_eq!(history.task_id, "🚀task");
+    }
+
+    // === SpeedHistoryManager Serialization ===
+
+    #[test]
+    fn test_speed_history_manager_serde_roundtrip() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("task1", 1024.0, 1000);
+        manager.add_sample("task2", 2048.0, 2000);
+
+        let json = serde_json::to_string(&manager).unwrap();
+        let deserialized: SpeedHistoryManager = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.default_max_samples, 100);
+        assert_eq!(deserialized.histories.len(), 2);
+        assert!(deserialized.get("task1").is_some());
+        assert!(deserialized.get("task2").is_some());
+    }
+
+    #[test]
+    fn test_speed_history_manager_serde_empty() {
+        let manager = SpeedHistoryManager::new(50);
+        let json = serde_json::to_string(&manager).unwrap();
+        let deserialized: SpeedHistoryManager = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.default_max_samples, 50);
+        assert_eq!(deserialized.histories.len(), 0);
+    }
+
+    #[test]
+    fn test_speed_history_manager_serde_extra_fields_ignored() {
+        let json = r#"{"histories":{},"default_max_samples":100,"extra":"ignored"}"#;
+        let manager: SpeedHistoryManager = serde_json::from_str(json).unwrap();
+        assert_eq!(manager.default_max_samples, 100);
+    }
+
+    #[test]
+    fn test_speed_history_manager_serde_pretty() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("task1", 1024.0, 1000);
+        let pretty = serde_json::to_string_pretty(&manager).unwrap();
+        assert!(pretty.contains('\n'));
+        let deserialized: SpeedHistoryManager = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(deserialized.histories.len(), 1);
+    }
+
+    // === SpeedHistoryManager Traits ===
+
+    #[test]
+    fn test_speed_history_manager_clone() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("task1", 1024.0, 1000);
+
+        let cloned = manager.clone();
+        assert_eq!(cloned.default_max_samples, 100);
+        assert_eq!(cloned.histories.len(), 1);
+    }
+
+    #[test]
+    fn test_speed_history_manager_clone_independence() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("task1", 1024.0, 1000);
+
+        let mut cloned = manager.clone();
+        cloned.add_sample("task2", 2048.0, 2000);
+
+        assert_eq!(manager.histories.len(), 1);
+        assert_eq!(cloned.histories.len(), 2);
+    }
+
+    #[test]
+    fn test_speed_history_manager_debug() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("task1", 1024.0, 1000);
+
+        let debug = format!("{:?}", manager);
+        assert!(debug.contains("SpeedHistoryManager"));
+        assert!(debug.contains("task1"));
+    }
+
+    #[test]
+    fn test_speed_history_manager_default() {
+        let manager = SpeedHistoryManager::default();
+        assert_eq!(manager.default_max_samples, 0);
+        assert_eq!(manager.histories.len(), 0);
+    }
+
+    // === SpeedHistoryManager Boundary Tests ===
+
+    #[test]
+    fn test_speed_history_manager_new_zero_max_samples() {
+        let manager = SpeedHistoryManager::new(0);
+        assert_eq!(manager.default_max_samples, 0);
+    }
+
+    #[test]
+    fn test_speed_history_manager_get_or_create_new_task() {
+        let mut manager = SpeedHistoryManager::new(100);
+        let history = manager.get_or_create("task1");
+        assert_eq!(history.task_id, "task1");
+        assert_eq!(history.max_samples, 100);
+        assert_eq!(history.sample_count(), 0);
+    }
+
+    #[test]
+    fn test_speed_history_manager_get_or_create_existing_task() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("task1", 1024.0, 1000);
+
+        let history = manager.get_or_create("task1");
+        assert_eq!(history.sample_count(), 1);
+    }
+
+    #[test]
+    fn test_speed_history_manager_add_sample_creates_history() {
+        let mut manager = SpeedHistoryManager::new(100);
+        assert!(manager.get("task1").is_none());
+
+        manager.add_sample("task1", 1024.0, 1000);
+        assert!(manager.get("task1").is_some());
+        assert_eq!(manager.get("task1").unwrap().sample_count(), 1);
+    }
+
+    #[test]
+    fn test_speed_history_manager_get_exists() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("task1", 1024.0, 1000);
+        assert!(manager.get("task1").is_some());
+    }
+
+    #[test]
+    fn test_speed_history_manager_get_not_exists() {
+        let manager = SpeedHistoryManager::new(100);
+        assert!(manager.get("task1").is_none());
+    }
+
+    #[test]
+    fn test_speed_history_manager_get_mut_exists() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("task1", 1024.0, 1000);
+        let history = manager.get_mut("task1").unwrap();
+        history.add_sample(2048.0, 2000);
+        assert_eq!(history.sample_count(), 2);
+    }
+
+    #[test]
+    fn test_speed_history_manager_get_mut_not_exists() {
+        let mut manager = SpeedHistoryManager::new(100);
+        assert!(manager.get_mut("task1").is_none());
+    }
+
+    #[test]
+    fn test_speed_history_manager_remove_exists() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("task1", 1024.0, 1000);
+        assert!(manager.remove("task1"));
+        assert!(manager.get("task1").is_none());
+    }
+
+    #[test]
+    fn test_speed_history_manager_remove_not_exists() {
+        let mut manager = SpeedHistoryManager::new(100);
+        assert!(!manager.remove("task1"));
+    }
+
+    #[test]
+    fn test_speed_history_manager_remove_idempotent() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("task1", 1024.0, 1000);
+        assert!(manager.remove("task1"));
+        assert!(!manager.remove("task1"));
+    }
+
+    #[test]
+    fn test_speed_history_manager_list_task_ids_empty() {
+        let manager = SpeedHistoryManager::new(100);
+        assert_eq!(manager.list_task_ids().len(), 0);
+    }
+
+    #[test]
+    fn test_speed_history_manager_list_task_ids_multiple() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("task1", 1024.0, 1000);
+        manager.add_sample("task2", 2048.0, 2000);
+        manager.add_sample("task3", 3072.0, 3000);
+
+        let ids = manager.list_task_ids();
+        assert_eq!(ids.len(), 3);
+    }
+
+    #[test]
+    fn test_speed_history_manager_get_summary_exists() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("task1", 1000.0, 1000);
+        manager.add_sample("task1", 2000.0, 2000);
+        manager.add_sample("task1", 3000.0, 3000);
+
+        let summary = manager.get_summary("task1").unwrap();
+        assert_eq!(summary.task_id, "task1");
+        assert_eq!(summary.sample_count, 3);
+        assert_eq!(summary.latest_speed, 3000.0);
+        assert_eq!(summary.peak_speed, 3000.0);
+    }
+
+    #[test]
+    fn test_speed_history_manager_get_summary_not_exists() {
+        let manager = SpeedHistoryManager::new(100);
+        assert!(manager.get_summary("task1").is_none());
+    }
+
+    #[test]
+    fn test_speed_history_manager_get_summary_empty_history() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.get_or_create("task1");
+
+        let summary = manager.get_summary("task1").unwrap();
+        assert_eq!(summary.sample_count, 0);
+        assert_eq!(summary.latest_speed, 0.0);
+        assert_eq!(summary.peak_speed, 0.0);
+    }
+
+    #[test]
+    fn test_speed_history_manager_unicode_task_id() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("任务1", 1024.0, 1000);
+        manager.add_sample("🚀task", 2048.0, 2000);
+
+        assert!(manager.get("任务1").is_some());
+        assert!(manager.get("🚀task").is_some());
+    }
+
+    // === SpeedHistorySummary Serialization ===
+
+    #[test]
+    fn test_speed_history_summary_serde_roundtrip() {
+        let summary = SpeedHistorySummary {
+            task_id: "task1".to_string(),
+            sample_count: 100,
+            latest_speed: 1024.0,
+            avg_5min: 2048.0,
+            avg_15min: 1536.0,
+            avg_1h: 1280.0,
+            peak_speed: 5120.0,
+        };
+
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: SpeedHistorySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.task_id, "task1");
+        assert_eq!(deserialized.sample_count, 100);
+        assert_eq!(deserialized.latest_speed, 1024.0);
+    }
+
+    #[test]
+    fn test_speed_history_summary_serde_zero_values() {
+        let summary = SpeedHistorySummary {
+            task_id: "task1".to_string(),
+            sample_count: 0,
+            latest_speed: 0.0,
+            avg_5min: 0.0,
+            avg_15min: 0.0,
+            avg_1h: 0.0,
+            peak_speed: 0.0,
+        };
+
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: SpeedHistorySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.sample_count, 0);
+    }
+
+    #[test]
+    fn test_speed_history_summary_serde_extra_fields_ignored() {
+        let json = r#"{"task_id":"task1","sample_count":10,"latest_speed":1024.0,"avg_5min":0.0,"avg_15min":0.0,"avg_1h":0.0,"peak_speed":2048.0,"extra":"ignored"}"#;
+        let summary: SpeedHistorySummary = serde_json::from_str(json).unwrap();
+        assert_eq!(summary.task_id, "task1");
+        assert_eq!(summary.sample_count, 10);
+    }
+
+    // === SpeedHistorySummary Traits ===
+
+    #[test]
+    fn test_speed_history_summary_clone() {
+        let summary = SpeedHistorySummary {
+            task_id: "task1".to_string(),
+            sample_count: 100,
+            latest_speed: 1024.0,
+            avg_5min: 2048.0,
+            avg_15min: 1536.0,
+            avg_1h: 1280.0,
+            peak_speed: 5120.0,
+        };
+
+        let cloned = summary.clone();
+        assert_eq!(cloned.task_id, "task1");
+        assert_eq!(cloned.sample_count, 100);
+    }
+
+    #[test]
+    fn test_speed_history_summary_debug() {
+        let summary = SpeedHistorySummary {
+            task_id: "task1".to_string(),
+            sample_count: 100,
+            latest_speed: 1024.0,
+            avg_5min: 2048.0,
+            avg_15min: 1536.0,
+            avg_1h: 1280.0,
+            peak_speed: 5120.0,
+        };
+
+        let debug = format!("{:?}", summary);
+        assert!(debug.contains("SpeedHistorySummary"));
+        assert!(debug.contains("task1"));
+    }
+
+    // === SpeedHistorySummary format_summary ===
+
+    #[test]
+    fn test_speed_history_summary_format_zero_values() {
+        let summary = SpeedHistorySummary {
+            task_id: "task1".to_string(),
+            sample_count: 0,
+            latest_speed: 0.0,
+            avg_5min: 0.0,
+            avg_15min: 0.0,
+            avg_1h: 0.0,
+            peak_speed: 0.0,
+        };
+
+        let formatted = summary.format_summary();
+        assert!(formatted.contains("0 samples"));
+        assert!(formatted.contains("0.0 KB/s"));
+    }
+
+    #[test]
+    fn test_speed_history_summary_format_large_values() {
+        let summary = SpeedHistorySummary {
+            task_id: "task1".to_string(),
+            sample_count: 10000,
+            latest_speed: 1048576.0, // 1 MB/s
+            avg_5min: 2097152.0,     // 2 MB/s
+            avg_15min: 1572864.0,    // 1.5 MB/s
+            avg_1h: 1048576.0,       // 1 MB/s
+            peak_speed: 5242880.0,   // 5 MB/s
+        };
+
+        let formatted = summary.format_summary();
+        assert!(formatted.contains("10000 samples"));
+        assert!(formatted.contains("1024.0 KB/s")); // 1 MB/s in KB/s
+    }
+
+    #[test]
+    fn test_speed_history_summary_format_all_sections() {
+        let summary = SpeedHistorySummary {
+            task_id: "task1".to_string(),
+            sample_count: 100,
+            latest_speed: 1024.0,
+            avg_5min: 2048.0,
+            avg_15min: 1536.0,
+            avg_1h: 1280.0,
+            peak_speed: 5120.0,
+        };
+
+        let formatted = summary.format_summary();
+        assert!(formatted.contains("Speed History:"));
+        assert!(formatted.contains("samples"));
+        assert!(formatted.contains("Latest:"));
+        assert!(formatted.contains("Avg 5min:"));
+        assert!(formatted.contains("Avg 15min:"));
+        assert!(formatted.contains("Avg 1h:"));
+        assert!(formatted.contains("Peak:"));
+    }
+
+    #[test]
+    fn test_speed_history_summary_format_unicode_task_id() {
+        let summary = SpeedHistorySummary {
+            task_id: "任务1".to_string(),
+            sample_count: 10,
+            latest_speed: 1024.0,
+            avg_5min: 1024.0,
+            avg_15min: 1024.0,
+            avg_1h: 1024.0,
+            peak_speed: 2048.0,
+        };
+
+        let formatted = summary.format_summary();
+        // Task ID is not in the format string, but the summary should still work
+        assert!(formatted.contains("10 samples"));
+    }
+
+    // === Complex Workflow Tests ===
+
+    #[test]
+    fn test_speed_history_complete_lifecycle() {
+        let mut manager = SpeedHistoryManager::new(100);
+
+        // Add samples for multiple tasks
+        manager.add_sample("task1", 1000.0, 1000);
+        manager.add_sample("task1", 2000.0, 2000);
+        manager.add_sample("task2", 3000.0, 3000);
+
+        // Verify state
+        assert_eq!(manager.histories.len(), 2);
+        assert_eq!(manager.get("task1").unwrap().sample_count(), 2);
+        assert_eq!(manager.get("task2").unwrap().sample_count(), 1);
+
+        // Get summary
+        let summary = manager.get_summary("task1").unwrap();
+        assert_eq!(summary.sample_count, 2);
+        assert_eq!(summary.latest_speed, 2000.0);
+
+        // Remove task
+        assert!(manager.remove("task1"));
+        assert_eq!(manager.histories.len(), 1);
+        assert!(manager.get("task1").is_none());
+
+        // List remaining
+        let ids = manager.list_task_ids();
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn test_speed_history_multiple_tasks_independent() {
+        let mut manager = SpeedHistoryManager::new(100);
+
+        manager.add_sample("task1", 1000.0, 1000);
+        manager.add_sample("task2", 2000.0, 2000);
+        manager.add_sample("task3", 3000.0, 3000);
+
+        // Each task should have independent history
+        assert_eq!(manager.get("task1").unwrap().sample_count(), 1);
+        assert_eq!(manager.get("task2").unwrap().sample_count(), 1);
+        assert_eq!(manager.get("task3").unwrap().sample_count(), 1);
+
+        // Remove one shouldn't affect others
+        manager.remove("task2");
+        assert_eq!(manager.histories.len(), 2);
+        assert!(manager.get("task1").is_some());
+        assert!(manager.get("task2").is_none());
+        assert!(manager.get("task3").is_some());
+    }
+
+    #[test]
+    fn test_speed_history_max_samples_enforcement() {
+        let mut manager = SpeedHistoryManager::new(5);
+
+        // Add more samples than max
+        for i in 0..10 {
+            manager.add_sample("task1", i as f64 * 100.0, i * 1000);
+        }
+
+        // Should only keep the last 5
+        let history = manager.get("task1").unwrap();
+        assert_eq!(history.sample_count(), 5);
+        assert_eq!(history.samples[0].downloaded, 5000);
+        assert_eq!(history.samples[4].downloaded, 9000);
+    }
+
+    #[test]
+    fn test_speed_history_persistence_roundtrip() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("task1", 1024.0, 1000);
+        manager.add_sample("task1", 2048.0, 2000);
+        manager.add_sample("task2", 3072.0, 3000);
+
+        // Serialize
+        let json = serde_json::to_string(&manager).unwrap();
+
+        // Deserialize
+        let loaded: SpeedHistoryManager = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.default_max_samples, 100);
+        assert_eq!(loaded.histories.len(), 2);
+        assert_eq!(loaded.get("task1").unwrap().sample_count(), 2);
+        assert_eq!(loaded.get("task2").unwrap().sample_count(), 1);
+    }
+
+    #[test]
+    fn test_speed_history_unicode_persistence() {
+        let mut manager = SpeedHistoryManager::new(100);
+        manager.add_sample("任务1", 1024.0, 1000);
+        manager.add_sample("🚀task", 2048.0, 2000);
+
+        let json = serde_json::to_string(&manager).unwrap();
+        let loaded: SpeedHistoryManager = serde_json::from_str(&json).unwrap();
+
+        assert!(loaded.get("任务1").is_some());
+        assert!(loaded.get("🚀task").is_some());
+    }
 }

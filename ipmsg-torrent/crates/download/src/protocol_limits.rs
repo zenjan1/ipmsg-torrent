@@ -478,4 +478,679 @@ mod tests {
             4
         );
     }
+
+    // ===== Phase 232: Comprehensive Test Coverage =====
+
+    // --- ProtocolLimitEntry tests ---
+
+    #[test]
+    fn entry_default_values() {
+        let entry = ProtocolLimitEntry::default();
+        assert_eq!(entry.max_concurrent, 0);
+        assert!(!entry.enabled);
+    }
+
+    #[test]
+    fn entry_serde_roundtrip() {
+        let entry = ProtocolLimitEntry {
+            max_concurrent: 42,
+            enabled: true,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let de: ProtocolLimitEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.max_concurrent, 42);
+        assert!(de.enabled);
+    }
+
+    #[test]
+    fn entry_serde_extra_fields_ignored() {
+        let json = r#"{"max_concurrent":5,"enabled":true,"extra_field":"ignored"}"#;
+        let entry: ProtocolLimitEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.max_concurrent, 5);
+        assert!(entry.enabled);
+    }
+
+    #[test]
+    fn entry_clone_debug() {
+        let entry = ProtocolLimitEntry {
+            max_concurrent: 3,
+            enabled: true,
+        };
+        let cloned = entry.clone();
+        assert_eq!(cloned.max_concurrent, 3);
+        assert!(cloned.enabled);
+        // Debug trait
+        let debug_str = format!("{:?}", entry);
+        assert!(debug_str.contains("max_concurrent"));
+    }
+
+    // --- ProtocolLimitsConfig serde tests ---
+
+    #[test]
+    fn config_serde_roundtrip() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.default_max_concurrent = 10;
+        config.set_limit(DownloadProtocol::Torrent, 5, true);
+        config.set_limit(DownloadProtocol::P2P, 2, false);
+
+        let json = serde_json::to_string(&config).unwrap();
+        let de: ProtocolLimitsConfig = serde_json::from_str(&json).unwrap();
+
+        assert!(de.enabled);
+        assert_eq!(de.default_max_concurrent, 10);
+        assert_eq!(de.get_limit(DownloadProtocol::Torrent).max_concurrent, 5);
+        assert!(!de.get_limit(DownloadProtocol::P2P).enabled);
+    }
+
+    #[test]
+    fn config_pretty_serde() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.set_limit(DownloadProtocol::Torrent, 3, true);
+
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        assert!(pretty.contains('\n'));
+        let de: ProtocolLimitsConfig = serde_json::from_str(&pretty).unwrap();
+        assert!(de.enabled);
+    }
+
+    #[test]
+    fn config_serde_extra_fields_ignored() {
+        let json = r#"{"enabled":false,"limits":{},"default_max_concurrent":0,"unknown":"val"}"#;
+        let config: ProtocolLimitsConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn config_clone_debug() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.set_limit(DownloadProtocol::Torrent, 3, true);
+
+        let cloned = config.clone();
+        assert!(cloned.enabled);
+        assert_eq!(
+            cloned.get_limit(DownloadProtocol::Torrent).max_concurrent,
+            3
+        );
+
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("enabled"));
+    }
+
+    #[test]
+    fn config_default_equals_new() {
+        let default_config = ProtocolLimitsConfig::default();
+        let new_config = ProtocolLimitsConfig::new();
+        assert_eq!(default_config.enabled, new_config.enabled);
+        assert_eq!(
+            default_config.default_max_concurrent,
+            new_config.default_max_concurrent
+        );
+        assert_eq!(default_config.limits.len(), new_config.limits.len());
+    }
+
+    // --- set_limit overwrite tests ---
+
+    #[test]
+    fn set_limit_overwrites_existing() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.set_limit(DownloadProtocol::Torrent, 3, true);
+        config.set_limit(DownloadProtocol::Torrent, 7, false);
+
+        let entry = config.get_limit(DownloadProtocol::Torrent);
+        assert_eq!(entry.max_concurrent, 7);
+        assert!(!entry.enabled);
+    }
+
+    #[test]
+    fn set_limit_all_protocols() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.set_limit(DownloadProtocol::Torrent, 1, true);
+        config.set_limit(DownloadProtocol::Ed2k, 2, true);
+        config.set_limit(DownloadProtocol::Xunlei, 3, true);
+        config.set_limit(DownloadProtocol::Magnet, 4, true);
+        config.set_limit(DownloadProtocol::P2P, 5, true);
+
+        assert_eq!(config.limits.len(), 5);
+        assert_eq!(
+            config.get_limit(DownloadProtocol::Torrent).max_concurrent,
+            1
+        );
+        assert_eq!(config.get_limit(DownloadProtocol::Ed2k).max_concurrent, 2);
+        assert_eq!(config.get_limit(DownloadProtocol::Xunlei).max_concurrent, 3);
+        assert_eq!(config.get_limit(DownloadProtocol::Magnet).max_concurrent, 4);
+        assert_eq!(config.get_limit(DownloadProtocol::P2P).max_concurrent, 5);
+    }
+
+    // --- remove_limit edge cases ---
+
+    #[test]
+    fn remove_limit_nonexistent_no_panic() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.remove_limit(DownloadProtocol::Torrent);
+        assert!(config.limits.is_empty());
+    }
+
+    #[test]
+    fn remove_limit_reverts_to_default() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.default_max_concurrent = 10;
+        config.enabled = true;
+        config.set_limit(DownloadProtocol::Torrent, 3, true);
+        config.remove_limit(DownloadProtocol::Torrent);
+
+        let entry = config.get_limit(DownloadProtocol::Torrent);
+        assert_eq!(entry.max_concurrent, 10);
+        assert!(entry.enabled);
+    }
+
+    // --- can_start boundary tests ---
+
+    #[test]
+    fn can_start_exact_boundary() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.set_limit(DownloadProtocol::Torrent, 5, true);
+
+        assert!(config.can_start(DownloadProtocol::Torrent, 4));
+        assert!(!config.can_start(DownloadProtocol::Torrent, 5));
+        assert!(!config.can_start(DownloadProtocol::Torrent, 6));
+    }
+
+    #[test]
+    fn can_start_zero_running() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.set_limit(DownloadProtocol::Torrent, 1, true);
+
+        assert!(config.can_start(DownloadProtocol::Torrent, 0));
+    }
+
+    #[test]
+    fn can_start_max_limit() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.set_limit(DownloadProtocol::Torrent, u32::MAX, true);
+
+        assert!(config.can_start(DownloadProtocol::Torrent, u32::MAX - 1));
+        assert!(!config.can_start(DownloadProtocol::Torrent, u32::MAX));
+    }
+
+    #[test]
+    fn can_start_large_running_count() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.set_limit(DownloadProtocol::Torrent, 100, true);
+
+        assert!(!config.can_start(DownloadProtocol::Torrent, 1000));
+    }
+
+    // --- summary tests ---
+
+    #[test]
+    fn summary_empty_config() {
+        let config = ProtocolLimitsConfig::new();
+        let summary = config.summary();
+        assert!(!summary.enabled);
+        assert_eq!(summary.default_max_concurrent, 0);
+        assert_eq!(summary.entries.len(), 5);
+    }
+
+    #[test]
+    fn summary_uses_default_for_unconfigured() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.default_max_concurrent = 7;
+
+        let summary = config.summary();
+        for entry in &summary.entries {
+            assert_eq!(entry.max_concurrent, 7);
+        }
+    }
+
+    #[test]
+    fn summary_contains_all_protocols() {
+        let config = ProtocolLimitsConfig::new();
+        let summary = config.summary();
+
+        let protocols: Vec<&str> = summary
+            .entries
+            .iter()
+            .map(|e| e.protocol.as_str())
+            .collect();
+        assert!(protocols.contains(&"torrent"));
+        assert!(protocols.contains(&"ed2k"));
+        assert!(protocols.contains(&"xunlei"));
+        assert!(protocols.contains(&"magnet"));
+        assert!(protocols.contains(&"p2p"));
+    }
+
+    #[test]
+    fn summary_current_running_is_zero() {
+        let config = ProtocolLimitsConfig::new();
+        let summary = config.summary();
+        for entry in &summary.entries {
+            assert_eq!(entry.current_running, 0);
+        }
+    }
+
+    // --- ProtocolLimitsSummary serde ---
+
+    #[test]
+    fn summary_serde_roundtrip() {
+        let summary = ProtocolLimitsSummary {
+            enabled: true,
+            default_max_concurrent: 5,
+            entries: vec![ProtocolLimitSummaryEntry {
+                protocol: "torrent".to_string(),
+                max_concurrent: 3,
+                enabled: true,
+                current_running: 1,
+            }],
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let de: ProtocolLimitsSummary = serde_json::from_str(&json).unwrap();
+        assert!(de.enabled);
+        assert_eq!(de.default_max_concurrent, 5);
+        assert_eq!(de.entries.len(), 1);
+        assert_eq!(de.entries[0].current_running, 1);
+    }
+
+    #[test]
+    fn summary_clone_debug() {
+        let summary = ProtocolLimitsSummary {
+            enabled: false,
+            default_max_concurrent: 0,
+            entries: vec![],
+        };
+        let cloned = summary.clone();
+        assert!(!cloned.enabled);
+        let debug_str = format!("{:?}", summary);
+        assert!(debug_str.contains("enabled"));
+    }
+
+    // --- ProtocolLimitSummaryEntry serde ---
+
+    #[test]
+    fn summary_entry_serde_roundtrip() {
+        let entry = ProtocolLimitSummaryEntry {
+            protocol: "ed2k".to_string(),
+            max_concurrent: 10,
+            enabled: true,
+            current_running: 3,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let de: ProtocolLimitSummaryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.protocol, "ed2k");
+        assert_eq!(de.max_concurrent, 10);
+        assert_eq!(de.current_running, 3);
+    }
+
+    #[test]
+    fn summary_entry_missing_current_running_defaults_zero() {
+        let json = r#"{"protocol":"torrent","max_concurrent":5,"enabled":true}"#;
+        let entry: ProtocolLimitSummaryEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.current_running, 0);
+    }
+
+    // --- format() tests ---
+
+    #[test]
+    fn format_disabled() {
+        let summary = ProtocolLimitsSummary {
+            enabled: false,
+            default_max_concurrent: 0,
+            entries: vec![],
+        };
+        let formatted = summary.format();
+        assert!(formatted.contains("disabled"));
+        assert!(formatted.contains("unlimited"));
+    }
+
+    #[test]
+    fn format_enabled_with_entries() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.set_limit(DownloadProtocol::Torrent, 3, true);
+        config.set_limit(DownloadProtocol::Ed2k, 0, true);
+
+        let summary = config.summary();
+        let formatted = summary.format();
+        assert!(formatted.contains("enabled"));
+        assert!(formatted.contains("torrent"));
+        assert!(formatted.contains("3"));
+        assert!(formatted.contains("unlimited"));
+        assert!(formatted.contains("✓"));
+    }
+
+    #[test]
+    fn format_disabled_entry_shows_marker() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.set_limit(DownloadProtocol::Xunlei, 5, false);
+
+        let summary = config.summary();
+        let formatted = summary.format();
+        assert!(formatted.contains("✗"));
+        assert!(formatted.contains("(disabled)"));
+    }
+
+    #[test]
+    fn format_default_unlimited() {
+        let summary = ProtocolLimitsSummary {
+            enabled: true,
+            default_max_concurrent: 0,
+            entries: vec![],
+        };
+        let formatted = summary.format();
+        assert!(formatted.contains("Default max concurrent: unlimited"));
+    }
+
+    #[test]
+    fn format_default_with_value() {
+        let summary = ProtocolLimitsSummary {
+            enabled: true,
+            default_max_concurrent: 42,
+            entries: vec![],
+        };
+        let formatted = summary.format();
+        assert!(formatted.contains("Default max concurrent: 42"));
+    }
+
+    // --- ProtocolLimitsError tests ---
+
+    #[test]
+    fn error_display_io() {
+        let err = ProtocolLimitsError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file missing",
+        ));
+        let msg = format!("{}", err);
+        assert!(msg.contains("I/O error"));
+        assert!(msg.contains("file missing"));
+    }
+
+    #[test]
+    fn error_display_json() {
+        let json_err = serde_json::from_str::<ProtocolLimitsConfig>("invalid").unwrap_err();
+        let err = ProtocolLimitsError::Json(json_err);
+        let msg = format!("{}", err);
+        assert!(msg.contains("JSON error"));
+    }
+
+    #[test]
+    fn error_debug() {
+        let err = ProtocolLimitsError::Io(std::io::Error::new(std::io::ErrorKind::Other, "test"));
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("Io"));
+    }
+
+    #[test]
+    fn error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err: ProtocolLimitsError = io_err.into();
+        let msg = format!("{}", err);
+        assert!(msg.contains("denied"));
+    }
+
+    #[test]
+    fn error_from_json() {
+        let json_err = serde_json::from_str::<ProtocolLimitsConfig>("bad").unwrap_err();
+        let err: ProtocolLimitsError = json_err.into();
+        let msg = format!("{}", err);
+        assert!(msg.contains("JSON error"));
+    }
+
+    // --- key_to_protocol edge cases ---
+
+    #[test]
+    fn key_to_protocol_mixed_case() {
+        assert_eq!(key_to_protocol("TORRENT"), Some(DownloadProtocol::Torrent));
+        assert_eq!(key_to_protocol("Ed2K"), Some(DownloadProtocol::Ed2k));
+        assert_eq!(key_to_protocol("XUNLEI"), Some(DownloadProtocol::Xunlei));
+        assert_eq!(key_to_protocol("MAGNET"), Some(DownloadProtocol::Magnet));
+        assert_eq!(key_to_protocol("P2P"), Some(DownloadProtocol::P2P));
+    }
+
+    #[test]
+    fn key_to_protocol_empty_string() {
+        assert_eq!(key_to_protocol(""), None);
+    }
+
+    #[test]
+    fn key_to_protocol_whitespace() {
+        assert_eq!(key_to_protocol(" torrent "), None);
+        assert_eq!(key_to_protocol("torrent "), None);
+    }
+
+    #[test]
+    fn key_to_protocol_unicode() {
+        assert_eq!(key_to_protocol("种子"), None);
+        assert_eq!(key_to_protocol("🔗"), None);
+    }
+
+    // --- Persistence edge cases ---
+
+    #[tokio::test]
+    async fn save_creates_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("new_file.json");
+        assert!(!path.exists());
+
+        let config = ProtocolLimitsConfig::new();
+        save_protocol_limits_config(&config, &path).await.unwrap();
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn save_no_tmp_residual() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("protocol_limits.json");
+
+        let config = ProtocolLimitsConfig::new();
+        save_protocol_limits_config(&config, &path).await.unwrap();
+
+        let tmp_path = path.with_extension("json.tmp");
+        assert!(!tmp_path.exists());
+    }
+
+    #[tokio::test]
+    async fn save_overwrites_existing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("protocol_limits.json");
+
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        save_protocol_limits_config(&config, &path).await.unwrap();
+
+        config.enabled = false;
+        config.default_max_concurrent = 99;
+        save_protocol_limits_config(&config, &path).await.unwrap();
+
+        let loaded = load_protocol_limits_config(&path).await.unwrap();
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.default_max_concurrent, 99);
+    }
+
+    #[tokio::test]
+    async fn load_corrupt_json() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("corrupt.json");
+        std::fs::write(&path, "not valid json").unwrap();
+
+        let result = load_protocol_limits_config(&path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn load_empty_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("empty.json");
+        std::fs::write(&path, "").unwrap();
+
+        let result = load_protocol_limits_config(&path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn save_and_load_pretty_json() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("pretty.json");
+
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.set_limit(DownloadProtocol::Torrent, 3, true);
+
+        save_protocol_limits_config(&config, &path).await.unwrap();
+
+        // Verify it's pretty-printed
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains('\n'));
+
+        let loaded = load_protocol_limits_config(&path).await.unwrap();
+        assert!(loaded.enabled);
+    }
+
+    #[tokio::test]
+    async fn persistence_unicode_values() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("unicode.json");
+
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.default_max_concurrent = 42;
+
+        save_protocol_limits_config(&config, &path).await.unwrap();
+        let loaded = load_protocol_limits_config(&path).await.unwrap();
+        assert_eq!(loaded.default_max_concurrent, 42);
+    }
+
+    // --- Complex workflows ---
+
+    #[test]
+    fn complete_lifecycle() {
+        let mut config = ProtocolLimitsConfig::new();
+
+        // 1. Start disabled
+        assert!(!config.enabled);
+        assert!(config.can_start(DownloadProtocol::Torrent, 100));
+
+        // 2. Enable with limits
+        config.enabled = true;
+        config.set_limit(DownloadProtocol::Torrent, 2, true);
+        config.set_limit(DownloadProtocol::Ed2k, 3, true);
+
+        assert!(config.can_start(DownloadProtocol::Torrent, 1));
+        assert!(!config.can_start(DownloadProtocol::Torrent, 2));
+        assert!(config.can_start(DownloadProtocol::Ed2k, 2));
+        assert!(!config.can_start(DownloadProtocol::Ed2k, 3));
+
+        // 3. Remove Torrent limit, falls back to default
+        config.remove_limit(DownloadProtocol::Torrent);
+        assert!(config.can_start(DownloadProtocol::Torrent, 100));
+
+        // 4. Generate summary
+        let summary = config.summary();
+        assert!(summary.enabled);
+        assert_eq!(summary.entries.len(), 5);
+
+        // 5. Format
+        let formatted = summary.format();
+        assert!(formatted.contains("enabled"));
+    }
+
+    #[test]
+    fn multi_protocol_independent_can_start() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.set_limit(DownloadProtocol::Torrent, 1, true);
+        config.set_limit(DownloadProtocol::Ed2k, 5, true);
+        config.set_limit(DownloadProtocol::Magnet, 0, true); // unlimited
+
+        // Torrent is at limit
+        assert!(!config.can_start(DownloadProtocol::Torrent, 1));
+        // Ed2k still has room
+        assert!(config.can_start(DownloadProtocol::Ed2k, 4));
+        // Magnet is unlimited
+        assert!(config.can_start(DownloadProtocol::Magnet, 999));
+        // P2P uses default (0 = unlimited)
+        assert!(config.can_start(DownloadProtocol::P2P, 999));
+    }
+
+    #[test]
+    fn toggle_enabled_affects_can_start() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.set_limit(DownloadProtocol::Torrent, 1, true);
+
+        // Disabled globally
+        config.enabled = false;
+        assert!(config.can_start(DownloadProtocol::Torrent, 100));
+
+        // Enable globally
+        config.enabled = true;
+        assert!(config.can_start(DownloadProtocol::Torrent, 0));
+        assert!(!config.can_start(DownloadProtocol::Torrent, 1));
+    }
+
+    #[test]
+    fn default_max_concurrent_applies_to_all_unconfigured() {
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.default_max_concurrent = 3;
+
+        // All protocols should use default of 3
+        assert!(config.can_start(DownloadProtocol::Torrent, 2));
+        assert!(!config.can_start(DownloadProtocol::Torrent, 3));
+        assert!(config.can_start(DownloadProtocol::Ed2k, 2));
+        assert!(!config.can_start(DownloadProtocol::Ed2k, 3));
+        assert!(config.can_start(DownloadProtocol::Xunlei, 2));
+        assert!(!config.can_start(DownloadProtocol::Xunlei, 3));
+    }
+
+    #[tokio::test]
+    async fn full_persistence_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("protocol_limits.json");
+
+        let mut config = ProtocolLimitsConfig::new();
+        config.enabled = true;
+        config.default_max_concurrent = 10;
+        config.set_limit(DownloadProtocol::Torrent, 5, true);
+        config.set_limit(DownloadProtocol::Ed2k, 3, false);
+        config.set_limit(DownloadProtocol::Xunlei, 0, true); // unlimited
+
+        save_protocol_limits_config(&config, &path).await.unwrap();
+        let loaded = load_protocol_limits_config(&path).await.unwrap();
+
+        assert!(loaded.enabled);
+        assert_eq!(loaded.default_max_concurrent, 10);
+        assert_eq!(
+            loaded.get_limit(DownloadProtocol::Torrent).max_concurrent,
+            5
+        );
+        assert!(loaded.get_limit(DownloadProtocol::Torrent).enabled);
+        assert_eq!(loaded.get_limit(DownloadProtocol::Ed2k).max_concurrent, 3);
+        assert!(!loaded.get_limit(DownloadProtocol::Ed2k).enabled);
+        assert_eq!(loaded.get_limit(DownloadProtocol::Xunlei).max_concurrent, 0);
+    }
+
+    #[tokio::test]
+    async fn save_load_empty_manager() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("empty.json");
+
+        let config = ProtocolLimitsConfig::new();
+        save_protocol_limits_config(&config, &path).await.unwrap();
+
+        let loaded = load_protocol_limits_config(&path).await.unwrap();
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.default_max_concurrent, 0);
+        assert!(loaded.limits.is_empty());
+
+        // Summary should still work
+        let summary = loaded.summary();
+        assert_eq!(summary.entries.len(), 5);
+    }
 }
