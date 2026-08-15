@@ -72,6 +72,12 @@ pub struct TaskSnoozeManager {
     snoozed: HashMap<String, SnoozeState>,
 }
 
+impl Default for TaskSnoozeManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TaskSnoozeManager {
     /// Create a new manager with default configuration.
     pub fn new() -> Self {
@@ -467,5 +473,852 @@ mod tests {
         assert_eq!(state.task_id, "task-1");
         assert_eq!(state.reason, Some("reason".to_string()));
         assert!(mgr.get_snooze_state("nonexistent").is_none());
+    }
+
+    // ===== Serialization tests =====
+
+    #[test]
+    fn test_snooze_state_serde_roundtrip() {
+        let state = SnoozeState {
+            task_id: "task-1".to_string(),
+            snoozed_until: Utc::now() + Duration::hours(1),
+            snoozed_at: Utc::now(),
+            reason: Some("testing".to_string()),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let deserialized: SnoozeState = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.task_id, "task-1");
+        assert_eq!(deserialized.reason, Some("testing".to_string()));
+    }
+
+    #[test]
+    fn test_snooze_state_serde_none_reason() {
+        let state = SnoozeState {
+            task_id: "task-2".to_string(),
+            snoozed_until: Utc::now() + Duration::hours(1),
+            snoozed_at: Utc::now(),
+            reason: None,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let deserialized: SnoozeState = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.reason, None);
+    }
+
+    #[test]
+    fn test_snooze_state_serde_unicode() {
+        let state = SnoozeState {
+            task_id: "任务-🔥".to_string(),
+            snoozed_until: Utc::now() + Duration::hours(1),
+            snoozed_at: Utc::now(),
+            reason: Some("休息中 💤".to_string()),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let deserialized: SnoozeState = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.task_id, "任务-🔥");
+        assert_eq!(deserialized.reason, Some("休息中 💤".to_string()));
+    }
+
+    #[test]
+    fn test_snooze_state_serde_extra_fields_ignored() {
+        let json = r#"{
+            "task_id": "task-1",
+            "snoozed_until": "2030-01-01T00:00:00Z",
+            "snoozed_at": "2026-01-01T00:00:00Z",
+            "reason": null,
+            "extra_field": "ignored"
+        }"#;
+        let state: SnoozeState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.task_id, "task-1");
+    }
+
+    #[test]
+    fn test_task_snooze_config_serde_roundtrip() {
+        let config = TaskSnoozeConfig {
+            enabled: false,
+            max_snoozed: 42,
+            max_duration_secs: 86400,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: TaskSnoozeConfig = serde_json::from_str(&json).unwrap();
+        assert!(!deserialized.enabled);
+        assert_eq!(deserialized.max_snoozed, 42);
+        assert_eq!(deserialized.max_duration_secs, 86400);
+    }
+
+    #[test]
+    fn test_task_snooze_config_serde_default_values() {
+        let config = TaskSnoozeConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: TaskSnoozeConfig = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.enabled);
+        assert_eq!(deserialized.max_snoozed, 0);
+        assert_eq!(deserialized.max_duration_secs, 30 * 24 * 3600);
+    }
+
+    #[test]
+    fn test_task_snooze_config_serde_extra_fields_ignored() {
+        let json = r#"{
+            "enabled": true,
+            "max_snoozed": 10,
+            "max_duration_secs": 3600,
+            "unknown_field": 123
+        }"#;
+        let config: TaskSnoozeConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.max_snoozed, 10);
+    }
+
+    #[test]
+    fn test_task_snooze_config_pretty_serde() {
+        let config = TaskSnoozeConfig {
+            enabled: true,
+            max_snoozed: 5,
+            max_duration_secs: 7200,
+        };
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        assert!(json.contains('\n'));
+        let deserialized: TaskSnoozeConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.max_snoozed, 5);
+    }
+
+    #[test]
+    fn test_task_snooze_data_serde_roundtrip() {
+        let data = TaskSnoozeData {
+            config: TaskSnoozeConfig {
+                enabled: true,
+                max_snoozed: 3,
+                max_duration_secs: 3600,
+            },
+            snoozed_tasks: vec![SnoozeState {
+                task_id: "task-1".to_string(),
+                snoozed_until: Utc::now() + Duration::hours(1),
+                snoozed_at: Utc::now(),
+                reason: Some("test".to_string()),
+            }],
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let deserialized: TaskSnoozeData = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.config.max_snoozed, 3);
+        assert_eq!(deserialized.snoozed_tasks.len(), 1);
+    }
+
+    #[test]
+    fn test_task_snooze_data_default() {
+        let data = TaskSnoozeData::default();
+        assert!(data.config.enabled);
+        assert_eq!(data.snoozed_tasks.len(), 0);
+    }
+
+    #[test]
+    fn test_task_snooze_data_empty_snoozed_tasks() {
+        let data = TaskSnoozeData {
+            config: TaskSnoozeConfig::default(),
+            snoozed_tasks: vec![],
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let deserialized: TaskSnoozeData = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.snoozed_tasks.len(), 0);
+    }
+
+    // ===== Error Display tests =====
+
+    #[test]
+    fn test_error_not_snoozed_display() {
+        let err = TaskSnoozeError::NotSnoozed("task-1".to_string());
+        assert_eq!(err.to_string(), "task task-1 is not snoozed");
+    }
+
+    #[test]
+    fn test_error_invalid_time_display() {
+        let err = TaskSnoozeError::InvalidTime;
+        assert_eq!(
+            err.to_string(),
+            "invalid snooze time: must be in the future"
+        );
+    }
+
+    #[test]
+    fn test_error_io_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err = TaskSnoozeError::Io(io_err);
+        assert!(err.to_string().contains("file not found"));
+    }
+
+    #[test]
+    fn test_error_serialize_display() {
+        let json_err = serde_json::from_str::<TaskSnoozeData>("invalid").unwrap_err();
+        let err = TaskSnoozeError::Serialize(json_err);
+        assert!(err.to_string().contains("serialization error"));
+    }
+
+    #[test]
+    fn test_error_debug_trait() {
+        let err1 = TaskSnoozeError::NotSnoozed("task-1".to_string());
+        let err2 = TaskSnoozeError::InvalidTime;
+        let debug1 = format!("{:?}", err1);
+        let debug2 = format!("{:?}", err2);
+        assert!(debug1.contains("NotSnoozed"));
+        assert!(debug2.contains("InvalidTime"));
+    }
+
+    #[test]
+    fn test_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err: TaskSnoozeError = io_err.into();
+        assert!(matches!(err, TaskSnoozeError::Io(_)));
+    }
+
+    #[test]
+    fn test_error_from_serde_json() {
+        let json_err = serde_json::from_str::<TaskSnoozeData>("bad json").unwrap_err();
+        let err: TaskSnoozeError = json_err.into();
+        assert!(matches!(err, TaskSnoozeError::Serialize(_)));
+    }
+
+    // ===== Struct traits =====
+
+    #[test]
+    fn test_snooze_state_clone() {
+        let state = SnoozeState {
+            task_id: "task-1".to_string(),
+            snoozed_until: Utc::now() + Duration::hours(1),
+            snoozed_at: Utc::now(),
+            reason: Some("test".to_string()),
+        };
+        let cloned = state.clone();
+        assert_eq!(cloned.task_id, state.task_id);
+        assert_eq!(cloned.reason, state.reason);
+    }
+
+    #[test]
+    fn test_snooze_state_debug() {
+        let state = SnoozeState {
+            task_id: "task-1".to_string(),
+            snoozed_until: Utc::now() + Duration::hours(1),
+            snoozed_at: Utc::now(),
+            reason: None,
+        };
+        let debug = format!("{:?}", state);
+        assert!(debug.contains("task-1"));
+    }
+
+    #[test]
+    fn test_task_snooze_config_clone() {
+        let config = TaskSnoozeConfig {
+            enabled: false,
+            max_snoozed: 10,
+            max_duration_secs: 7200,
+        };
+        let cloned = config.clone();
+        assert!(!cloned.enabled);
+        assert_eq!(cloned.max_snoozed, 10);
+        assert_eq!(cloned.max_duration_secs, 7200);
+    }
+
+    #[test]
+    fn test_task_snooze_config_debug() {
+        let config = TaskSnoozeConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("enabled"));
+        assert!(debug.contains("max_snoozed"));
+    }
+
+    #[test]
+    fn test_task_snooze_data_clone() {
+        let data = TaskSnoozeData {
+            config: TaskSnoozeConfig::default(),
+            snoozed_tasks: vec![SnoozeState {
+                task_id: "task-1".to_string(),
+                snoozed_until: Utc::now() + Duration::hours(1),
+                snoozed_at: Utc::now(),
+                reason: None,
+            }],
+        };
+        let cloned = data.clone();
+        assert_eq!(cloned.snoozed_tasks.len(), 1);
+    }
+
+    #[test]
+    fn test_task_snooze_data_debug() {
+        let data = TaskSnoozeData::default();
+        let debug = format!("{:?}", data);
+        assert!(debug.contains("config"));
+        assert!(debug.contains("snoozed_tasks"));
+    }
+
+    #[test]
+    fn test_task_snooze_manager_clone() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        mgr.snooze_task("task-1".to_string(), until, None).unwrap();
+        let cloned = mgr.clone();
+        assert!(cloned.is_snoozed("task-1"));
+        assert_eq!(cloned.snoozed_count(), 1);
+    }
+
+    #[test]
+    fn test_task_snooze_manager_clone_independence() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        mgr.snooze_task("task-1".to_string(), until, None).unwrap();
+        let mut cloned = mgr.clone();
+        cloned.remove_task("task-1");
+        assert!(mgr.is_snoozed("task-1"));
+        assert!(!cloned.is_snoozed("task-1"));
+    }
+
+    #[test]
+    fn test_task_snooze_manager_debug() {
+        let mgr = TaskSnoozeManager::new();
+        let debug = format!("{:?}", mgr);
+        assert!(debug.contains("config"));
+        assert!(debug.contains("snoozed"));
+    }
+
+    // ===== Manager boundary tests =====
+
+    #[test]
+    fn test_manager_default_trait() {
+        let mgr = TaskSnoozeManager::default();
+        assert_eq!(mgr.snoozed_count(), 0);
+        assert!(mgr.config().enabled);
+        assert_eq!(mgr.config().max_snoozed, 0);
+        assert_eq!(mgr.config().max_duration_secs, 30 * 24 * 3600);
+    }
+
+    #[test]
+    fn test_manager_new_equals_default_config() {
+        let mgr = TaskSnoozeManager::new();
+        let default_config = TaskSnoozeConfig::default();
+        assert_eq!(mgr.config().enabled, default_config.enabled);
+        assert_eq!(mgr.config().max_snoozed, default_config.max_snoozed);
+        assert_eq!(
+            mgr.config().max_duration_secs,
+            default_config.max_duration_secs
+        );
+    }
+
+    #[test]
+    fn test_manager_default_equals_new() {
+        let new_mgr = TaskSnoozeManager::new();
+        let default_mgr = TaskSnoozeManager::default();
+        assert_eq!(new_mgr.config().enabled, default_mgr.config().enabled);
+        assert_eq!(
+            new_mgr.config().max_snoozed,
+            default_mgr.config().max_snoozed
+        );
+        assert_eq!(new_mgr.snoozed_count(), default_mgr.snoozed_count());
+    }
+
+    #[test]
+    fn test_from_data_empty() {
+        let data = TaskSnoozeData::default();
+        let mgr = TaskSnoozeManager::from_data(data);
+        assert_eq!(mgr.snoozed_count(), 0);
+        assert!(mgr.config().enabled);
+    }
+
+    #[test]
+    fn test_from_data_multiple_tasks() {
+        let data = TaskSnoozeData {
+            config: TaskSnoozeConfig::default(),
+            snoozed_tasks: vec![
+                SnoozeState {
+                    task_id: "task-1".to_string(),
+                    snoozed_until: Utc::now() + Duration::hours(1),
+                    snoozed_at: Utc::now(),
+                    reason: None,
+                },
+                SnoozeState {
+                    task_id: "task-2".to_string(),
+                    snoozed_until: Utc::now() + Duration::hours(2),
+                    snoozed_at: Utc::now(),
+                    reason: None,
+                },
+            ],
+        };
+        let mgr = TaskSnoozeManager::from_data(data);
+        assert_eq!(mgr.snoozed_count(), 2);
+        assert!(mgr.is_snoozed("task-1"));
+        assert!(mgr.is_snoozed("task-2"));
+    }
+
+    #[test]
+    fn test_set_config_updates() {
+        let mut mgr = TaskSnoozeManager::new();
+        let new_config = TaskSnoozeConfig {
+            enabled: false,
+            max_snoozed: 100,
+            max_duration_secs: 60,
+        };
+        mgr.set_config(new_config);
+        assert!(!mgr.config().enabled);
+        assert_eq!(mgr.config().max_snoozed, 100);
+        assert_eq!(mgr.config().max_duration_secs, 60);
+    }
+
+    #[test]
+    fn test_config_returns_reference() {
+        let mgr = TaskSnoozeManager::new();
+        let config_ref = mgr.config();
+        assert!(config_ref.enabled);
+    }
+
+    #[test]
+    fn test_snooze_task_empty_id() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        let result = mgr.snooze_task("".to_string(), until, None);
+        assert!(result.is_ok());
+        assert!(mgr.is_snoozed(""));
+    }
+
+    #[test]
+    fn test_snooze_task_unicode_id() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        let result = mgr.snooze_task("任务-中文".to_string(), until, None);
+        assert!(result.is_ok());
+        assert!(mgr.is_snoozed("任务-中文"));
+    }
+
+    #[test]
+    fn test_snooze_task_emoji_id() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        let result = mgr.snooze_task("task-🔥".to_string(), until, None);
+        assert!(result.is_ok());
+        assert!(mgr.is_snoozed("task-🔥"));
+    }
+
+    #[test]
+    fn test_snooze_task_reason_none() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        let state = mgr.snooze_task("task-1".to_string(), until, None).unwrap();
+        assert_eq!(state.reason, None);
+    }
+
+    #[test]
+    fn test_snooze_task_long_reason() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        let long_reason = "a".repeat(10000);
+        let state = mgr
+            .snooze_task("task-1".to_string(), until, Some(long_reason.clone()))
+            .unwrap();
+        assert_eq!(state.reason, Some(long_reason));
+    }
+
+    #[test]
+    fn test_snooze_max_duration_zero_unlimited() {
+        let mut mgr = TaskSnoozeManager::new();
+        mgr.config.max_duration_secs = 0;
+        let until = Utc::now() + Duration::days(365);
+        let result = mgr.snooze_task("task-1".to_string(), until, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_snooze_max_duration_exact_boundary() {
+        let mut mgr = TaskSnoozeManager::new();
+        mgr.config.max_duration_secs = 3600;
+        // Just under the limit
+        let until = Utc::now() + Duration::seconds(3599);
+        let result = mgr.snooze_task("task-1".to_string(), until, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_snooze_max_duration_just_over_boundary() {
+        let mut mgr = TaskSnoozeManager::new();
+        mgr.config.max_duration_secs = 3600;
+        // Use a large enough margin to avoid timing issues
+        let until = Utc::now() + Duration::seconds(7200);
+        let result = mgr.snooze_task("task-1".to_string(), until, None);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TaskSnoozeError::InvalidTime));
+    }
+
+    #[test]
+    fn test_snooze_max_snoozed_zero_unlimited() {
+        let mut mgr = TaskSnoozeManager::new();
+        mgr.config.max_snoozed = 0;
+        let until = Utc::now() + Duration::hours(1);
+        for i in 0..100 {
+            let result = mgr.snooze_task(format!("task-{}", i), until, None);
+            assert!(result.is_ok());
+        }
+        assert_eq!(mgr.snoozed_count(), 100);
+    }
+
+    #[test]
+    fn test_snooze_max_snoozed_one_boundary() {
+        let mut mgr = TaskSnoozeManager::new();
+        mgr.config.max_snoozed = 1;
+        let until = Utc::now() + Duration::hours(1);
+        assert!(mgr.snooze_task("task-1".to_string(), until, None).is_ok());
+        assert!(mgr.snooze_task("task-2".to_string(), until, None).is_err());
+    }
+
+    #[test]
+    fn test_unsnooze_empty_id() {
+        let mut mgr = TaskSnoozeManager::new();
+        let result = mgr.unsnooze_task("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unsnooze_idempotent() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        mgr.snooze_task("task-1".to_string(), until, None).unwrap();
+        assert!(mgr.unsnooze_task("task-1").is_ok());
+        assert!(mgr.unsnooze_task("task-1").is_err());
+    }
+
+    #[test]
+    fn test_is_snoozed_empty_string() {
+        let mgr = TaskSnoozeManager::new();
+        assert!(!mgr.is_snoozed(""));
+    }
+
+    #[test]
+    fn test_list_snoozed_empty() {
+        let mgr = TaskSnoozeManager::new();
+        let list = mgr.list_snoozed();
+        assert_eq!(list.len(), 0);
+    }
+
+    #[test]
+    fn test_list_snoozed_single() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        mgr.snooze_task("task-1".to_string(), until, None).unwrap();
+        let list = mgr.list_snoozed();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].task_id, "task-1");
+    }
+
+    #[test]
+    fn test_snoozed_count_multiple() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        mgr.snooze_task("task-1".to_string(), until, None).unwrap();
+        mgr.snooze_task("task-2".to_string(), until, None).unwrap();
+        mgr.snooze_task("task-3".to_string(), until, None).unwrap();
+        assert_eq!(mgr.snoozed_count(), 3);
+    }
+
+    #[test]
+    fn test_collect_expired_empty() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        mgr.snooze_task("task-1".to_string(), until, None).unwrap();
+        let expired = mgr.collect_expired();
+        assert_eq!(expired.len(), 0);
+    }
+
+    #[test]
+    fn test_clear_expired_empty() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        mgr.snooze_task("task-1".to_string(), until, None).unwrap();
+        let cleared = mgr.clear_expired();
+        assert_eq!(cleared.len(), 0);
+        assert!(mgr.is_snoozed("task-1"));
+    }
+
+    #[test]
+    fn test_remove_task_nonexistent() {
+        let mut mgr = TaskSnoozeManager::new();
+        mgr.remove_task("nonexistent"); // Should not panic
+        assert_eq!(mgr.snoozed_count(), 0);
+    }
+
+    #[test]
+    fn test_remove_task_idempotent() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        mgr.snooze_task("task-1".to_string(), until, None).unwrap();
+        mgr.remove_task("task-1");
+        mgr.remove_task("task-1"); // Should not panic
+        assert_eq!(mgr.snoozed_count(), 0);
+    }
+
+    #[test]
+    fn test_to_data_empty_manager() {
+        let mgr = TaskSnoozeManager::new();
+        let data = mgr.to_data();
+        assert!(data.config.enabled);
+        assert_eq!(data.snoozed_tasks.len(), 0);
+    }
+
+    #[test]
+    fn test_to_data_preserves_config() {
+        let mut mgr = TaskSnoozeManager::new();
+        mgr.config.max_snoozed = 42;
+        mgr.config.max_duration_secs = 999;
+        let data = mgr.to_data();
+        assert_eq!(data.config.max_snoozed, 42);
+        assert_eq!(data.config.max_duration_secs, 999);
+    }
+
+    // ===== Persistence tests =====
+
+    #[tokio::test]
+    async fn test_save_creates_file() {
+        let dir = tempdir().unwrap();
+        let data = TaskSnoozeData::default();
+        save_task_snooze_data(&data, dir.path()).await.unwrap();
+        let path = dir.path().join("task_snooze.json");
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_save_overwrites_existing() {
+        let dir = tempdir().unwrap();
+        let data1 = TaskSnoozeData {
+            config: TaskSnoozeConfig {
+                enabled: true,
+                max_snoozed: 1,
+                max_duration_secs: 3600,
+            },
+            snoozed_tasks: vec![],
+        };
+        let data2 = TaskSnoozeData {
+            config: TaskSnoozeConfig {
+                enabled: false,
+                max_snoozed: 2,
+                max_duration_secs: 7200,
+            },
+            snoozed_tasks: vec![],
+        };
+        save_task_snooze_data(&data1, dir.path()).await.unwrap();
+        save_task_snooze_data(&data2, dir.path()).await.unwrap();
+        let loaded = load_task_snooze_data(dir.path()).await.unwrap();
+        assert!(!loaded.config.enabled);
+        assert_eq!(loaded.config.max_snoozed, 2);
+    }
+
+    #[tokio::test]
+    async fn test_save_atomic_no_tmp_left() {
+        let dir = tempdir().unwrap();
+        let data = TaskSnoozeData::default();
+        save_task_snooze_data(&data, dir.path()).await.unwrap();
+        let tmp_path = dir.path().join("task_snooze.json.tmp");
+        assert!(!tmp_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_load_corrupt_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("task_snooze.json");
+        tokio::fs::write(&path, "not valid json").await.unwrap();
+        let result = load_task_snooze_data(dir.path()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_load_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("task_snooze.json");
+        tokio::fs::write(&path, "").await.unwrap();
+        let result = load_task_snooze_data(dir.path()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_save_load_unicode() {
+        let dir = tempdir().unwrap();
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        mgr.snooze_task(
+            "任务-中文🔥".to_string(),
+            until,
+            Some("休息中 💤".to_string()),
+        )
+        .unwrap();
+        let data = mgr.to_data();
+        save_task_snooze_data(&data, dir.path()).await.unwrap();
+        let loaded = load_task_snooze_data(dir.path()).await.unwrap();
+        assert_eq!(loaded.snoozed_tasks.len(), 1);
+        assert_eq!(loaded.snoozed_tasks[0].task_id, "任务-中文🔥");
+        assert_eq!(
+            loaded.snoozed_tasks[0].reason,
+            Some("休息中 💤".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_load_empty_data() {
+        let dir = tempdir().unwrap();
+        let data = TaskSnoozeData::default();
+        save_task_snooze_data(&data, dir.path()).await.unwrap();
+        let loaded = load_task_snooze_data(dir.path()).await.unwrap();
+        assert_eq!(loaded.snoozed_tasks.len(), 0);
+        assert!(loaded.config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_save_pretty_json() {
+        let dir = tempdir().unwrap();
+        let data = TaskSnoozeData::default();
+        save_task_snooze_data(&data, dir.path()).await.unwrap();
+        let path = dir.path().join("task_snooze.json");
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(content.contains('\n'));
+    }
+
+    // ===== Complex workflow tests =====
+
+    #[test]
+    fn test_full_lifecycle() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+
+        // Snooze
+        mgr.snooze_task("task-1".to_string(), until, Some("break".to_string()))
+            .unwrap();
+        assert!(mgr.is_snoozed("task-1"));
+        assert_eq!(mgr.snoozed_count(), 1);
+
+        // Unsnooze
+        let state = mgr.unsnooze_task("task-1").unwrap();
+        assert_eq!(state.task_id, "task-1");
+        assert!(!mgr.is_snoozed("task-1"));
+        assert_eq!(mgr.snoozed_count(), 0);
+
+        // Snooze again
+        let until2 = Utc::now() + Duration::hours(2);
+        mgr.snooze_task("task-1".to_string(), until2, None).unwrap();
+        assert!(mgr.is_snoozed("task-1"));
+        assert_eq!(mgr.snoozed_count(), 1);
+    }
+
+    #[test]
+    fn test_multiple_tasks_independent() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+        mgr.snooze_task("task-1".to_string(), until, None).unwrap();
+        mgr.snooze_task("task-2".to_string(), until, None).unwrap();
+        mgr.snooze_task("task-3".to_string(), until, None).unwrap();
+
+        mgr.unsnooze_task("task-2").unwrap();
+        assert!(mgr.is_snoozed("task-1"));
+        assert!(!mgr.is_snoozed("task-2"));
+        assert!(mgr.is_snoozed("task-3"));
+        assert_eq!(mgr.snoozed_count(), 2);
+    }
+
+    #[test]
+    fn test_snooze_expire_and_clear() {
+        let mut mgr = TaskSnoozeManager::new();
+        let soon = Utc::now() + Duration::seconds(1);
+        let future = Utc::now() + Duration::hours(1);
+        mgr.snooze_task("expired".to_string(), soon, None).unwrap();
+        mgr.snooze_task("active".to_string(), future, None).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let expired = mgr.collect_expired();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].task_id, "expired");
+
+        let cleared = mgr.clear_expired();
+        assert_eq!(cleared.len(), 1);
+        assert!(!mgr.is_snoozed("expired"));
+        assert!(mgr.is_snoozed("active"));
+    }
+
+    #[test]
+    fn test_config_change_affects_behavior() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until = Utc::now() + Duration::hours(1);
+
+        // Enable and snooze
+        mgr.snooze_task("task-1".to_string(), until, None).unwrap();
+        assert!(mgr.is_snoozed("task-1"));
+
+        // Disable config
+        mgr.config.enabled = false;
+        let result = mgr.snooze_task("task-2".to_string(), until, None);
+        assert!(result.is_err());
+
+        // Re-enable
+        mgr.config.enabled = true;
+        let result = mgr.snooze_task("task-2".to_string(), until, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_snooze_overwrites_existing() {
+        let mut mgr = TaskSnoozeManager::new();
+        let until1 = Utc::now() + Duration::hours(1);
+        let until2 = Utc::now() + Duration::hours(5);
+
+        mgr.snooze_task("task-1".to_string(), until1, Some("first".to_string()))
+            .unwrap();
+        let state1 = mgr.get_snooze_state("task-1").unwrap();
+        assert_eq!(state1.reason, Some("first".to_string()));
+
+        mgr.snooze_task("task-1".to_string(), until2, Some("second".to_string()))
+            .unwrap();
+        let state2 = mgr.get_snooze_state("task-1").unwrap();
+        assert_eq!(state2.reason, Some("second".to_string()));
+        assert_eq!(mgr.snoozed_count(), 1);
+    }
+
+    #[test]
+    fn test_snooze_state_timestamps() {
+        let mut mgr = TaskSnoozeManager::new();
+        let before = Utc::now();
+        let until = Utc::now() + Duration::hours(2);
+        let state = mgr.snooze_task("task-1".to_string(), until, None).unwrap();
+        let after = Utc::now();
+
+        assert!(state.snoozed_at >= before);
+        assert!(state.snoozed_at <= after);
+        assert!(state.snoozed_until > after);
+    }
+
+    #[test]
+    fn test_max_snoozed_error_message() {
+        let mut mgr = TaskSnoozeManager::new();
+        mgr.config.max_snoozed = 2;
+        let until = Utc::now() + Duration::hours(1);
+        mgr.snooze_task("task-1".to_string(), until, None).unwrap();
+        mgr.snooze_task("task-2".to_string(), until, None).unwrap();
+        let err = mgr
+            .snooze_task("task-3".to_string(), until, None)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("maximum snoozed tasks"));
+        assert!(msg.contains("2"));
+    }
+
+    #[test]
+    fn test_from_data_preserves_all_fields() {
+        let until = Utc::now() + Duration::hours(3);
+        let now = Utc::now();
+        let data = TaskSnoozeData {
+            config: TaskSnoozeConfig {
+                enabled: false,
+                max_snoozed: 99,
+                max_duration_secs: 12345,
+            },
+            snoozed_tasks: vec![SnoozeState {
+                task_id: "preserved".to_string(),
+                snoozed_until: until,
+                snoozed_at: now,
+                reason: Some("kept".to_string()),
+            }],
+        };
+        let mgr = TaskSnoozeManager::from_data(data);
+        assert!(!mgr.config().enabled);
+        assert_eq!(mgr.config().max_snoozed, 99);
+        assert_eq!(mgr.config().max_duration_secs, 12345);
+        let state = mgr.get_snooze_state("preserved").unwrap();
+        assert_eq!(state.reason, Some("kept".to_string()));
     }
 }

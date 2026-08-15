@@ -239,4 +239,373 @@ mod tests {
         // Should be "0s" or "1s" depending on timing
         assert!(formatted == "0s" || formatted == "1s");
     }
+
+    // ===== Phase 231: Comprehensive test coverage =====
+
+    // ── format_duration boundary tests ──
+
+    #[test]
+    fn test_format_duration_one_second() {
+        assert_eq!(format_duration(1), "1s");
+    }
+
+    #[test]
+    fn test_format_duration_59_seconds() {
+        assert_eq!(format_duration(59), "59s");
+    }
+
+    #[test]
+    fn test_format_duration_exact_minute() {
+        assert_eq!(format_duration(60), "1m");
+    }
+
+    #[test]
+    fn test_format_duration_61_seconds() {
+        assert_eq!(format_duration(61), "1m 1s");
+    }
+
+    #[test]
+    fn test_format_duration_59_minutes_59_seconds() {
+        assert_eq!(format_duration(3599), "59m 59s");
+    }
+
+    #[test]
+    fn test_format_duration_exact_2_hours() {
+        assert_eq!(format_duration(7200), "2h");
+    }
+
+    #[test]
+    fn test_format_duration_23h_59m_59s() {
+        assert_eq!(format_duration(86399), "23h 59m 59s");
+    }
+
+    #[test]
+    fn test_format_duration_exact_2_days() {
+        assert_eq!(format_duration(172800), "2d");
+    }
+
+    #[test]
+    fn test_format_duration_large_value() {
+        // 365 days + 5 hours + 30 minutes + 15 seconds
+        let secs = 365 * 86400 + 5 * 3600 + 30 * 60 + 15;
+        assert_eq!(format_duration(secs), "365d 5h 30m 15s");
+    }
+
+    #[test]
+    fn test_format_duration_very_large_value() {
+        // 1000 days
+        assert_eq!(format_duration(86_400_000), "1000d");
+    }
+
+    #[test]
+    fn test_format_duration_u64_max() {
+        // Should not panic
+        let result = format_duration(u64::MAX);
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_format_duration_zero_minutes_no_zero_seconds() {
+        // 1h exactly: should be "1h", not "1h 0m 0s"
+        assert_eq!(format_duration(3600), "1h");
+    }
+
+    #[test]
+    fn test_format_duration_zero_hours_no_zero_minutes() {
+        // 1d exactly: should be "1d", not "1d 0h 0m 0s"
+        assert_eq!(format_duration(86400), "1d");
+    }
+
+    #[test]
+    fn test_format_duration_days_and_seconds_no_hours_minutes() {
+        // 1 day + 30 seconds = "1d 30s"
+        assert_eq!(format_duration(86430), "1d 30s");
+    }
+
+    // ── UptimeSummary serde tests ──
+
+    #[test]
+    fn test_uptime_summary_serde_roundtrip() {
+        let summary = UptimeSummary {
+            uptime_seconds: 12345,
+            uptime_formatted: "3h 25m 45s".to_string(),
+            started_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: UptimeSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.uptime_seconds, 12345);
+        assert_eq!(deserialized.uptime_formatted, "3h 25m 45s");
+    }
+
+    #[test]
+    fn test_uptime_summary_serde_zero_values() {
+        let summary = UptimeSummary {
+            uptime_seconds: 0,
+            uptime_formatted: "0s".to_string(),
+            started_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: UptimeSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.uptime_seconds, 0);
+        assert_eq!(deserialized.uptime_formatted, "0s");
+    }
+
+    #[test]
+    fn test_uptime_summary_serde_large_uptime() {
+        let summary = UptimeSummary {
+            uptime_seconds: u64::MAX,
+            uptime_formatted: "very long".to_string(),
+            started_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: UptimeSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.uptime_seconds, u64::MAX);
+    }
+
+    #[test]
+    fn test_uptime_summary_serde_extra_fields_ignored() {
+        let json = r#"{"uptime_seconds":10,"uptime_formatted":"10s","started_at":"2026-01-01T00:00:00Z","extra_field":"ignored"}"#;
+        let deserialized: UptimeSummary = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.uptime_seconds, 10);
+        assert_eq!(deserialized.uptime_formatted, "10s");
+    }
+
+    #[test]
+    fn test_uptime_summary_serde_pretty() {
+        let summary = UptimeSummary {
+            uptime_seconds: 3661,
+            uptime_formatted: "1h 1m 1s".to_string(),
+            started_at: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+        let pretty = serde_json::to_string_pretty(&summary).unwrap();
+        assert!(pretty.contains("\"uptime_seconds\""));
+        assert!(pretty.contains("\"uptime_formatted\""));
+        let deserialized: UptimeSummary = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(deserialized.uptime_seconds, 3661);
+    }
+
+    // ── Clone trait tests ──
+
+    #[test]
+    fn test_clone_tracker() {
+        let tracker = SystemUptimeTracker::new();
+        let cloned = tracker.clone();
+        // Both should report similar uptime
+        assert!(cloned.uptime_seconds() < 2);
+    }
+
+    #[test]
+    fn test_clone_independence() {
+        let tracker1 = SystemUptimeTracker::new();
+        let tracker2 = tracker1.clone();
+        // Both started at the same time
+        assert_eq!(
+            tracker1.started_at().timestamp_millis(),
+            tracker2.started_at().timestamp_millis()
+        );
+    }
+
+    #[test]
+    fn test_clone_summary() {
+        let summary = UptimeSummary {
+            uptime_seconds: 100,
+            uptime_formatted: "1m 40s".to_string(),
+            started_at: chrono::Utc::now(),
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.uptime_seconds, 100);
+        assert_eq!(cloned.uptime_formatted, "1m 40s");
+    }
+
+    // ── Debug trait tests ──
+
+    #[test]
+    fn test_debug_tracker() {
+        let tracker = SystemUptimeTracker::new();
+        let debug_str = format!("{:?}", tracker);
+        assert!(debug_str.contains("SystemUptimeTracker"));
+    }
+
+    #[test]
+    fn test_debug_summary() {
+        let summary = UptimeSummary {
+            uptime_seconds: 42,
+            uptime_formatted: "42s".to_string(),
+            started_at: chrono::Utc::now(),
+        };
+        let debug_str = format!("{:?}", summary);
+        assert!(debug_str.contains("UptimeSummary"));
+        assert!(debug_str.contains("42"));
+    }
+
+    // ── from_timestamp edge cases ──
+
+    #[test]
+    fn test_from_timestamp_now() {
+        let now = chrono::Utc::now();
+        let tracker = SystemUptimeTracker::from_timestamp(now);
+        assert!(tracker.uptime_seconds() < 2);
+    }
+
+    #[test]
+    fn test_from_timestamp_very_old() {
+        // Start time 30 days ago
+        let thirty_days_ago = chrono::Utc::now() - chrono::Duration::days(30);
+        let tracker = SystemUptimeTracker::from_timestamp(thirty_days_ago);
+        let uptime = tracker.uptime_seconds();
+        // Should be approximately 30 * 86400 = 2_592_000 seconds
+        assert!(uptime >= 2_590_000 && uptime <= 2_600_000);
+    }
+
+    #[test]
+    fn test_from_timestamp_preserves_original_timestamp() {
+        let specific_time = chrono::DateTime::parse_from_rfc3339("2025-06-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let tracker = SystemUptimeTracker::from_timestamp(specific_time);
+        assert_eq!(tracker.started_at(), specific_time);
+    }
+
+    #[test]
+    fn test_from_timestamp_uptime_grows() {
+        let ten_secs_ago = chrono::Utc::now() - chrono::Duration::seconds(10);
+        let tracker = SystemUptimeTracker::from_timestamp(ten_secs_ago);
+        let uptime1 = tracker.uptime_seconds();
+        thread::sleep(Duration::from_millis(100));
+        let uptime2 = tracker.uptime_seconds();
+        assert!(uptime2 >= uptime1);
+    }
+
+    // ── Uptime accessor consistency ──
+
+    #[test]
+    fn test_uptime_millis_greater_than_seconds() {
+        let tracker = SystemUptimeTracker::new();
+        thread::sleep(Duration::from_millis(50));
+        let secs = tracker.uptime_seconds();
+        let millis = tracker.uptime_millis();
+        // millis should be >= secs * 1000 (approximately)
+        assert!(millis >= (secs as u128) * 1000);
+    }
+
+    #[test]
+    fn test_started_at_consistent_across_calls() {
+        let tracker = SystemUptimeTracker::new();
+        let ts1 = tracker.started_at();
+        let ts2 = tracker.started_at();
+        assert_eq!(ts1, ts2);
+    }
+
+    #[test]
+    fn test_format_uptime_matches_summary() {
+        let tracker = SystemUptimeTracker::new();
+        let formatted = tracker.format_uptime();
+        let summary = tracker.summary();
+        assert_eq!(formatted, summary.uptime_formatted);
+    }
+
+    // ── Summary field correctness ──
+
+    #[test]
+    fn test_summary_started_at_matches_tracker() {
+        let tracker = SystemUptimeTracker::new();
+        let summary = tracker.summary();
+        assert_eq!(summary.started_at, tracker.started_at());
+    }
+
+    #[test]
+    fn test_summary_uptime_seconds_matches_tracker() {
+        let tracker = SystemUptimeTracker::new();
+        let summary = tracker.summary();
+        // Allow 1 second margin for timing
+        let diff = (summary.uptime_seconds as i64 - tracker.uptime_seconds() as i64).unsigned_abs();
+        assert!(diff <= 1);
+    }
+
+    #[test]
+    fn test_summary_from_timestamp_tracker() {
+        let one_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
+        let tracker = SystemUptimeTracker::from_timestamp(one_hour_ago);
+        let summary = tracker.summary();
+        assert_eq!(summary.started_at, one_hour_ago);
+        assert!(summary.uptime_seconds >= 3590 && summary.uptime_seconds <= 3610);
+    }
+
+    // ── Default == new ──
+
+    #[test]
+    fn test_default_equals_new() {
+        let default_tracker = SystemUptimeTracker::default();
+        let new_tracker = SystemUptimeTracker::new();
+        // Both should have very similar uptime
+        assert!(default_tracker.uptime_seconds() < 2);
+        assert!(new_tracker.uptime_seconds() < 2);
+    }
+
+    // ── Multiple trackers independent ──
+
+    #[test]
+    fn test_multiple_trackers_independent() {
+        let tracker1 = SystemUptimeTracker::new();
+        thread::sleep(Duration::from_millis(50));
+        let tracker2 = SystemUptimeTracker::new();
+        // tracker1 should have been running longer
+        assert!(tracker1.uptime_millis() >= tracker2.uptime_millis());
+    }
+
+    #[test]
+    fn test_multiple_trackers_different_timestamps() {
+        let t1 =
+            SystemUptimeTracker::from_timestamp(chrono::Utc::now() - chrono::Duration::hours(2));
+        let t2 =
+            SystemUptimeTracker::from_timestamp(chrono::Utc::now() - chrono::Duration::hours(1));
+        // t1 should have more uptime
+        assert!(t1.uptime_seconds() > t2.uptime_seconds());
+    }
+
+    // ── format_duration component isolation ──
+
+    #[test]
+    fn test_format_duration_only_minutes() {
+        assert_eq!(format_duration(300), "5m");
+    }
+
+    #[test]
+    fn test_format_duration_days_hours() {
+        // 1 day + 1 hour = 90000 seconds
+        assert_eq!(format_duration(90000), "1d 1h");
+    }
+
+    #[test]
+    fn test_format_duration_days_minutes() {
+        // 1 day + 1 minute = 86460 seconds
+        assert_eq!(format_duration(86460), "1d 1m");
+    }
+
+    #[test]
+    fn test_format_duration_hours_seconds() {
+        // 1 hour + 1 second = 3601
+        assert_eq!(format_duration(3601), "1h 1s");
+    }
+
+    // ── UptimeSummary JSON structure ──
+
+    #[test]
+    fn test_uptime_summary_json_contains_all_fields() {
+        let summary = UptimeSummary {
+            uptime_seconds: 100,
+            uptime_formatted: "1m 40s".to_string(),
+            started_at: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(json.contains("\"uptime_seconds\""));
+        assert!(json.contains("\"uptime_formatted\""));
+        assert!(json.contains("\"started_at\""));
+        assert!(json.contains("100"));
+        assert!(json.contains("1m 40s"));
+    }
 }
