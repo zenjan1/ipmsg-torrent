@@ -2284,4 +2284,1013 @@ mod tests {
         mgr.set_config(config).await;
         assert!(dir.join("tag_management_config.json").exists());
     }
+
+    // ===== Phase 235: Comprehensive Test Coverage =====
+
+    // --- TagInfo additional serde tests ---
+    #[test]
+    fn test_p235_taginfo_serde_pretty() {
+        let info = TagInfo {
+            name: "movies".to_string(),
+            usage_count: 10,
+            last_used_at: Some(1000),
+            created_at: 500,
+            label: Some("🎬".to_string()),
+        };
+        let json = serde_json::to_string_pretty(&info).unwrap();
+        assert!(json.contains('\n'));
+        let deser: TagInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.name, "movies");
+        assert_eq!(deser.usage_count, 10);
+    }
+
+    #[test]
+    fn test_p235_taginfo_serde_missing_optional_fields() {
+        let json = r#"{"name":"test","usage_count":5,"created_at":100}"#;
+        let deser: TagInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(deser.name, "test");
+        assert_eq!(deser.usage_count, 5);
+        assert_eq!(deser.last_used_at, None);
+        assert_eq!(deser.label, None);
+    }
+
+    #[test]
+    fn test_p235_taginfo_zero_usage_count() {
+        let info = TagInfo {
+            name: "zero".to_string(),
+            usage_count: 0,
+            last_used_at: None,
+            created_at: 0,
+            label: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let deser: TagInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.usage_count, 0);
+        assert_eq!(deser.created_at, 0);
+    }
+
+    #[test]
+    fn test_p235_taginfo_max_values() {
+        let info = TagInfo {
+            name: "max".to_string(),
+            usage_count: u32::MAX,
+            last_used_at: Some(u64::MAX),
+            created_at: u64::MAX,
+            label: Some("🎬".to_string()),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let deser: TagInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.usage_count, u32::MAX);
+        assert_eq!(deser.last_used_at, Some(u64::MAX));
+    }
+
+    #[test]
+    fn test_p235_taginfo_unicode_name() {
+        let info = TagInfo {
+            name: "日本語テスト".to_string(),
+            usage_count: 1,
+            last_used_at: Some(100),
+            created_at: 50,
+            label: Some("🏷️".to_string()),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let deser: TagInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.name, "日本語テスト");
+    }
+
+    #[test]
+    fn test_p235_taginfo_emoji_name() {
+        let info = TagInfo {
+            name: "🎬🎵📚".to_string(),
+            usage_count: 3,
+            last_used_at: Some(100),
+            created_at: 50,
+            label: Some("✨".to_string()),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let deser: TagInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.name, "🎬🎵📚");
+    }
+
+    // --- TagAliasMap additional tests ---
+    #[test]
+    fn test_p235_tag_alias_map_serde_pretty() {
+        let mut map = TagAliasMap::default();
+        map.aliases.insert("film".to_string(), "movies".to_string());
+        let json = serde_json::to_string_pretty(&map).unwrap();
+        assert!(json.contains('\n'));
+        let deser: TagAliasMap = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.aliases.len(), 1);
+    }
+
+    #[test]
+    fn test_p235_tag_alias_map_clone_debug() {
+        let mut map = TagAliasMap::default();
+        map.aliases.insert("a".to_string(), "b".to_string());
+        let cloned = map.clone();
+        assert_eq!(cloned.aliases.len(), 1);
+        let debug = format!("{:?}", map);
+        assert!(debug.contains("TagAliasMap"));
+    }
+
+    #[test]
+    fn test_p235_tag_alias_map_multiple_aliases() {
+        let mut map = TagAliasMap::default();
+        for i in 0..100 {
+            map.aliases
+                .insert(format!("alias{}", i), format!("tag{}", i));
+        }
+        let json = serde_json::to_string(&map).unwrap();
+        let deser: TagAliasMap = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.aliases.len(), 100);
+    }
+
+    // --- TagManagementConfig additional tests ---
+    #[test]
+    fn test_p235_config_serde_missing_fields() {
+        // TagManagementConfig requires all fields (no #[serde(default)] on struct)
+        // Test that partial JSON fails to deserialize
+        let json = r#"{"auto_cleanup_orphans":true}"#;
+        let result = serde_json::from_str::<TagManagementConfig>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_p235_config_zero_values() {
+        let config = TagManagementConfig {
+            auto_cleanup_orphans: false,
+            orphan_threshold_secs: 0,
+            enable_aliases: false,
+            max_tags: 0,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deser: TagManagementConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.orphan_threshold_secs, 0);
+        assert_eq!(deser.max_tags, 0);
+    }
+
+    #[test]
+    fn test_p235_config_max_values() {
+        let config = TagManagementConfig {
+            auto_cleanup_orphans: true,
+            orphan_threshold_secs: u64::MAX,
+            enable_aliases: true,
+            max_tags: usize::MAX,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deser: TagManagementConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.orphan_threshold_secs, u64::MAX);
+        assert_eq!(deser.max_tags, usize::MAX);
+    }
+
+    // --- TagManagementSummary additional tests ---
+    #[test]
+    fn test_p235_summary_serde_pretty() {
+        let summary = TagManagementSummary {
+            total_tags: 5,
+            orphan_tags: vec!["old".to_string()],
+            alias_count: 2,
+            top_tags: vec![("movies".to_string(), 10)],
+            unused_tags: vec!["new".to_string()],
+            config: TagManagementConfig::default(),
+        };
+        let json = serde_json::to_string_pretty(&summary).unwrap();
+        assert!(json.contains('\n'));
+        let deser: TagManagementSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.total_tags, 5);
+    }
+
+    #[test]
+    fn test_p235_summary_extra_fields_ignored() {
+        let json = r#"{"total_tags":10,"orphan_tags":[],"alias_count":0,"top_tags":[],"unused_tags":[],"config":{"auto_cleanup_orphans":false,"orphan_threshold_secs":604800,"enable_aliases":true,"max_tags":0},"future_field":true}"#;
+        let deser: TagManagementSummary = serde_json::from_str(json).unwrap();
+        assert_eq!(deser.total_tags, 10);
+    }
+
+    #[test]
+    fn test_p235_summary_unicode_content() {
+        let summary = TagManagementSummary {
+            total_tags: 3,
+            orphan_tags: vec!["孤立标签".to_string()],
+            alias_count: 1,
+            top_tags: vec![("电影".to_string(), 100), ("音乐".to_string(), 50)],
+            unused_tags: vec!["🆕".to_string()],
+            config: TagManagementConfig::default(),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deser: TagManagementSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.top_tags[0].0, "电影");
+        assert_eq!(deser.orphan_tags[0], "孤立标签");
+    }
+
+    // --- TagAction additional tests ---
+    #[test]
+    fn test_p235_tag_action_all_variants_serde() {
+        let actions = vec![
+            TagAction::Renamed {
+                old: "a".to_string(),
+                new: "b".to_string(),
+                affected_tasks: 5,
+            },
+            TagAction::Merged {
+                source: "x".to_string(),
+                target: "y".to_string(),
+                affected_tasks: 10,
+            },
+            TagAction::OrphansCleaned {
+                removed: vec!["old1".to_string(), "old2".to_string()],
+            },
+            TagAction::AliasAdded {
+                alias: "film".to_string(),
+                canonical: "movies".to_string(),
+            },
+            TagAction::AliasRemoved {
+                alias: "film".to_string(),
+            },
+        ];
+
+        for action in actions {
+            let json = serde_json::to_string(&action).unwrap();
+            let _deser: TagAction = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_p235_tag_action_unicode_content() {
+        let action = TagAction::Renamed {
+            old: "电影".to_string(),
+            new: "影视".to_string(),
+            affected_tasks: 3,
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        let deser: TagAction = serde_json::from_str(&json).unwrap();
+        match deser {
+            TagAction::Renamed { old, new, .. } => {
+                assert_eq!(old, "电影");
+                assert_eq!(new, "影视");
+            }
+            _ => panic!("Expected Renamed"),
+        }
+    }
+
+    #[test]
+    fn test_p235_tag_action_zero_affected_tasks() {
+        let action = TagAction::Renamed {
+            old: "a".to_string(),
+            new: "b".to_string(),
+            affected_tasks: 0,
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        let deser: TagAction = serde_json::from_str(&json).unwrap();
+        match deser {
+            TagAction::Renamed { affected_tasks, .. } => {
+                assert_eq!(affected_tasks, 0);
+            }
+            _ => panic!("Expected Renamed"),
+        }
+    }
+
+    #[test]
+    fn test_p235_tag_action_empty_removed_list() {
+        let action = TagAction::OrphansCleaned { removed: vec![] };
+        let json = serde_json::to_string(&action).unwrap();
+        let deser: TagAction = serde_json::from_str(&json).unwrap();
+        match deser {
+            TagAction::OrphansCleaned { removed } => {
+                assert!(removed.is_empty());
+            }
+            _ => panic!("Expected OrphansCleaned"),
+        }
+    }
+
+    // --- TagManager additional async tests ---
+
+    #[tokio::test]
+    async fn test_p235_resolve_alias_disabled_returns_input() {
+        let dir = test_dir("alias_disabled_resolve");
+        let mgr = TagManager::new(&dir);
+        let mut config = TagManagementConfig::default();
+        config.enable_aliases = false;
+        mgr.set_config(config).await;
+
+        mgr.add_alias("film", "movies").await;
+        let resolved = mgr.resolve_alias("film").await;
+        assert_eq!(resolved, "film");
+    }
+
+    #[tokio::test]
+    async fn test_p235_register_usage_creates_tag_with_correct_timestamps() {
+        let dir = test_dir("reg_timestamps");
+        let mgr = TagManager::new(&dir);
+        mgr.register_usage("movies", 12345).await;
+
+        let info = mgr.get_tag_info("movies").await.unwrap();
+        assert_eq!(info.created_at, 12345);
+        assert_eq!(info.last_used_at, Some(12345));
+    }
+
+    #[tokio::test]
+    async fn test_p235_register_usage_updates_last_used_only() {
+        let dir = test_dir("reg_update_last");
+        let mgr = TagManager::new(&dir);
+        mgr.register_usage("movies", 1000).await;
+        mgr.register_usage("movies", 2000).await;
+
+        let info = mgr.get_tag_info("movies").await.unwrap();
+        assert_eq!(info.created_at, 1000);
+        assert_eq!(info.last_used_at, Some(2000));
+        assert_eq!(info.usage_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_p235_unregister_nonexistent_tag_no_panic() {
+        let dir = test_dir("unreg_nonexistent");
+        let mgr = TagManager::new(&dir);
+        mgr.unregister_usage("nonexistent").await;
+        assert!(mgr.get_tag_info("nonexistent").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_p235_register_usages_with_unicode() {
+        let dir = test_dir("batch_unicode");
+        let mgr = TagManager::new(&dir);
+        let tags = vec!["电影".to_string(), "音乐".to_string(), "📚".to_string()];
+        mgr.register_usages(&tags, 1000).await;
+
+        assert!(mgr.get_tag_info("电影").await.is_some());
+        assert!(mgr.get_tag_info("音乐").await.is_some());
+        assert!(mgr.get_tag_info("📚").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_p235_sync_from_tasks_with_unicode() {
+        let dir = test_dir("sync_unicode");
+        let mgr = TagManager::new(&dir);
+        let task_tags = vec![
+            vec!["电影".to_string(), "动作".to_string()],
+            vec!["电影".to_string()],
+        ];
+        mgr.sync_from_tasks(&task_tags, 2000).await;
+
+        let movies = mgr.get_tag_info("电影").await.unwrap();
+        assert_eq!(movies.usage_count, 2);
+        let action = mgr.get_tag_info("动作").await.unwrap();
+        assert_eq!(action.usage_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_p235_sync_from_tasks_preserves_labels() {
+        let dir = test_dir("sync_preserve_labels");
+        let mgr = TagManager::new(&dir);
+        mgr.register_usage("movies", 1000).await;
+        mgr.set_tag_label("movies", Some("🎬".to_string())).await;
+
+        let task_tags = vec![vec!["movies".to_string()]];
+        mgr.sync_from_tasks(&task_tags, 2000).await;
+
+        let info = mgr.get_tag_info("movies").await.unwrap();
+        assert_eq!(info.label, Some("🎬".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_p235_rename_to_same_name() {
+        let dir = test_dir("rename_same");
+        let mgr = TagManager::new(&dir);
+        mgr.register_usage("movies", 1000).await;
+
+        let result = mgr.rename_tag("movies", "movies").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_p235_rename_nonexistent_to_existing() {
+        let dir = test_dir("rename_noexist_to_exist");
+        let mgr = TagManager::new(&dir);
+        mgr.register_usage("movies", 1000).await;
+
+        let result = mgr.rename_tag("nonexistent", "movies").await;
+        assert!(result.is_none());
+        assert!(mgr.get_tag_info("movies").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_p235_merge_updates_target_created_at() {
+        let dir = test_dir("merge_created_at");
+        let mgr = TagManager::new(&dir);
+        mgr.register_usage("source", 5000).await;
+        {
+            let mut tags = mgr.tags.write().await;
+            tags.insert(
+                "target".to_string(),
+                TagInfo {
+                    name: "target".to_string(),
+                    usage_count: 1,
+                    last_used_at: Some(6000),
+                    created_at: 6000,
+                    label: None,
+                },
+            );
+        }
+        mgr.merge_tags("source", "target").await;
+        let info = mgr.get_tag_info("target").await.unwrap();
+        assert_eq!(info.created_at, 6000);
+    }
+
+    #[tokio::test]
+    async fn test_p235_merge_both_have_no_last_used() {
+        let dir = test_dir("merge_no_last_used");
+        let mgr = TagManager::new(&dir);
+        {
+            let mut tags = mgr.tags.write().await;
+            tags.insert(
+                "source".to_string(),
+                TagInfo {
+                    name: "source".to_string(),
+                    usage_count: 1,
+                    last_used_at: None,
+                    created_at: 1000,
+                    label: None,
+                },
+            );
+            tags.insert(
+                "target".to_string(),
+                TagInfo {
+                    name: "target".to_string(),
+                    usage_count: 1,
+                    last_used_at: None,
+                    created_at: 2000,
+                    label: None,
+                },
+            );
+        }
+        mgr.merge_tags("source", "target").await;
+        let info = mgr.get_tag_info("target").await.unwrap();
+        assert_eq!(info.last_used_at, None);
+        assert_eq!(info.usage_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_p235_add_alias_unicode() {
+        let dir = test_dir("alias_unicode");
+        let mgr = TagManager::new(&dir);
+        assert!(mgr.add_alias("电影", "movies").await);
+        let resolved = mgr.resolve_alias("电影").await;
+        assert_eq!(resolved, "movies");
+    }
+
+    #[tokio::test]
+    async fn test_p235_add_alias_emoji() {
+        let dir = test_dir("alias_emoji");
+        let mgr = TagManager::new(&dir);
+        assert!(mgr.add_alias("🎬", "movies").await);
+        let resolved = mgr.resolve_alias("🎬").await;
+        assert_eq!(resolved, "movies");
+    }
+
+    #[tokio::test]
+    async fn test_p235_remove_alias_nonexistent() {
+        let dir = test_dir("rm_alias_nonexistent");
+        let mgr = TagManager::new(&dir);
+        assert!(!mgr.remove_alias("nonexistent").await);
+    }
+
+    #[tokio::test]
+    async fn test_p235_get_aliases_multiple() {
+        let dir = test_dir("aliases_multiple");
+        let mgr = TagManager::new(&dir);
+        mgr.add_alias("film", "movies").await;
+        mgr.add_alias("song", "music").await;
+        mgr.add_alias("book", "reading").await;
+
+        let aliases = mgr.get_aliases().await;
+        assert_eq!(aliases.len(), 3);
+        assert_eq!(aliases.get("film").unwrap(), "movies");
+        assert_eq!(aliases.get("song").unwrap(), "music");
+        assert_eq!(aliases.get("book").unwrap(), "reading");
+    }
+
+    #[tokio::test]
+    async fn test_p235_set_tag_label_via_alias() {
+        let dir = test_dir("label_via_alias");
+        let mgr = TagManager::new(&dir);
+        mgr.register_usage("movies", 1000).await;
+        mgr.add_alias("film", "movies").await;
+
+        assert!(mgr.set_tag_label("film", Some("🎬".to_string())).await);
+        let info = mgr.get_tag_info("movies").await.unwrap();
+        assert_eq!(info.label, Some("🎬".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_p235_set_tag_label_nonexistent_via_alias() {
+        let dir = test_dir("label_noexist_alias");
+        let mgr = TagManager::new(&dir);
+        mgr.add_alias("film", "movies").await;
+        assert!(!mgr.set_tag_label("film", Some("🎬".to_string())).await);
+    }
+
+    #[tokio::test]
+    async fn test_p235_get_orphan_tags_empty() {
+        let dir = test_dir("orphans_empty");
+        let mgr = TagManager::new(&dir);
+        let orphans = mgr.get_orphan_tags().await;
+        assert!(orphans.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_p235_get_orphan_tags_multiple() {
+        let dir = test_dir("orphans_multiple");
+        let mgr = TagManager::new(&dir);
+        {
+            let mut tags = mgr.tags.write().await;
+            for i in 0..10 {
+                tags.insert(
+                    format!("orphan{}", i),
+                    TagInfo {
+                        name: format!("orphan{}", i),
+                        usage_count: 0,
+                        last_used_at: None,
+                        created_at: 1000,
+                        label: None,
+                    },
+                );
+            }
+        }
+        let orphans = mgr.get_orphan_tags().await;
+        assert_eq!(orphans.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_p235_cleanup_orphans_empty() {
+        let dir = test_dir("cleanup_empty");
+        let mgr = TagManager::new(&dir);
+        let removed = mgr.cleanup_orphans().await;
+        assert!(removed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_p235_cleanup_orphans_preserves_used() {
+        let dir = test_dir("cleanup_preserves");
+        let mgr = TagManager::new(&dir);
+        mgr.register_usage("used", 1000).await;
+        mgr.register_usage("unused", 1000).await;
+        mgr.unregister_usage("unused").await;
+
+        let removed = mgr.cleanup_orphans().await;
+        assert_eq!(removed.len(), 1);
+        assert!(removed.contains(&"unused".to_string()));
+        assert!(mgr.get_tag_info("used").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_p235_delete_tag_via_alias() {
+        let dir = test_dir("delete_via_alias");
+        let mgr = TagManager::new(&dir);
+        mgr.register_usage("movies", 1000).await;
+        mgr.add_alias("film", "movies").await;
+
+        assert!(mgr.delete_tag("film").await);
+        assert!(mgr.get_tag_info("movies").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_p235_delete_tag_nonexistent() {
+        let dir = test_dir("delete_nonexistent2");
+        let mgr = TagManager::new(&dir);
+        assert!(!mgr.delete_tag("nonexistent").await);
+    }
+
+    #[tokio::test]
+    async fn test_p235_get_all_tags_empty() {
+        let dir = test_dir("all_tags_empty");
+        let mgr = TagManager::new(&dir);
+        let all = mgr.get_all_tags().await;
+        assert!(all.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_p235_get_all_tags_many() {
+        let dir = test_dir("all_tags_many");
+        let mgr = TagManager::new(&dir);
+        for i in 0..50 {
+            mgr.register_usage(&format!("tag{}", i), 1000).await;
+        }
+        let all = mgr.get_all_tags().await;
+        assert_eq!(all.len(), 50);
+    }
+
+    #[tokio::test]
+    async fn test_p235_get_unused_tags_empty() {
+        let dir = test_dir("unused_empty");
+        let mgr = TagManager::new(&dir);
+        let unused = mgr.get_unused_tags().await;
+        assert!(unused.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_p235_get_summary_empty() {
+        let dir = test_dir("summary_empty");
+        let mgr = TagManager::new(&dir);
+        let summary = mgr.get_summary().await;
+        assert_eq!(summary.total_tags, 0);
+        assert!(summary.orphan_tags.is_empty());
+        assert!(summary.top_tags.is_empty());
+        assert!(summary.unused_tags.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_p235_get_summary_top_tags_limit() {
+        let dir = test_dir("summary_limit");
+        let mgr = TagManager::new(&dir);
+        for i in 0..20 {
+            for _ in 0..(20 - i) {
+                mgr.register_usage(&format!("tag{}", i), 1000).await;
+            }
+        }
+        let summary = mgr.get_summary().await;
+        assert_eq!(summary.top_tags.len(), 10);
+        assert_eq!(summary.top_tags[0].0, "tag0");
+        assert_eq!(summary.top_tags[0].1, 20);
+    }
+
+    #[test]
+    fn test_p235_format_summary_empty() {
+        let summary = TagManagementSummary {
+            total_tags: 0,
+            orphan_tags: vec![],
+            alias_count: 0,
+            top_tags: vec![],
+            unused_tags: vec![],
+            config: TagManagementConfig::default(),
+        };
+        let formatted = TagManager::format_summary(&summary);
+        assert!(formatted.contains("Total tags: 0"));
+        assert!(formatted.contains("Orphan tags: 0"));
+    }
+
+    #[test]
+    fn test_p235_format_summary_with_all_sections() {
+        let summary = TagManagementSummary {
+            total_tags: 100,
+            orphan_tags: (0..25).map(|i| format!("orphan{}", i)).collect(),
+            alias_count: 50,
+            top_tags: vec![("movies".to_string(), 1000), ("music".to_string(), 500)],
+            unused_tags: (0..15).map(|i| format!("unused{}", i)).collect(),
+            config: TagManagementConfig {
+                auto_cleanup_orphans: true,
+                ..Default::default()
+            },
+        };
+        let formatted = TagManager::format_summary(&summary);
+        assert!(formatted.contains("Total tags: 100"));
+        assert!(formatted.contains("Orphan tags: 25"));
+        assert!(formatted.contains("Alias mappings: 50"));
+        assert!(formatted.contains("enabled"));
+        assert!(formatted.contains("movies (1000 tasks)"));
+        assert!(formatted.contains("... and 5 more"));
+        assert!(formatted.contains("Unused tags"));
+    }
+
+    // --- Persistence tests ---
+
+    #[tokio::test]
+    async fn test_p235_restore_missing_files() {
+        let dir = test_dir("restore_missing");
+        let mgr = TagManager::new(&dir);
+        mgr.restore().await;
+        assert!(mgr.get_all_tags().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_p235_restore_corrupt_config_json() {
+        let dir = test_dir("restore_corrupt_config");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("tag_management_config.json"), "not valid json").unwrap();
+
+        let mgr = TagManager::new(&dir);
+        mgr.restore().await;
+        let config = mgr.get_config().await;
+        assert!(!config.auto_cleanup_orphans);
+    }
+
+    #[tokio::test]
+    async fn test_p235_restore_corrupt_data_json() {
+        let dir = test_dir("restore_corrupt_data");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("tag_management.json"), "{invalid json}").unwrap();
+
+        let mgr = TagManager::new(&dir);
+        mgr.restore().await;
+        assert!(mgr.get_all_tags().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_p235_restore_empty_config_file() {
+        let dir = test_dir("restore_empty_config");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("tag_management_config.json"), "").unwrap();
+
+        let mgr = TagManager::new(&dir);
+        mgr.restore().await;
+        let config = mgr.get_config().await;
+        assert!(!config.auto_cleanup_orphans);
+    }
+
+    #[tokio::test]
+    async fn test_p235_restore_empty_data_file() {
+        let dir = test_dir("restore_empty_data");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("tag_management.json"), "").unwrap();
+
+        let mgr = TagManager::new(&dir);
+        mgr.restore().await;
+        assert!(mgr.get_all_tags().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_p235_restore_partial_data() {
+        let dir = test_dir("restore_partial");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("tag_management.json"),
+            r#"{"tags":{"movies":{"name":"movies","usage_count":5,"created_at":1000}}}"#,
+        )
+        .unwrap();
+
+        let mgr = TagManager::new(&dir);
+        mgr.restore().await;
+        let info = mgr.get_tag_info("movies").await.unwrap();
+        assert_eq!(info.usage_count, 5);
+        assert!(mgr.get_aliases().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_p235_persistence_unicode_roundtrip() {
+        let dir = test_dir("persist_unicode");
+        let mgr = TagManager::new(&dir);
+        mgr.register_usage("电影", 1000).await;
+        mgr.register_usage("音乐", 1001).await;
+        mgr.add_alias("影视", "电影").await;
+        mgr.set_tag_label("电影", Some("🎬".to_string())).await;
+
+        let mgr2 = TagManager::new(&dir);
+        mgr2.restore().await;
+
+        let movies = mgr2.get_tag_info("电影").await.unwrap();
+        assert_eq!(movies.usage_count, 1);
+        assert_eq!(movies.label, Some("🎬".to_string()));
+
+        let resolved = mgr2.resolve_alias("影视").await;
+        assert_eq!(resolved, "电影");
+    }
+
+    #[tokio::test]
+    async fn test_p235_persistence_emoji_roundtrip() {
+        let dir = test_dir("persist_emoji");
+        let mgr = TagManager::new(&dir);
+        mgr.register_usage("🎬", 1000).await;
+        mgr.add_alias("🎥", "🎬").await;
+
+        let mgr2 = TagManager::new(&dir);
+        mgr2.restore().await;
+
+        assert!(mgr2.get_tag_info("🎬").await.is_some());
+        let resolved = mgr2.resolve_alias("🎥").await;
+        assert_eq!(resolved, "🎬");
+    }
+
+    #[tokio::test]
+    async fn test_p235_save_overwrites_existing() {
+        let dir = test_dir("save_overwrite");
+        let mgr = TagManager::new(&dir);
+        mgr.register_usage("movies", 1000).await;
+        mgr.register_usage("movies", 1001).await;
+        mgr.register_usage("movies", 1002).await;
+
+        let mgr2 = TagManager::new(&dir);
+        mgr2.restore().await;
+        let info = mgr2.get_tag_info("movies").await.unwrap();
+        assert_eq!(info.usage_count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_p235_config_save_overwrites_existing() {
+        let dir = test_dir("config_overwrite");
+        let mgr = TagManager::new(&dir);
+
+        let mut config1 = TagManagementConfig::default();
+        config1.max_tags = 10;
+        mgr.set_config(config1).await;
+
+        let mut config2 = TagManagementConfig::default();
+        config2.max_tags = 100;
+        mgr.set_config(config2).await;
+
+        let mgr2 = TagManager::new(&dir);
+        mgr2.restore().await;
+        let loaded = mgr2.get_config().await;
+        assert_eq!(loaded.max_tags, 100);
+    }
+
+    // --- Complex workflow tests ---
+
+    #[tokio::test]
+    async fn test_p235_full_lifecycle() {
+        let dir = test_dir("lifecycle");
+        let mgr = TagManager::new(&dir);
+
+        mgr.register_usage("movies", 1000).await;
+        mgr.register_usage("movies", 1001).await;
+        mgr.register_usage("music", 1002).await;
+
+        mgr.add_alias("film", "movies").await;
+        mgr.add_alias("song", "music").await;
+
+        mgr.set_tag_label("movies", Some("🎬".to_string())).await;
+        mgr.set_tag_label("music", Some("🎵".to_string())).await;
+
+        let summary = mgr.get_summary().await;
+        assert_eq!(summary.total_tags, 2);
+        assert_eq!(summary.alias_count, 2);
+
+        let mgr2 = TagManager::new(&dir);
+        mgr2.restore().await;
+
+        let movies = mgr2.get_tag_info("movies").await.unwrap();
+        assert_eq!(movies.usage_count, 2);
+        assert_eq!(movies.label, Some("🎬".to_string()));
+
+        let resolved = mgr2.resolve_alias("film").await;
+        assert_eq!(resolved, "movies");
+
+        mgr2.merge_tags("music", "movies").await;
+        let movies_after = mgr2.get_tag_info("movies").await.unwrap();
+        assert_eq!(movies_after.usage_count, 3);
+
+        mgr2.rename_tag("movies", "media").await;
+        assert!(mgr2.get_tag_info("movies").await.is_none());
+        assert!(mgr2.get_tag_info("media").await.is_some());
+
+        mgr2.delete_tag("media").await;
+        assert!(mgr2.get_tag_info("media").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_p235_multi_tag_independent_operations() {
+        let dir = test_dir("multi_independent2");
+        let mgr = TagManager::new(&dir);
+
+        for i in 0..10 {
+            mgr.register_usage(&format!("tag{}", i), 1000).await;
+        }
+
+        mgr.delete_tag("tag0").await;
+        mgr.delete_tag("tag5").await;
+
+        for i in 1..5 {
+            assert!(mgr.get_tag_info(&format!("tag{}", i)).await.is_some());
+        }
+        for i in 6..10 {
+            assert!(mgr.get_tag_info(&format!("tag{}", i)).await.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_p235_register_unregister_alternating() {
+        let dir = test_dir("alternating2");
+        let mgr = TagManager::new(&dir);
+
+        for _ in 0..100 {
+            mgr.register_usage("toggle", 1000).await;
+        }
+        for _ in 0..50 {
+            mgr.unregister_usage("toggle").await;
+        }
+
+        let info = mgr.get_tag_info("toggle").await.unwrap();
+        assert_eq!(info.usage_count, 50);
+    }
+
+    #[tokio::test]
+    async fn test_p235_alias_chain_behavior() {
+        let dir = test_dir("alias_chain");
+        let mgr = TagManager::new(&dir);
+
+        mgr.add_alias("a", "b").await;
+        mgr.add_alias("b", "c").await;
+
+        let resolved = mgr.resolve_alias("a").await;
+        assert_eq!(resolved, "b");
+
+        let resolved2 = mgr.resolve_alias("b").await;
+        assert_eq!(resolved2, "c");
+
+        mgr.register_usage("a", 1000).await;
+        let b_info = mgr.get_tag_info("b").await.unwrap();
+        assert_eq!(b_info.usage_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_p235_merge_then_register_via_alias() {
+        let dir = test_dir("merge_register_alias");
+        let mgr = TagManager::new(&dir);
+
+        mgr.register_usage("movie", 1000).await;
+        mgr.register_usage("movies", 1001).await;
+
+        mgr.merge_tags("movie", "movies").await;
+
+        mgr.register_usage("movie", 1002).await;
+
+        let movies = mgr.get_tag_info("movies").await.unwrap();
+        assert_eq!(movies.usage_count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_p235_cleanup_orphans_then_add_alias() {
+        let dir = test_dir("cleanup_then_alias");
+        let mgr = TagManager::new(&dir);
+
+        mgr.register_usage("movies", 1000).await;
+        mgr.register_usage("old", 1001).await;
+        mgr.unregister_usage("old").await;
+
+        mgr.cleanup_orphans().await;
+
+        mgr.add_alias("old", "movies").await;
+
+        let resolved = mgr.resolve_alias("old").await;
+        assert_eq!(resolved, "movies");
+    }
+
+    #[tokio::test]
+    async fn test_p235_delete_then_recreate() {
+        let dir = test_dir("delete_recreate");
+        let mgr = TagManager::new(&dir);
+
+        mgr.register_usage("movies", 1000).await;
+        mgr.set_tag_label("movies", Some("🎬".to_string())).await;
+
+        mgr.delete_tag("movies").await;
+        assert!(mgr.get_tag_info("movies").await.is_none());
+
+        mgr.register_usage("movies", 2000).await;
+        let info = mgr.get_tag_info("movies").await.unwrap();
+        assert_eq!(info.usage_count, 1);
+        assert_eq!(info.created_at, 2000);
+        assert_eq!(info.label, None);
+    }
+
+    #[tokio::test]
+    async fn test_p235_config_change_affects_alias_resolution() {
+        let dir = test_dir("config_affects_alias");
+        let mgr = TagManager::new(&dir);
+
+        mgr.add_alias("film", "movies").await;
+        let resolved1 = mgr.resolve_alias("film").await;
+        assert_eq!(resolved1, "movies");
+
+        let mut config = TagManagementConfig::default();
+        config.enable_aliases = false;
+        mgr.set_config(config).await;
+
+        let resolved2 = mgr.resolve_alias("film").await;
+        assert_eq!(resolved2, "film");
+
+        let mut config2 = TagManagementConfig::default();
+        config2.enable_aliases = true;
+        mgr.set_config(config2).await;
+
+        let resolved3 = mgr.resolve_alias("film").await;
+        assert_eq!(resolved3, "movies");
+    }
+
+    #[tokio::test]
+    async fn test_p235_many_tags_performance() {
+        let dir = test_dir("many_tags");
+        let mgr = TagManager::new(&dir);
+
+        for i in 0..1000 {
+            mgr.register_usage(&format!("tag{}", i), 1000).await;
+        }
+
+        let all = mgr.get_all_tags().await;
+        assert_eq!(all.len(), 1000);
+
+        let summary = mgr.get_summary().await;
+        assert_eq!(summary.total_tags, 1000);
+    }
+
+    #[tokio::test]
+    async fn test_p235_many_aliases_performance() {
+        let dir = test_dir("many_aliases");
+        let mgr = TagManager::new(&dir);
+
+        for i in 0..1000 {
+            mgr.add_alias(&format!("alias{}", i), "target").await;
+        }
+
+        let aliases = mgr.get_aliases().await;
+        assert_eq!(aliases.len(), 1000);
+    }
 }
