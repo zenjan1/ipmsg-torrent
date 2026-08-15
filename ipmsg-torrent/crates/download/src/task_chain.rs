@@ -575,4 +575,651 @@ mod tests {
             Some("Test description".to_string())
         );
     }
+
+    // ===== TaskChain new() defaults =====
+
+    #[test]
+    fn test_new_chain_defaults() {
+        let chain = TaskChain::new("c1".into(), "n".into());
+        assert!(chain.task_ids.is_empty());
+        assert!(chain.enabled);
+        assert!(chain.description.is_none());
+        assert!(!chain.auto_remove_completed);
+    }
+
+    // ===== TaskChain::is_empty / len =====
+
+    #[test]
+    fn test_is_empty_and_len() {
+        let mut chain = TaskChain::new("c1".into(), "n".into());
+        assert!(chain.is_empty());
+        assert_eq!(chain.len(), 0);
+        chain.add_task("t1".into()).unwrap();
+        assert!(!chain.is_empty());
+        assert_eq!(chain.len(), 1);
+        chain.add_task("t2".into()).unwrap();
+        assert_eq!(chain.len(), 2);
+    }
+
+    // ===== pop from empty =====
+
+    #[test]
+    fn test_pop_empty_chain() {
+        let mut chain = TaskChain::new("c1".into(), "n".into());
+        assert!(chain.pop_completed_task().is_none());
+    }
+
+    // ===== TaskChain serde =====
+
+    #[test]
+    fn test_chain_serde_roundtrip() {
+        let mut chain = TaskChain::new("c1".into(), "MyChain".into());
+        chain.add_task("t1".into()).unwrap();
+        chain.add_task("t2".into()).unwrap();
+        chain.description = Some("desc".into());
+        chain.auto_remove_completed = true;
+
+        let json = serde_json::to_string(&chain).unwrap();
+        let back: TaskChain = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.chain_id, "c1");
+        assert_eq!(back.name, "MyChain");
+        assert_eq!(back.task_ids, vec!["t1", "t2"]);
+        assert!(back.auto_remove_completed);
+        assert_eq!(back.description, Some("desc".into()));
+    }
+
+    #[test]
+    fn test_chain_serde_extra_fields_ignored() {
+        let json = r#"{"chain_id":"c1","name":"n","task_ids":[],"enabled":true,"created_at":"2026-01-01T00:00:00Z","auto_remove_completed":false,"extra_field":42}"#;
+        let chain: TaskChain = serde_json::from_str(json).unwrap();
+        assert_eq!(chain.chain_id, "c1");
+    }
+
+    #[test]
+    fn test_chain_serde_pretty() {
+        let chain = TaskChain::new("c1".into(), "n".into());
+        let pretty = serde_json::to_string_pretty(&chain).unwrap();
+        let back: TaskChain = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(back.chain_id, chain.chain_id);
+    }
+
+    // ===== TaskChain Clone/Debug =====
+
+    #[test]
+    fn test_chain_clone_debug() {
+        let mut chain = TaskChain::new("c1".into(), "n".into());
+        chain.add_task("t1".into()).unwrap();
+        let cloned = chain.clone();
+        assert_eq!(cloned.chain_id, chain.chain_id);
+        assert_eq!(cloned.task_ids, chain.task_ids);
+        // Debug works
+        let _ = format!("{:?}", chain);
+    }
+
+    // ===== TaskChainError Display =====
+
+    #[test]
+    fn test_error_display_all_variants() {
+        let e1 = TaskChainError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"));
+        assert!(e1.to_string().contains("IO error"));
+
+        let e2 = TaskChainError::Json(serde_json::from_str::<String>("invalid").unwrap_err());
+        assert!(e2.to_string().contains("JSON"));
+
+        let e3 = TaskChainError::ChainNotFound("abc".into());
+        assert!(e3.to_string().contains("abc"));
+
+        let e4 = TaskChainError::TaskNotInChain("xyz".into());
+        assert!(e4.to_string().contains("xyz"));
+
+        let e5 = TaskChainError::ChainFull { max: 10 };
+        assert!(e5.to_string().contains("10"));
+
+        let e6 = TaskChainError::CircularDependency;
+        assert!(e6.to_string().contains("Circular"));
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let e = TaskChainError::ChainNotFound("x".into());
+        let _ = format!("{:?}", e);
+    }
+
+    // ===== TaskChainState serde =====
+
+    #[test]
+    fn test_state_serde_roundtrip() {
+        let mut state = TaskChainState::default();
+        let mut chain = TaskChain::new("c1".into(), "n".into());
+        chain.add_task("t1".into()).unwrap();
+        state.chains.insert("c1".into(), chain);
+        state.task_to_chain.insert("t1".into(), "c1".into());
+
+        let json = serde_json::to_string(&state).unwrap();
+        let back: TaskChainState = serde_json::from_str(&json).unwrap();
+        assert!(back.chains.contains_key("c1"));
+        assert_eq!(back.task_to_chain.get("t1"), Some(&"c1".into()));
+    }
+
+    #[test]
+    fn test_state_default() {
+        let state = TaskChainState::default();
+        assert!(state.chains.is_empty());
+        assert!(state.task_to_chain.is_empty());
+    }
+
+    // ===== TaskChainSummary / ChainInfo serde =====
+
+    #[test]
+    fn test_summary_serde_roundtrip() {
+        let summary = TaskChainSummary {
+            total_chains: 2,
+            enabled_chains: 1,
+            total_tasks: 5,
+            chains: vec![ChainInfo {
+                chain_id: "c1".into(),
+                name: "n".into(),
+                task_count: 3,
+                enabled: true,
+                next_task_id: Some("t1".into()),
+            }],
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let back: TaskChainSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.total_chains, 2);
+        assert_eq!(back.enabled_chains, 1);
+        assert_eq!(back.total_tasks, 5);
+        assert_eq!(back.chains.len(), 1);
+    }
+
+    #[test]
+    fn test_chain_info_serde() {
+        let info = ChainInfo {
+            chain_id: "c1".into(),
+            name: "n".into(),
+            task_count: 0,
+            enabled: false,
+            next_task_id: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: ChainInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.chain_id, "c1");
+        assert!(back.next_task_id.is_none());
+    }
+
+    #[test]
+    fn test_summary_clone_debug() {
+        let summary = TaskChainSummary {
+            total_chains: 0,
+            enabled_chains: 0,
+            total_tasks: 0,
+            chains: vec![],
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_chains, 0);
+        let _ = format!("{:?}", summary);
+    }
+
+    // ===== Manager: delete nonexistent =====
+
+    #[test]
+    fn test_delete_nonexistent_chain() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        let result = mgr.delete_chain("nope");
+        assert!(result.is_err());
+    }
+
+    // ===== Manager: add/remove task to nonexistent chain =====
+
+    #[test]
+    fn test_add_task_to_nonexistent_chain() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        let result = mgr.add_task_to_chain("nope", "t1".into());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_remove_task_from_nonexistent_chain() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        let result = mgr.remove_task_from_chain("nope", "t1");
+        assert!(result.is_err());
+    }
+
+    // ===== Manager: set enabled / auto_remove on nonexistent =====
+
+    #[test]
+    fn test_set_enabled_nonexistent() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        assert!(mgr.set_chain_enabled("nope", true).is_err());
+    }
+
+    #[test]
+    fn test_set_auto_remove_nonexistent() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        assert!(mgr.set_auto_remove_completed("nope", true).is_err());
+    }
+
+    // ===== Manager: list/get chains =====
+
+    #[test]
+    fn test_list_chains_empty() {
+        let mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        assert!(mgr.list_chains().is_empty());
+    }
+
+    #[test]
+    fn test_list_chains_multiple() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+        mgr.create_chain("c2".into(), "C2".into()).unwrap();
+        assert_eq!(mgr.list_chains().len(), 2);
+    }
+
+    #[test]
+    fn test_get_chain_nonexistent() {
+        let mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        assert!(mgr.get_chain("nope").is_none());
+    }
+
+    #[test]
+    fn test_get_chain_for_task_nonexistent() {
+        let mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        assert!(mgr.get_chain_for_task("nope").is_none());
+    }
+
+    // ===== Manager: mark_task_completed without auto_remove =====
+
+    #[test]
+    fn test_mark_completed_without_auto_remove() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+        mgr.add_task_to_chain("c1", "t1".into()).unwrap();
+        mgr.add_task_to_chain("c1", "t2".into()).unwrap();
+
+        // auto_remove is off by default
+        let next = mgr.mark_task_completed("t1").unwrap();
+        assert_eq!(next, Some(("c1".into(), "t1".into())));
+        // t1 still in chain mapping (not auto-removed)
+        assert!(mgr.get_chain_for_task("t1").is_some());
+    }
+
+    #[test]
+    fn test_mark_completed_task_not_in_any_chain() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+        let result = mgr.mark_task_completed("orphan");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_mark_completed_last_task_in_chain() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+        mgr.add_task_to_chain("c1", "t1".into()).unwrap();
+        mgr.set_auto_remove_completed("c1", true).unwrap();
+
+        let next = mgr.mark_task_completed("t1").unwrap();
+        assert!(next.is_none()); // no more tasks
+        assert!(mgr.get_chain_for_task("t1").is_none()); // removed
+    }
+
+    // ===== Manager: get_next_task_after_completion edge cases =====
+
+    #[test]
+    fn test_next_after_completion_task_not_in_chain() {
+        let mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        assert!(mgr.get_next_task_after_completion("orphan").is_none());
+    }
+
+    #[test]
+    fn test_next_after_completion_disabled_chain() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+        mgr.add_task_to_chain("c1", "t1".into()).unwrap();
+        mgr.add_task_to_chain("c1", "t2".into()).unwrap();
+        mgr.set_chain_enabled("c1", false).unwrap();
+
+        assert!(mgr.get_next_task_after_completion("t1").is_none());
+    }
+
+    // ===== Manager: delete chain cleans up task_to_chain =====
+
+    #[test]
+    fn test_delete_chain_cleans_task_mapping() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+        mgr.add_task_to_chain("c1", "t1".into()).unwrap();
+        mgr.add_task_to_chain("c1", "t2".into()).unwrap();
+
+        assert!(mgr.get_chain_for_task("t1").is_some());
+        mgr.delete_chain("c1").unwrap();
+        assert!(mgr.get_chain_for_task("t1").is_none());
+        assert!(mgr.get_chain_for_task("t2").is_none());
+    }
+
+    // ===== Manager: summary details =====
+
+    #[test]
+    fn test_summary_enabled_count() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+        mgr.create_chain("c2".into(), "C2".into()).unwrap();
+        mgr.set_chain_enabled("c2", false).unwrap();
+
+        let summary = mgr.get_summary();
+        assert_eq!(summary.total_chains, 2);
+        assert_eq!(summary.enabled_chains, 1);
+    }
+
+    #[test]
+    fn test_summary_next_task_id() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+        mgr.add_task_to_chain("c1", "t1".into()).unwrap();
+
+        let summary = mgr.get_summary();
+        assert_eq!(summary.chains[0].next_task_id, Some("t1".into()));
+    }
+
+    #[test]
+    fn test_summary_empty_chain_next_task_none() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+
+        let summary = mgr.get_summary();
+        assert!(summary.chains[0].next_task_id.is_none());
+    }
+
+    // ===== Persistence: save creates file =====
+
+    #[tokio::test]
+    async fn test_save_creates_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("chains.json");
+        let mut mgr = TaskChainManager::new(path.clone());
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+        mgr.save().await.unwrap();
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_save_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("chains.json");
+
+        let mut mgr = TaskChainManager::new(path.clone());
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+        mgr.save().await.unwrap();
+
+        mgr.create_chain("c2".into(), "C2".into()).unwrap();
+        mgr.save().await.unwrap();
+
+        let mut loaded = TaskChainManager::new(path);
+        loaded.load().await.unwrap();
+        assert!(loaded.get_chain("c1").is_some());
+        assert!(loaded.get_chain("c2").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_save_no_tmp_leftover() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("chains.json");
+        let mut mgr = TaskChainManager::new(path.clone());
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+        mgr.save().await.unwrap();
+
+        let tmp_file = path.with_extension("json.tmp");
+        assert!(!tmp_file.exists());
+    }
+
+    #[tokio::test]
+    async fn test_load_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nonexistent.json");
+        let mut mgr = TaskChainManager::new(path);
+        mgr.load().await.unwrap(); // should not error
+        assert!(mgr.list_chains().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("chains.json");
+        std::fs::write(&path, "").unwrap();
+        let mut mgr = TaskChainManager::new(path);
+        mgr.load().await.unwrap();
+        assert!(mgr.list_chains().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_corrupt_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("chains.json");
+        std::fs::write(&path, "not json").unwrap();
+        let mut mgr = TaskChainManager::new(path);
+        assert!(mgr.load().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_full_persistence_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("chains.json");
+
+        let mut mgr = TaskChainManager::new(path.clone());
+        mgr.create_chain("c1".into(), "Chain Alpha".into()).unwrap();
+        mgr.add_task_to_chain("c1", "t1".into()).unwrap();
+        mgr.add_task_to_chain("c1", "t2".into()).unwrap();
+        mgr.set_auto_remove_completed("c1", true).unwrap();
+        mgr.create_chain("c2".into(), "Chain Beta".into()).unwrap();
+        mgr.set_chain_enabled("c2", false).unwrap();
+        mgr.save().await.unwrap();
+
+        let mut loaded = TaskChainManager::new(path);
+        loaded.load().await.unwrap();
+
+        assert!(loaded.get_chain("c1").is_some());
+        assert!(loaded.get_chain("c2").is_some());
+        assert!(loaded.get_chain_for_task("t1").is_some());
+        assert!(loaded.get_chain_for_task("t2").is_some());
+
+        let c1 = loaded.get_chain("c1").unwrap();
+        assert!(c1.auto_remove_completed);
+        assert_eq!(c1.task_ids.len(), 2);
+
+        let c2 = loaded.get_chain("c2").unwrap();
+        assert!(!c2.enabled);
+    }
+
+    // ===== Unicode task IDs =====
+
+    #[test]
+    fn test_unicode_task_ids() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "链".into()).unwrap();
+        mgr.add_task_to_chain("c1", "任务-α".into()).unwrap();
+        mgr.add_task_to_chain("c1", "任务-β".into()).unwrap();
+
+        assert!(mgr.get_chain_for_task("任务-α").is_some());
+        assert!(mgr.get_chain_for_task("任务-β").is_some());
+    }
+
+    #[test]
+    fn test_emoji_task_id() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "🔗".into()).unwrap();
+        mgr.add_task_to_chain("c1", "🚀".into()).unwrap();
+        assert!(mgr.get_chain_for_task("🚀").is_some());
+    }
+
+    // ===== Complex workflow =====
+
+    #[test]
+    fn test_complete_workflow() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+
+        // Create chain
+        mgr.create_chain("pipeline".into(), "Build Pipeline".into())
+            .unwrap();
+        mgr.add_task_to_chain("pipeline", "step-1".into()).unwrap();
+        mgr.add_task_to_chain("pipeline", "step-2".into()).unwrap();
+        mgr.add_task_to_chain("pipeline", "step-3".into()).unwrap();
+        mgr.set_auto_remove_completed("pipeline", true).unwrap();
+
+        // Complete step-1 -> next is step-1 (first in chain before pop)
+        let next = mgr.mark_task_completed("step-1").unwrap();
+        assert!(next.is_some());
+        let (chain_id, next_task) = next.unwrap();
+        assert_eq!(chain_id, "pipeline");
+        assert_eq!(next_task, "step-2");
+
+        // step-1 removed, step-2 now first
+        assert!(mgr.get_chain_for_task("step-1").is_none());
+
+        // Complete step-2
+        let next = mgr.mark_task_completed("step-2").unwrap();
+        assert_eq!(next.unwrap().1, "step-3");
+
+        // Complete step-3 (last)
+        let next = mgr.mark_task_completed("step-3").unwrap();
+        assert!(next.is_none()); // no more tasks
+    }
+
+    #[test]
+    fn test_multiple_chains_independent() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("a".into(), "A".into()).unwrap();
+        mgr.create_chain("b".into(), "B".into()).unwrap();
+        mgr.add_task_to_chain("a", "t1".into()).unwrap();
+        mgr.add_task_to_chain("b", "t2".into()).unwrap();
+
+        // Each task belongs to its own chain
+        assert_eq!(mgr.get_chain_for_task("t1").unwrap().chain_id, "a");
+        assert_eq!(mgr.get_chain_for_task("t2").unwrap().chain_id, "b");
+
+        // Deleting chain A doesn't affect chain B
+        mgr.delete_chain("a").unwrap();
+        assert!(mgr.get_chain_for_task("t1").is_none());
+        assert!(mgr.get_chain_for_task("t2").is_some());
+    }
+
+    // ===== Manager: Clone =====
+
+    #[test]
+    fn test_manager_clone() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+        mgr.add_task_to_chain("c1", "t1".into()).unwrap();
+
+        let cloned = mgr.clone();
+        assert!(cloned.get_chain("c1").is_some());
+        assert!(cloned.get_chain_for_task("t1").is_some());
+    }
+
+    #[test]
+    fn test_manager_clone_independence() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+
+        let mut cloned = mgr.clone();
+        cloned.create_chain("c2".into(), "C2".into()).unwrap();
+
+        // Original not affected
+        assert!(mgr.get_chain("c2").is_none());
+        assert!(cloned.get_chain("c2").is_some());
+    }
+
+    // ===== Manager: Debug =====
+
+    #[test]
+    fn test_manager_debug() {
+        let mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        let _ = format!("{:?}", mgr);
+    }
+
+    // ===== add_task duplicate across different chains =====
+
+    #[test]
+    fn test_same_task_added_to_different_chains() {
+        // The module allows adding same task_id to different chains
+        // (task_to_chain will point to the last one)
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("a".into(), "A".into()).unwrap();
+        mgr.create_chain("b".into(), "B".into()).unwrap();
+        mgr.add_task_to_chain("a", "t1".into()).unwrap();
+        mgr.add_task_to_chain("b", "t1".into()).unwrap();
+
+        // task_to_chain now points to "b"
+        assert_eq!(mgr.get_chain_for_task("t1").unwrap().chain_id, "b");
+    }
+
+    // ===== set_chain_enabled toggle =====
+
+    #[test]
+    fn test_toggle_chain_enabled() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+
+        assert!(mgr.get_chain("c1").unwrap().enabled);
+        mgr.set_chain_enabled("c1", false).unwrap();
+        assert!(!mgr.get_chain("c1").unwrap().enabled);
+        mgr.set_chain_enabled("c1", true).unwrap();
+        assert!(mgr.get_chain("c1").unwrap().enabled);
+    }
+
+    // ===== set_auto_remove_completed toggle =====
+
+    #[test]
+    fn test_toggle_auto_remove() {
+        let mut mgr = TaskChainManager::new(PathBuf::from("/tmp/x.json"));
+        mgr.create_chain("c1".into(), "C1".into()).unwrap();
+
+        assert!(!mgr.get_chain("c1").unwrap().auto_remove_completed);
+        mgr.set_auto_remove_completed("c1", true).unwrap();
+        assert!(mgr.get_chain("c1").unwrap().auto_remove_completed);
+    }
+
+    // ===== get_next_task returns first in order =====
+
+    #[test]
+    fn test_get_next_task_order() {
+        let mut chain = TaskChain::new("c1".into(), "n".into());
+        chain.add_task("first".into()).unwrap();
+        chain.add_task("second".into()).unwrap();
+        chain.add_task("third".into()).unwrap();
+        assert_eq!(chain.get_next_task(), Some("first"));
+    }
+
+    // ===== pop order =====
+
+    #[test]
+    fn test_pop_order() {
+        let mut chain = TaskChain::new("c1".into(), "n".into());
+        chain.add_task("a".into()).unwrap();
+        chain.add_task("b".into()).unwrap();
+        chain.add_task("c".into()).unwrap();
+
+        assert_eq!(chain.pop_completed_task(), Some("a".into()));
+        assert_eq!(chain.pop_completed_task(), Some("b".into()));
+        assert_eq!(chain.pop_completed_task(), Some("c".into()));
+        assert!(chain.pop_completed_task().is_none());
+    }
+
+    // ===== Persistence with Unicode =====
+
+    #[tokio::test]
+    async fn test_persistence_unicode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("chains.json");
+
+        let mut mgr = TaskChainManager::new(path.clone());
+        mgr.create_chain("链-1".into(), "测试链".into()).unwrap();
+        mgr.add_task_to_chain("链-1", "任务-α".into()).unwrap();
+        mgr.save().await.unwrap();
+
+        let mut loaded = TaskChainManager::new(path);
+        loaded.load().await.unwrap();
+        assert!(loaded.get_chain("链-1").is_some());
+        assert!(loaded.get_chain_for_task("任务-α").is_some());
+    }
 }
