@@ -23452,7 +23452,7 @@ mod url_allowlist_tests {
 
         // Create new DownloadManager instance (simulates restart)
         let dm2 = DownloadManager::new(temp_dir.path().to_path_buf());
-        let config = dm2.get_url_allowlist_config().await;
+        let _config = dm2.get_url_allowlist_config().await;
 
         // Note: This will fail until we implement restore in new_with_restore()
         // For now, just verify the file was saved
