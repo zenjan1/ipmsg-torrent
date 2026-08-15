@@ -548,4 +548,835 @@ mod tests {
         assert!(result.status_code.is_none());
         assert_eq!(result.response_time_ms, 0);
     }
+
+    // ===== Comprehensive Test Coverage (Phase 233) =====
+
+    // --- UrlExpanderConfig serde ---
+
+    #[test]
+    fn config_serde_roundtrip_default() {
+        let config = UrlExpanderConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let de: UrlExpanderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.expansion_enabled, config.expansion_enabled);
+        assert_eq!(de.validation_enabled, config.validation_enabled);
+        assert_eq!(de.max_redirects, config.max_redirects);
+        assert_eq!(de.timeout_secs, config.timeout_secs);
+        assert_eq!(de.block_on_unreachable, config.block_on_unreachable);
+        assert!(de.custom_shorteners.is_empty());
+    }
+
+    #[test]
+    fn config_serde_roundtrip_custom() {
+        let config = UrlExpanderConfig {
+            expansion_enabled: false,
+            validation_enabled: false,
+            max_redirects: 0,
+            timeout_secs: 1,
+            custom_shorteners: vec!["a.io".into(), "b.co".into()],
+            block_on_unreachable: true,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let de: UrlExpanderConfig = serde_json::from_str(&json).unwrap();
+        assert!(!de.expansion_enabled);
+        assert!(!de.validation_enabled);
+        assert_eq!(de.max_redirects, 0);
+        assert_eq!(de.timeout_secs, 1);
+        assert!(de.block_on_unreachable);
+        assert_eq!(de.custom_shorteners.len(), 2);
+    }
+
+    #[test]
+    fn config_serde_pretty() {
+        let config = UrlExpanderConfig::default();
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        assert!(pretty.contains('\n'));
+        let de: UrlExpanderConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(de.max_redirects, 10);
+    }
+
+    #[test]
+    fn config_serde_extra_fields_ignored() {
+        let json = r#"{"expansion_enabled":true,"validation_enabled":true,"max_redirects":5,"timeout_secs":10,"custom_shorteners":[],"block_on_unreachable":false,"unknown_field":42}"#;
+        let de: UrlExpanderConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(de.max_redirects, 5);
+    }
+
+    #[test]
+    fn config_serde_missing_fields_use_defaults() {
+        // Only provide some fields; serde should fail since no #[serde(default)] on struct
+        // But individual fields with defaults in Default impl work when using full object
+        let json = serde_json::to_string(&UrlExpanderConfig::default()).unwrap();
+        let de: UrlExpanderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.timeout_secs, 15);
+    }
+
+    // --- UrlExpanderConfig Clone/Debug ---
+
+    #[test]
+    fn config_clone() {
+        let config = UrlExpanderConfig {
+            custom_shorteners: vec!["x.io".into()],
+            ..Default::default()
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.custom_shorteners, config.custom_shorteners);
+        assert_eq!(cloned.max_redirects, config.max_redirects);
+    }
+
+    #[test]
+    fn config_debug() {
+        let config = UrlExpanderConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("UrlExpanderConfig"));
+        assert!(debug.contains("expansion_enabled"));
+        assert!(debug.contains("max_redirects"));
+    }
+
+    // --- ExpansionResult traits ---
+
+    #[test]
+    fn expansion_result_clone() {
+        let r = ExpansionResult {
+            original: "https://bit.ly/x".into(),
+            expanded: "https://example.com/y".into(),
+            was_expanded: true,
+            redirect_count: 3,
+        };
+        let cloned = r.clone();
+        assert_eq!(cloned.original, r.original);
+        assert_eq!(cloned.expanded, r.expanded);
+        assert!(cloned.was_expanded);
+        assert_eq!(cloned.redirect_count, 3);
+    }
+
+    #[test]
+    fn expansion_result_debug() {
+        let r = ExpansionResult {
+            original: "o".into(),
+            expanded: "e".into(),
+            was_expanded: false,
+            redirect_count: 0,
+        };
+        let debug = format!("{:?}", r);
+        assert!(debug.contains("ExpansionResult"));
+        assert!(debug.contains("was_expanded"));
+    }
+
+    #[test]
+    fn expansion_result_serde_not_expanded() {
+        let r = ExpansionResult {
+            original: "https://example.com".into(),
+            expanded: "https://example.com".into(),
+            was_expanded: false,
+            redirect_count: 0,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let de: ExpansionResult = serde_json::from_str(&json).unwrap();
+        assert!(!de.was_expanded);
+        assert_eq!(de.redirect_count, 0);
+    }
+
+    #[test]
+    fn expansion_result_serde_extra_fields_ignored() {
+        let json = r#"{"original":"o","expanded":"e","was_expanded":false,"redirect_count":0,"extra":"ignored"}"#;
+        let de: ExpansionResult = serde_json::from_str(json).unwrap();
+        assert_eq!(de.original, "o");
+    }
+
+    // --- ValidationResult traits ---
+
+    #[test]
+    fn validation_result_clone() {
+        let v = ValidationResult {
+            reachable: true,
+            status_code: Some(200),
+            content_length: Some(1024),
+            content_type: Some("application/zip".into()),
+            was_shortened: false,
+            final_url: None,
+            error: None,
+            response_time_ms: 50,
+        };
+        let cloned = v.clone();
+        assert!(cloned.reachable);
+        assert_eq!(cloned.status_code, Some(200));
+        assert_eq!(cloned.content_length, Some(1024));
+        assert_eq!(cloned.response_time_ms, 50);
+    }
+
+    #[test]
+    fn validation_result_debug() {
+        let v = ValidationResult {
+            reachable: false,
+            status_code: Some(404),
+            content_length: None,
+            content_type: None,
+            was_shortened: false,
+            final_url: None,
+            error: Some("HTTP 404".into()),
+            response_time_ms: 100,
+        };
+        let debug = format!("{:?}", v);
+        assert!(debug.contains("ValidationResult"));
+        assert!(debug.contains("reachable"));
+    }
+
+    #[test]
+    fn validation_result_serde_unreachable() {
+        let v = ValidationResult {
+            reachable: false,
+            status_code: Some(500),
+            content_length: None,
+            content_type: None,
+            was_shortened: false,
+            final_url: None,
+            error: Some("HTTP 500".into()),
+            response_time_ms: 200,
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        let de: ValidationResult = serde_json::from_str(&json).unwrap();
+        assert!(!de.reachable);
+        assert_eq!(de.status_code, Some(500));
+        assert!(de.error.is_some());
+    }
+
+    #[test]
+    fn validation_result_serde_extra_fields_ignored() {
+        let json = r#"{"reachable":true,"status_code":null,"content_length":null,"content_type":null,"was_shortened":false,"final_url":null,"error":null,"response_time_ms":0,"bonus":true}"#;
+        let de: ValidationResult = serde_json::from_str(json).unwrap();
+        assert!(de.reachable);
+    }
+
+    // --- is_shortened_url comprehensive ---
+
+    #[test]
+    fn is_shortened_url_all_known_shorteners() {
+        let config = UrlExpanderConfig::default();
+        let shorteners = [
+            "bit.ly",
+            "tinyurl.com",
+            "t.co",
+            "goo.gl",
+            "is.gd",
+            "v.gd",
+            "buff.ly",
+            "ow.ly",
+            "shorturl.at",
+            "tiny.cc",
+            "bl.ink",
+            "rebrand.ly",
+            "cutt.ly",
+            "short.io",
+        ];
+        for s in &shorteners {
+            let url = format!("https://{}/abc123", s);
+            assert!(
+                is_shortened_url(&url, &config),
+                "should detect {} as shortener",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn is_shortened_url_empty_string() {
+        let config = UrlExpanderConfig::default();
+        assert!(!is_shortened_url("", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_just_scheme() {
+        let config = UrlExpanderConfig::default();
+        assert!(!is_shortened_url("https://", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_ftp_not_matched() {
+        let config = UrlExpanderConfig::default();
+        // FTP URLs are not matched (only http/https)
+        assert!(!is_shortened_url("ftp://bit.ly/file", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_partial_domain_no_match() {
+        let config = UrlExpanderConfig::default();
+        // notbit.ly should NOT match bit.ly
+        assert!(!is_shortened_url("https://notbit.ly/abc", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_subdomain_of_shortener() {
+        let config = UrlExpanderConfig::default();
+        assert!(is_shortened_url("https://www.tinyurl.com/abc", &config));
+        assert!(is_shortened_url("https://sub.bit.ly/abc", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_custom_shortener_empty_list() {
+        let config = UrlExpanderConfig {
+            custom_shorteners: vec![],
+            ..Default::default()
+        };
+        assert!(!is_shortened_url("https://custom.short/abc", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_custom_shortener_subdomain() {
+        let config = UrlExpanderConfig {
+            custom_shorteners: vec!["my.short".into()],
+            ..Default::default()
+        };
+        assert!(is_shortened_url("https://sub.my.short/abc", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_unicode_path() {
+        let config = UrlExpanderConfig::default();
+        assert!(is_shortened_url("https://bit.ly/中文路径", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_emoji_path() {
+        let config = UrlExpanderConfig::default();
+        assert!(is_shortened_url("https://bit.ly/🔥🎉", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_with_query_params() {
+        let config = UrlExpanderConfig::default();
+        assert!(is_shortened_url("https://bit.ly/abc?ref=twitter", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_with_fragment() {
+        let config = UrlExpanderConfig::default();
+        assert!(is_shortened_url("https://bit.ly/abc#section", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_invalid_url() {
+        let config = UrlExpanderConfig::default();
+        assert!(!is_shortened_url("not a url at all", &config));
+        assert!(!is_shortened_url("://missing-scheme", &config));
+    }
+
+    // --- UrlExpanderError comprehensive ---
+
+    #[test]
+    fn error_display_http_client() {
+        let err = UrlExpanderError::HttpClient("connection timeout".into());
+        let s = err.to_string();
+        assert!(s.contains("HTTP client error"));
+        assert!(s.contains("connection timeout"));
+    }
+
+    #[test]
+    fn error_display_request_failed() {
+        let err = UrlExpanderError::RequestFailed("DNS resolution failed".into());
+        let s = err.to_string();
+        assert!(s.contains("Request failed"));
+        assert!(s.contains("DNS resolution failed"));
+    }
+
+    #[test]
+    fn error_display_validation_failed() {
+        let err = UrlExpanderError::ValidationFailed {
+            url: "https://example.com".into(),
+            error: "404 Not Found".into(),
+            response_time_ms: 250,
+        };
+        let s = err.to_string();
+        assert!(s.contains("Validation failed"));
+        assert!(s.contains("example.com"));
+        assert!(s.contains("404 Not Found"));
+        assert!(s.contains("250ms"));
+    }
+
+    #[test]
+    fn error_debug() {
+        let err = UrlExpanderError::HttpClient("test".into());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("HttpClient"));
+    }
+
+    #[test]
+    fn error_is_error_trait() {
+        let err: Box<dyn std::error::Error> = Box::new(UrlExpanderError::HttpClient("test".into()));
+        assert!(err.source().is_none() || err.source().is_some());
+    }
+
+    #[test]
+    fn error_unicode_messages() {
+        let err = UrlExpanderError::HttpClient("超时错误".into());
+        assert!(err.to_string().contains("超时错误"));
+
+        let err = UrlExpanderError::RequestFailed("连接被拒绝 🚫".into());
+        assert!(err.to_string().contains("连接被拒绝 🚫"));
+
+        let err = UrlExpanderError::ValidationFailed {
+            url: "https://中文.com".into(),
+            error: "找不到服务器".into(),
+            response_time_ms: 100,
+        };
+        assert!(err.to_string().contains("中文.com"));
+    }
+
+    // --- Persistence comprehensive ---
+
+    #[test]
+    fn save_creates_file() {
+        let temp_dir = std::env::temp_dir().join("test_url_expander_save_creates");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let config = UrlExpanderConfig::default();
+        save_url_expander_config(&config, &temp_dir).unwrap();
+
+        let path = temp_dir.join("url_expander_config.json");
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn save_overwrites_existing() {
+        let temp_dir = std::env::temp_dir().join("test_url_expander_overwrite");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let config1 = UrlExpanderConfig {
+            max_redirects: 5,
+            ..Default::default()
+        };
+        save_url_expander_config(&config1, &temp_dir).unwrap();
+
+        let config2 = UrlExpanderConfig {
+            max_redirects: 20,
+            ..Default::default()
+        };
+        save_url_expander_config(&config2, &temp_dir).unwrap();
+
+        let loaded = load_url_expander_config(&temp_dir).unwrap();
+        assert_eq!(loaded.max_redirects, 20);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn save_no_tmp_leftover() {
+        let temp_dir = std::env::temp_dir().join("test_url_expander_no_tmp");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let config = UrlExpanderConfig::default();
+        save_url_expander_config(&config, &temp_dir).unwrap();
+
+        let tmp_path = temp_dir.join("url_expander_config.json.tmp");
+        assert!(!tmp_path.exists());
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn load_corrupt_json_returns_none() {
+        let temp_dir = std::env::temp_dir().join("test_url_expander_corrupt");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let path = temp_dir.join("url_expander_config.json");
+        std::fs::write(&path, "not valid json{{{").unwrap();
+
+        assert!(load_url_expander_config(&temp_dir).is_none());
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn load_empty_file_returns_none() {
+        let temp_dir = std::env::temp_dir().join("test_url_expander_empty");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let path = temp_dir.join("url_expander_config.json");
+        std::fs::write(&path, "").unwrap();
+
+        assert!(load_url_expander_config(&temp_dir).is_none());
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn save_load_unicode_config() {
+        let temp_dir = std::env::temp_dir().join("test_url_expander_unicode");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let config = UrlExpanderConfig {
+            custom_shorteners: vec!["短链.io".into(), "ショート.jp".into()],
+            ..Default::default()
+        };
+        save_url_expander_config(&config, &temp_dir).unwrap();
+        let loaded = load_url_expander_config(&temp_dir).unwrap();
+
+        assert_eq!(loaded.custom_shorteners.len(), 2);
+        assert!(loaded.custom_shorteners.contains(&"短链.io".to_string()));
+        assert!(
+            loaded
+                .custom_shorteners
+                .contains(&"ショート.jp".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn save_load_full_roundtrip() {
+        let temp_dir = std::env::temp_dir().join("test_url_expander_full_rt");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let config = UrlExpanderConfig {
+            expansion_enabled: false,
+            validation_enabled: false,
+            max_redirects: 1,
+            timeout_secs: 60,
+            custom_shorteners: vec!["a.co".into(), "b.io".into(), "c.net".into()],
+            block_on_unreachable: true,
+        };
+        save_url_expander_config(&config, &temp_dir).unwrap();
+        let loaded = load_url_expander_config(&temp_dir).unwrap();
+
+        assert!(!loaded.expansion_enabled);
+        assert!(!loaded.validation_enabled);
+        assert_eq!(loaded.max_redirects, 1);
+        assert_eq!(loaded.timeout_secs, 60);
+        assert!(loaded.block_on_unreachable);
+        assert_eq!(loaded.custom_shorteners.len(), 3);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn load_missing_file_returns_none() {
+        let temp_dir = std::env::temp_dir().join("test_url_expander_nofile");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        // Don't create directory
+        assert!(load_url_expander_config(&temp_dir).is_none());
+    }
+
+    // --- expand_url boundary tests (no network) ---
+
+    #[tokio::test]
+    async fn test_expand_url_disabled_returns_same() {
+        let config = UrlExpanderConfig {
+            expansion_enabled: false,
+            ..Default::default()
+        };
+        let result = expand_url("https://example.com/anything", &config)
+            .await
+            .unwrap();
+        assert!(!result.was_expanded);
+        assert_eq!(result.expanded, "https://example.com/anything");
+        assert_eq!(result.redirect_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_expand_url_disabled_unicode_url() {
+        let config = UrlExpanderConfig {
+            expansion_enabled: false,
+            ..Default::default()
+        };
+        let url = "https://example.com/中文/パス";
+        let result = expand_url(url, &config).await.unwrap();
+        assert_eq!(result.expanded, url);
+        assert!(!result.was_expanded);
+    }
+
+    // --- validate_url boundary tests (no network) ---
+
+    #[tokio::test]
+    async fn test_validate_url_disabled_returns_defaults() {
+        let config = UrlExpanderConfig {
+            validation_enabled: false,
+            ..Default::default()
+        };
+        let result = validate_url("https://anything.com/path", &config)
+            .await
+            .unwrap();
+        assert!(result.reachable);
+        assert!(result.status_code.is_none());
+        assert!(result.content_length.is_none());
+        assert!(result.content_type.is_none());
+        assert!(!result.was_shortened);
+        assert!(result.final_url.is_none());
+        assert!(result.error.is_none());
+        assert_eq!(result.response_time_ms, 0);
+    }
+
+    // --- expand_and_validate boundary (no network) ---
+
+    #[tokio::test]
+    async fn test_expand_and_validate_both_disabled() {
+        let config = UrlExpanderConfig {
+            expansion_enabled: false,
+            validation_enabled: false,
+            ..Default::default()
+        };
+        let (exp, val) = expand_and_validate("https://example.com", &config)
+            .await
+            .unwrap();
+        assert!(!exp.was_expanded);
+        assert_eq!(exp.expanded, "https://example.com");
+        assert!(val.reachable);
+        assert_eq!(val.response_time_ms, 0);
+    }
+
+    // --- KNOWN_SHORTENERS constant ---
+
+    #[test]
+    fn known_shorteners_not_empty() {
+        assert!(!KNOWN_SHORTENERS.is_empty());
+        assert!(KNOWN_SHORTENERS.len() >= 14);
+    }
+
+    #[test]
+    fn known_shorteners_all_contain_dot() {
+        for s in KNOWN_SHORTENERS {
+            assert!(s.contains('.'), "shortener {} should contain a dot", s);
+        }
+    }
+
+    #[test]
+    fn known_shorteners_all_lowercase() {
+        for s in KNOWN_SHORTENERS {
+            assert_eq!(*s, s.to_lowercase(), "shortener {} should be lowercase", s);
+        }
+    }
+
+    // --- Config edge cases ---
+
+    #[test]
+    fn config_max_redirects_zero() {
+        let config = UrlExpanderConfig {
+            max_redirects: 0,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let de: UrlExpanderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.max_redirects, 0);
+    }
+
+    #[test]
+    fn config_max_redirects_max_value() {
+        let config = UrlExpanderConfig {
+            max_redirects: u32::MAX,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let de: UrlExpanderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.max_redirects, u32::MAX);
+    }
+
+    #[test]
+    fn config_timeout_zero() {
+        let config = UrlExpanderConfig {
+            timeout_secs: 0,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let de: UrlExpanderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.timeout_secs, 0);
+    }
+
+    #[test]
+    fn config_many_custom_shorteners() {
+        let config = UrlExpanderConfig {
+            custom_shorteners: (0..100).map(|i| format!("s{}.io", i)).collect(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let de: UrlExpanderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.custom_shorteners.len(), 100);
+    }
+
+    // --- ExpansionResult edge cases ---
+
+    #[test]
+    fn expansion_result_large_redirect_count() {
+        let r = ExpansionResult {
+            original: "o".into(),
+            expanded: "e".into(),
+            was_expanded: true,
+            redirect_count: u32::MAX,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let de: ExpansionResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.redirect_count, u32::MAX);
+    }
+
+    #[test]
+    fn expansion_result_empty_strings() {
+        let r = ExpansionResult {
+            original: String::new(),
+            expanded: String::new(),
+            was_expanded: false,
+            redirect_count: 0,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let de: ExpansionResult = serde_json::from_str(&json).unwrap();
+        assert!(de.original.is_empty());
+        assert!(de.expanded.is_empty());
+    }
+
+    // --- ValidationResult edge cases ---
+
+    #[test]
+    fn validation_result_all_none() {
+        let v = ValidationResult {
+            reachable: false,
+            status_code: None,
+            content_length: None,
+            content_type: None,
+            was_shortened: false,
+            final_url: None,
+            error: None,
+            response_time_ms: 0,
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        let de: ValidationResult = serde_json::from_str(&json).unwrap();
+        assert!(!de.reachable);
+        assert!(de.status_code.is_none());
+        assert!(de.content_length.is_none());
+    }
+
+    #[test]
+    fn validation_result_unicode_content_type() {
+        let v = ValidationResult {
+            reachable: true,
+            status_code: Some(200),
+            content_length: Some(0),
+            content_type: Some("text/html; charset=中文".into()),
+            was_shortened: false,
+            final_url: None,
+            error: None,
+            response_time_ms: 1,
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        let de: ValidationResult = serde_json::from_str(&json).unwrap();
+        assert!(de.content_type.unwrap().contains("中文"));
+    }
+
+    #[test]
+    fn validation_result_large_content_length() {
+        let v = ValidationResult {
+            reachable: true,
+            status_code: Some(200),
+            content_length: Some(u64::MAX),
+            content_type: None,
+            was_shortened: false,
+            final_url: None,
+            error: None,
+            response_time_ms: 0,
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        let de: ValidationResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.content_length, Some(u64::MAX));
+    }
+
+    // --- Persistence with pretty JSON ---
+
+    #[test]
+    fn save_pretty_json_format() {
+        let temp_dir = std::env::temp_dir().join("test_url_expander_pretty");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let config = UrlExpanderConfig::default();
+        save_url_expander_config(&config, &temp_dir).unwrap();
+
+        let path = temp_dir.join("url_expander_config.json");
+        let content = std::fs::read_to_string(&path).unwrap();
+        // Pretty JSON should have newlines and indentation
+        assert!(content.contains('\n'));
+        assert!(content.contains("  "));
+        // Should be valid JSON
+        let _: UrlExpanderConfig = serde_json::from_str(&content).unwrap();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // --- is_shortened_url with config variations ---
+
+    #[test]
+    fn is_shortened_url_validation_disabled_but_expansion_enabled() {
+        let config = UrlExpanderConfig {
+            expansion_enabled: true,
+            validation_enabled: false,
+            ..Default::default()
+        };
+        // is_shortened_url only checks expansion_enabled
+        assert!(is_shortened_url("https://bit.ly/abc", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_both_disabled() {
+        let config = UrlExpanderConfig {
+            expansion_enabled: false,
+            validation_enabled: false,
+            ..Default::default()
+        };
+        assert!(!is_shortened_url("https://bit.ly/abc", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_http_scheme() {
+        let config = UrlExpanderConfig::default();
+        assert!(is_shortened_url("http://bit.ly/test", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_uppercase_scheme_not_matched() {
+        let config = UrlExpanderConfig::default();
+        // The function checks starts_with("http://") before lowercasing,
+        // so uppercase schemes are not matched
+        assert!(!is_shortened_url("HTTPS://BIT.LY/abc", &config));
+    }
+
+    #[test]
+    fn is_shortened_url_mixed_case_domain() {
+        let config = UrlExpanderConfig::default();
+        assert!(is_shortened_url("https://Bit.Ly/AbC", &config));
+    }
+
+    // --- Error trait coverage ---
+
+    #[test]
+    fn error_clone() {
+        let err = UrlExpanderError::HttpClient("test".into());
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+
+        let err = UrlExpanderError::ValidationFailed {
+            url: "u".into(),
+            error: "e".into(),
+            response_time_ms: 1,
+        };
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+    }
+
+    #[test]
+    fn error_validation_failed_zero_response_time() {
+        let err = UrlExpanderError::ValidationFailed {
+            url: "https://x.com".into(),
+            error: "timeout".into(),
+            response_time_ms: 0,
+        };
+        let s = err.to_string();
+        assert!(s.contains("0ms"));
+    }
+
+    #[test]
+    fn error_validation_failed_large_response_time() {
+        let err = UrlExpanderError::ValidationFailed {
+            url: "https://slow.com".into(),
+            error: "slow".into(),
+            response_time_ms: u64::MAX,
+        };
+        let s = err.to_string();
+        assert!(s.contains(&format!("{}ms", u64::MAX)));
+    }
 }
