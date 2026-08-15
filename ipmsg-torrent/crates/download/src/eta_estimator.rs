@@ -624,4 +624,729 @@ mod tests {
         // Fast task should have much lower ETA
         assert!(fast.estimated_secs < slow.estimated_secs / 10.0);
     }
+
+    // ============================================================
+    // Phase 230: Comprehensive Test Coverage
+    // ============================================================
+
+    // --- TaskSpeedState internals ---
+
+    #[test]
+    fn task_speed_state_new_defaults() {
+        let state = TaskSpeedState::new();
+        assert_eq!(state.ema, 0.0);
+        assert_eq!(state.emvar, 0.0);
+        assert_eq!(state.sample_count, 0);
+        assert_eq!(state.last_raw_bps, 0.0);
+    }
+
+    #[test]
+    fn task_speed_state_second_sample() {
+        let mut state = TaskSpeedState::new();
+        state.update(1000.0, 0.3);
+        state.update(2000.0, 0.3);
+        assert_eq!(state.sample_count, 2);
+        assert_eq!(state.last_raw_bps, 2000.0);
+        // EMA: 1000 + 0.3 * (2000 - 1000) = 1300
+        assert!((state.ema - 1300.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn task_speed_state_zero_speed_update() {
+        let mut state = TaskSpeedState::new();
+        state.update(0.0, 0.3);
+        assert_eq!(state.ema, 0.0);
+        assert_eq!(state.sample_count, 1);
+        state.update(0.0, 0.3);
+        assert_eq!(state.sample_count, 2);
+    }
+
+    #[test]
+    fn task_speed_state_large_speed() {
+        let mut state = TaskSpeedState::new();
+        state.update(1e15, 0.3);
+        assert_eq!(state.ema, 1e15);
+        assert_eq!(state.sample_count, 1);
+    }
+
+    #[test]
+    fn task_speed_state_stddev_zero_for_constant() {
+        let mut state = TaskSpeedState::new();
+        for _ in 0..20 {
+            state.update(500.0, 0.3);
+        }
+        assert!(state.stddev() < 0.001);
+    }
+
+    #[test]
+    fn task_speed_state_stddev_positive_for_varying() {
+        let mut state = TaskSpeedState::new();
+        state.update(100.0, 0.3);
+        state.update(900.0, 0.3);
+        state.update(100.0, 0.3);
+        assert!(state.stddev() > 0.0);
+    }
+
+    #[test]
+    fn task_speed_state_cv_zero_ema() {
+        let state = TaskSpeedState {
+            ema: 0.0,
+            emvar: 10.0,
+            sample_count: 5,
+            last_raw_bps: 0.0,
+        };
+        assert_eq!(state.coefficient_of_variation(), f64::MAX);
+    }
+
+    #[test]
+    fn task_speed_state_negative_ema_cv() {
+        let state = TaskSpeedState {
+            ema: -1.0,
+            emvar: 1.0,
+            sample_count: 5,
+            last_raw_bps: 0.0,
+        };
+        // Negative EMA → returns MAX
+        assert_eq!(state.coefficient_of_variation(), f64::MAX);
+    }
+
+    #[test]
+    fn task_speed_state_clone() {
+        let mut state = TaskSpeedState::new();
+        state.update(1000.0, 0.3);
+        let cloned = state.clone();
+        assert_eq!(cloned.ema, state.ema);
+        assert_eq!(cloned.sample_count, state.sample_count);
+    }
+
+    #[test]
+    fn task_speed_state_debug() {
+        let state = TaskSpeedState::new();
+        let debug = format!("{:?}", state);
+        assert!(debug.contains("TaskSpeedState"));
+        assert!(debug.contains("ema"));
+    }
+
+    // --- EtaConfidence ---
+
+    #[test]
+    fn eta_confidence_serde_roundtrip() {
+        for c in [
+            EtaConfidence::Low,
+            EtaConfidence::Medium,
+            EtaConfidence::High,
+        ] {
+            let json = serde_json::to_string(&c).unwrap();
+            let parsed: EtaConfidence = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, c);
+        }
+    }
+
+    #[test]
+    fn eta_confidence_snake_case_values() {
+        assert_eq!(
+            serde_json::to_string(&EtaConfidence::Low).unwrap(),
+            "\"low\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EtaConfidence::Medium).unwrap(),
+            "\"medium\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EtaConfidence::High).unwrap(),
+            "\"high\""
+        );
+    }
+
+    #[test]
+    fn eta_confidence_clone_copy() {
+        let c = EtaConfidence::High;
+        let c2 = c;
+        let c3 = c.clone();
+        assert_eq!(c2, c3);
+    }
+
+    #[test]
+    fn eta_confidence_debug() {
+        let debug = format!("{:?}", EtaConfidence::Medium);
+        assert!(debug.contains("Medium"));
+    }
+
+    #[test]
+    fn eta_confidence_eq() {
+        assert_eq!(EtaConfidence::Low, EtaConfidence::Low);
+        assert_ne!(EtaConfidence::Low, EtaConfidence::High);
+        assert_ne!(EtaConfidence::Medium, EtaConfidence::High);
+    }
+
+    #[test]
+    fn eta_confidence_label_all() {
+        assert_eq!(EtaConfidence::Low.label(), "low");
+        assert_eq!(EtaConfidence::Medium.label(), "medium");
+        assert_eq!(EtaConfidence::High.label(), "high");
+    }
+
+    // --- EtaEstimate ---
+
+    #[test]
+    fn eta_estimate_serde_roundtrip() {
+        let e = EtaEstimate {
+            estimated_secs: 120.0,
+            optimistic_secs: 90.0,
+            pessimistic_secs: 200.0,
+            confidence: EtaConfidence::High,
+            smoothed_speed_bps: 800.0,
+            raw_speed_bps: 850.0,
+            sample_count: 25,
+            speed_stability: 0.1,
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let parsed: EtaEstimate = serde_json::from_str(&json).unwrap();
+        assert!((parsed.estimated_secs - 120.0).abs() < 0.01);
+        assert_eq!(parsed.confidence, EtaConfidence::High);
+        assert_eq!(parsed.sample_count, 25);
+    }
+
+    #[test]
+    fn eta_estimate_serde_extra_fields_ignored() {
+        let json = r#"{"estimated_secs":10,"optimistic_secs":5,"pessimistic_secs":20,"confidence":"low","smoothed_speed_bps":100,"raw_speed_bps":120,"sample_count":3,"speed_stability":0.5,"extra_field":"ignored"}"#;
+        let parsed: EtaEstimate = serde_json::from_str(json).unwrap();
+        assert!((parsed.estimated_secs - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn eta_estimate_clone() {
+        let e = EtaEstimate {
+            estimated_secs: 50.0,
+            optimistic_secs: 40.0,
+            pessimistic_secs: 70.0,
+            confidence: EtaConfidence::Medium,
+            smoothed_speed_bps: 500.0,
+            raw_speed_bps: 550.0,
+            sample_count: 10,
+            speed_stability: 0.2,
+        };
+        let cloned = e.clone();
+        assert_eq!(cloned.estimated_secs, e.estimated_secs);
+        assert_eq!(cloned.confidence, e.confidence);
+    }
+
+    #[test]
+    fn eta_estimate_debug() {
+        let e = EtaEstimate {
+            estimated_secs: 50.0,
+            optimistic_secs: 40.0,
+            pessimistic_secs: 70.0,
+            confidence: EtaConfidence::Medium,
+            smoothed_speed_bps: 500.0,
+            raw_speed_bps: 550.0,
+            sample_count: 10,
+            speed_stability: 0.2,
+        };
+        let debug = format!("{:?}", e);
+        assert!(debug.contains("EtaEstimate"));
+    }
+
+    #[test]
+    fn format_eta_zero() {
+        let e = EtaEstimate {
+            estimated_secs: 0.0,
+            optimistic_secs: 0.0,
+            pessimistic_secs: 0.0,
+            confidence: EtaConfidence::High,
+            smoothed_speed_bps: 1000.0,
+            raw_speed_bps: 1000.0,
+            sample_count: 20,
+            speed_stability: 0.05,
+        };
+        assert_eq!(e.format_eta(), "0s");
+    }
+
+    #[test]
+    fn format_eta_nan() {
+        let e = EtaEstimate {
+            estimated_secs: f64::NAN,
+            optimistic_secs: 0.0,
+            pessimistic_secs: 0.0,
+            confidence: EtaConfidence::Low,
+            smoothed_speed_bps: 0.0,
+            raw_speed_bps: 0.0,
+            sample_count: 1,
+            speed_stability: f64::MAX,
+        };
+        assert_eq!(e.format_eta(), "unknown");
+    }
+
+    #[test]
+    fn format_eta_exactly_60() {
+        let e = EtaEstimate {
+            estimated_secs: 60.0,
+            optimistic_secs: 50.0,
+            pessimistic_secs: 80.0,
+            confidence: EtaConfidence::Medium,
+            smoothed_speed_bps: 100.0,
+            raw_speed_bps: 110.0,
+            sample_count: 10,
+            speed_stability: 0.1,
+        };
+        assert_eq!(e.format_eta(), "1m 0s");
+    }
+
+    #[test]
+    fn format_eta_exactly_3600() {
+        let e = EtaEstimate {
+            estimated_secs: 3600.0,
+            optimistic_secs: 3000.0,
+            pessimistic_secs: 5000.0,
+            confidence: EtaConfidence::Medium,
+            smoothed_speed_bps: 100.0,
+            raw_speed_bps: 110.0,
+            sample_count: 10,
+            speed_stability: 0.1,
+        };
+        assert_eq!(e.format_eta(), "1h 0m");
+    }
+
+    #[test]
+    fn format_range_with_range() {
+        let e = EtaEstimate {
+            estimated_secs: 120.0,
+            optimistic_secs: 60.0,
+            pessimistic_secs: 240.0,
+            confidence: EtaConfidence::Medium,
+            smoothed_speed_bps: 500.0,
+            raw_speed_bps: 550.0,
+            sample_count: 10,
+            speed_stability: 0.2,
+        };
+        assert_eq!(e.format_range(), "2m 0s (1m 0s–4m 0s)");
+    }
+
+    #[test]
+    fn format_range_infinite_bounds() {
+        let e = EtaEstimate {
+            estimated_secs: 100.0,
+            optimistic_secs: f64::INFINITY,
+            pessimistic_secs: f64::NAN,
+            confidence: EtaConfidence::Low,
+            smoothed_speed_bps: 100.0,
+            raw_speed_bps: 100.0,
+            sample_count: 5,
+            speed_stability: 0.5,
+        };
+        assert_eq!(e.format_range(), "1m 40s (?–?)");
+    }
+
+    // --- format_secs helper ---
+
+    #[test]
+    fn format_secs_zero() {
+        assert_eq!(format_secs(0.0), "0s");
+    }
+
+    #[test]
+    fn format_secs_small() {
+        assert_eq!(format_secs(45.0), "45s");
+    }
+
+    #[test]
+    fn format_secs_minutes() {
+        assert_eq!(format_secs(150.0), "2m 30s");
+    }
+
+    #[test]
+    fn format_secs_hours() {
+        assert_eq!(format_secs(7200.0), "2h 0m");
+    }
+
+    #[test]
+    fn format_secs_infinity() {
+        assert_eq!(format_secs(f64::INFINITY), "?");
+    }
+
+    #[test]
+    fn format_secs_nan() {
+        assert_eq!(format_secs(f64::NAN), "?");
+    }
+
+    // --- EtaEstimator ---
+
+    #[test]
+    fn estimator_new_defaults() {
+        let est = EtaEstimator::new();
+        assert!((est.alpha - DEFAULT_ALPHA).abs() < 0.001);
+    }
+
+    #[test]
+    fn estimator_default_equals_new() {
+        let est = EtaEstimator::default();
+        assert!((est.alpha - DEFAULT_ALPHA).abs() < 0.001);
+    }
+
+    #[test]
+    fn estimator_debug() {
+        let est = EtaEstimator::new();
+        let debug = format!("{:?}", est);
+        assert!(debug.contains("EtaEstimator"));
+    }
+
+    #[tokio::test]
+    async fn estimator_tracked_count_empty() {
+        let est = EtaEstimator::new();
+        assert_eq!(est.tracked_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn estimator_tracked_count_after_updates() {
+        let est = EtaEstimator::new();
+        est.update_speed("t1", 100.0).await;
+        est.update_speed("t2", 200.0).await;
+        assert_eq!(est.tracked_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn estimator_smoothed_speed_unknown() {
+        let est = EtaEstimator::new();
+        assert!(est.smoothed_speed("nonexistent").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn estimator_smoothed_speed_after_update() {
+        let est = EtaEstimator::new();
+        est.update_speed("t1", 1000.0).await;
+        let speed = est.smoothed_speed("t1").await.unwrap();
+        assert_eq!(speed, 1000.0);
+    }
+
+    #[tokio::test]
+    async fn estimator_remove_nonexistent_no_panic() {
+        let est = EtaEstimator::new();
+        est.remove_task("nonexistent").await;
+        assert_eq!(est.tracked_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn estimator_clear_empty() {
+        let est = EtaEstimator::new();
+        est.clear().await;
+        assert_eq!(est.tracked_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn estimator_estimate_exactly_min_samples() {
+        let est = EtaEstimator::new();
+        for _ in 0..3 {
+            est.update_speed("t1", 1000.0).await;
+        }
+        let result = est.estimate("t1", 3000).await;
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.sample_count, 3);
+        assert!((r.estimated_secs - 3.0).abs() < 0.5);
+    }
+
+    #[tokio::test]
+    async fn estimator_estimate_one_below_min() {
+        let est = EtaEstimator::new();
+        for _ in 0..2 {
+            est.update_speed("t1", 1000.0).await;
+        }
+        assert!(est.estimate("t1", 3000).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn estimator_stall_exactly_at_threshold() {
+        let est = EtaEstimator::new();
+        for _ in 0..5 {
+            est.update_speed("t1", 1.0).await; // exactly at threshold
+        }
+        // EMA should be ~1.0, which is <= STALL_THRESHOLD_BPS
+        assert!(est.estimate("t1", 5000).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn estimator_just_above_stall() {
+        let est = EtaEstimator::new();
+        for _ in 0..5 {
+            est.update_speed("t1", 1.5).await;
+        }
+        let result = est.estimate("t1", 15).await;
+        assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn estimator_unicode_task_id() {
+        let est = EtaEstimator::new();
+        for _ in 0..5 {
+            est.update_speed("任务-α", 1000.0).await;
+        }
+        let result = est.estimate("任务-α", 5000).await;
+        assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn estimator_emoji_task_id() {
+        let est = EtaEstimator::new();
+        for _ in 0..5 {
+            est.update_speed("🚀fast", 2000.0).await;
+        }
+        let result = est.estimate("🚀fast", 10000).await;
+        assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn estimator_empty_task_id() {
+        let est = EtaEstimator::new();
+        for _ in 0..5 {
+            est.update_speed("", 1000.0).await;
+        }
+        let result = est.estimate("", 5000).await;
+        assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn estimator_large_remaining() {
+        let est = EtaEstimator::new();
+        for _ in 0..5 {
+            est.update_speed("t1", 1000.0).await;
+        }
+        let result = est.estimate("t1", u64::MAX).await.unwrap();
+        assert!(result.estimated_secs.is_infinite() || result.estimated_secs > 1e15);
+    }
+
+    #[tokio::test]
+    async fn estimator_zero_speed_update() {
+        let est = EtaEstimator::new();
+        est.update_speed("t1", 0.0).await;
+        let speed = est.smoothed_speed("t1").await.unwrap();
+        assert_eq!(speed, 0.0);
+    }
+
+    #[tokio::test]
+    async fn estimator_remove_then_readd() {
+        let est = EtaEstimator::new();
+        for _ in 0..5 {
+            est.update_speed("t1", 1000.0).await;
+        }
+        est.remove_task("t1").await;
+        assert!(est.smoothed_speed("t1").await.is_none());
+
+        // Re-add
+        est.update_speed("t1", 5000.0).await;
+        let speed = est.smoothed_speed("t1").await.unwrap();
+        assert_eq!(speed, 5000.0); // fresh start
+    }
+
+    #[tokio::test]
+    async fn estimator_many_tasks() {
+        let est = EtaEstimator::new();
+        for i in 0..100 {
+            est.update_speed(&format!("task_{}", i), 1000.0 * (i as f64 + 1.0))
+                .await;
+        }
+        assert_eq!(est.tracked_count().await, 100);
+    }
+
+    #[tokio::test]
+    async fn estimator_confidence_low_samples() {
+        let est = EtaEstimator::new();
+        // 3 samples = just enough for ETA, but low confidence
+        for _ in 0..3 {
+            est.update_speed("t1", 1000.0).await;
+        }
+        let result = est.estimate("t1", 5000).await.unwrap();
+        assert_eq!(result.confidence, EtaConfidence::Low);
+    }
+
+    #[tokio::test]
+    async fn estimator_confidence_medium_boundary() {
+        let est = EtaEstimator::new();
+        // 5 samples with stable speed
+        for _ in 0..5 {
+            est.update_speed("t1", 1000.0).await;
+        }
+        let result = est.estimate("t1", 5000).await.unwrap();
+        // 5 samples + low CV → Medium
+        assert_eq!(result.confidence, EtaConfidence::Medium);
+    }
+
+    #[tokio::test]
+    async fn estimator_confidence_high_boundary() {
+        let est = EtaEstimator::new();
+        for _ in 0..20 {
+            est.update_speed("t1", 1000.0).await;
+        }
+        let result = est.estimate("t1", 5000).await.unwrap();
+        assert_eq!(result.confidence, EtaConfidence::High);
+    }
+
+    #[tokio::test]
+    async fn estimator_confidence_high_cv_too_high() {
+        let est = EtaEstimator::new();
+        // 25 samples but volatile → not High
+        for i in 0..25 {
+            let speed = if i % 2 == 0 { 100.0 } else { 10000.0 };
+            est.update_speed("t1", speed).await;
+        }
+        let result = est.estimate("t1", 5000).await.unwrap();
+        assert_ne!(result.confidence, EtaConfidence::High);
+    }
+
+    #[tokio::test]
+    async fn estimator_optimistic_lte_estimated() {
+        let est = EtaEstimator::new();
+        for _ in 0..10 {
+            est.update_speed("t1", 1000.0).await;
+        }
+        let result = est.estimate("t1", 10000).await.unwrap();
+        assert!(result.optimistic_secs <= result.estimated_secs + 0.001);
+    }
+
+    #[tokio::test]
+    async fn estimator_pessimistic_gte_estimated() {
+        let est = EtaEstimator::new();
+        for _ in 0..10 {
+            est.update_speed("t1", 1000.0).await;
+        }
+        let result = est.estimate("t1", 10000).await.unwrap();
+        assert!(result.pessimistic_secs >= result.estimated_secs - 0.001);
+    }
+
+    #[tokio::test]
+    async fn estimator_speed_stability_non_negative() {
+        let est = EtaEstimator::new();
+        for _ in 0..10 {
+            est.update_speed("t1", 1000.0).await;
+        }
+        let result = est.estimate("t1", 5000).await.unwrap();
+        assert!(result.speed_stability >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn estimator_raw_speed_matches_last() {
+        let est = EtaEstimator::new();
+        est.update_speed("t1", 1000.0).await;
+        est.update_speed("t1", 3000.0).await;
+        est.update_speed("t1", 5000.0).await;
+        let result = est.estimate("t1", 5000).await.unwrap();
+        assert_eq!(result.raw_speed_bps, 5000.0);
+    }
+
+    #[tokio::test]
+    async fn estimator_with_alpha_boundary_low() {
+        let est = EtaEstimator::with_alpha(0.01);
+        assert!((est.alpha - 0.01).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn estimator_with_alpha_boundary_high() {
+        let est = EtaEstimator::with_alpha(1.0);
+        assert!((est.alpha - 1.0).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn estimator_with_alpha_zero_clamped() {
+        let est = EtaEstimator::with_alpha(0.0);
+        assert!((est.alpha - 0.01).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn estimator_smoothed_speed_monotonic_increase() {
+        let est = EtaEstimator::new();
+        // Feed increasing speeds
+        for i in 1..=10 {
+            est.update_speed("t1", (i * 100) as f64).await;
+        }
+        let speed = est.smoothed_speed("t1").await.unwrap();
+        // EMA should be somewhere in the middle-high range
+        assert!(speed > 500.0);
+        assert!(speed < 1000.0);
+    }
+
+    // --- Full lifecycle ---
+
+    #[tokio::test]
+    async fn full_lifecycle() {
+        let est = EtaEstimator::new();
+
+        // Phase 1: Add tasks
+        for _ in 0..5 {
+            est.update_speed("download_1", 5000.0).await;
+            est.update_speed("download_2", 1000.0).await;
+        }
+        assert_eq!(est.tracked_count().await, 2);
+
+        // Phase 2: Estimate
+        let eta1 = est.estimate("download_1", 50_000).await.unwrap();
+        let eta2 = est.estimate("download_2", 50_000).await.unwrap();
+        assert!(eta1.estimated_secs < eta2.estimated_secs);
+
+        // Phase 3: Remove one
+        est.remove_task("download_1").await;
+        assert_eq!(est.tracked_count().await, 1);
+        assert!(est.estimate("download_1", 50_000).await.is_none());
+
+        // Phase 4: Clear
+        est.clear().await;
+        assert_eq!(est.tracked_count().await, 0);
+        assert!(est.estimate("download_2", 50_000).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_update_estimate_remove_readd() {
+        let est = EtaEstimator::new();
+
+        // Update
+        for _ in 0..5 {
+            est.update_speed("t1", 2000.0).await;
+        }
+        let eta = est.estimate("t1", 10_000).await.unwrap();
+        assert!((eta.estimated_secs - 5.0).abs() < 1.0);
+
+        // Remove
+        est.remove_task("t1").await;
+        assert!(est.estimate("t1", 10_000).await.is_none());
+
+        // Re-add with different speed
+        for _ in 0..5 {
+            est.update_speed("t1", 10_000.0).await;
+        }
+        let eta2 = est.estimate("t1", 10_000).await.unwrap();
+        assert!((eta2.estimated_secs - 1.0).abs() < 0.5);
+    }
+
+    #[tokio::test]
+    async fn independent_estimators() {
+        let est1 = EtaEstimator::new();
+        let est2 = EtaEstimator::new();
+
+        for _ in 0..5 {
+            est1.update_speed("t1", 1000.0).await;
+        }
+
+        assert!(est1.smoothed_speed("t1").await.is_some());
+        assert!(est2.smoothed_speed("t1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn estimator_same_task_different_speeds_converge() {
+        let est = EtaEstimator::new();
+        // Feed constant 2000 B/s
+        for _ in 0..50 {
+            est.update_speed("t1", 2000.0).await;
+        }
+        let speed = est.smoothed_speed("t1").await.unwrap();
+        assert!((speed - 2000.0).abs() < 1.0);
+
+        let result = est.estimate("t1", 20_000).await.unwrap();
+        assert!((result.estimated_secs - 10.0).abs() < 1.0);
+        assert_eq!(result.confidence, EtaConfidence::High);
+    }
+
+    #[test]
+    fn constants_are_reasonable() {
+        assert!(DEFAULT_ALPHA > 0.0 && DEFAULT_ALPHA <= 1.0);
+        assert!(MIN_SAMPLES_FOR_ETA > 0);
+        assert!(STALL_THRESHOLD_BPS > 0.0);
+    }
 }
