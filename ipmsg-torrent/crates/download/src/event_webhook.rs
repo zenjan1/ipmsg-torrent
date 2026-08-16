@@ -276,7 +276,7 @@ pub struct WebhookPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_group: Option<String>,
     /// Additional metadata
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
 }
 
@@ -1212,5 +1212,933 @@ mod tests {
 
         let event: WebhookEvent = serde_json::from_str(r#""download_failed""#).unwrap();
         assert_eq!(event, WebhookEvent::DownloadFailed);
+    }
+
+    // ===== Phase 244: Comprehensive Test Coverage =====
+
+    // --- WebhookEvent: all labels ---
+    #[test]
+    fn test_webhook_event_all_labels() {
+        assert_eq!(WebhookEvent::DownloadComplete.label(), "download_complete");
+        assert_eq!(WebhookEvent::DownloadFailed.label(), "download_failed");
+        assert_eq!(WebhookEvent::DownloadStarted.label(), "download_started");
+        assert_eq!(WebhookEvent::DownloadPaused.label(), "download_paused");
+        assert_eq!(WebhookEvent::DownloadResumed.label(), "download_resumed");
+        assert_eq!(WebhookEvent::DownloadAdded.label(), "download_added");
+        assert_eq!(WebhookEvent::DownloadRemoved.label(), "download_removed");
+        assert_eq!(WebhookEvent::QueueEmpty.label(), "queue_empty");
+        assert_eq!(
+            WebhookEvent::ProgressMilestone.label(),
+            "progress_milestone"
+        );
+    }
+
+    // --- WebhookEvent: serde roundtrip all 9 variants ---
+    #[test]
+    fn test_webhook_event_serde_all_variants() {
+        let variants = WebhookEvent::all();
+        for &event in variants {
+            let json = serde_json::to_string(&event).unwrap();
+            let deserialized: WebhookEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(event, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_webhook_event_serde_snake_case_values() {
+        assert_eq!(
+            serde_json::to_string(&WebhookEvent::DownloadStarted).unwrap(),
+            r#""download_started""#
+        );
+        assert_eq!(
+            serde_json::to_string(&WebhookEvent::DownloadPaused).unwrap(),
+            r#""download_paused""#
+        );
+        assert_eq!(
+            serde_json::to_string(&WebhookEvent::DownloadResumed).unwrap(),
+            r#""download_resumed""#
+        );
+        assert_eq!(
+            serde_json::to_string(&WebhookEvent::DownloadAdded).unwrap(),
+            r#""download_added""#
+        );
+        assert_eq!(
+            serde_json::to_string(&WebhookEvent::DownloadRemoved).unwrap(),
+            r#""download_removed""#
+        );
+        assert_eq!(
+            serde_json::to_string(&WebhookEvent::ProgressMilestone).unwrap(),
+            r#""progress_milestone""#
+        );
+    }
+
+    // --- WebhookEvent: traits ---
+    #[test]
+    fn test_webhook_event_clone_copy() {
+        let event = WebhookEvent::DownloadComplete;
+        let cloned = event;
+        assert_eq!(event, cloned);
+    }
+
+    #[test]
+    fn test_webhook_event_debug() {
+        let debug_str = format!("{:?}", WebhookEvent::DownloadComplete);
+        assert_eq!(debug_str, "DownloadComplete");
+    }
+
+    #[test]
+    fn test_webhook_event_eq_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(WebhookEvent::DownloadComplete);
+        set.insert(WebhookEvent::DownloadComplete);
+        assert_eq!(set.len(), 1);
+        set.insert(WebhookEvent::DownloadFailed);
+        assert_eq!(set.len(), 2);
+    }
+
+    // --- DeliveryStatus: serde roundtrip all 3 variants ---
+    #[test]
+    fn test_delivery_status_serde_all_variants() {
+        let variants = [
+            DeliveryStatus::Success,
+            DeliveryStatus::Pending,
+            DeliveryStatus::Failed,
+        ];
+        for status in &variants {
+            let json = serde_json::to_string(status).unwrap();
+            let deserialized: DeliveryStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(*status, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_delivery_status_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&DeliveryStatus::Success).unwrap(),
+            r#""success""#
+        );
+        assert_eq!(
+            serde_json::to_string(&DeliveryStatus::Pending).unwrap(),
+            r#""pending""#
+        );
+        assert_eq!(
+            serde_json::to_string(&DeliveryStatus::Failed).unwrap(),
+            r#""failed""#
+        );
+    }
+
+    // --- DeliveryStatus: traits ---
+    #[test]
+    fn test_delivery_status_clone_copy_debug() {
+        let status = DeliveryStatus::Success;
+        let cloned = status;
+        assert_eq!(status, cloned);
+        let debug_str = format!("{:?}", status);
+        assert_eq!(debug_str, "Success");
+    }
+
+    // --- WebhookDelivery: serde roundtrip ---
+    #[test]
+    fn test_webhook_delivery_serde_roundtrip() {
+        let mut delivery = WebhookDelivery::new("ep-1".to_string(), WebhookEvent::DownloadComplete);
+        delivery.task_id = Some("task-123".to_string());
+        delivery.task_name = Some("test.zip".to_string());
+        delivery.mark_success(200);
+
+        let json = serde_json::to_string(&delivery).unwrap();
+        let deserialized: WebhookDelivery = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.endpoint_id, "ep-1");
+        assert_eq!(deserialized.event, WebhookEvent::DownloadComplete);
+        assert_eq!(deserialized.task_id, Some("task-123".to_string()));
+        assert_eq!(deserialized.status, DeliveryStatus::Success);
+        assert_eq!(deserialized.status_code, Some(200));
+    }
+
+    #[test]
+    fn test_webhook_delivery_clone_debug() {
+        let delivery = WebhookDelivery::new("ep-1".to_string(), WebhookEvent::DownloadFailed);
+        let cloned = delivery.clone();
+        assert_eq!(cloned.endpoint_id, delivery.endpoint_id);
+        assert_eq!(cloned.event, delivery.event);
+        let debug_str = format!("{:?}", delivery);
+        assert!(debug_str.contains("WebhookDelivery"));
+    }
+
+    #[test]
+    fn test_webhook_delivery_mark_success_various_codes() {
+        for code in [200, 201, 202, 204, 299] {
+            let mut delivery =
+                WebhookDelivery::new("ep-1".to_string(), WebhookEvent::DownloadComplete);
+            delivery.mark_success(code);
+            assert_eq!(delivery.status_code, Some(code));
+            assert_eq!(delivery.status, DeliveryStatus::Success);
+        }
+    }
+
+    #[test]
+    fn test_webhook_delivery_mark_failed_none_status() {
+        let mut delivery = WebhookDelivery::new("ep-1".to_string(), WebhookEvent::DownloadComplete);
+        delivery.mark_failed("Connection refused".to_string(), None);
+        assert_eq!(delivery.status_code, None);
+        assert_eq!(delivery.status, DeliveryStatus::Failed);
+        assert_eq!(delivery.error, Some("Connection refused".to_string()));
+    }
+
+    #[test]
+    fn test_webhook_delivery_increment_retry_multiple() {
+        let mut delivery = WebhookDelivery::new("ep-1".to_string(), WebhookEvent::DownloadComplete);
+        for i in 1..=10 {
+            delivery.increment_retry();
+            assert_eq!(delivery.retry_count, i);
+        }
+    }
+
+    // --- WebhookPayload: serde ---
+    #[test]
+    fn test_webhook_payload_serde_all_none() {
+        let payload = WebhookPayload {
+            event: "download_complete".to_string(),
+            timestamp: Utc::now(),
+            task_id: None,
+            task_name: None,
+            task_url: None,
+            task_size: None,
+            task_downloaded: None,
+            task_progress: None,
+            task_error: None,
+            task_tags: Vec::new(),
+            task_group: None,
+            metadata: HashMap::new(),
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        // skip_serializing_if should omit None fields
+        assert!(!json.contains("task_id"));
+        assert!(!json.contains("task_name"));
+        assert!(!json.contains("task_url"));
+        assert!(!json.contains("task_size"));
+        assert!(!json.contains("task_progress"));
+        assert!(!json.contains("task_error"));
+        assert!(!json.contains("task_tags"));
+        assert!(!json.contains("task_group"));
+        assert!(!json.contains("metadata"));
+    }
+
+    #[test]
+    fn test_webhook_payload_serde_with_all_fields() {
+        let mut metadata = HashMap::new();
+        metadata.insert("key1".to_string(), "value1".to_string());
+
+        let payload = WebhookPayload {
+            event: "download_complete".to_string(),
+            timestamp: Utc::now(),
+            task_id: Some("task-1".to_string()),
+            task_name: Some("file.zip".to_string()),
+            task_url: Some("https://example.com/file.zip".to_string()),
+            task_size: Some(1024),
+            task_downloaded: Some(512),
+            task_progress: Some(50.0),
+            task_error: Some("timeout".to_string()),
+            task_tags: vec!["tag1".to_string()],
+            task_group: Some("group1".to_string()),
+            metadata,
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("task-1"));
+        assert!(json.contains("file.zip"));
+        assert!(json.contains("key1"));
+
+        let deserialized: WebhookPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.task_id, Some("task-1".to_string()));
+        assert_eq!(deserialized.task_size, Some(1024));
+    }
+
+    #[test]
+    fn test_webhook_payload_unicode() {
+        let payload = WebhookPayload {
+            event: "download_complete".to_string(),
+            timestamp: Utc::now(),
+            task_id: Some("任务-123".to_string()),
+            task_name: Some("测试文件.zip".to_string()),
+            task_url: None,
+            task_size: None,
+            task_downloaded: None,
+            task_progress: None,
+            task_error: Some("连接超时".to_string()),
+            task_tags: vec!["标签".to_string()],
+            task_group: None,
+            metadata: HashMap::new(),
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let deserialized: WebhookPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.task_id, Some("任务-123".to_string()));
+        assert_eq!(deserialized.task_name, Some("测试文件.zip".to_string()));
+    }
+
+    #[test]
+    fn test_webhook_payload_emoji() {
+        let payload = WebhookPayload {
+            event: "download_complete".to_string(),
+            timestamp: Utc::now(),
+            task_id: Some("🎯-task".to_string()),
+            task_name: Some("🚀-file.zip".to_string()),
+            task_url: None,
+            task_size: None,
+            task_downloaded: None,
+            task_progress: None,
+            task_error: None,
+            task_tags: vec!["⚡".to_string()],
+            task_group: None,
+            metadata: HashMap::new(),
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let deserialized: WebhookPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.task_id, Some("🎯-task".to_string()));
+    }
+
+    // --- WebhookConfig: serde ---
+    #[test]
+    fn test_webhook_config_serde_roundtrip() {
+        let config = WebhookConfig {
+            enabled: false,
+            max_history_per_endpoint: 50,
+            global_timeout_secs: Some(60),
+            log_deliveries: false,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: WebhookConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.enabled, false);
+        assert_eq!(deserialized.max_history_per_endpoint, 50);
+        assert_eq!(deserialized.global_timeout_secs, Some(60));
+        assert_eq!(deserialized.log_deliveries, false);
+    }
+
+    #[test]
+    fn test_webhook_config_serde_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"max_history_per_endpoint":100,"extra_field":"ignored"}"#;
+        let config: WebhookConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.max_history_per_endpoint, 100);
+    }
+
+    #[test]
+    fn test_webhook_config_clone_debug() {
+        let config = WebhookConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.enabled, config.enabled);
+        assert_eq!(
+            cloned.max_history_per_endpoint,
+            config.max_history_per_endpoint
+        );
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("WebhookConfig"));
+    }
+
+    // --- WebhookSummary: serde + traits ---
+    #[test]
+    fn test_webhook_summary_serde_roundtrip() {
+        let summary = WebhookSummary {
+            total_endpoints: 10,
+            enabled_endpoints: 8,
+            total_deliveries: 500,
+            successful_deliveries: 450,
+            failed_deliveries: 50,
+            success_rate: 90.0,
+        };
+
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: WebhookSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.total_endpoints, 10);
+        assert_eq!(deserialized.success_rate, 90.0);
+    }
+
+    #[test]
+    fn test_webhook_summary_clone_debug() {
+        let summary = WebhookSummary {
+            total_endpoints: 1,
+            enabled_endpoints: 1,
+            total_deliveries: 0,
+            successful_deliveries: 0,
+            failed_deliveries: 0,
+            success_rate: 100.0,
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_endpoints, summary.total_endpoints);
+        let debug_str = format!("{:?}", summary);
+        assert!(debug_str.contains("WebhookSummary"));
+    }
+
+    // --- WebhookEndpointUpdate: Default ---
+    #[test]
+    fn test_webhook_endpoint_update_default() {
+        let update = WebhookEndpointUpdate::default();
+        assert!(update.url.is_none());
+        assert!(update.name.is_none());
+        assert!(update.enabled.is_none());
+        assert!(update.secret.is_none());
+        assert!(update.timeout_secs.is_none());
+        assert!(update.max_retries.is_none());
+        assert!(update.events.is_none());
+        assert!(update.headers.is_none());
+    }
+
+    // --- WebhookManager: endpoint operations ---
+    #[test]
+    fn test_webhook_manager_update_endpoint_not_found() {
+        let mut manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+        let updates = WebhookEndpointUpdate::default();
+        let result = manager.update_endpoint("nonexistent", updates);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            WebhookError::EndpointNotFound(_)
+        ));
+    }
+
+    #[test]
+    fn test_webhook_manager_get_endpoint_not_found() {
+        let manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+        assert!(manager.get_endpoint("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_webhook_manager_get_history_not_found() {
+        let manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+        assert!(manager.get_history("nonexistent", 10).is_empty());
+    }
+
+    #[test]
+    fn test_webhook_manager_clear_history_not_found() {
+        let mut manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+        let result = manager.clear_history("nonexistent");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            WebhookError::EndpointNotFound(_)
+        ));
+    }
+
+    #[test]
+    fn test_webhook_manager_update_all_fields() {
+        let mut manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+        let endpoint = WebhookEndpoint::new(
+            "https://example.com/webhook".to_string(),
+            "Test".to_string(),
+        );
+        let id = manager.add_endpoint(endpoint).unwrap();
+
+        let mut headers = HashMap::new();
+        headers.insert("X-Custom".to_string(), "value".to_string());
+
+        let updates = WebhookEndpointUpdate {
+            url: Some("https://new.example.com/hook".to_string()),
+            name: Some("New Name".to_string()),
+            enabled: Some(false),
+            secret: Some("new-secret".to_string()),
+            timeout_secs: Some(120),
+            max_retries: Some(5),
+            events: Some(vec![WebhookEvent::DownloadComplete]),
+            headers: Some(headers),
+        };
+        manager.update_endpoint(&id, updates).unwrap();
+
+        let updated = manager.get_endpoint(&id).unwrap();
+        assert_eq!(updated.url, "https://new.example.com/hook");
+        assert_eq!(updated.name, "New Name");
+        assert!(!updated.enabled);
+        assert_eq!(updated.secret, Some("new-secret".to_string()));
+        assert_eq!(updated.timeout_secs, 120);
+        assert_eq!(updated.max_retries, 5);
+        assert_eq!(updated.events, vec![WebhookEvent::DownloadComplete]);
+        assert!(updated.headers.contains_key("X-Custom"));
+    }
+
+    #[test]
+    fn test_webhook_manager_record_delivery_trimming() {
+        let mut manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+        manager.config.max_history_per_endpoint = 3;
+
+        let endpoint = WebhookEndpoint::new(
+            "https://example.com/webhook".to_string(),
+            "Test".to_string(),
+        );
+        let id = manager.add_endpoint(endpoint).unwrap();
+
+        // Record 5 deliveries
+        for _ in 0..5 {
+            let delivery = WebhookDelivery::new(id.clone(), WebhookEvent::DownloadComplete);
+            manager.record_delivery(&id, delivery);
+        }
+
+        // Should be trimmed to 3
+        assert_eq!(manager.get_history(&id, 10).len(), 3);
+    }
+
+    #[test]
+    fn test_webhook_manager_multiple_endpoints_independent() {
+        let mut manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+
+        let ep1 =
+            WebhookEndpoint::new("https://example.com/hook1".to_string(), "Hook1".to_string());
+        let ep2 =
+            WebhookEndpoint::new("https://example.com/hook2".to_string(), "Hook2".to_string());
+        let id1 = manager.add_endpoint(ep1).unwrap();
+        let id2 = manager.add_endpoint(ep2).unwrap();
+
+        manager.record_delivery(
+            &id1,
+            WebhookDelivery::new(id1.clone(), WebhookEvent::DownloadComplete),
+        );
+        manager.record_delivery(
+            &id1,
+            WebhookDelivery::new(id1.clone(), WebhookEvent::DownloadFailed),
+        );
+
+        assert_eq!(manager.get_history(&id1, 10).len(), 2);
+        assert_eq!(manager.get_history(&id2, 10).len(), 0);
+    }
+
+    // --- WebhookError: Display + From ---
+    #[test]
+    fn test_webhook_error_display() {
+        let err = WebhookError::InvalidUrl("bad url".to_string());
+        assert_eq!(format!("{}", err), "invalid URL: bad url");
+
+        let err = WebhookError::EndpointNotFound("ep-1".to_string());
+        assert_eq!(format!("{}", err), "endpoint not found: ep-1");
+    }
+
+    #[test]
+    fn test_webhook_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err: WebhookError = io_err.into();
+        assert!(matches!(err, WebhookError::Io(_)));
+        assert!(format!("{}", err).contains("file not found"));
+    }
+
+    #[test]
+    fn test_webhook_error_from_serde() {
+        let serde_err = serde_json::from_str::<WebhookConfig>("invalid json").unwrap_err();
+        let err: WebhookError = serde_err.into();
+        assert!(matches!(err, WebhookError::Serialize(_)));
+    }
+
+    #[test]
+    fn test_webhook_error_debug() {
+        let err = WebhookError::InvalidUrl("test".to_string());
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("InvalidUrl"));
+    }
+
+    // --- Persistence ---
+    #[tokio::test]
+    async fn test_webhook_manager_save_config_creates_file() {
+        let dir = std::env::temp_dir().join(format!("webhook_test_{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let manager = WebhookManager::new(dir.clone());
+        manager.save_config().await.unwrap();
+
+        let config_path = dir.join("webhook_config.json");
+        assert!(config_path.exists());
+
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_webhook_manager_load_config_missing_file() {
+        let dir = std::env::temp_dir().join(format!("webhook_test_{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let mut manager = WebhookManager::new(dir.clone());
+        let result = manager.load_config().await;
+        assert!(result.is_ok()); // Missing file is OK
+
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_webhook_manager_save_load_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("webhook_test_{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let mut manager = WebhookManager::new(dir.clone());
+        let endpoint = WebhookEndpoint::new(
+            "https://example.com/webhook".to_string(),
+            "Test Hook".to_string(),
+        );
+        let id = manager.add_endpoint(endpoint).unwrap();
+
+        manager.save_config().await.unwrap();
+
+        let mut loaded = WebhookManager::new(dir.clone());
+        loaded.load_config().await.unwrap();
+
+        assert!(loaded.get_endpoint(&id).is_some());
+        assert_eq!(loaded.get_endpoint(&id).unwrap().name, "Test Hook");
+
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_webhook_manager_load_config_corrupt_json() {
+        let dir = std::env::temp_dir().join(format!("webhook_test_{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let config_path = dir.join("webhook_config.json");
+        tokio::fs::write(&config_path, "not valid json")
+            .await
+            .unwrap();
+
+        let mut manager = WebhookManager::new(dir.clone());
+        let result = manager.load_config().await;
+        assert!(result.is_err());
+
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_webhook_manager_save_overwrite() {
+        let dir = std::env::temp_dir().join(format!("webhook_test_{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let mut manager = WebhookManager::new(dir.clone());
+
+        // First save
+        manager.save_config().await.unwrap();
+
+        // Add endpoint and save again
+        let endpoint = WebhookEndpoint::new(
+            "https://example.com/webhook".to_string(),
+            "New Hook".to_string(),
+        );
+        manager.add_endpoint(endpoint).unwrap();
+        manager.save_config().await.unwrap();
+
+        // Load and verify
+        let mut loaded = WebhookManager::new(dir.clone());
+        loaded.load_config().await.unwrap();
+        assert_eq!(loaded.list_endpoints().len(), 1);
+
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    // --- Unicode endpoint names ---
+    #[test]
+    fn test_webhook_endpoint_unicode_name() {
+        let endpoint = WebhookEndpoint::new(
+            "https://example.com/webhook".to_string(),
+            "中文 webhook".to_string(),
+        );
+        assert_eq!(endpoint.name, "中文 webhook");
+    }
+
+    #[test]
+    fn test_webhook_endpoint_emoji_name() {
+        let endpoint = WebhookEndpoint::new(
+            "https://example.com/webhook".to_string(),
+            "🚀 webhook".to_string(),
+        );
+        assert_eq!(endpoint.name, "🚀 webhook");
+    }
+
+    // --- Edge cases ---
+    #[test]
+    fn test_webhook_manager_add_endpoint_empty_url() {
+        let mut manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+        let mut endpoint = WebhookEndpoint::new("".to_string(), "Test".to_string());
+        endpoint.url = "".to_string();
+        let result = manager.add_endpoint(endpoint);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_webhook_manager_add_endpoint_http() {
+        let mut manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+        let endpoint =
+            WebhookEndpoint::new("http://example.com/webhook".to_string(), "Test".to_string());
+        let result = manager.add_endpoint(endpoint);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_webhook_endpoint_should_send_disabled_with_events() {
+        let mut endpoint = WebhookEndpoint::new(
+            "https://example.com/webhook".to_string(),
+            "Test".to_string(),
+        );
+        endpoint.add_event(WebhookEvent::DownloadComplete);
+        endpoint.enabled = false;
+
+        // Even if event matches, disabled endpoint returns false
+        assert!(!endpoint.should_send(WebhookEvent::DownloadComplete));
+    }
+
+    #[test]
+    fn test_webhook_endpoint_default_values() {
+        let endpoint = WebhookEndpoint::new(
+            "https://example.com/webhook".to_string(),
+            "Test".to_string(),
+        );
+        assert!(endpoint.enabled);
+        assert_eq!(endpoint.timeout_secs, 30);
+        assert_eq!(endpoint.max_retries, 3);
+    }
+
+    #[test]
+    fn test_webhook_endpoint_serde_defaults() {
+        let json = r#"{"id":"test","url":"https://example.com","name":"Test","created_at":"2024-01-01T00:00:00Z"}"#;
+        let endpoint: WebhookEndpoint = serde_json::from_str(json).unwrap();
+        assert!(endpoint.enabled); // default_true
+        assert_eq!(endpoint.timeout_secs, 30); // default_timeout
+        assert_eq!(endpoint.max_retries, 3); // default_max_retries
+        assert!(endpoint.events.is_empty()); // default
+        assert!(endpoint.secret.is_none()); // default
+        assert!(endpoint.headers.is_empty()); // default
+    }
+
+    // --- format_webhook_summary ---
+    #[test]
+    fn test_format_webhook_summary_empty() {
+        let summary = WebhookSummary {
+            total_endpoints: 0,
+            enabled_endpoints: 0,
+            total_deliveries: 0,
+            successful_deliveries: 0,
+            failed_deliveries: 0,
+            success_rate: 100.0,
+        };
+        let formatted = format_webhook_summary(&summary);
+        assert!(formatted.contains("0 total"));
+        assert!(formatted.contains("100.0%"));
+    }
+
+    #[test]
+    fn test_format_webhook_summary_unicode() {
+        let summary = WebhookSummary {
+            total_endpoints: 3,
+            enabled_endpoints: 2,
+            total_deliveries: 100,
+            successful_deliveries: 90,
+            failed_deliveries: 10,
+            success_rate: 90.0,
+        };
+        let formatted = format_webhook_summary(&summary);
+        assert!(formatted.contains("📡"));
+        assert!(formatted.contains("3 total"));
+        assert!(formatted.contains("2 enabled"));
+        assert!(formatted.contains("90 successful"));
+        assert!(formatted.contains("10 failed"));
+    }
+
+    // --- Complex workflow ---
+    #[test]
+    fn test_webhook_manager_full_lifecycle() {
+        let mut manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+
+        // Create endpoints
+        let ep1 = WebhookEndpoint::new(
+            "https://example.com/hook1".to_string(),
+            "Hook 1".to_string(),
+        );
+        let ep2 = WebhookEndpoint::new(
+            "https://example.com/hook2".to_string(),
+            "Hook 2".to_string(),
+        );
+        let id1 = manager.add_endpoint(ep1).unwrap();
+        let id2 = manager.add_endpoint(ep2).unwrap();
+
+        // Record deliveries
+        let mut d1 = WebhookDelivery::new(id1.clone(), WebhookEvent::DownloadComplete);
+        d1.mark_success(200);
+        manager.record_delivery(&id1, d1);
+
+        let mut d2 = WebhookDelivery::new(id2.clone(), WebhookEvent::DownloadFailed);
+        d2.mark_failed("timeout".to_string(), Some(504));
+        manager.record_delivery(&id2, d2);
+
+        // Verify summary
+        let summary = manager.get_summary();
+        assert_eq!(summary.total_endpoints, 2);
+        assert_eq!(summary.total_deliveries, 2);
+        assert_eq!(summary.successful_deliveries, 1);
+        assert_eq!(summary.failed_deliveries, 1);
+        assert_eq!(summary.success_rate, 50.0);
+
+        // Update endpoint
+        let updates = WebhookEndpointUpdate {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        manager.update_endpoint(&id1, updates).unwrap();
+        assert!(!manager.get_endpoint(&id1).unwrap().enabled);
+
+        // Clear and verify
+        manager.clear_history(&id1).unwrap();
+        assert_eq!(manager.get_history(&id1, 10).len(), 0);
+        assert_eq!(manager.get_history(&id2, 10).len(), 1);
+
+        // Remove endpoint
+        manager.remove_endpoint(&id1).unwrap();
+        assert_eq!(manager.list_endpoints().len(), 1);
+    }
+
+    #[test]
+    fn test_webhook_manager_get_all_history() {
+        let mut manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+
+        let ep1 =
+            WebhookEndpoint::new("https://example.com/hook1".to_string(), "Hook1".to_string());
+        let ep2 =
+            WebhookEndpoint::new("https://example.com/hook2".to_string(), "Hook2".to_string());
+        let id1 = manager.add_endpoint(ep1).unwrap();
+        let id2 = manager.add_endpoint(ep2).unwrap();
+
+        manager.record_delivery(
+            &id1,
+            WebhookDelivery::new(id1.clone(), WebhookEvent::DownloadComplete),
+        );
+        manager.record_delivery(
+            &id2,
+            WebhookDelivery::new(id2.clone(), WebhookEvent::DownloadFailed),
+        );
+
+        let all = manager.get_all_history();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_webhook_manager_set_config() {
+        let mut manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+
+        let config = WebhookConfig {
+            enabled: false,
+            max_history_per_endpoint: 50,
+            global_timeout_secs: Some(120),
+            log_deliveries: false,
+        };
+        manager.set_config(config);
+
+        assert!(!manager.config().enabled);
+        assert_eq!(manager.config().max_history_per_endpoint, 50);
+        assert_eq!(manager.config().global_timeout_secs, Some(120));
+    }
+
+    #[test]
+    fn test_compute_hmac_signature_empty_payload() {
+        let signature = compute_hmac_signature("", "secret").unwrap();
+        assert_eq!(signature.len(), 64);
+    }
+
+    #[test]
+    fn test_compute_hmac_signature_unicode() {
+        let payload = r#"{"event":"download_complete","task":"测试文件"}"#;
+        let secret = "密钥";
+        let signature = compute_hmac_signature(payload, secret).unwrap();
+        assert_eq!(signature.len(), 64);
+    }
+
+    #[test]
+    fn test_webhook_endpoint_id_uniqueness() {
+        let ep1 =
+            WebhookEndpoint::new("https://example.com/hook1".to_string(), "Hook1".to_string());
+        let ep2 =
+            WebhookEndpoint::new("https://example.com/hook2".to_string(), "Hook2".to_string());
+        assert_ne!(ep1.id, ep2.id);
+    }
+
+    #[test]
+    fn test_webhook_delivery_id_uniqueness() {
+        let d1 = WebhookDelivery::new("ep-1".to_string(), WebhookEvent::DownloadComplete);
+        let d2 = WebhookDelivery::new("ep-1".to_string(), WebhookEvent::DownloadComplete);
+        assert_ne!(d1.id, d2.id);
+    }
+
+    #[test]
+    fn test_webhook_manager_summary_all_failed() {
+        let mut manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+        let endpoint = WebhookEndpoint::new(
+            "https://example.com/webhook".to_string(),
+            "Test".to_string(),
+        );
+        let id = manager.add_endpoint(endpoint).unwrap();
+
+        for _ in 0..5 {
+            let mut d = WebhookDelivery::new(id.clone(), WebhookEvent::DownloadFailed);
+            d.mark_failed("error".to_string(), Some(500));
+            manager.record_delivery(&id, d);
+        }
+
+        let summary = manager.get_summary();
+        assert_eq!(summary.successful_deliveries, 0);
+        assert_eq!(summary.failed_deliveries, 5);
+        assert_eq!(summary.success_rate, 0.0);
+    }
+
+    #[test]
+    fn test_webhook_manager_summary_all_success() {
+        let mut manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+        let endpoint = WebhookEndpoint::new(
+            "https://example.com/webhook".to_string(),
+            "Test".to_string(),
+        );
+        let id = manager.add_endpoint(endpoint).unwrap();
+
+        for _ in 0..5 {
+            let mut d = WebhookDelivery::new(id.clone(), WebhookEvent::DownloadComplete);
+            d.mark_success(200);
+            manager.record_delivery(&id, d);
+        }
+
+        let summary = manager.get_summary();
+        assert_eq!(summary.successful_deliveries, 5);
+        assert_eq!(summary.failed_deliveries, 0);
+        assert_eq!(summary.success_rate, 100.0);
+    }
+
+    #[test]
+    fn test_webhook_endpoint_add_remove_all_events() {
+        let mut endpoint = WebhookEndpoint::new(
+            "https://example.com/webhook".to_string(),
+            "Test".to_string(),
+        );
+
+        // Add all event types
+        for event in WebhookEvent::all() {
+            endpoint.add_event(*event);
+        }
+        assert_eq!(endpoint.events.len(), 9);
+
+        // Remove all one by one
+        for event in WebhookEvent::all() {
+            endpoint.remove_event(*event);
+        }
+        assert!(endpoint.events.is_empty());
+    }
+
+    #[test]
+    fn test_webhook_manager_remove_endpoint_clears_history() {
+        let mut manager = WebhookManager::new(std::path::PathBuf::from("/tmp/test"));
+        let endpoint = WebhookEndpoint::new(
+            "https://example.com/webhook".to_string(),
+            "Test".to_string(),
+        );
+        let id = manager.add_endpoint(endpoint).unwrap();
+
+        manager.record_delivery(
+            &id,
+            WebhookDelivery::new(id.clone(), WebhookEvent::DownloadComplete),
+        );
+        assert_eq!(manager.get_history(&id, 10).len(), 1);
+
+        manager.remove_endpoint(&id).unwrap();
+        // History should be gone too
+        assert!(manager.get_history(&id, 10).is_empty());
     }
 }
