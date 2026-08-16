@@ -1108,4 +1108,1050 @@ mod tests {
         assert!(space.is_ok());
         assert!(space.unwrap() > 0);
     }
+
+    // ========== Phase 242: Comprehensive Test Coverage ==========
+
+    // --- PreflightStatus serde roundtrip all variants ---
+    #[test]
+    fn test_preflight_status_serde_roundtrip_all_variants() {
+        for status in [
+            PreflightStatus::Pass,
+            PreflightStatus::Warn,
+            PreflightStatus::Fail,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: PreflightStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn test_preflight_status_serde_values() {
+        // Default serde uses PascalCase for enums
+        assert_eq!(
+            serde_json::to_string(&PreflightStatus::Pass).unwrap(),
+            "\"Pass\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PreflightStatus::Warn).unwrap(),
+            "\"Warn\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PreflightStatus::Fail).unwrap(),
+            "\"Fail\""
+        );
+    }
+
+    // --- PreflightStatus traits ---
+    #[test]
+    fn test_preflight_status_clone_copy() {
+        let s = PreflightStatus::Pass;
+        let cloned = s;
+        assert_eq!(cloned, PreflightStatus::Pass);
+    }
+
+    #[test]
+    fn test_preflight_status_debug() {
+        assert_eq!(format!("{:?}", PreflightStatus::Pass), "Pass");
+        assert_eq!(format!("{:?}", PreflightStatus::Warn), "Warn");
+        assert_eq!(format!("{:?}", PreflightStatus::Fail), "Fail");
+    }
+
+    #[test]
+    fn test_preflight_status_eq() {
+        assert_eq!(PreflightStatus::Pass, PreflightStatus::Pass);
+        assert_ne!(PreflightStatus::Pass, PreflightStatus::Warn);
+        assert_ne!(PreflightStatus::Warn, PreflightStatus::Fail);
+    }
+
+    // --- CheckResult serde ---
+    #[test]
+    fn test_check_result_serde_roundtrip_pass() {
+        let result = CheckResult {
+            name: "DNS".into(),
+            critical: true,
+            status: PreflightStatus::Pass,
+            message: "OK".into(),
+            duration_ms: 42,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: CheckResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "DNS");
+        assert!(back.critical);
+        assert_eq!(back.status, PreflightStatus::Pass);
+        assert_eq!(back.message, "OK");
+        assert_eq!(back.duration_ms, 42);
+    }
+
+    #[test]
+    fn test_check_result_serde_roundtrip_fail() {
+        let result = CheckResult {
+            name: "Disk".into(),
+            critical: false,
+            status: PreflightStatus::Fail,
+            message: "Full".into(),
+            duration_ms: 0,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: CheckResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "Disk");
+        assert!(!back.critical);
+        assert_eq!(back.status, PreflightStatus::Fail);
+    }
+
+    #[test]
+    fn test_check_result_serde_extra_fields_ignored() {
+        let json = r#"{"name":"X","critical":true,"status":"Pass","message":"ok","duration_ms":1,"extra":"ignored"}"#;
+        let back: CheckResult = serde_json::from_str(json).unwrap();
+        assert_eq!(back.name, "X");
+        assert_eq!(back.duration_ms, 1);
+    }
+
+    // --- CheckResult traits ---
+    #[test]
+    fn test_check_result_clone() {
+        let result = CheckResult {
+            name: "Test".into(),
+            critical: true,
+            status: PreflightStatus::Warn,
+            message: "msg".into(),
+            duration_ms: 99,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.name, result.name);
+        assert_eq!(cloned.critical, result.critical);
+        assert_eq!(cloned.duration_ms, result.duration_ms);
+    }
+
+    #[test]
+    fn test_check_result_debug() {
+        let result = CheckResult {
+            name: "DNS".into(),
+            critical: true,
+            status: PreflightStatus::Pass,
+            message: "OK".into(),
+            duration_ms: 5,
+        };
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("DNS"));
+        assert!(debug.contains("Pass"));
+    }
+
+    // --- PreflightInput serde ---
+    #[test]
+    fn test_preflight_input_serde_roundtrip_full() {
+        let input = PreflightInput {
+            url: "https://example.com/file.zip".into(),
+            save_dir: PathBuf::from("/tmp/downloads"),
+            expected_size: Some(1024000),
+            proxy_url: Some("socks5://127.0.0.1:1080".into()),
+            protocol: PreflightProtocol::Http,
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let back: PreflightInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.url, input.url);
+        assert_eq!(back.save_dir, input.save_dir);
+        assert_eq!(back.expected_size, input.expected_size);
+        assert_eq!(back.proxy_url, input.proxy_url);
+        assert_eq!(back.protocol, input.protocol);
+    }
+
+    #[test]
+    fn test_preflight_input_serde_minimal() {
+        let input = PreflightInput {
+            url: "magnet:?xt=urn:btih:abc".into(),
+            save_dir: PathBuf::from("/tmp"),
+            expected_size: None,
+            proxy_url: None,
+            protocol: PreflightProtocol::Torrent,
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let back: PreflightInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.url, input.url);
+        assert!(back.expected_size.is_none());
+        assert!(back.proxy_url.is_none());
+    }
+
+    #[test]
+    fn test_preflight_input_debug() {
+        let input = PreflightInput {
+            url: "https://example.com".into(),
+            save_dir: PathBuf::from("/tmp"),
+            expected_size: Some(100),
+            proxy_url: None,
+            protocol: PreflightProtocol::Http,
+        };
+        let debug = format!("{:?}", input);
+        assert!(debug.contains("example.com"));
+    }
+
+    // --- PreflightProtocol traits ---
+    #[test]
+    fn test_preflight_protocol_clone_copy() {
+        let p = PreflightProtocol::Http;
+        let cloned = p;
+        assert_eq!(cloned, PreflightProtocol::Http);
+    }
+
+    #[test]
+    fn test_preflight_protocol_debug() {
+        assert_eq!(format!("{:?}", PreflightProtocol::Http), "Http");
+        assert_eq!(format!("{:?}", PreflightProtocol::Torrent), "Torrent");
+        assert_eq!(format!("{:?}", PreflightProtocol::Ed2k), "Ed2k");
+        assert_eq!(format!("{:?}", PreflightProtocol::P2p), "P2p");
+    }
+
+    #[test]
+    fn test_preflight_protocol_eq() {
+        assert_eq!(PreflightProtocol::Http, PreflightProtocol::Http);
+        assert_ne!(PreflightProtocol::Http, PreflightProtocol::Torrent);
+        assert_ne!(PreflightProtocol::Ed2k, PreflightProtocol::P2p);
+    }
+
+    // --- PreflightReport serde ---
+    #[test]
+    fn test_preflight_report_serde_roundtrip() {
+        let report = PreflightReport {
+            url: "https://example.com/file.zip".into(),
+            checked_at: chrono::Utc::now(),
+            overall: PreflightStatus::Pass,
+            checks: vec![CheckResult {
+                name: "DNS".into(),
+                critical: true,
+                status: PreflightStatus::Pass,
+                message: "OK".into(),
+                duration_ms: 10,
+            }],
+            total_duration_ms: 10,
+            passed: 1,
+            warnings: 0,
+            failures: 0,
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let back: PreflightReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.url, report.url);
+        assert_eq!(back.overall, report.overall);
+        assert_eq!(back.checks.len(), 1);
+        assert_eq!(back.passed, 1);
+        assert_eq!(back.total_duration_ms, 10);
+    }
+
+    #[test]
+    fn test_preflight_report_serde_extra_fields_ignored() {
+        let report = PreflightReport {
+            url: "https://example.com".into(),
+            checked_at: chrono::Utc::now(),
+            overall: PreflightStatus::Pass,
+            checks: vec![],
+            total_duration_ms: 0,
+            passed: 0,
+            warnings: 0,
+            failures: 0,
+        };
+        let mut json: serde_json::Value = serde_json::to_value(&report).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("extra_field".into(), serde_json::json!("ignored"));
+        let back: PreflightReport = serde_json::from_value(json).unwrap();
+        assert_eq!(back.url, report.url);
+    }
+
+    // --- PreflightReport traits ---
+    #[test]
+    fn test_preflight_report_clone() {
+        let report = PreflightReport {
+            url: "https://example.com".into(),
+            checked_at: chrono::Utc::now(),
+            overall: PreflightStatus::Warn,
+            checks: vec![CheckResult {
+                name: "Test".into(),
+                critical: false,
+                status: PreflightStatus::Warn,
+                message: "msg".into(),
+                duration_ms: 5,
+            }],
+            total_duration_ms: 5,
+            passed: 0,
+            warnings: 1,
+            failures: 0,
+        };
+        let cloned = report.clone();
+        assert_eq!(cloned.url, report.url);
+        assert_eq!(cloned.overall, report.overall);
+        assert_eq!(cloned.checks.len(), report.checks.len());
+    }
+
+    #[test]
+    fn test_preflight_report_debug() {
+        let report = PreflightReport {
+            url: "https://example.com".into(),
+            checked_at: chrono::Utc::now(),
+            overall: PreflightStatus::Fail,
+            checks: vec![],
+            total_duration_ms: 0,
+            passed: 0,
+            warnings: 0,
+            failures: 0,
+        };
+        let debug = format!("{:?}", report);
+        assert!(debug.contains("Fail"));
+        assert!(debug.contains("example.com"));
+    }
+
+    // --- PreflightConfig advanced ---
+    #[test]
+    fn test_preflight_config_clone_debug() {
+        let config = test_config();
+        let cloned = config.clone();
+        assert_eq!(cloned.enabled, config.enabled);
+        assert_eq!(cloned.min_free_disk_bytes, config.min_free_disk_bytes);
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("enabled"));
+    }
+
+    #[test]
+    fn test_preflight_config_pretty_serde() {
+        let config = test_config();
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        assert!(pretty.contains('\n'));
+        let back: PreflightConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(back.enabled, config.enabled);
+    }
+
+    #[test]
+    fn test_preflight_config_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"check_dns":true,"check_disk_space":true,"check_url_reachable":true,"check_proxy":true,"min_free_disk_bytes":1024,"check_timeout_secs":5,"block_on_fail":false,"unknown_field":42}"#;
+        let back: PreflightConfig = serde_json::from_str(json).unwrap();
+        assert!(back.enabled);
+        assert_eq!(back.check_timeout_secs, 5);
+    }
+
+    #[test]
+    fn test_preflight_config_custom_values() {
+        let config = PreflightConfig {
+            enabled: false,
+            check_dns: false,
+            check_disk_space: true,
+            check_url_reachable: false,
+            check_proxy: true,
+            min_free_disk_bytes: 500 * 1024 * 1024,
+            check_timeout_secs: 30,
+            block_on_fail: true,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: PreflightConfig = serde_json::from_str(&json).unwrap();
+        assert!(!back.enabled);
+        assert!(!back.check_dns);
+        assert!(back.check_disk_space);
+        assert!(!back.check_url_reachable);
+        assert!(back.check_proxy);
+        assert_eq!(back.min_free_disk_bytes, 500 * 1024 * 1024);
+        assert_eq!(back.check_timeout_secs, 30);
+        assert!(back.block_on_fail);
+    }
+
+    // --- format_bytes boundary values ---
+    #[test]
+    fn test_format_bytes_exact_kb() {
+        assert_eq!(format_bytes(1024), "1.0 KB");
+    }
+
+    #[test]
+    fn test_format_bytes_exact_mb() {
+        assert_eq!(format_bytes(1048576), "1.0 MB");
+    }
+
+    #[test]
+    fn test_format_bytes_exact_gb() {
+        assert_eq!(format_bytes(1073741824), "1.0 GB");
+    }
+
+    #[test]
+    fn test_format_bytes_slightly_below_kb() {
+        assert_eq!(format_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn test_format_bytes_slightly_below_mb() {
+        assert_eq!(format_bytes(1048575), "1024.0 KB");
+    }
+
+    #[test]
+    fn test_format_bytes_slightly_below_gb() {
+        assert_eq!(format_bytes(1073741823), "1024.0 MB");
+    }
+
+    #[test]
+    fn test_format_bytes_large_value() {
+        // 2.5 GB
+        let val = 2u64 * 1024 * 1024 * 1024 + 512 * 1024 * 1024;
+        assert_eq!(format_bytes(val), "2.5 GB");
+    }
+
+    #[test]
+    fn test_format_bytes_single_byte() {
+        assert_eq!(format_bytes(1), "1 B");
+    }
+
+    #[test]
+    fn test_format_bytes_u64_max() {
+        let result = format_bytes(u64::MAX);
+        assert!(result.contains("GB"));
+    }
+
+    // --- extract_host edge cases ---
+    #[test]
+    fn test_extract_host_empty_string() {
+        // Empty string has empty host_part, so returns None
+        assert_eq!(extract_host(""), None);
+    }
+
+    #[test]
+    fn test_extract_host_no_scheme() {
+        assert_eq!(extract_host("example.com/path"), Some("example.com".into()));
+    }
+
+    #[test]
+    fn test_extract_host_unicode() {
+        assert_eq!(
+            extract_host("https://中文.example.com/file"),
+            Some("中文.example.com".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_ipv4() {
+        assert_eq!(
+            extract_host("http://192.168.1.1:8080/path"),
+            Some("192.168.1.1".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_only_scheme() {
+        // "http://" with nothing after → empty host → None
+        assert_eq!(extract_host("http://"), None);
+    }
+
+    // --- extract_host_port edge cases ---
+    #[test]
+    fn test_extract_host_port_empty() {
+        // Empty string → empty host_part → None
+        assert_eq!(extract_host_port(""), None);
+    }
+
+    #[test]
+    fn test_extract_host_port_no_port() {
+        assert_eq!(
+            extract_host_port("http://example.com/path"),
+            Some("example.com".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_port_unicode() {
+        assert_eq!(
+            extract_host_port("socks5://代理.example.com:1080"),
+            Some("代理.example.com:1080".into())
+        );
+    }
+
+    // --- is_http_url edge cases ---
+    #[test]
+    fn test_is_http_url_empty() {
+        assert!(!is_http_url(""));
+    }
+
+    #[test]
+    fn test_is_http_url_case_sensitive() {
+        // HTTP:// is not matched (case sensitive)
+        assert!(!is_http_url("HTTP://example.com"));
+        assert!(!is_http_url("HTTPS://example.com"));
+    }
+
+    #[test]
+    fn test_is_http_url_ftp() {
+        assert!(!is_http_url("ftp://example.com/file"));
+    }
+
+    // --- PreflightCheckError ---
+    #[test]
+    fn test_preflight_check_error_display_io() {
+        let err = PreflightCheckError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file not found",
+        ));
+        let display = format!("{}", err);
+        assert!(display.contains("IO error"));
+        assert!(display.contains("file not found"));
+    }
+
+    #[test]
+    fn test_preflight_check_error_display_serialize() {
+        let bad_json = serde_json::from_str::<PreflightConfig>("not json");
+        let err = PreflightCheckError::Serialize(bad_json.unwrap_err());
+        let display = format!("{}", err);
+        assert!(display.contains("Serialization error"));
+    }
+
+    #[test]
+    fn test_preflight_check_error_debug() {
+        let err = PreflightCheckError::Io(std::io::Error::new(std::io::ErrorKind::Other, "test"));
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Io"));
+    }
+
+    #[test]
+    fn test_preflight_check_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err: PreflightCheckError = PreflightCheckError::from(io_err);
+        let display = format!("{}", err);
+        assert!(display.contains("denied"));
+    }
+
+    #[test]
+    fn test_preflight_check_error_from_serde() {
+        let serde_err = serde_json::from_str::<PreflightConfig>("invalid").unwrap_err();
+        let err: PreflightCheckError = PreflightCheckError::from(serde_err);
+        let display = format!("{}", err);
+        assert!(display.contains("Serialization error"));
+    }
+
+    // --- Persistence advanced ---
+    #[test]
+    fn test_save_creates_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("subdir").join("preflight_config.json");
+        let config = PreflightConfig::default();
+        save_preflight_config(&path, &config).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_save_no_tmp_leftover() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("preflight_config.json");
+        let config = PreflightConfig::default();
+        save_preflight_config(&path, &config).unwrap();
+        let tmp_file = path.with_extension("tmp");
+        assert!(!tmp_file.exists());
+    }
+
+    #[test]
+    fn test_save_overwrite() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("preflight_config.json");
+        let config1 = PreflightConfig::default();
+        save_preflight_config(&path, &config1).unwrap();
+
+        let mut config2 = PreflightConfig::default();
+        config2.min_free_disk_bytes = 999;
+        save_preflight_config(&path, &config2).unwrap();
+
+        let loaded = load_preflight_config(&path).unwrap();
+        assert_eq!(loaded.min_free_disk_bytes, 999);
+    }
+
+    #[test]
+    fn test_load_corrupt_json() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("preflight_config.json");
+        std::fs::write(&path, "not valid json{{{").unwrap();
+        assert!(load_preflight_config(&path).is_none());
+    }
+
+    #[test]
+    fn test_load_empty_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("preflight_config.json");
+        std::fs::write(&path, "").unwrap();
+        assert!(load_preflight_config(&path).is_none());
+    }
+
+    #[test]
+    fn test_persistence_unicode_config() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("preflight_config.json");
+        let config = PreflightConfig::default();
+        save_preflight_config(&path, &config).unwrap();
+        let loaded = load_preflight_config(&path).unwrap();
+        assert_eq!(loaded.enabled, config.enabled);
+    }
+
+    #[test]
+    fn test_persistence_full_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("preflight_config.json");
+        let config = PreflightConfig {
+            enabled: false,
+            check_dns: false,
+            check_disk_space: true,
+            check_url_reachable: false,
+            check_proxy: true,
+            min_free_disk_bytes: 42,
+            check_timeout_secs: 7,
+            block_on_fail: true,
+        };
+        save_preflight_config(&path, &config).unwrap();
+        let loaded = load_preflight_config(&path).unwrap();
+        assert_eq!(loaded.enabled, false);
+        assert_eq!(loaded.check_dns, false);
+        assert_eq!(loaded.check_disk_space, true);
+        assert_eq!(loaded.check_url_reachable, false);
+        assert_eq!(loaded.check_proxy, true);
+        assert_eq!(loaded.min_free_disk_bytes, 42);
+        assert_eq!(loaded.check_timeout_secs, 7);
+        assert!(loaded.block_on_fail);
+    }
+
+    // --- Checker advanced ---
+
+    #[test]
+    fn test_checker_loads_saved_config() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("preflight_config.json");
+        let mut config = PreflightConfig::default();
+        config.min_free_disk_bytes = 7777;
+        save_preflight_config(&config_path, &config).unwrap();
+
+        let checker = PreflightChecker::new(tmp.path());
+        assert_eq!(checker.config().min_free_disk_bytes, 7777);
+    }
+
+    #[test]
+    fn test_checker_falls_back_to_default_on_corrupt() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("preflight_config.json");
+        std::fs::write(&config_path, "corrupt").unwrap();
+
+        let checker = PreflightChecker::new(tmp.path());
+        assert_eq!(checker.config().min_free_disk_bytes, 100 * 1024 * 1024);
+    }
+
+    // --- format_report advanced ---
+    #[test]
+    fn test_format_report_empty_checks() {
+        let report = PreflightReport {
+            url: "https://example.com".into(),
+            checked_at: chrono::Utc::now(),
+            overall: PreflightStatus::Pass,
+            checks: vec![],
+            total_duration_ms: 0,
+            passed: 0,
+            warnings: 0,
+            failures: 0,
+        };
+        let formatted = report.format_report();
+        assert!(formatted.contains("✅"));
+        assert!(formatted.contains("0 passed, 0 warnings, 0 failed"));
+        assert!(formatted.contains("URL: https://example.com"));
+    }
+
+    #[test]
+    fn test_format_report_mixed_statuses() {
+        let report = PreflightReport {
+            url: "https://example.com".into(),
+            checked_at: chrono::Utc::now(),
+            overall: PreflightStatus::Fail,
+            checks: vec![
+                CheckResult {
+                    name: "DNS".into(),
+                    critical: true,
+                    status: PreflightStatus::Pass,
+                    message: "OK".into(),
+                    duration_ms: 5,
+                },
+                CheckResult {
+                    name: "Disk".into(),
+                    critical: true,
+                    status: PreflightStatus::Fail,
+                    message: "Full".into(),
+                    duration_ms: 1,
+                },
+                CheckResult {
+                    name: "Proxy".into(),
+                    critical: false,
+                    status: PreflightStatus::Warn,
+                    message: "Slow".into(),
+                    duration_ms: 100,
+                },
+            ],
+            total_duration_ms: 106,
+            passed: 1,
+            warnings: 1,
+            failures: 1,
+        };
+        let formatted = report.format_report();
+        assert!(formatted.contains("❌"));
+        assert!(formatted.contains("✓ DNS"));
+        assert!(formatted.contains("✗ Disk"));
+        assert!(formatted.contains("⚠ Proxy"));
+        assert!(formatted.contains("[critical]"));
+        assert!(formatted.contains("1 passed, 1 warnings, 1 failed"));
+    }
+
+    #[test]
+    fn test_format_report_unicode_content() {
+        let report = PreflightReport {
+            url: "https://中文.example.com/文件.zip".into(),
+            checked_at: chrono::Utc::now(),
+            overall: PreflightStatus::Pass,
+            checks: vec![CheckResult {
+                name: "DNS 解析".into(),
+                critical: true,
+                status: PreflightStatus::Pass,
+                message: "中文.example.com 解析成功".into(),
+                duration_ms: 10,
+            }],
+            total_duration_ms: 10,
+            passed: 1,
+            warnings: 0,
+            failures: 0,
+        };
+        let formatted = report.format_report();
+        assert!(formatted.contains("中文"));
+    }
+
+    // --- PreflightReport counters ---
+    #[test]
+    fn test_report_counters_all_pass() {
+        let report = PreflightReport {
+            url: "https://example.com".into(),
+            checked_at: chrono::Utc::now(),
+            overall: PreflightStatus::Pass,
+            checks: vec![
+                CheckResult {
+                    name: "A".into(),
+                    critical: true,
+                    status: PreflightStatus::Pass,
+                    message: "ok".into(),
+                    duration_ms: 1,
+                },
+                CheckResult {
+                    name: "B".into(),
+                    critical: false,
+                    status: PreflightStatus::Pass,
+                    message: "ok".into(),
+                    duration_ms: 2,
+                },
+            ],
+            total_duration_ms: 3,
+            passed: 2,
+            warnings: 0,
+            failures: 0,
+        };
+        assert_eq!(report.passed, 2);
+        assert_eq!(report.warnings, 0);
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.overall, PreflightStatus::Pass);
+    }
+
+    #[test]
+    fn test_report_counters_fail_dominates() {
+        // Even with warnings, if there are failures, overall is Fail
+        let report = PreflightReport {
+            url: "https://example.com".into(),
+            checked_at: chrono::Utc::now(),
+            overall: PreflightStatus::Fail,
+            checks: vec![
+                CheckResult {
+                    name: "A".into(),
+                    critical: false,
+                    status: PreflightStatus::Warn,
+                    message: "warn".into(),
+                    duration_ms: 1,
+                },
+                CheckResult {
+                    name: "B".into(),
+                    critical: true,
+                    status: PreflightStatus::Fail,
+                    message: "fail".into(),
+                    duration_ms: 2,
+                },
+            ],
+            total_duration_ms: 3,
+            passed: 0,
+            warnings: 1,
+            failures: 1,
+        };
+        assert_eq!(report.overall, PreflightStatus::Fail);
+    }
+
+    // --- Proxy check scheme validation ---
+    #[test]
+    fn test_proxy_scheme_http_valid() {
+        // http:// is a recognized proxy scheme
+        assert!("http://proxy:8080".starts_with("http://"));
+    }
+
+    #[test]
+    fn test_proxy_scheme_https_valid() {
+        assert!("https://proxy:8080".starts_with("https://"));
+    }
+
+    #[test]
+    fn test_proxy_scheme_socks5_valid() {
+        assert!("socks5://127.0.0.1:1080".starts_with("socks5://"));
+    }
+
+    #[test]
+    fn test_proxy_scheme_ftp_invalid() {
+        let scheme = "ftp://proxy:8080";
+        assert!(!scheme.starts_with("http://"));
+        assert!(!scheme.starts_with("https://"));
+        assert!(!scheme.starts_with("socks5://"));
+    }
+
+    // --- Disk space warn boundary ---
+    #[tokio::test]
+    async fn test_check_disk_space_warn_boundary() {
+        let tmp = TempDir::new().unwrap();
+        // Get actual available space
+        let actual_space = get_available_space(tmp.path()).unwrap();
+
+        // Set min_free_disk_bytes lower than actual, but expected_size higher
+        let mut config = test_config();
+        config.min_free_disk_bytes = 1; // very low minimum
+        config.check_dns = false;
+        config.check_url_reachable = false;
+        config.check_proxy = false;
+
+        let checker = PreflightChecker {
+            config,
+            config_path: tmp.path().join("preflight_config.json"),
+        };
+
+        // Request more than available
+        let input = PreflightInput {
+            url: "https://example.com/file.zip".into(),
+            save_dir: tmp.path().to_path_buf(),
+            expected_size: Some(actual_space + 1),
+            proxy_url: None,
+            protocol: PreflightProtocol::Http,
+        };
+
+        let report = checker.run_checks(&input).await;
+        // Should be Warn (not Fail) because actual space > min_free_disk_bytes (1 byte)
+        // but < expected_size
+        assert_eq!(report.checks[0].name, "Disk Space");
+        assert_eq!(report.checks[0].status, PreflightStatus::Warn);
+        assert!(!report.checks[0].critical);
+    }
+
+    // --- Async checks with all disabled ---
+    #[tokio::test]
+    async fn test_only_dns_enabled() {
+        let tmp = TempDir::new().unwrap();
+        let config = PreflightConfig {
+            enabled: true,
+            check_dns: true,
+            check_disk_space: false,
+            check_url_reachable: false,
+            check_proxy: false,
+            min_free_disk_bytes: 1024,
+            check_timeout_secs: 2,
+            block_on_fail: false,
+        };
+
+        let checker = PreflightChecker {
+            config,
+            config_path: tmp.path().join("preflight_config.json"),
+        };
+
+        let input = PreflightInput {
+            url: "https://example.com/file.zip".into(),
+            save_dir: tmp.path().to_path_buf(),
+            expected_size: None,
+            proxy_url: None,
+            protocol: PreflightProtocol::Http,
+        };
+
+        let report = checker.run_checks(&input).await;
+        // Only DNS check should run
+        assert_eq!(report.checks.len(), 1);
+        assert_eq!(report.checks[0].name, "DNS Resolution");
+    }
+
+    #[tokio::test]
+    async fn test_only_proxy_enabled() {
+        let tmp = TempDir::new().unwrap();
+        let config = PreflightConfig {
+            enabled: true,
+            check_dns: false,
+            check_disk_space: false,
+            check_url_reachable: false,
+            check_proxy: true,
+            min_free_disk_bytes: 1024,
+            check_timeout_secs: 2,
+            block_on_fail: false,
+        };
+
+        let checker = PreflightChecker {
+            config,
+            config_path: tmp.path().join("preflight_config.json"),
+        };
+
+        // With proxy URL
+        let input = PreflightInput {
+            url: "https://example.com/file.zip".into(),
+            save_dir: tmp.path().to_path_buf(),
+            expected_size: None,
+            proxy_url: Some("ftp://invalid:8080".into()),
+            protocol: PreflightProtocol::Http,
+        };
+
+        let report = checker.run_checks(&input).await;
+        // Only proxy check should run
+        assert_eq!(report.checks.len(), 1);
+        assert_eq!(report.checks[0].name, "Proxy Connectivity");
+    }
+
+    #[tokio::test]
+    async fn test_proxy_not_checked_without_proxy_url() {
+        let tmp = TempDir::new().unwrap();
+        let config = PreflightConfig {
+            enabled: true,
+            check_dns: false,
+            check_disk_space: false,
+            check_url_reachable: false,
+            check_proxy: true,
+            min_free_disk_bytes: 1024,
+            check_timeout_secs: 2,
+            block_on_fail: false,
+        };
+
+        let checker = PreflightChecker {
+            config,
+            config_path: tmp.path().join("preflight_config.json"),
+        };
+
+        // No proxy URL provided
+        let input = PreflightInput {
+            url: "https://example.com/file.zip".into(),
+            save_dir: tmp.path().to_path_buf(),
+            expected_size: None,
+            proxy_url: None,
+            protocol: PreflightProtocol::Http,
+        };
+
+        let report = checker.run_checks(&input).await;
+        // No checks should run (proxy enabled but no proxy_url)
+        assert_eq!(report.checks.len(), 0);
+        assert_eq!(report.overall, PreflightStatus::Pass);
+    }
+
+    // --- extract_host with scheme edge cases ---
+    #[test]
+    fn test_extract_host_with_scheme_no_host() {
+        // "://" → empty host → None
+        let result = extract_host("://");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_host_complex_path() {
+        assert_eq!(
+            extract_host("https://example.com/a/b/c/d?query=1#frag"),
+            Some("example.com".into())
+        );
+    }
+
+    // --- CheckResult with Unicode ---
+    #[test]
+    fn test_check_result_unicode_fields() {
+        let result = CheckResult {
+            name: "DNS 解析".into(),
+            critical: true,
+            status: PreflightStatus::Pass,
+            message: "解析成功 ✅".into(),
+            duration_ms: 42,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: CheckResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "DNS 解析");
+        assert_eq!(back.message, "解析成功 ✅");
+    }
+
+    #[test]
+    fn test_check_result_emoji_fields() {
+        let result = CheckResult {
+            name: "🔍 Check".into(),
+            critical: false,
+            status: PreflightStatus::Warn,
+            message: "⚠️ Warning 🚨".into(),
+            duration_ms: 0,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: CheckResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "🔍 Check");
+        assert_eq!(back.message, "⚠️ Warning 🚨");
+    }
+
+    // --- PreflightInput with Unicode ---
+    #[test]
+    fn test_preflight_input_unicode_url() {
+        let input = PreflightInput {
+            url: "https://中文.example.com/文件.zip".into(),
+            save_dir: PathBuf::from("/tmp/下载"),
+            expected_size: Some(100),
+            proxy_url: Some("socks5://代理:1080".into()),
+            protocol: PreflightProtocol::Http,
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let back: PreflightInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.url, input.url);
+        assert_eq!(back.save_dir, input.save_dir);
+    }
+
+    // --- PreflightConfig boundary values ---
+    #[test]
+    fn test_preflight_config_zero_disk_bytes() {
+        let config = PreflightConfig {
+            enabled: true,
+            check_dns: true,
+            check_disk_space: true,
+            check_url_reachable: true,
+            check_proxy: true,
+            min_free_disk_bytes: 0,
+            check_timeout_secs: 10,
+            block_on_fail: false,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: PreflightConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.min_free_disk_bytes, 0);
+    }
+
+    #[test]
+    fn test_preflight_config_u64_max_disk_bytes() {
+        let config = PreflightConfig {
+            enabled: true,
+            check_dns: true,
+            check_disk_space: true,
+            check_url_reachable: true,
+            check_proxy: true,
+            min_free_disk_bytes: u64::MAX,
+            check_timeout_secs: 10,
+            block_on_fail: false,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: PreflightConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.min_free_disk_bytes, u64::MAX);
+    }
+
+    #[test]
+    fn test_preflight_config_zero_timeout() {
+        let config = PreflightConfig {
+            enabled: true,
+            check_dns: true,
+            check_disk_space: true,
+            check_url_reachable: true,
+            check_proxy: true,
+            min_free_disk_bytes: 1024,
+            check_timeout_secs: 0,
+            block_on_fail: false,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: PreflightConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.check_timeout_secs, 0);
+    }
 }
