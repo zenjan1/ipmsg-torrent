@@ -1159,4 +1159,1087 @@ mod tests {
         assert_eq!(deserialized.error, Some("Connection reset".into()));
         assert_eq!(deserialized.tags.len(), 2);
     }
+
+    // ===== Phase 241: Notification Comprehensive Test Coverage =====
+
+    // --- NotificationEvent: all variants ---
+
+    #[test]
+    fn event_label_all_variants() {
+        assert_eq!(
+            NotificationEvent::DownloadComplete.label(),
+            "download_complete"
+        );
+        assert_eq!(NotificationEvent::DownloadFailed.label(), "download_failed");
+        assert_eq!(NotificationEvent::QueueEmpty.label(), "queue_empty");
+        assert_eq!(
+            NotificationEvent::ProgressMilestone.label(),
+            "progress_milestone"
+        );
+    }
+
+    #[test]
+    fn event_serde_roundtrip_all_variants() {
+        for event in [
+            NotificationEvent::DownloadComplete,
+            NotificationEvent::DownloadFailed,
+            NotificationEvent::QueueEmpty,
+            NotificationEvent::ProgressMilestone,
+        ] {
+            let json = serde_json::to_string(&event).unwrap();
+            let loaded: NotificationEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded, event);
+        }
+    }
+
+    #[test]
+    fn event_serde_pascal_case_values() {
+        assert_eq!(
+            serde_json::to_string(&NotificationEvent::DownloadComplete).unwrap(),
+            "\"DownloadComplete\""
+        );
+        assert_eq!(
+            serde_json::to_string(&NotificationEvent::QueueEmpty).unwrap(),
+            "\"QueueEmpty\""
+        );
+    }
+
+    #[test]
+    fn event_clone_copy_debug_eq() {
+        let e = NotificationEvent::DownloadComplete;
+        let e2 = e;
+        assert_eq!(e, e2);
+        let s = format!("{:?}", e);
+        assert!(s.contains("DownloadComplete"));
+    }
+
+    #[test]
+    fn event_hash_trait() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(NotificationEvent::DownloadComplete);
+        set.insert(NotificationEvent::DownloadFailed);
+        set.insert(NotificationEvent::DownloadComplete);
+        assert_eq!(set.len(), 2);
+    }
+
+    // --- NotificationChannel serde ---
+
+    #[test]
+    fn channel_serde_desktop() {
+        let ch = NotificationChannel::Desktop;
+        let json = serde_json::to_string(&ch).unwrap();
+        let loaded: NotificationChannel = serde_json::from_str(&json).unwrap();
+        assert!(matches!(loaded, NotificationChannel::Desktop));
+    }
+
+    #[test]
+    fn channel_serde_shell() {
+        let ch = NotificationChannel::Shell {
+            command: "echo done".into(),
+        };
+        let json = serde_json::to_string(&ch).unwrap();
+        let loaded: NotificationChannel = serde_json::from_str(&json).unwrap();
+        match loaded {
+            NotificationChannel::Shell { command } => assert_eq!(command, "echo done"),
+            _ => panic!("expected Shell"),
+        }
+    }
+
+    #[test]
+    fn channel_serde_logfile() {
+        let ch = NotificationChannel::LogFile {
+            path: PathBuf::from("/tmp/test.log"),
+        };
+        let json = serde_json::to_string(&ch).unwrap();
+        let loaded: NotificationChannel = serde_json::from_str(&json).unwrap();
+        match loaded {
+            NotificationChannel::LogFile { path } => {
+                assert_eq!(path, PathBuf::from("/tmp/test.log"))
+            }
+            _ => panic!("expected LogFile"),
+        }
+    }
+
+    #[test]
+    fn channel_serde_webhook() {
+        let ch = NotificationChannel::Webhook {
+            url: "https://example.com/hook".into(),
+            secret: Some("s3cret".into()),
+        };
+        let json = serde_json::to_string(&ch).unwrap();
+        let loaded: NotificationChannel = serde_json::from_str(&json).unwrap();
+        match loaded {
+            NotificationChannel::Webhook { url, secret } => {
+                assert_eq!(url, "https://example.com/hook");
+                assert_eq!(secret, Some("s3cret".into()));
+            }
+            _ => panic!("expected Webhook"),
+        }
+    }
+
+    #[test]
+    fn channel_clone_debug() {
+        let ch = NotificationChannel::Desktop;
+        let ch2 = ch.clone();
+        assert!(matches!(ch2, NotificationChannel::Desktop));
+        let s = format!("{:?}", ch);
+        assert!(s.contains("Desktop"));
+    }
+
+    // --- NotificationConfig ---
+
+    #[test]
+    fn config_default() {
+        let config = NotificationConfig::default();
+        assert!(!config.enabled);
+        assert!(config.channels.is_empty());
+        assert!(config.events.is_empty());
+    }
+
+    #[test]
+    fn config_serde_roundtrip_custom() {
+        let config = NotificationConfig {
+            enabled: true,
+            channels: vec![NotificationChannel::Desktop],
+            events: vec![
+                NotificationEvent::DownloadComplete,
+                NotificationEvent::DownloadFailed,
+            ],
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: NotificationConfig = serde_json::from_str(&json).unwrap();
+        assert!(loaded.enabled);
+        assert_eq!(loaded.channels.len(), 1);
+        assert_eq!(loaded.events.len(), 2);
+    }
+
+    #[test]
+    fn config_serde_pretty() {
+        let config = NotificationConfig::desktop_complete();
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        assert!(json.contains('\n'));
+        let loaded: NotificationConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.enabled, config.enabled);
+    }
+
+    #[test]
+    fn config_serde_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"channels":[],"events":[],"unknown_field":42}"#;
+        let loaded: NotificationConfig = serde_json::from_str(json).unwrap();
+        assert!(loaded.enabled);
+    }
+
+    #[test]
+    fn config_clone_debug() {
+        let config = NotificationConfig::desktop_complete();
+        let config2 = config.clone();
+        assert_eq!(config.enabled, config2.enabled);
+        let s = format!("{:?}", config);
+        assert!(s.contains("enabled"));
+    }
+
+    #[test]
+    fn config_should_notify_all_events() {
+        let config = NotificationConfig {
+            enabled: true,
+            channels: vec![],
+            events: vec![
+                NotificationEvent::DownloadComplete,
+                NotificationEvent::DownloadFailed,
+                NotificationEvent::QueueEmpty,
+                NotificationEvent::ProgressMilestone,
+            ],
+        };
+        assert!(config.should_notify(NotificationEvent::DownloadComplete));
+        assert!(config.should_notify(NotificationEvent::DownloadFailed));
+        assert!(config.should_notify(NotificationEvent::QueueEmpty));
+        assert!(config.should_notify(NotificationEvent::ProgressMilestone));
+    }
+
+    #[test]
+    fn config_disabled_never_notifies() {
+        let config = NotificationConfig {
+            enabled: false,
+            channels: vec![NotificationChannel::Desktop],
+            events: vec![NotificationEvent::DownloadComplete],
+        };
+        assert!(!config.should_notify(NotificationEvent::DownloadComplete));
+    }
+
+    // --- NotificationContext ---
+
+    #[test]
+    fn context_serde_roundtrip() {
+        let ctx = NotificationContext {
+            task_id: "t1".into(),
+            name: "file.txt".into(),
+            size: 1024,
+            downloaded: 512,
+            protocol: "HTTP".into(),
+            save_path: "/tmp".into(),
+            error: Some("timeout".into()),
+            event: NotificationEvent::DownloadFailed,
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        let loaded: NotificationContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.task_id, "t1");
+        assert_eq!(loaded.error, Some("timeout".into()));
+    }
+
+    #[test]
+    fn context_serde_none_error() {
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        let json = serde_json::to_string(&ctx).unwrap();
+        assert!(json.contains("null") || !json.contains("error"));
+        let loaded: NotificationContext = serde_json::from_str(&json).unwrap();
+        assert!(loaded.error.is_none());
+    }
+
+    #[test]
+    fn context_clone_debug() {
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        let ctx2 = ctx.clone();
+        assert_eq!(ctx2.task_id, "t1");
+        let s = format!("{:?}", ctx);
+        assert!(s.contains("t1"));
+    }
+
+    #[test]
+    fn context_render_template_unicode() {
+        let ctx = NotificationContext {
+            task_id: "任务-001".into(),
+            name: "中文文件.txt".into(),
+            size: 1024,
+            downloaded: 1024,
+            protocol: "HTTP".into(),
+            save_path: "/下载/文件.txt".into(),
+            error: None,
+            event: NotificationEvent::DownloadComplete,
+        };
+        let rendered = ctx.render_template("{name} -> {save_path}");
+        assert_eq!(rendered, "中文文件.txt -> /下载/文件.txt");
+    }
+
+    #[test]
+    fn context_render_template_emoji() {
+        let ctx = NotificationContext {
+            task_id: "🚀".into(),
+            name: "🎉.txt".into(),
+            size: 100,
+            downloaded: 100,
+            protocol: "HTTP".into(),
+            save_path: "/tmp/🎉".into(),
+            error: None,
+            event: NotificationEvent::DownloadComplete,
+        };
+        let rendered = ctx.render_template("{task_id}: {name}");
+        assert_eq!(rendered, "🚀: 🎉.txt");
+    }
+
+    #[test]
+    fn context_render_template_empty_error() {
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        let rendered = ctx.render_template("Error: {error}");
+        assert_eq!(rendered, "Error: ");
+    }
+
+    #[test]
+    fn context_render_template_all_placeholders() {
+        let ctx = NotificationContext {
+            task_id: "id1".into(),
+            name: "n".into(),
+            size: 10,
+            downloaded: 5,
+            protocol: "P".into(),
+            save_path: "/s".into(),
+            error: None,
+            event: NotificationEvent::DownloadComplete,
+        };
+        let rendered =
+            ctx.render_template("{task_id}{name}{size}{downloaded}{protocol}{save_path}{event}");
+        assert_eq!(rendered, "id1n105P/sdownload_complete");
+    }
+
+    // --- NotificationFilter ---
+
+    #[test]
+    fn filter_default_is_all() {
+        let filter = NotificationFilter::default();
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        assert!(filter.matches(&ctx, &[]));
+        assert!(filter.matches(&ctx, &["any".into()]));
+    }
+
+    #[test]
+    fn filter_events_only() {
+        let filter = NotificationFilter::events(vec![NotificationEvent::DownloadFailed]);
+        let complete = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        let failed = make_test_ctx("t2", "f.txt", NotificationEvent::DownloadFailed);
+        assert!(!filter.matches(&complete, &[]));
+        assert!(filter.matches(&failed, &[]));
+    }
+
+    #[test]
+    fn filter_task_ids_only() {
+        let filter = NotificationFilter::task_ids(vec!["t1".into()]);
+        let ctx1 = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        let ctx2 = make_test_ctx("t2", "f.txt", NotificationEvent::DownloadComplete);
+        assert!(filter.matches(&ctx1, &[]));
+        assert!(!filter.matches(&ctx2, &[]));
+    }
+
+    #[test]
+    fn filter_tags_any_match() {
+        let filter = NotificationFilter {
+            tags: vec!["a".into(), "b".into()],
+            ..Default::default()
+        };
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        assert!(filter.matches(&ctx, &["a".into()]));
+        assert!(filter.matches(&ctx, &["b".into(), "c".into()]));
+        assert!(!filter.matches(&ctx, &["c".into()]));
+        assert!(!filter.matches(&ctx, &[]));
+    }
+
+    #[test]
+    fn filter_empty_tags_empty_context_tags() {
+        let filter = NotificationFilter {
+            tags: vec!["x".into()],
+            ..Default::default()
+        };
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        assert!(!filter.matches(&ctx, &[]));
+    }
+
+    #[test]
+    fn filter_serde_roundtrip() {
+        let filter = NotificationFilter {
+            events: vec![NotificationEvent::DownloadComplete],
+            task_ids: vec!["t1".into()],
+            tags: vec!["tag1".into()],
+        };
+        let json = serde_json::to_string(&filter).unwrap();
+        let loaded: NotificationFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.events.len(), 1);
+        assert_eq!(loaded.task_ids.len(), 1);
+        assert_eq!(loaded.tags.len(), 1);
+    }
+
+    #[test]
+    fn filter_serde_extra_fields_ignored() {
+        let json = r#"{"events":[],"task_ids":[],"tags":[],"extra":true}"#;
+        let loaded: NotificationFilter = serde_json::from_str(json).unwrap();
+        assert!(loaded.events.is_empty());
+    }
+
+    #[test]
+    fn filter_clone_debug() {
+        let filter = NotificationFilter::all();
+        let filter2 = filter.clone();
+        assert!(filter2.task_ids.is_empty());
+        let s = format!("{:?}", filter);
+        assert!(s.contains("events"));
+    }
+
+    #[test]
+    fn filter_unicode_task_ids() {
+        let filter = NotificationFilter::task_ids(vec!["任务-中文".into()]);
+        let ctx = make_test_ctx("任务-中文", "f.txt", NotificationEvent::DownloadComplete);
+        assert!(filter.matches(&ctx, &[]));
+    }
+
+    #[test]
+    fn filter_emoji_task_ids() {
+        let filter = NotificationFilter::task_ids(vec!["🚀".into()]);
+        let ctx = make_test_ctx("🚀", "f.txt", NotificationEvent::DownloadComplete);
+        assert!(filter.matches(&ctx, &[]));
+    }
+
+    // --- NotificationSubscription ---
+
+    #[test]
+    fn subscription_new_has_unique_id() {
+        let sub1 = NotificationSubscription::new(NotificationFilter::all());
+        let sub2 = NotificationSubscription::new(NotificationFilter::all());
+        assert_ne!(sub1.id, sub2.id);
+    }
+
+    #[test]
+    fn subscription_new_has_created_at() {
+        let sub = NotificationSubscription::new(NotificationFilter::all());
+        assert!(sub.created_at <= chrono::Utc::now());
+    }
+
+    #[test]
+    fn subscription_clone_debug() {
+        let sub = NotificationSubscription::new(NotificationFilter::all());
+        let sub2 = sub.clone();
+        assert_eq!(sub.id, sub2.id);
+        let s = format!("{:?}", sub);
+        assert!(s.contains("id"));
+    }
+
+    // --- NotificationHistory ---
+
+    #[test]
+    fn history_default_max_100() {
+        let history = NotificationHistory::default();
+        assert_eq!(history.len(), 0);
+        for i in 0..150 {
+            history.record(NotificationHistoryEntry {
+                timestamp: chrono::Utc::now(),
+                event: NotificationEvent::DownloadComplete,
+                task_id: format!("t{}", i),
+                name: "f.txt".into(),
+                size: 100,
+                downloaded: 100,
+                protocol: "HTTP".into(),
+                save_path: "/tmp".into(),
+                error: None,
+                tags: vec![],
+            });
+        }
+        assert_eq!(history.len(), 100);
+    }
+
+    #[test]
+    fn history_max_1() {
+        let history = NotificationHistory::new(1);
+        history.record(NotificationHistoryEntry {
+            timestamp: chrono::Utc::now(),
+            event: NotificationEvent::DownloadComplete,
+            task_id: "first".into(),
+            name: "f.txt".into(),
+            size: 100,
+            downloaded: 100,
+            protocol: "HTTP".into(),
+            save_path: "/tmp".into(),
+            error: None,
+            tags: vec![],
+        });
+        history.record(NotificationHistoryEntry {
+            timestamp: chrono::Utc::now(),
+            event: NotificationEvent::DownloadFailed,
+            task_id: "second".into(),
+            name: "f.txt".into(),
+            size: 100,
+            downloaded: 100,
+            protocol: "HTTP".into(),
+            save_path: "/tmp".into(),
+            error: None,
+            tags: vec![],
+        });
+        assert_eq!(history.len(), 1);
+        let all = history.get_all();
+        assert_eq!(all[0].task_id, "second");
+    }
+
+    #[test]
+    fn history_get_all_newest_first() {
+        let history = NotificationHistory::new(100);
+        for i in 0..3 {
+            history.record(NotificationHistoryEntry {
+                timestamp: chrono::Utc::now(),
+                event: NotificationEvent::DownloadComplete,
+                task_id: format!("t{}", i),
+                name: "f.txt".into(),
+                size: 100,
+                downloaded: 100,
+                protocol: "HTTP".into(),
+                save_path: "/tmp".into(),
+                error: None,
+                tags: vec![],
+            });
+        }
+        let all = history.get_all();
+        assert_eq!(all[0].task_id, "t2");
+        assert_eq!(all[1].task_id, "t1");
+        assert_eq!(all[2].task_id, "t0");
+    }
+
+    #[test]
+    fn history_clone_debug() {
+        let history = NotificationHistory::new(10);
+        let history2 = history.clone();
+        assert_eq!(history2.len(), 0);
+        let s = format!("{:?}", history);
+        assert!(s.contains("entries"));
+    }
+
+    // --- NotificationHistoryEntry serde ---
+
+    #[test]
+    fn history_entry_serde_roundtrip() {
+        let entry = NotificationHistoryEntry {
+            timestamp: chrono::Utc::now(),
+            event: NotificationEvent::QueueEmpty,
+            task_id: "t1".into(),
+            name: "f.txt".into(),
+            size: 1024,
+            downloaded: 1024,
+            protocol: "Torrent".into(),
+            save_path: "/dl".into(),
+            error: None,
+            tags: vec!["a".into(), "b".into()],
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let loaded: NotificationHistoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.task_id, "t1");
+        assert_eq!(loaded.tags.len(), 2);
+    }
+
+    #[test]
+    fn history_entry_clone_debug() {
+        let entry = NotificationHistoryEntry {
+            timestamp: chrono::Utc::now(),
+            event: NotificationEvent::DownloadComplete,
+            task_id: "t1".into(),
+            name: "f.txt".into(),
+            size: 100,
+            downloaded: 100,
+            protocol: "HTTP".into(),
+            save_path: "/tmp".into(),
+            error: None,
+            tags: vec![],
+        };
+        let entry2 = entry.clone();
+        assert_eq!(entry2.task_id, "t1");
+        let s = format!("{:?}", entry);
+        assert!(s.contains("t1"));
+    }
+
+    #[test]
+    fn history_entry_unicode_fields() {
+        let entry = NotificationHistoryEntry {
+            timestamp: chrono::Utc::now(),
+            event: NotificationEvent::DownloadComplete,
+            task_id: "中文任务".into(),
+            name: "日本語ファイル.txt".into(),
+            size: 100,
+            downloaded: 100,
+            protocol: "HTTP".into(),
+            save_path: "/tmp/🎉".into(),
+            error: Some("错误消息".into()),
+            tags: vec!["标签".into()],
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let loaded: NotificationHistoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.task_id, "中文任务");
+        assert_eq!(loaded.name, "日本語ファイル.txt");
+        assert_eq!(loaded.error, Some("错误消息".into()));
+    }
+
+    // --- NotificationError ---
+
+    #[test]
+    fn error_display_all_variants() {
+        assert_eq!(
+            NotificationError::Io("disk full".into()).to_string(),
+            "IO error: disk full"
+        );
+        assert_eq!(
+            NotificationError::Shell("exit 1".into()).to_string(),
+            "Shell command error: exit 1"
+        );
+        assert_eq!(
+            NotificationError::Http("404".into()).to_string(),
+            "HTTP error: 404"
+        );
+        assert_eq!(
+            NotificationError::Serialize("bad json".into()).to_string(),
+            "Serialization error: bad json"
+        );
+    }
+
+    #[test]
+    fn error_debug_trait() {
+        let e = NotificationError::Io("test".into());
+        let s = format!("{:?}", e);
+        assert!(s.contains("Io"));
+    }
+
+    #[test]
+    fn error_unicode_messages() {
+        let e = NotificationError::Io("磁盘已满".into());
+        assert!(e.to_string().contains("磁盘已满"));
+    }
+
+    // --- NotificationPersistenceError ---
+
+    #[test]
+    fn persistence_error_display_all_variants() {
+        assert_eq!(
+            NotificationPersistenceError::Io("fail".into()).to_string(),
+            "IO error: fail"
+        );
+        assert_eq!(
+            NotificationPersistenceError::Serialize("bad".into()).to_string(),
+            "serialize error: bad"
+        );
+        assert_eq!(
+            NotificationPersistenceError::Deserialize("corrupt".into()).to_string(),
+            "deserialize error: corrupt"
+        );
+    }
+
+    #[test]
+    fn persistence_error_debug_trait() {
+        let e = NotificationPersistenceError::Io("test".into());
+        let s = format!("{:?}", e);
+        assert!(s.contains("Io"));
+    }
+
+    // --- format_size ---
+
+    #[test]
+    fn format_size_zero() {
+        assert_eq!(format_size(0), "0 B");
+    }
+
+    #[test]
+    fn format_size_bytes() {
+        assert_eq!(format_size(1), "1 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_size_exact_kb() {
+        assert_eq!(format_size(1024), "1.00 KB");
+    }
+
+    #[test]
+    fn format_size_exact_mb() {
+        assert_eq!(format_size(1024 * 1024), "1.00 MB");
+    }
+
+    #[test]
+    fn format_size_exact_gb() {
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.00 GB");
+    }
+
+    #[test]
+    fn format_size_fractional_kb() {
+        assert_eq!(format_size(1536), "1.50 KB");
+    }
+
+    #[test]
+    fn format_size_large_value() {
+        assert_eq!(format_size(5 * 1024 * 1024 * 1024), "5.00 GB");
+    }
+
+    // --- save/load notification config ---
+
+    #[test]
+    fn save_creates_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = NotificationConfig::desktop_complete();
+        save_notification_config(&config, temp_dir.path()).unwrap();
+        assert!(temp_dir.path().join("notification_config.json").exists());
+    }
+
+    #[test]
+    fn save_overwrites_existing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config1 = NotificationConfig::disabled();
+        save_notification_config(&config1, temp_dir.path()).unwrap();
+        let config2 = NotificationConfig::desktop_complete();
+        save_notification_config(&config2, temp_dir.path()).unwrap();
+        let loaded = load_notification_config(temp_dir.path()).unwrap().unwrap();
+        assert!(loaded.enabled);
+    }
+
+    #[test]
+    fn load_missing_file_returns_none() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let loaded = load_notification_config(temp_dir.path()).unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn load_corrupt_json_returns_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("notification_config.json");
+        std::fs::write(&path, "not json").unwrap();
+        let result = load_notification_config(temp_dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_empty_file_returns_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("notification_config.json");
+        std::fs::write(&path, "").unwrap();
+        let result = load_notification_config(temp_dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn save_load_pretty_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = NotificationConfig {
+            enabled: true,
+            channels: vec![
+                NotificationChannel::Desktop,
+                NotificationChannel::LogFile {
+                    path: PathBuf::from("/tmp/test.log"),
+                },
+            ],
+            events: vec![NotificationEvent::DownloadComplete],
+        };
+        save_notification_config(&config, temp_dir.path()).unwrap();
+        let loaded = load_notification_config(temp_dir.path()).unwrap().unwrap();
+        assert!(loaded.enabled);
+        assert_eq!(loaded.channels.len(), 2);
+        assert_eq!(loaded.events.len(), 1);
+    }
+
+    #[test]
+    fn save_load_unicode_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = NotificationConfig {
+            enabled: true,
+            channels: vec![NotificationChannel::Shell {
+                command: "echo '中文通知 🎉'".into(),
+            }],
+            events: vec![NotificationEvent::DownloadComplete],
+        };
+        save_notification_config(&config, temp_dir.path()).unwrap();
+        let loaded = load_notification_config(temp_dir.path()).unwrap().unwrap();
+        match &loaded.channels[0] {
+            NotificationChannel::Shell { command } => {
+                assert!(command.contains("中文"));
+            }
+            _ => panic!("expected Shell"),
+        }
+    }
+
+    // --- NotificationDispatcher ---
+
+    #[test]
+    fn dispatcher_new_has_zero_subscriptions() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+        assert_eq!(dispatcher.subscription_count(), 0);
+    }
+
+    #[test]
+    fn dispatcher_update_config() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+        let new_config = NotificationConfig::desktop_complete();
+        dispatcher.update_config(new_config);
+        // Config is internal; verify via dispatch behavior
+    }
+
+    #[test]
+    fn dispatcher_history_accessible() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+        assert!(dispatcher.history().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatcher_dispatch_disabled_still_records_history() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        dispatcher.dispatch(&ctx).await.unwrap();
+        assert_eq!(dispatcher.history().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_dispatch_multiple_accumulates_history() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+        for i in 0..5 {
+            let ctx = make_test_ctx(
+                &format!("t{}", i),
+                "f.txt",
+                NotificationEvent::DownloadComplete,
+            );
+            dispatcher.dispatch(&ctx).await.unwrap();
+        }
+        assert_eq!(dispatcher.history().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_subscribe_events_receives_broadcast() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+        let mut rx = dispatcher.subscribe_events();
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadFailed);
+        dispatcher.dispatch(&ctx).await.unwrap();
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received.event, NotificationEvent::DownloadFailed);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_multiple_subscribers_all_receive() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+        let mut rx1 = dispatcher.subscribe_events();
+        let mut rx2 = dispatcher.subscribe_events();
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::QueueEmpty);
+        dispatcher.dispatch(&ctx).await.unwrap();
+        assert!(rx1.try_recv().is_ok());
+        assert!(rx2.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatcher_dispatch_with_tags_records_tags_in_history() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        dispatcher
+            .dispatch_with_tags(&ctx, &["tag1".into(), "tag2".into()])
+            .await
+            .unwrap();
+        let entries = dispatcher.history().get_all();
+        assert_eq!(entries[0].tags, vec!["tag1", "tag2"]);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_dispatch_with_empty_tags() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        dispatcher.dispatch_with_tags(&ctx, &[]).await.unwrap();
+        let entries = dispatcher.history().get_all();
+        assert!(entries[0].tags.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatcher_log_file_unicode_content() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("unicode.log");
+        let config = NotificationConfig {
+            enabled: true,
+            channels: vec![NotificationChannel::LogFile {
+                path: log_path.clone(),
+            }],
+            events: vec![NotificationEvent::DownloadComplete],
+        };
+        let dispatcher = NotificationDispatcher::new(config);
+        let ctx = NotificationContext {
+            task_id: "任务-001".into(),
+            name: "中文文件.txt".into(),
+            size: 2048,
+            downloaded: 2048,
+            protocol: "HTTP".into(),
+            save_path: "/下载".into(),
+            error: None,
+            event: NotificationEvent::DownloadComplete,
+        };
+        dispatcher.dispatch(&ctx).await.unwrap();
+        let content = tokio::fs::read_to_string(&log_path).await.unwrap();
+        assert!(content.contains("中文文件.txt"));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_log_file_appends() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("append.log");
+        let config = NotificationConfig {
+            enabled: true,
+            channels: vec![NotificationChannel::LogFile {
+                path: log_path.clone(),
+            }],
+            events: vec![NotificationEvent::DownloadComplete],
+        };
+        let dispatcher = NotificationDispatcher::new(config);
+        for i in 0..3 {
+            let ctx = make_test_ctx(
+                &format!("t{}", i),
+                "f.txt",
+                NotificationEvent::DownloadComplete,
+            );
+            dispatcher.dispatch(&ctx).await.unwrap();
+        }
+        let content = tokio::fs::read_to_string(&log_path).await.unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_shell_command_unicode_template() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output_path = temp_dir.path().join("unicode_out.txt");
+        let config = NotificationConfig {
+            enabled: true,
+            channels: vec![NotificationChannel::Shell {
+                command: format!("echo '{{name}}' > {}", output_path.display()),
+            }],
+            events: vec![NotificationEvent::DownloadComplete],
+        };
+        let dispatcher = NotificationDispatcher::new(config);
+        let ctx = NotificationContext {
+            task_id: "t1".into(),
+            name: "日本語ファイル".into(),
+            size: 100,
+            downloaded: 100,
+            protocol: "HTTP".into(),
+            save_path: "/tmp".into(),
+            error: None,
+            event: NotificationEvent::DownloadComplete,
+        };
+        dispatcher.dispatch(&ctx).await.unwrap();
+        let content = tokio::fs::read_to_string(&output_path).await.unwrap();
+        assert!(content.contains("日本語ファイル"));
+    }
+
+    // --- Complex workflows ---
+
+    #[tokio::test]
+    async fn workflow_subscribe_dispatch_unsubscribe() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+        let sub = dispatcher.subscribe(NotificationFilter::events(vec![
+            NotificationEvent::DownloadComplete,
+        ]));
+        assert_eq!(dispatcher.subscription_count(), 1);
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        dispatcher.dispatch(&ctx).await.unwrap();
+        assert!(dispatcher.unsubscribe(&sub.id));
+        assert_eq!(dispatcher.subscription_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn workflow_multiple_events_history_order() {
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+        let events = [
+            NotificationEvent::DownloadComplete,
+            NotificationEvent::DownloadFailed,
+            NotificationEvent::QueueEmpty,
+        ];
+        for (i, event) in events.iter().enumerate() {
+            let ctx = make_test_ctx(&format!("t{}", i), "f.txt", *event);
+            dispatcher.dispatch(&ctx).await.unwrap();
+        }
+        let entries = dispatcher.history().get_all();
+        assert_eq!(entries.len(), 3);
+        // Newest first
+        assert_eq!(entries[0].event, NotificationEvent::QueueEmpty);
+        assert_eq!(entries[1].event, NotificationEvent::DownloadFailed);
+        assert_eq!(entries[2].event, NotificationEvent::DownloadComplete);
+    }
+
+    #[tokio::test]
+    async fn workflow_config_update_then_dispatch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join("update.log");
+        let dispatcher = NotificationDispatcher::new(NotificationConfig::disabled());
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        // First dispatch: disabled, no channel output
+        dispatcher.dispatch(&ctx).await.unwrap();
+        // Update config to enable log file
+        let config = NotificationConfig {
+            enabled: true,
+            channels: vec![NotificationChannel::LogFile {
+                path: log_path.clone(),
+            }],
+            events: vec![NotificationEvent::DownloadComplete],
+        };
+        dispatcher.update_config(config);
+        dispatcher.dispatch(&ctx).await.unwrap();
+        let content = tokio::fs::read_to_string(&log_path).await.unwrap();
+        assert!(content.contains("download_complete"));
+    }
+
+    #[test]
+    fn workflow_save_load_config_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = NotificationConfig {
+            enabled: true,
+            channels: vec![
+                NotificationChannel::Desktop,
+                NotificationChannel::Shell {
+                    command: "echo done".into(),
+                },
+                NotificationChannel::LogFile {
+                    path: PathBuf::from("/tmp/test.log"),
+                },
+            ],
+            events: vec![
+                NotificationEvent::DownloadComplete,
+                NotificationEvent::DownloadFailed,
+                NotificationEvent::QueueEmpty,
+                NotificationEvent::ProgressMilestone,
+            ],
+        };
+        save_notification_config(&config, temp_dir.path()).unwrap();
+        let loaded = load_notification_config(temp_dir.path()).unwrap().unwrap();
+        assert!(loaded.enabled);
+        assert_eq!(loaded.channels.len(), 3);
+        assert_eq!(loaded.events.len(), 4);
+    }
+
+    // --- Edge cases ---
+
+    #[test]
+    fn filter_empty_events_matches_all() {
+        let filter = NotificationFilter {
+            events: vec![],
+            task_ids: vec![],
+            tags: vec![],
+        };
+        for event in [
+            NotificationEvent::DownloadComplete,
+            NotificationEvent::DownloadFailed,
+            NotificationEvent::QueueEmpty,
+            NotificationEvent::ProgressMilestone,
+        ] {
+            let ctx = make_test_ctx("t1", "f.txt", event);
+            assert!(filter.matches(&ctx, &[]));
+        }
+    }
+
+    #[test]
+    fn filter_multiple_task_ids() {
+        let ids: Vec<String> = (0..50).map(|i| format!("t{}", i)).collect();
+        let filter = NotificationFilter::task_ids(ids.clone());
+        for id in &ids {
+            let ctx = make_test_ctx(id, "f.txt", NotificationEvent::DownloadComplete);
+            assert!(filter.matches(&ctx, &[]));
+        }
+        let ctx = make_test_ctx("t999", "f.txt", NotificationEvent::DownloadComplete);
+        assert!(!filter.matches(&ctx, &[]));
+    }
+
+    #[test]
+    fn filter_multiple_tags() {
+        let tags: Vec<String> = (0..20).map(|i| format!("tag{}", i)).collect();
+        let filter = NotificationFilter {
+            tags: tags.clone(),
+            ..Default::default()
+        };
+        let ctx = make_test_ctx("t1", "f.txt", NotificationEvent::DownloadComplete);
+        assert!(filter.matches(&ctx, &["tag19".into()]));
+        assert!(!filter.matches(&ctx, &["other".into()]));
+    }
+
+    #[test]
+    fn history_entry_large_size() {
+        let entry = NotificationHistoryEntry {
+            timestamp: chrono::Utc::now(),
+            event: NotificationEvent::DownloadComplete,
+            task_id: "t1".into(),
+            name: "large.iso".into(),
+            size: u64::MAX,
+            downloaded: u64::MAX,
+            protocol: "HTTP".into(),
+            save_path: "/tmp".into(),
+            error: None,
+            tags: vec![],
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let loaded: NotificationHistoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.size, u64::MAX);
+    }
+
+    #[test]
+    fn context_render_template_special_chars() {
+        let ctx = NotificationContext {
+            task_id: "t1".into(),
+            name: "file with spaces & symbols < > \" ' ".into(),
+            size: 100,
+            downloaded: 100,
+            protocol: "HTTP".into(),
+            save_path: "/tmp/path".into(),
+            error: None,
+            event: NotificationEvent::DownloadComplete,
+        };
+        let rendered = ctx.render_template("{name}");
+        assert_eq!(rendered, "file with spaces & symbols < > \" ' ");
+    }
 }

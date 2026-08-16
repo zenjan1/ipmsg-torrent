@@ -38,7 +38,7 @@ pub enum DownloadSessionError {
 }
 
 /// Outcome of a completed download session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionOutcome {
     /// Download completed successfully
@@ -174,7 +174,7 @@ pub struct TaskSessionSummary {
 }
 
 /// Configuration for the download session tracker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DownloadSessionConfig {
     /// Maximum sessions per task (oldest evicted when exceeded)
     pub max_sessions_per_task: usize,
@@ -717,5 +717,1103 @@ mod tests {
         let path = Path::new("/tmp/nonexistent_sessions_test.json");
         let result = DownloadSessionManager::load_from_file(path).await;
         assert!(result.is_err());
+    }
+
+    // ===== Phase 241: Comprehensive Test Coverage =====
+
+    // --- SessionOutcome serde ---
+    #[test]
+    fn test_session_outcome_serde_roundtrip_all_variants() {
+        for outcome in [
+            SessionOutcome::Completed,
+            SessionOutcome::Paused,
+            SessionOutcome::Failed,
+            SessionOutcome::TimedOut,
+            SessionOutcome::InProgress,
+        ] {
+            let json = serde_json::to_string(&outcome).unwrap();
+            let back: SessionOutcome = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, outcome);
+        }
+    }
+
+    #[test]
+    fn test_session_outcome_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SessionOutcome::Completed).unwrap(),
+            "\"completed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SessionOutcome::TimedOut).unwrap(),
+            "\"timed_out\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SessionOutcome::InProgress).unwrap(),
+            "\"in_progress\""
+        );
+    }
+
+    #[test]
+    fn test_session_outcome_clone_copy_eq() {
+        let a = SessionOutcome::Completed;
+        let b = a;
+        assert_eq!(a, b);
+        let c = a.clone();
+        assert_eq!(a, c);
+    }
+
+    #[test]
+    fn test_session_outcome_debug() {
+        let s = format!("{:?}", SessionOutcome::Failed);
+        assert!(s.contains("Failed"));
+    }
+
+    // --- DownloadSession serde ---
+    #[test]
+    fn test_download_session_serde_roundtrip() {
+        let mut session = DownloadSession::new("task-1", 100, "http");
+        session.started_at = chrono::DateTime::parse_from_rfc3339("2026-01-15T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        session.close(5000, SessionOutcome::Completed, None);
+
+        let json = serde_json::to_string(&session).unwrap();
+        let back: DownloadSession = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.task_id, "task-1");
+        assert_eq!(back.bytes_at_start, 100);
+        assert_eq!(back.bytes_at_end, Some(5000));
+        assert_eq!(back.outcome, SessionOutcome::Completed);
+        assert_eq!(back.protocol, "http");
+        assert!(back.error.is_none());
+        assert!(back.ended_at.is_some());
+    }
+
+    #[test]
+    fn test_download_session_serde_extra_fields_ignored() {
+        let json = r#"{
+            "id": "abc",
+            "task_id": "t1",
+            "started_at": "2026-01-15T10:00:00Z",
+            "ended_at": null,
+            "bytes_at_start": 0,
+            "bytes_at_end": null,
+            "peak_speed_bps": 0,
+            "avg_speed_bps": null,
+            "error": null,
+            "outcome": "in_progress",
+            "protocol": "http",
+            "unknown_field": true
+        }"#;
+        let session: DownloadSession = serde_json::from_str(json).unwrap();
+        assert_eq!(session.task_id, "t1");
+    }
+
+    #[test]
+    fn test_download_session_clone() {
+        let session = DownloadSession::new("task-1", 0, "http");
+        let cloned = session.clone();
+        assert_eq!(cloned.task_id, session.task_id);
+        assert_eq!(cloned.id, session.id);
+    }
+
+    #[test]
+    fn test_download_session_debug() {
+        let session = DownloadSession::new("task-1", 0, "http");
+        let dbg = format!("{:?}", session);
+        assert!(dbg.contains("task-1"));
+        assert!(dbg.contains("http"));
+    }
+
+    // --- DownloadSessionConfig serde ---
+    #[test]
+    fn test_config_serde_roundtrip() {
+        let config = DownloadSessionConfig {
+            max_sessions_per_task: 10,
+            max_total_sessions: 100,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: DownloadSessionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_sessions_per_task, 10);
+        assert_eq!(back.max_total_sessions, 100);
+    }
+
+    #[test]
+    fn test_config_serde_default_values() {
+        let json = r#"{"max_sessions_per_task": 50, "max_total_sessions": 5000}"#;
+        let config: DownloadSessionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.max_sessions_per_task, 50);
+        assert_eq!(config.max_total_sessions, 5000);
+    }
+
+    #[test]
+    fn test_config_serde_extra_fields_ignored() {
+        let json = r#"{"max_sessions_per_task": 5, "max_total_sessions": 50, "extra": true}"#;
+        let config: DownloadSessionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.max_sessions_per_task, 5);
+    }
+
+    #[test]
+    fn test_config_serde_pretty() {
+        let config = DownloadSessionConfig {
+            max_sessions_per_task: 20,
+            max_total_sessions: 200,
+        };
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        assert!(json.contains('\n'));
+        let back: DownloadSessionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+    }
+
+    #[test]
+    fn test_config_default() {
+        let config = DownloadSessionConfig::default();
+        assert_eq!(config.max_sessions_per_task, DEFAULT_MAX_SESSIONS_PER_TASK);
+        assert_eq!(config.max_total_sessions, DEFAULT_MAX_TOTAL_SESSIONS);
+    }
+
+    #[test]
+    fn test_config_clone_debug() {
+        let config = DownloadSessionConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.max_sessions_per_task, config.max_sessions_per_task);
+        let dbg = format!("{:?}", config);
+        assert!(dbg.contains("max_sessions_per_task"));
+    }
+
+    // --- TaskSessionSummary serde ---
+    #[test]
+    fn test_task_session_summary_serde_roundtrip() {
+        let summary = TaskSessionSummary {
+            task_id: "task-1".to_string(),
+            total_sessions: 3,
+            completed_sessions: 2,
+            failed_sessions: 1,
+            paused_sessions: 0,
+            active_session: None,
+            total_download_time_secs: 120.5,
+            total_bytes_transferred: 1_000_000,
+            overall_avg_speed_bps: Some(8333),
+            peak_speed_bps: 50_000,
+            sessions: vec![],
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let back: TaskSessionSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.task_id, "task-1");
+        assert_eq!(back.total_sessions, 3);
+        assert_eq!(back.total_bytes_transferred, 1_000_000);
+    }
+
+    #[test]
+    fn test_task_session_summary_clone_debug() {
+        let summary = TaskSessionSummary {
+            task_id: "t".to_string(),
+            total_sessions: 0,
+            completed_sessions: 0,
+            failed_sessions: 0,
+            paused_sessions: 0,
+            active_session: None,
+            total_download_time_secs: 0.0,
+            total_bytes_transferred: 0,
+            overall_avg_speed_bps: None,
+            peak_speed_bps: 0,
+            sessions: vec![],
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.task_id, summary.task_id);
+        let dbg = format!("{:?}", summary);
+        assert!(dbg.contains("task_id"));
+    }
+
+    // --- DownloadSessionManager serde ---
+    #[test]
+    fn test_manager_serde_roundtrip() {
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        mgr.close_session("task-1", 5000, SessionOutcome::Completed, None)
+            .unwrap();
+
+        let json = serde_json::to_string(&mgr).unwrap();
+        let back: DownloadSessionManager = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.total_session_count(), 1);
+        assert_eq!(back.active_session_count(), 0);
+    }
+
+    #[test]
+    fn test_manager_serde_extra_fields_ignored() {
+        let json = r#"{"sessions": {}, "config": {"max_sessions_per_task": 50, "max_total_sessions": 5000}, "extra": 42}"#;
+        let mgr: DownloadSessionManager = serde_json::from_str(json).unwrap();
+        assert_eq!(mgr.total_session_count(), 0);
+    }
+
+    #[test]
+    fn test_manager_clone() {
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+
+        let cloned = mgr.clone();
+        assert_eq!(cloned.total_session_count(), 1);
+
+        // Independence: modifying clone doesn't affect original
+        let mut cloned = cloned;
+        cloned.clear_all();
+        assert_eq!(cloned.total_session_count(), 0);
+        assert_eq!(mgr.total_session_count(), 1);
+    }
+
+    #[test]
+    fn test_manager_debug() {
+        let mgr = DownloadSessionManager::new();
+        let dbg = format!("{:?}", mgr);
+        assert!(dbg.contains("DownloadSessionManager"));
+    }
+
+    #[test]
+    fn test_manager_default() {
+        let mgr = DownloadSessionManager::default();
+        assert_eq!(mgr.total_session_count(), 0);
+        assert_eq!(
+            mgr.config().max_sessions_per_task,
+            DEFAULT_MAX_SESSIONS_PER_TASK
+        );
+    }
+
+    // --- DownloadSessionError ---
+    #[test]
+    fn test_error_display_all_variants() {
+        let io_err = DownloadSessionError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file missing",
+        ));
+        assert!(io_err.to_string().contains("I/O error"));
+
+        let json_str = "{";
+        let json_err: DownloadSessionError =
+            serde_json::from_str::<DownloadSessionManager>(json_str)
+                .unwrap_err()
+                .into();
+        assert!(json_err.to_string().contains("JSON error"));
+
+        let not_found = DownloadSessionError::TaskNotFound("task-xyz".to_string());
+        assert!(not_found.to_string().contains("task-xyz"));
+
+        let no_active = DownloadSessionError::NoActiveSession("task-abc".to_string());
+        assert!(no_active.to_string().contains("task-abc"));
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let err = DownloadSessionError::TaskNotFound("t1".to_string());
+        let dbg = format!("{:?}", err);
+        assert!(dbg.contains("TaskNotFound"));
+    }
+
+    #[test]
+    fn test_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "disk full");
+        let err: DownloadSessionError = io_err.into();
+        assert!(err.to_string().contains("disk full"));
+    }
+
+    #[test]
+    fn test_error_from_json() {
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err: DownloadSessionError = json_err.into();
+        assert!(err.to_string().contains("JSON error"));
+    }
+
+    // --- DownloadSession::new boundaries ---
+    #[test]
+    fn test_session_new_empty_task_id() {
+        let session = DownloadSession::new("", 0, "http");
+        assert_eq!(session.task_id, "");
+        assert!(!session.id.is_empty());
+    }
+
+    #[test]
+    fn test_session_new_unicode_task_id() {
+        let session = DownloadSession::new("任务-中文", 0, "http");
+        assert_eq!(session.task_id, "任务-中文");
+    }
+
+    #[test]
+    fn test_session_new_emoji_task_id() {
+        let session = DownloadSession::new("task-🚀", 0, "torrent");
+        assert_eq!(session.task_id, "task-🚀");
+    }
+
+    #[test]
+    fn test_session_new_large_bytes_at_start() {
+        let session = DownloadSession::new("task-1", u64::MAX, "http");
+        assert_eq!(session.bytes_at_start, u64::MAX);
+    }
+
+    #[test]
+    fn test_session_new_all_protocols() {
+        for proto in ["http", "https", "torrent", "ed2k", "p2p", "ftp"] {
+            let session = DownloadSession::new("task-1", 0, proto);
+            assert_eq!(session.protocol, proto);
+        }
+    }
+
+    // --- DownloadSession::close boundaries ---
+    #[test]
+    fn test_session_close_zero_bytes() {
+        let mut session = DownloadSession::new("task-1", 0, "http");
+        session.close(0, SessionOutcome::Completed, None);
+        assert_eq!(session.bytes_transferred(), 0);
+    }
+
+    #[test]
+    fn test_session_close_large_bytes() {
+        let mut session = DownloadSession::new("task-1", 0, "http");
+        session.close(u64::MAX, SessionOutcome::Completed, None);
+        assert_eq!(session.bytes_at_end, Some(u64::MAX));
+        assert_eq!(session.bytes_transferred(), u64::MAX);
+    }
+
+    #[test]
+    fn test_session_close_with_error_message() {
+        let mut session = DownloadSession::new("task-1", 0, "http");
+        session.close(
+            100,
+            SessionOutcome::Failed,
+            Some("connection reset by peer".to_string()),
+        );
+        assert_eq!(session.error.as_deref(), Some("connection reset by peer"));
+    }
+
+    #[test]
+    fn test_session_close_unicode_error() {
+        let mut session = DownloadSession::new("task-1", 0, "http");
+        session.close(0, SessionOutcome::Failed, Some("连接被重置".to_string()));
+        assert_eq!(session.error.as_deref(), Some("连接被重置"));
+    }
+
+    #[test]
+    fn test_session_close_timed_out() {
+        let mut session = DownloadSession::new("task-1", 0, "http");
+        session.close(
+            500,
+            SessionOutcome::TimedOut,
+            Some("timeout after 30s".to_string()),
+        );
+        assert_eq!(session.outcome, SessionOutcome::TimedOut);
+        assert!(session.error.is_some());
+    }
+
+    // --- duration_secs boundaries ---
+    #[test]
+    fn test_duration_secs_active_session() {
+        let session = DownloadSession::new("task-1", 0, "http");
+        // Active session uses Utc::now() as end
+        assert!(session.duration_secs() >= 0.0);
+        assert!(session.duration_secs() < 2.0);
+    }
+
+    #[test]
+    fn test_duration_secs_closed_session() {
+        let mut session = DownloadSession::new("task-1", 0, "http");
+        session.started_at = chrono::DateTime::parse_from_rfc3339("2026-01-15T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        session.ended_at = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-01-15T10:05:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
+        let dur = session.duration_secs();
+        assert!((dur - 300.0).abs() < 1.0);
+    }
+
+    // --- bytes_transferred boundaries ---
+    #[test]
+    fn test_bytes_transferred_saturating() {
+        let session = DownloadSession::new("task-1", 1000, "http");
+        // In progress: bytes_at_end is None, uses bytes_at_start
+        // bytes_transferred = bytes_at_start.saturating_sub(bytes_at_start) = 0
+        assert_eq!(session.bytes_transferred(), 0);
+    }
+
+    #[test]
+    fn test_bytes_transferred_closed() {
+        let mut session = DownloadSession::new("task-1", 500, "http");
+        session.close(2500, SessionOutcome::Completed, None);
+        assert_eq!(session.bytes_transferred(), 2000);
+    }
+
+    // --- Manager operations ---
+    #[test]
+    fn test_manager_with_config() {
+        let config = DownloadSessionConfig {
+            max_sessions_per_task: 5,
+            max_total_sessions: 100,
+        };
+        let mgr = DownloadSessionManager::with_config(config);
+        assert_eq!(mgr.config().max_sessions_per_task, 5);
+        assert_eq!(mgr.config().max_total_sessions, 100);
+    }
+
+    #[test]
+    fn test_manager_start_session_returns_unique_ids() {
+        let mut mgr = DownloadSessionManager::new();
+        let id1 = mgr.start_session("task-1", 0, "http");
+        mgr.close_session("task-1", 100, SessionOutcome::Completed, None)
+            .unwrap();
+        let id2 = mgr.start_session("task-1", 100, "http");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_manager_start_multiple_tasks() {
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        mgr.start_session("task-2", 0, "torrent");
+        mgr.start_session("task-3", 0, "ed2k");
+
+        assert_eq!(mgr.total_session_count(), 3);
+        assert_eq!(mgr.active_session_count(), 3);
+        assert!(mgr.get_active_session("task-1").is_some());
+        assert!(mgr.get_active_session("task-2").is_some());
+        assert!(mgr.get_active_session("task-3").is_some());
+    }
+
+    #[test]
+    fn test_manager_get_task_sessions_none() {
+        let mgr = DownloadSessionManager::new();
+        assert!(mgr.get_task_sessions("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_manager_get_task_sessions_some() {
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        let sessions = mgr.get_task_sessions("task-1").unwrap();
+        assert_eq!(sessions.len(), 1);
+    }
+
+    #[test]
+    fn test_manager_get_active_session_none() {
+        let mgr = DownloadSessionManager::new();
+        assert!(mgr.get_active_session("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_manager_get_active_session_closed() {
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        mgr.close_session("task-1", 100, SessionOutcome::Completed, None)
+            .unwrap();
+        assert!(mgr.get_active_session("task-1").is_none());
+    }
+
+    #[test]
+    fn test_manager_update_peak_speed_no_active() {
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        mgr.close_session("task-1", 100, SessionOutcome::Completed, None)
+            .unwrap();
+        // No active session, should not panic
+        mgr.update_peak_speed("task-1", 100_000);
+    }
+
+    #[test]
+    fn test_manager_update_peak_speed_no_task() {
+        let mut mgr = DownloadSessionManager::new();
+        // Non-existent task, should not panic
+        mgr.update_peak_speed("nonexistent", 100_000);
+    }
+
+    #[test]
+    fn test_manager_update_peak_speed_lower_not_updated() {
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        mgr.update_peak_speed("task-1", 50_000);
+        mgr.update_peak_speed("task-1", 30_000); // lower
+        let session = mgr.get_active_session("task-1").unwrap();
+        assert_eq!(session.peak_speed_bps, 50_000);
+    }
+
+    #[test]
+    fn test_manager_update_peak_speed_zero() {
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        mgr.update_peak_speed("task-1", 0);
+        let session = mgr.get_active_session("task-1").unwrap();
+        assert_eq!(session.peak_speed_bps, 0);
+    }
+
+    // --- Eviction ---
+    #[test]
+    fn test_manager_eviction_per_task_keeps_newest() {
+        let config = DownloadSessionConfig {
+            max_sessions_per_task: 2,
+            max_total_sessions: 5000,
+        };
+        let mut mgr = DownloadSessionManager::with_config(config);
+
+        mgr.start_session("task-1", 0, "http");
+        mgr.close_session("task-1", 100, SessionOutcome::Completed, None)
+            .unwrap();
+        mgr.start_session("task-1", 100, "http");
+        mgr.close_session("task-1", 200, SessionOutcome::Completed, None)
+            .unwrap();
+        mgr.start_session("task-1", 200, "http");
+        mgr.close_session("task-1", 300, SessionOutcome::Completed, None)
+            .unwrap();
+
+        let sessions = mgr.get_task_sessions("task-1").unwrap();
+        assert_eq!(sessions.len(), 2);
+        // Oldest (bytes_at_start=0) should be evicted
+        assert_eq!(sessions[0].bytes_at_start, 100);
+        assert_eq!(sessions[1].bytes_at_start, 200);
+    }
+
+    #[test]
+    fn test_manager_global_limit_eviction() {
+        let config = DownloadSessionConfig {
+            max_sessions_per_task: 100,
+            max_total_sessions: 3,
+        };
+        let mut mgr = DownloadSessionManager::with_config(config);
+
+        mgr.start_session("task-1", 0, "http");
+        mgr.close_session("task-1", 100, SessionOutcome::Completed, None)
+            .unwrap();
+        mgr.start_session("task-2", 0, "http");
+        mgr.close_session("task-2", 100, SessionOutcome::Completed, None)
+            .unwrap();
+        mgr.start_session("task-3", 0, "http");
+        mgr.close_session("task-3", 100, SessionOutcome::Completed, None)
+            .unwrap();
+        // Now at 3 sessions, adding one more should trigger global eviction
+        mgr.start_session("task-4", 0, "http");
+
+        assert!(mgr.total_session_count() <= 3);
+    }
+
+    // --- Config management ---
+    #[test]
+    fn test_manager_set_config() {
+        let mut mgr = DownloadSessionManager::new();
+        let new_config = DownloadSessionConfig {
+            max_sessions_per_task: 10,
+            max_total_sessions: 50,
+        };
+        mgr.set_config(new_config);
+        assert_eq!(mgr.config().max_sessions_per_task, 10);
+        assert_eq!(mgr.config().max_total_sessions, 50);
+    }
+
+    // --- Session count boundaries ---
+    #[test]
+    fn test_total_session_count_empty() {
+        let mgr = DownloadSessionManager::new();
+        assert_eq!(mgr.total_session_count(), 0);
+    }
+
+    #[test]
+    fn test_active_session_count_empty() {
+        let mgr = DownloadSessionManager::new();
+        assert_eq!(mgr.active_session_count(), 0);
+    }
+
+    #[test]
+    fn test_active_session_count_mixed() {
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        mgr.close_session("task-1", 100, SessionOutcome::Completed, None)
+            .unwrap();
+        mgr.start_session("task-2", 0, "http");
+
+        assert_eq!(mgr.active_session_count(), 1);
+        assert_eq!(mgr.total_session_count(), 2);
+    }
+
+    // --- Summary computation ---
+    #[test]
+    fn test_summary_all_outcomes() {
+        let mut mgr = DownloadSessionManager::new();
+
+        // Completed
+        mgr.start_session("task-1", 0, "http");
+        mgr.close_session("task-1", 100, SessionOutcome::Completed, None)
+            .unwrap();
+
+        // Failed
+        mgr.start_session("task-1", 100, "http");
+        mgr.close_session(
+            "task-1",
+            150,
+            SessionOutcome::Failed,
+            Some("err".to_string()),
+        )
+        .unwrap();
+
+        // Paused
+        mgr.start_session("task-1", 150, "http");
+        mgr.close_session("task-1", 200, SessionOutcome::Paused, None)
+            .unwrap();
+
+        // Timed out
+        mgr.start_session("task-1", 200, "http");
+        mgr.close_session(
+            "task-1",
+            250,
+            SessionOutcome::TimedOut,
+            Some("timeout".to_string()),
+        )
+        .unwrap();
+
+        let summary = mgr.get_task_summary("task-1").unwrap();
+        assert_eq!(summary.total_sessions, 4);
+        assert_eq!(summary.completed_sessions, 1);
+        assert_eq!(summary.failed_sessions, 1);
+        assert_eq!(summary.paused_sessions, 1);
+        assert!(summary.active_session.is_none());
+    }
+
+    #[test]
+    fn test_summary_total_bytes_accumulated() {
+        let mut mgr = DownloadSessionManager::new();
+
+        mgr.start_session("task-1", 0, "http");
+        mgr.close_session("task-1", 1000, SessionOutcome::Completed, None)
+            .unwrap();
+
+        mgr.start_session("task-1", 1000, "http");
+        mgr.close_session("task-1", 3000, SessionOutcome::Completed, None)
+            .unwrap();
+
+        let summary = mgr.get_task_summary("task-1").unwrap();
+        assert_eq!(summary.total_bytes_transferred, 3000);
+    }
+
+    #[test]
+    fn test_summary_peak_speed_across_sessions() {
+        let mut mgr = DownloadSessionManager::new();
+
+        mgr.start_session("task-1", 0, "http");
+        mgr.update_peak_speed("task-1", 50_000);
+        mgr.close_session("task-1", 1000, SessionOutcome::Completed, None)
+            .unwrap();
+
+        mgr.start_session("task-1", 1000, "http");
+        mgr.update_peak_speed("task-1", 200_000);
+        mgr.close_session("task-1", 2000, SessionOutcome::Completed, None)
+            .unwrap();
+
+        let summary = mgr.get_task_summary("task-1").unwrap();
+        assert_eq!(summary.peak_speed_bps, 200_000);
+    }
+
+    #[test]
+    fn test_summary_overall_avg_speed_none_when_zero_duration() {
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        // Close immediately (zero duration)
+        mgr.close_session("task-1", 0, SessionOutcome::Completed, None)
+            .unwrap();
+
+        let summary = mgr.get_task_summary("task-1").unwrap();
+        // Zero duration → None
+        assert!(summary.overall_avg_speed_bps.is_none());
+    }
+
+    #[test]
+    fn test_get_all_summaries_empty() {
+        let mgr = DownloadSessionManager::new();
+        let summaries = mgr.get_all_summaries();
+        assert!(summaries.is_empty());
+    }
+
+    #[test]
+    fn test_get_all_summaries_multiple_tasks() {
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        mgr.start_session("task-2", 0, "torrent");
+        mgr.start_session("task-3", 0, "ed2k");
+
+        let summaries = mgr.get_all_summaries();
+        assert_eq!(summaries.len(), 3);
+    }
+
+    // --- Persistence ---
+    #[tokio::test]
+    async fn test_save_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+
+        let mgr = DownloadSessionManager::new();
+        mgr.save_to_file(&path).await.unwrap();
+
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_save_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        mgr.save_to_file(&path).await.unwrap();
+
+        mgr.clear_all();
+        mgr.save_to_file(&path).await.unwrap();
+
+        let loaded = DownloadSessionManager::load_from_file(&path).await.unwrap();
+        assert_eq!(loaded.total_session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_no_tmp_file_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+
+        let mgr = DownloadSessionManager::new();
+        mgr.save_to_file(&path).await.unwrap();
+
+        let tmp_path = path.with_extension("tmp");
+        assert!(!tmp_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_load_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        tokio::fs::write(&path, "not valid json").await.unwrap();
+
+        let result = DownloadSessionManager::load_from_file(&path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_load_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        tokio::fs::write(&path, "").await.unwrap();
+
+        let result = DownloadSessionManager::load_from_file(&path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_persistence_unicode_task_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("任务-中文", 0, "http");
+        mgr.start_session("タスク-日本語", 0, "torrent");
+        mgr.start_session("task-🚀", 0, "ed2k");
+
+        mgr.save_to_file(&path).await.unwrap();
+        let loaded = DownloadSessionManager::load_from_file(&path).await.unwrap();
+
+        assert_eq!(loaded.total_session_count(), 3);
+        assert!(loaded.get_task_sessions("任务-中文").is_some());
+        assert!(loaded.get_task_sessions("タスク-日本語").is_some());
+        assert!(loaded.get_task_sessions("task-🚀").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_persistence_with_peak_speed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        mgr.update_peak_speed("task-1", 500_000);
+        mgr.close_session("task-1", 10_000, SessionOutcome::Completed, None)
+            .unwrap();
+
+        mgr.save_to_file(&path).await.unwrap();
+        let loaded = DownloadSessionManager::load_from_file(&path).await.unwrap();
+
+        let summary = loaded.get_task_summary("task-1").unwrap();
+        assert_eq!(summary.peak_speed_bps, 500_000);
+    }
+
+    #[tokio::test]
+    async fn test_persistence_with_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        mgr.close_session(
+            "task-1",
+            100,
+            SessionOutcome::Failed,
+            Some("connection reset".to_string()),
+        )
+        .unwrap();
+
+        mgr.save_to_file(&path).await.unwrap();
+        let loaded = DownloadSessionManager::load_from_file(&path).await.unwrap();
+
+        let sessions = loaded.get_task_sessions("task-1").unwrap();
+        assert_eq!(sessions[0].error.as_deref(), Some("connection reset"));
+    }
+
+    #[tokio::test]
+    async fn test_persistence_pretty_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        mgr.close_session("task-1", 100, SessionOutcome::Completed, None)
+            .unwrap();
+
+        // save_to_file uses to_string_pretty
+        mgr.save_to_file(&path).await.unwrap();
+
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(content.contains('\n'));
+    }
+
+    // --- Convenience functions ---
+    #[tokio::test]
+    async fn test_convenience_save_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+
+        save_download_sessions(&mgr, &path).await.unwrap();
+        let loaded = load_download_sessions(&path).await.unwrap();
+        assert_eq!(loaded.total_session_count(), 1);
+    }
+
+    // --- Boundary: max_sessions_per_task = 0 or 1 ---
+    #[test]
+    fn test_max_sessions_per_task_zero() {
+        let config = DownloadSessionConfig {
+            max_sessions_per_task: 0,
+            max_total_sessions: 5000,
+        };
+        let mut mgr = DownloadSessionManager::with_config(config);
+        mgr.start_session("task-1", 0, "http");
+        // With max=0, eviction triggers immediately
+        // After adding, len becomes 1 which is > 0, so session is removed
+        let sessions = mgr.get_task_sessions("task-1");
+        assert!(sessions.is_none() || sessions.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_max_sessions_per_task_one() {
+        let config = DownloadSessionConfig {
+            max_sessions_per_task: 1,
+            max_total_sessions: 5000,
+        };
+        let mut mgr = DownloadSessionManager::with_config(config);
+
+        mgr.start_session("task-1", 0, "http");
+        mgr.close_session("task-1", 100, SessionOutcome::Completed, None)
+            .unwrap();
+        mgr.start_session("task-1", 100, "http");
+
+        let sessions = mgr.get_task_sessions("task-1").unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].bytes_at_start, 100);
+    }
+
+    // --- Boundary: max_total_sessions = 0 ---
+    #[test]
+    fn test_max_total_sessions_zero() {
+        let config = DownloadSessionConfig {
+            max_sessions_per_task: 100,
+            max_total_sessions: 0,
+        };
+        let mut mgr = DownloadSessionManager::with_config(config);
+        mgr.start_session("task-1", 0, "http");
+        // Global limit eviction triggers
+        assert!(mgr.total_session_count() <= 1);
+    }
+
+    // --- Complex workflow ---
+    #[test]
+    fn test_complex_workflow_full_lifecycle() {
+        let mut mgr = DownloadSessionManager::new();
+
+        // Task 1: start → complete → restart → fail → restart → pause
+        mgr.start_session("task-1", 0, "http");
+        mgr.update_peak_speed("task-1", 100_000);
+        mgr.close_session("task-1", 5000, SessionOutcome::Completed, None)
+            .unwrap();
+
+        mgr.start_session("task-1", 5000, "http");
+        mgr.update_peak_speed("task-1", 200_000);
+        mgr.close_session(
+            "task-1",
+            7000,
+            SessionOutcome::Failed,
+            Some("network error".to_string()),
+        )
+        .unwrap();
+
+        mgr.start_session("task-1", 7000, "http");
+        mgr.update_peak_speed("task-1", 150_000);
+        mgr.close_session("task-1", 10_000, SessionOutcome::Paused, None)
+            .unwrap();
+
+        // Task 2: start → in progress
+        mgr.start_session("task-2", 0, "torrent");
+        mgr.update_peak_speed("task-2", 50_000);
+
+        // Verify summaries
+        let s1 = mgr.get_task_summary("task-1").unwrap();
+        assert_eq!(s1.total_sessions, 3);
+        assert_eq!(s1.completed_sessions, 1);
+        assert_eq!(s1.failed_sessions, 1);
+        assert_eq!(s1.paused_sessions, 1);
+        assert_eq!(s1.peak_speed_bps, 200_000);
+        assert!(s1.active_session.is_none());
+
+        let s2 = mgr.get_task_summary("task-2").unwrap();
+        assert_eq!(s2.total_sessions, 1);
+        assert!(s2.active_session.is_some());
+
+        assert_eq!(mgr.total_session_count(), 4);
+        assert_eq!(mgr.active_session_count(), 1);
+
+        // Remove task-1 and verify
+        assert!(mgr.remove_task_sessions("task-1"));
+        assert_eq!(mgr.total_session_count(), 1);
+        assert!(mgr.get_task_summary("task-1").is_none());
+
+        // Clear all
+        mgr.clear_all();
+        assert_eq!(mgr.total_session_count(), 0);
+        assert_eq!(mgr.active_session_count(), 0);
+    }
+
+    #[test]
+    fn test_complex_workflow_multiple_tasks_independent() {
+        let mut mgr = DownloadSessionManager::new();
+
+        for i in 0..10 {
+            let task_id = format!("task-{}", i);
+            mgr.start_session(&task_id, i * 1000, "http");
+            if i % 2 == 0 {
+                mgr.close_session(&task_id, (i + 1) * 1000, SessionOutcome::Completed, None)
+                    .unwrap();
+            }
+        }
+
+        assert_eq!(mgr.total_session_count(), 10);
+        // Even indices (0,2,4,6,8) are closed → 5 active
+        assert_eq!(mgr.active_session_count(), 5);
+
+        let summaries = mgr.get_all_summaries();
+        assert_eq!(summaries.len(), 10);
+    }
+
+    #[test]
+    fn test_complex_workflow_restart_same_task_many_times() {
+        let mut mgr = DownloadSessionManager::new();
+
+        for i in 0..20 {
+            mgr.start_session("task-1", i * 100, "http");
+            if i < 19 {
+                mgr.close_session("task-1", (i + 1) * 100, SessionOutcome::Completed, None)
+                    .unwrap();
+            }
+        }
+
+        let sessions = mgr.get_task_sessions("task-1").unwrap();
+        // Default max_sessions_per_task = 50, so all 20 fit
+        assert_eq!(sessions.len(), 20);
+    }
+
+    // --- Config serde with missing fields ---
+    #[test]
+    fn test_config_serde_missing_fields_error() {
+        let json = r#"{"max_sessions_per_task": 10}"#;
+        let result = serde_json::from_str::<DownloadSessionConfig>(json);
+        assert!(result.is_err());
+    }
+
+    // --- Session ID format ---
+    #[test]
+    fn test_session_id_is_uuid_format() {
+        let session = DownloadSession::new("task-1", 0, "http");
+        // UUID v4 format: 8-4-4-4-12 hex chars
+        let parts: Vec<&str> = session.id.split('-').collect();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0].len(), 8);
+        assert_eq!(parts[1].len(), 4);
+        assert_eq!(parts[2].len(), 4);
+        assert_eq!(parts[3].len(), 4);
+        assert_eq!(parts[4].len(), 12);
+    }
+
+    // --- remove_task_sessions idempotent ---
+    #[test]
+    fn test_remove_task_sessions_idempotent() {
+        let mut mgr = DownloadSessionManager::new();
+        mgr.start_session("task-1", 0, "http");
+        assert!(mgr.remove_task_sessions("task-1"));
+        assert!(!mgr.remove_task_sessions("task-1"));
+        assert!(!mgr.remove_task_sessions("task-1"));
+    }
+
+    // --- clear_all idempotent ---
+    #[test]
+    fn test_clear_all_idempotent() {
+        let mut mgr = DownloadSessionManager::new();
+        mgr.clear_all();
+        mgr.clear_all();
+        assert_eq!(mgr.total_session_count(), 0);
+    }
+
+    // --- Large number of sessions ---
+    #[test]
+    fn test_many_sessions() {
+        let mut mgr = DownloadSessionManager::new();
+        for i in 0..100 {
+            let task_id = format!("task-{}", i);
+            mgr.start_session(&task_id, 0, "http");
+        }
+        assert_eq!(mgr.total_session_count(), 100);
+        assert_eq!(mgr.active_session_count(), 100);
+
+        let summaries = mgr.get_all_summaries();
+        assert_eq!(summaries.len(), 100);
+    }
+
+    // --- Persistence: empty manager ---
+    #[tokio::test]
+    async fn test_persistence_empty_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+
+        let mgr = DownloadSessionManager::new();
+        mgr.save_to_file(&path).await.unwrap();
+
+        let loaded = DownloadSessionManager::load_from_file(&path).await.unwrap();
+        assert_eq!(loaded.total_session_count(), 0);
+    }
+
+    // --- Persistence: config preserved ---
+    #[tokio::test]
+    async fn test_persistence_config_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+
+        let config = DownloadSessionConfig {
+            max_sessions_per_task: 10,
+            max_total_sessions: 50,
+        };
+        let mgr = DownloadSessionManager::with_config(config);
+        mgr.save_to_file(&path).await.unwrap();
+
+        let loaded = DownloadSessionManager::load_from_file(&path).await.unwrap();
+        assert_eq!(loaded.config().max_sessions_per_task, 10);
+        assert_eq!(loaded.config().max_total_sessions, 50);
     }
 }
