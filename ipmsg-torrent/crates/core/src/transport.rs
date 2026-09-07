@@ -548,6 +548,12 @@ impl P2PSwarm {
         if supports_relay_server {
             let peer_id = info.public_key.to_peer_id();
             
+            tracing::info!(
+                peer = %pid_str,
+                stored_addrs_count = self.relay_node_addrs.get(&peer_id).map(|v| v.len()).unwrap_or(0),
+                "🎯 Peer supports relay server, attempting reservation"
+            );
+            
             // Get the relay node's address from our stored connection addresses
             if let Some(relay_addrs) = self.relay_node_addrs.get(&peer_id) {
                 if let Some(relay_addr_base) = relay_addrs.first() {
@@ -595,7 +601,7 @@ impl P2PSwarm {
                 } else {
                     tracing::warn!(
                         peer = %pid_str,
-                        "⚠️ Peer supports relay but no relay address stored"
+                        "⚠️ Peer supports relay but relay_addrs vector is empty"
                     );
                 }
             } else {
@@ -604,6 +610,11 @@ impl P2PSwarm {
                     "⚠️ Peer supports relay but not in relay_node_addrs (not connected via relay)"
                 );
             }
+        } else {
+            tracing::debug!(
+                peer = %pid_str,
+                "Peer does not support relay server protocol"
+            );
         }
 
         let peer = ConnectedPeer {
@@ -989,6 +1000,11 @@ impl futures::Stream for P2PSwarm {
 
                             // Store relay node addresses for later relay address construction
                             if let libp2p::core::ConnectedPoint::Dialer { address, .. } = endpoint {
+                                tracing::info!(
+                                    peer = %peer_id,
+                                    address = %address,
+                                    "📝 Storing relay node address for potential reservation"
+                                );
                                 self.relay_node_addrs
                                     .entry(*peer_id)
                                     .or_default()
@@ -996,6 +1012,10 @@ impl futures::Stream for P2PSwarm {
                             } else if let libp2p::core::ConnectedPoint::Listener { .. } = endpoint {
                                 // For incoming connections, we don't have the remote address directly
                                 // but we can use the connection to request reservation later
+                                tracing::info!(
+                                    peer = %peer_id,
+                                    "📝 Incoming connection - will use Identify info for relay"
+                                );
                             }
 
                             // Don't add addresses to Kademlia here — wait for Identify
