@@ -1348,18 +1348,54 @@ mod tests {
 
     #[test]
     fn test_probability_category_boundaries() {
-        assert_eq!(ProbabilityCategory::from_probability(0.0), ProbabilityCategory::VeryLow);
-        assert_eq!(ProbabilityCategory::from_probability(19.99), ProbabilityCategory::VeryLow);
-        assert_eq!(ProbabilityCategory::from_probability(20.0), ProbabilityCategory::Low);
-        assert_eq!(ProbabilityCategory::from_probability(39.99), ProbabilityCategory::Low);
-        assert_eq!(ProbabilityCategory::from_probability(40.0), ProbabilityCategory::Moderate);
-        assert_eq!(ProbabilityCategory::from_probability(59.99), ProbabilityCategory::Moderate);
-        assert_eq!(ProbabilityCategory::from_probability(60.0), ProbabilityCategory::High);
-        assert_eq!(ProbabilityCategory::from_probability(79.99), ProbabilityCategory::High);
-        assert_eq!(ProbabilityCategory::from_probability(80.0), ProbabilityCategory::VeryHigh);
-        assert_eq!(ProbabilityCategory::from_probability(100.0), ProbabilityCategory::VeryHigh);
-        assert_eq!(ProbabilityCategory::from_probability(-10.0), ProbabilityCategory::VeryLow);
-        assert_eq!(ProbabilityCategory::from_probability(150.0), ProbabilityCategory::VeryHigh);
+        assert_eq!(
+            ProbabilityCategory::from_probability(0.0),
+            ProbabilityCategory::VeryLow
+        );
+        assert_eq!(
+            ProbabilityCategory::from_probability(19.99),
+            ProbabilityCategory::VeryLow
+        );
+        assert_eq!(
+            ProbabilityCategory::from_probability(20.0),
+            ProbabilityCategory::Low
+        );
+        assert_eq!(
+            ProbabilityCategory::from_probability(39.99),
+            ProbabilityCategory::Low
+        );
+        assert_eq!(
+            ProbabilityCategory::from_probability(40.0),
+            ProbabilityCategory::Moderate
+        );
+        assert_eq!(
+            ProbabilityCategory::from_probability(59.99),
+            ProbabilityCategory::Moderate
+        );
+        assert_eq!(
+            ProbabilityCategory::from_probability(60.0),
+            ProbabilityCategory::High
+        );
+        assert_eq!(
+            ProbabilityCategory::from_probability(79.99),
+            ProbabilityCategory::High
+        );
+        assert_eq!(
+            ProbabilityCategory::from_probability(80.0),
+            ProbabilityCategory::VeryHigh
+        );
+        assert_eq!(
+            ProbabilityCategory::from_probability(100.0),
+            ProbabilityCategory::VeryHigh
+        );
+        assert_eq!(
+            ProbabilityCategory::from_probability(-10.0),
+            ProbabilityCategory::VeryLow
+        );
+        assert_eq!(
+            ProbabilityCategory::from_probability(150.0),
+            ProbabilityCategory::VeryHigh
+        );
     }
 
     // --- TaskProbabilityInput ---
@@ -1547,12 +1583,36 @@ mod tests {
     #[test]
     fn test_probability_factors_serde_roundtrip() {
         let factors = ProbabilityFactors {
-            source_reliability: FactorScore { score: 0.8, weight: 0.25, has_data: true },
-            network: FactorScore { score: 0.9, weight: 0.20, has_data: true },
-            history: FactorScore { score: 0.7, weight: 0.15, has_data: true },
-            task_state: FactorScore { score: 0.6, weight: 0.20, has_data: true },
-            disk_space: FactorScore { score: 1.0, weight: 0.10, has_data: true },
-            error_frequency: FactorScore { score: 0.5, weight: 0.10, has_data: true },
+            source_reliability: FactorScore {
+                score: 0.8,
+                weight: 0.25,
+                has_data: true,
+            },
+            network: FactorScore {
+                score: 0.9,
+                weight: 0.20,
+                has_data: true,
+            },
+            history: FactorScore {
+                score: 0.7,
+                weight: 0.15,
+                has_data: true,
+            },
+            task_state: FactorScore {
+                score: 0.6,
+                weight: 0.20,
+                has_data: true,
+            },
+            disk_space: FactorScore {
+                score: 1.0,
+                weight: 0.10,
+                has_data: true,
+            },
+            error_frequency: FactorScore {
+                score: 0.5,
+                weight: 0.10,
+                has_data: true,
+            },
         };
         let json = serde_json::to_string(&factors).unwrap();
         let deserialized: ProbabilityFactors = serde_json::from_str(&json).unwrap();
@@ -1685,7 +1745,10 @@ mod tests {
     fn test_estimator_signals_clone_debug() {
         let signals = make_signals();
         let cloned = signals.clone();
-        assert_eq!(cloned.domain_reliability_score, signals.domain_reliability_score);
+        assert_eq!(
+            cloned.domain_reliability_score,
+            signals.domain_reliability_score
+        );
         let debug_str = format!("{:?}", signals);
         assert!(debug_str.contains("domain_reliability_score"));
     }
@@ -1761,7 +1824,9 @@ mod tests {
         ));
         assert!(io_err.to_string().contains("I/O error"));
 
-        let json_err = CompletionProbabilityError::Serialize(serde_json::from_str::<String>("invalid").unwrap_err());
+        let json_err = CompletionProbabilityError::Serialize(
+            serde_json::from_str::<String>("invalid").unwrap_err(),
+        );
         assert!(json_err.to_string().contains("serialization error"));
 
         let config_err = CompletionProbabilityError::InvalidConfig("bad config".to_string());
@@ -1825,7 +1890,10 @@ mod tests {
     fn test_estimator_clone_debug() {
         let estimator = CompletionProbabilityEstimator::new();
         let cloned = estimator.clone();
-        assert_eq!(cloned.config().max_cache_size, estimator.config().max_cache_size);
+        assert_eq!(
+            cloned.config().max_cache_size,
+            estimator.config().max_cache_size
+        );
         let debug_str = format!("{:?}", estimator);
         assert!(debug_str.contains("config"));
     }
@@ -2191,7 +2259,9 @@ mod tests {
         estimator.save_config(&config_path).await.unwrap();
         assert!(config_path.exists());
 
-        let loaded = CompletionProbabilityEstimator::load_config(&config_path).await.unwrap();
+        let loaded = CompletionProbabilityEstimator::load_config(&config_path)
+            .await
+            .unwrap();
         assert!(!loaded.enabled);
         assert_eq!(loaded.max_cache_size, 100);
     }
@@ -2219,7 +2289,9 @@ mod tests {
     async fn test_load_config_invalid_json() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("invalid.json");
-        tokio::fs::write(&config_path, "not valid json").await.unwrap();
+        tokio::fs::write(&config_path, "not valid json")
+            .await
+            .unwrap();
 
         let result = CompletionProbabilityEstimator::load_config(&config_path).await;
         assert!(result.is_err());
@@ -2242,7 +2314,9 @@ mod tests {
         });
         estimator2.save_config(&config_path).await.unwrap();
 
-        let loaded = CompletionProbabilityEstimator::load_config(&config_path).await.unwrap();
+        let loaded = CompletionProbabilityEstimator::load_config(&config_path)
+            .await
+            .unwrap();
         assert_eq!(loaded.max_cache_size, 100);
     }
 
@@ -2401,7 +2475,10 @@ mod tests {
 
         assert!(result2.probability > result1.probability);
         assert_eq!(estimator.cache.len(), 1);
-        assert_eq!(estimator.get_cached("task-1").unwrap().probability, result2.probability);
+        assert_eq!(
+            estimator.get_cached("task-1").unwrap().probability,
+            result2.probability
+        );
     }
 
     #[test]
@@ -2452,7 +2529,10 @@ mod tests {
         let input2 = make_input("low-conf");
         let signals2 = EstimatorSignals::default();
         let result2 = estimator.estimate(&input2, &signals2);
-        assert!(result2.confidence == ConfidenceLevel::Low || result2.confidence == ConfidenceLevel::Medium);
+        assert!(
+            result2.confidence == ConfidenceLevel::Low
+                || result2.confidence == ConfidenceLevel::Medium
+        );
     }
 
     #[test]

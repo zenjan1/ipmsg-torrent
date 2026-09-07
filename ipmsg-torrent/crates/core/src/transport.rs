@@ -926,25 +926,25 @@ impl futures::Stream for P2PSwarm {
                                 // Build proper relay address: /ip4/.../tcp/.../p2p/<peer_id>/p2p-circuit
                                 // The address must include the peer's ID for the relay client to work
                                 let mut relay_addr = address.clone();
-                                
+
                                 // Check if address already contains /p2p/<peer_id>
                                 let has_p2p = address
                                     .iter()
                                     .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)));
-                                
+
                                 if !has_p2p {
                                     relay_addr.push(libp2p::multiaddr::Protocol::P2p(*peer_id));
                                 }
-                                
+
                                 // Add p2p-circuit protocol
                                 relay_addr.push(libp2p::multiaddr::Protocol::P2pCircuit);
-                                
+
                                 tracing::info!(
                                     %peer_id,
                                     "Attempting to listen on relay address: {}",
                                     relay_addr
                                 );
-                                
+
                                 match self.swarm.listen_on(relay_addr.clone()) {
                                     Ok(id) => {
                                         tracing::info!(
