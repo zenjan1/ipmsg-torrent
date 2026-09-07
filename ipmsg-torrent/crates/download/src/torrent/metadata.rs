@@ -320,6 +320,148 @@ impl MetadataFetcher {
 mod tests {
     use super::*;
 
+    // ── Constants ──
+
+    #[test]
+    fn test_metadata_piece_size_value() {
+        assert_eq!(METADATA_PIECE_SIZE, 16 * 1024);
+        assert_eq!(METADATA_PIECE_SIZE, 16384);
+    }
+
+    // ── MetadataError Display ──
+
+    #[test]
+    fn test_error_display_peer() {
+        let err = MetadataError::Peer(PeerError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "refused",
+        )));
+        let msg = format!("{err}");
+        assert!(msg.contains("peer error"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_error_display_bencode() {
+        let err = MetadataError::Bencode("invalid data".to_string());
+        let msg = format!("{err}");
+        assert!(msg.contains("bencode error"), "got: {msg}");
+        assert!(msg.contains("invalid data"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_error_display_verification_failed() {
+        let err = MetadataError::VerificationFailed;
+        let msg = format!("{err}");
+        assert!(msg.contains("verification failed"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_error_display_not_supported() {
+        let err = MetadataError::NotSupported;
+        let msg = format!("{err}");
+        assert!(msg.contains("does not support"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_error_display_timeout() {
+        let err = MetadataError::Timeout;
+        let msg = format!("{err}");
+        assert!(msg.contains("timeout"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_error_display_incomplete() {
+        let err = MetadataError::Incomplete;
+        let msg = format!("{err}");
+        assert!(msg.contains("incomplete"), "got: {msg}");
+    }
+
+    // ── MetadataError Debug ──
+
+    #[test]
+    fn test_error_debug_peer() {
+        let err = MetadataError::Peer(PeerError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "test",
+        )));
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Peer"), "got: {dbg}");
+    }
+
+    #[test]
+    fn test_error_debug_bencode() {
+        let err = MetadataError::Bencode("bad".to_string());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Bencode"), "got: {dbg}");
+        assert!(dbg.contains("bad"), "got: {dbg}");
+    }
+
+    #[test]
+    fn test_error_debug_all_variants() {
+        let errors: Vec<MetadataError> = vec![
+            MetadataError::Peer(PeerError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "x",
+            ))),
+            MetadataError::Bencode("e".into()),
+            MetadataError::VerificationFailed,
+            MetadataError::NotSupported,
+            MetadataError::Timeout,
+            MetadataError::Incomplete,
+        ];
+        for err in &errors {
+            let dbg = format!("{err:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    // ── MetadataError From<PeerError> ──
+
+    #[test]
+    fn test_error_from_peer_error() {
+        let peer_err = PeerError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "eof",
+        ));
+        let err: MetadataError = peer_err.into();
+        let msg = format!("{err}");
+        assert!(msg.contains("peer error"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_error_from_peer_preserves_kind() {
+        let peer_err = PeerError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out",
+        ));
+        let err: MetadataError = peer_err.into();
+        match err {
+            MetadataError::Peer(PeerError::Io(ref e)) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+            }
+            _ => panic!("expected Peer variant"),
+        }
+    }
+
+    // ── MetadataError traits ──
+
+    #[test]
+    fn test_error_is_std_error() {
+        let err = MetadataError::Timeout;
+        // Verify it implements std::error::Error
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn test_error_send_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<MetadataError>();
+        assert_sync::<MetadataError>();
+    }
+
+    // ── MetadataFetcher::new ──
+
     #[test]
     fn test_metadata_fetcher_creation() {
         let info_hash = [0u8; 20];
@@ -327,5 +469,404 @@ mod tests {
         assert_eq!(fetcher.info_hash, info_hash);
         assert!(fetcher.metadata_pieces.is_empty());
         assert!(fetcher.total_size.is_none());
+    }
+
+    #[test]
+    fn test_metadata_fetcher_all_zeros_hash() {
+        let info_hash = [0u8; 20];
+        let fetcher = MetadataFetcher::new(info_hash);
+        assert_eq!(fetcher.info_hash, [0u8; 20]);
+    }
+
+    #[test]
+    fn test_metadata_fetcher_all_ff_hash() {
+        let info_hash = [0xFFu8; 20];
+        let fetcher = MetadataFetcher::new(info_hash);
+        assert_eq!(fetcher.info_hash, [0xFFu8; 20]);
+    }
+
+    #[test]
+    fn test_metadata_fetcher_custom_hash() {
+        let mut info_hash = [0u8; 20];
+        for (i, b) in info_hash.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let fetcher = MetadataFetcher::new(info_hash);
+        assert_eq!(fetcher.info_hash, info_hash);
+        assert!(fetcher.metadata_pieces.is_empty());
+        assert!(fetcher.total_size.is_none());
+    }
+
+    #[test]
+    fn test_metadata_fetcher_initial_state() {
+        let fetcher = MetadataFetcher::new([1u8; 20]);
+        // No pieces collected
+        assert!(fetcher.metadata_pieces.is_empty());
+        // No total size known
+        assert!(fetcher.total_size.is_none());
+        // Info hash preserved
+        assert_eq!(fetcher.info_hash, [1u8; 20]);
+    }
+
+    #[test]
+    fn test_metadata_fetcher_independent_instances() {
+        let f1 = MetadataFetcher::new([0u8; 20]);
+        let f2 = MetadataFetcher::new([1u8; 20]);
+        assert_ne!(f1.info_hash, f2.info_hash);
+    }
+
+    // ── assemble_metadata ──
+
+    #[test]
+    fn test_assemble_metadata_no_total_size() {
+        let fetcher = MetadataFetcher::new([0u8; 20]);
+        let result = fetcher.assemble_metadata();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MetadataError::Incomplete => {}
+            other => panic!("expected Incomplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_assemble_metadata_empty_pieces() {
+        let mut fetcher = MetadataFetcher::new([0u8; 20]);
+        fetcher.total_size = Some(100);
+        // No pieces inserted
+        let result = fetcher.assemble_metadata();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MetadataError::Incomplete => {}
+            other => panic!("expected Incomplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_assemble_metadata_single_piece() {
+        let mut fetcher = MetadataFetcher::new([0u8; 20]);
+        let data = vec![42u8; 100];
+        fetcher.total_size = Some(100);
+        fetcher.metadata_pieces.insert(0, data.clone());
+        let result = fetcher.assemble_metadata();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), data);
+    }
+
+    #[test]
+    fn test_assemble_metadata_multiple_pieces() {
+        let mut fetcher = MetadataFetcher::new([0u8; 20]);
+        let piece0 = vec![1u8; 50];
+        let piece1 = vec![2u8; 50];
+        fetcher.total_size = Some(100);
+        fetcher.metadata_pieces.insert(0, piece0);
+        fetcher.metadata_pieces.insert(1, piece1);
+        let result = fetcher.assemble_metadata();
+        assert!(result.is_ok());
+        let assembled = result.unwrap();
+        assert_eq!(assembled.len(), 100);
+        assert!(assembled[..50].iter().all(|&b| b == 1));
+        assert!(assembled[50..].iter().all(|&b| b == 2));
+    }
+
+    #[test]
+    fn test_assemble_metadata_gap_in_pieces() {
+        let mut fetcher = MetadataFetcher::new([0u8; 20]);
+        fetcher.total_size = Some(150);
+        fetcher.metadata_pieces.insert(0, vec![1u8; 50]);
+        // Missing piece 1
+        fetcher.metadata_pieces.insert(2, vec![3u8; 50]);
+        let result = fetcher.assemble_metadata();
+        // Should stop at gap, assembled size != total_size
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MetadataError::Incomplete => {}
+            other => panic!("expected Incomplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_assemble_metadata_size_mismatch() {
+        let mut fetcher = MetadataFetcher::new([0u8; 20]);
+        fetcher.total_size = Some(200);
+        fetcher.metadata_pieces.insert(0, vec![1u8; 50]);
+        fetcher.metadata_pieces.insert(1, vec![2u8; 50]);
+        // Total received = 100, but total_size = 200
+        let result = fetcher.assemble_metadata();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MetadataError::Incomplete => {}
+            other => panic!("expected Incomplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_assemble_metadata_exact_fit() {
+        let mut fetcher = MetadataFetcher::new([0u8; 20]);
+        let data = vec![0xABu8; 16384]; // exactly METADATA_PIECE_SIZE
+        fetcher.total_size = Some(16384);
+        fetcher.metadata_pieces.insert(0, data.clone());
+        let result = fetcher.assemble_metadata();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 16384);
+    }
+
+    #[test]
+    fn test_assemble_metadata_oversized_piece() {
+        let mut fetcher = MetadataFetcher::new([0u8; 20]);
+        let data = vec![0u8; 300];
+        fetcher.total_size = Some(100);
+        fetcher.metadata_pieces.insert(0, data);
+        let result = fetcher.assemble_metadata();
+        // assembled len is 300 but total_size is 100, so len != total_size → Incomplete
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MetadataError::Incomplete => {}
+            other => panic!("expected Incomplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_assemble_metadata_zero_total_size() {
+        let mut fetcher = MetadataFetcher::new([0u8; 20]);
+        fetcher.total_size = Some(0);
+        // No pieces needed
+        let result = fetcher.assemble_metadata();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_assemble_metadata_many_pieces() {
+        let mut fetcher = MetadataFetcher::new([0u8; 20]);
+        let piece_size = 100;
+        let num_pieces = 50;
+        let total = piece_size * num_pieces;
+        fetcher.total_size = Some(total);
+        for i in 0..num_pieces {
+            let data = vec![(i % 256) as u8; piece_size];
+            fetcher.metadata_pieces.insert(i, data);
+        }
+        let result = fetcher.assemble_metadata();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), total);
+    }
+
+    // ── verify_metadata ──
+
+    #[test]
+    fn test_verify_metadata_correct_hash() {
+        // Create some metadata bytes and compute their SHA-1
+        let metadata = b"test metadata content for hashing";
+        let hash = Sha1::digest(metadata);
+        let mut info_hash = [0u8; 20];
+        info_hash.copy_from_slice(&hash);
+
+        let fetcher = MetadataFetcher::new(info_hash);
+        let result = fetcher.verify_metadata(metadata);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_metadata_wrong_hash() {
+        let metadata = b"test metadata content";
+        let fetcher = MetadataFetcher::new([0u8; 20]); // wrong hash
+        let result = fetcher.verify_metadata(metadata);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MetadataError::VerificationFailed => {}
+            other => panic!("expected VerificationFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_verify_metadata_empty_data() {
+        let metadata = b"";
+        let hash = Sha1::digest(metadata);
+        let mut info_hash = [0u8; 20];
+        info_hash.copy_from_slice(&hash);
+
+        let fetcher = MetadataFetcher::new(info_hash);
+        let result = fetcher.verify_metadata(metadata);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_metadata_all_zeros() {
+        let metadata = [0u8; 100];
+        let hash = Sha1::digest(&metadata);
+        let mut info_hash = [0u8; 20];
+        info_hash.copy_from_slice(&hash);
+
+        let fetcher = MetadataFetcher::new(info_hash);
+        let result = fetcher.verify_metadata(&metadata);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_metadata_all_ff() {
+        let metadata = [0xFFu8; 100];
+        let hash = Sha1::digest(&metadata);
+        let mut info_hash = [0u8; 20];
+        info_hash.copy_from_slice(&hash);
+
+        let fetcher = MetadataFetcher::new(info_hash);
+        let result = fetcher.verify_metadata(&metadata);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_metadata_single_byte_mismatch() {
+        let metadata = b"test data here";
+        let hash = Sha1::digest(metadata);
+        let mut info_hash = [0u8; 20];
+        info_hash.copy_from_slice(&hash);
+        // Flip one bit in the hash
+        info_hash[0] ^= 0x01;
+
+        let fetcher = MetadataFetcher::new(info_hash);
+        let result = fetcher.verify_metadata(metadata);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_metadata_large_data() {
+        let metadata = vec![0x42u8; 1024 * 1024]; // 1MB
+        let hash = Sha1::digest(&metadata);
+        let mut info_hash = [0u8; 20];
+        info_hash.copy_from_slice(&hash);
+
+        let fetcher = MetadataFetcher::new(info_hash);
+        let result = fetcher.verify_metadata(&metadata);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_metadata_unicode_content() {
+        let metadata = "你好世界🌍".as_bytes();
+        let hash = Sha1::digest(metadata);
+        let mut info_hash = [0u8; 20];
+        info_hash.copy_from_slice(&hash);
+
+        let fetcher = MetadataFetcher::new(info_hash);
+        let result = fetcher.verify_metadata(metadata);
+        assert!(result.is_ok());
+    }
+
+    // ── assemble + verify integration ──
+
+    #[test]
+    fn test_assemble_then_verify_success() {
+        let metadata_content = b"complete torrent metadata for testing";
+        let hash = Sha1::digest(metadata_content);
+        let mut info_hash = [0u8; 20];
+        info_hash.copy_from_slice(&hash);
+
+        let mut fetcher = MetadataFetcher::new(info_hash);
+        fetcher.total_size = Some(metadata_content.len());
+        fetcher.metadata_pieces.insert(0, metadata_content.to_vec());
+
+        let assembled = fetcher.assemble_metadata().unwrap();
+        assert!(fetcher.verify_metadata(&assembled).is_ok());
+    }
+
+    #[test]
+    fn test_assemble_then_verify_failure() {
+        let metadata_content = b"some metadata";
+        let mut fetcher = MetadataFetcher::new([0u8; 20]); // wrong hash
+        fetcher.total_size = Some(metadata_content.len());
+        fetcher.metadata_pieces.insert(0, metadata_content.to_vec());
+
+        let assembled = fetcher.assemble_metadata().unwrap();
+        assert!(fetcher.verify_metadata(&assembled).is_err());
+    }
+
+    #[test]
+    fn test_assemble_multi_piece_then_verify() {
+        let part1 = b"first half of metadata ";
+        let part2 = b"second half of metadata";
+        let mut full = Vec::new();
+        full.extend_from_slice(part1);
+        full.extend_from_slice(part2);
+
+        let hash = Sha1::digest(&full);
+        let mut info_hash = [0u8; 20];
+        info_hash.copy_from_slice(&hash);
+
+        let mut fetcher = MetadataFetcher::new(info_hash);
+        fetcher.total_size = Some(full.len());
+        fetcher.metadata_pieces.insert(0, part1.to_vec());
+        fetcher.metadata_pieces.insert(1, part2.to_vec());
+
+        let assembled = fetcher.assemble_metadata().unwrap();
+        assert_eq!(assembled, full);
+        assert!(fetcher.verify_metadata(&assembled).is_ok());
+    }
+
+    // ── Edge cases ──
+
+    #[test]
+    fn test_fetcher_with_binary_hash() {
+        let info_hash = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+            0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13,
+        ];
+        let fetcher = MetadataFetcher::new(info_hash);
+        assert_eq!(fetcher.info_hash, info_hash);
+    }
+
+    #[test]
+    fn test_assemble_metadata_pieces_out_of_order_insert() {
+        // Insert pieces in reverse order, assemble should still work by index
+        let mut fetcher = MetadataFetcher::new([0u8; 20]);
+        fetcher.total_size = Some(150);
+        fetcher.metadata_pieces.insert(2, vec![3u8; 50]);
+        fetcher.metadata_pieces.insert(0, vec![1u8; 50]);
+        fetcher.metadata_pieces.insert(1, vec![2u8; 50]);
+        let result = fetcher.assemble_metadata();
+        assert!(result.is_ok());
+        let assembled = result.unwrap();
+        assert_eq!(assembled.len(), 150);
+        assert!(assembled[..50].iter().all(|&b| b == 1));
+        assert!(assembled[50..100].iter().all(|&b| b == 2));
+        assert!(assembled[100..].iter().all(|&b| b == 3));
+    }
+
+    #[test]
+    fn test_assemble_metadata_single_byte_pieces() {
+        let mut fetcher = MetadataFetcher::new([0u8; 20]);
+        fetcher.total_size = Some(3);
+        fetcher.metadata_pieces.insert(0, vec![0xAA]);
+        fetcher.metadata_pieces.insert(1, vec![0xBB]);
+        fetcher.metadata_pieces.insert(2, vec![0xCC]);
+        let result = fetcher.assemble_metadata();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), vec![0xAA, 0xBB, 0xCC]);
+    }
+
+    #[test]
+    fn test_verify_metadata_deterministic() {
+        let metadata = b"deterministic test";
+        let hash = Sha1::digest(metadata);
+        let mut info_hash = [0u8; 20];
+        info_hash.copy_from_slice(&hash);
+
+        let fetcher = MetadataFetcher::new(info_hash);
+        // Verify same data twice
+        assert!(fetcher.verify_metadata(metadata).is_ok());
+        assert!(fetcher.verify_metadata(metadata).is_ok());
+    }
+
+    #[test]
+    fn test_multiple_fetchers_independent() {
+        let data = b"shared test data";
+        let hash = Sha1::digest(data);
+        let mut info_hash = [0u8; 20];
+        info_hash.copy_from_slice(&hash);
+
+        let f1 = MetadataFetcher::new(info_hash);
+        let f2 = MetadataFetcher::new(info_hash);
+        // Both should verify the same data successfully
+        assert!(f1.verify_metadata(data).is_ok());
+        assert!(f2.verify_metadata(data).is_ok());
     }
 }

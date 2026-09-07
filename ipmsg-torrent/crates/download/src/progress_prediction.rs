@@ -757,4 +757,980 @@ mod tests {
         assert_eq!(format!("{}", PredictionConfidence::Low), "Low");
         assert_eq!(format!("{}", PredictionConfidence::Unknown), "Unknown");
     }
+
+    // ── Phase 248: Comprehensive test coverage ──
+
+    // --- PredictionConfidence serde ---
+
+    #[test]
+    fn test_confidence_serde_roundtrip_all_variants() {
+        for variant in [
+            PredictionConfidence::High,
+            PredictionConfidence::Medium,
+            PredictionConfidence::Low,
+            PredictionConfidence::Unknown,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: PredictionConfidence = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, back);
+        }
+    }
+
+    #[test]
+    fn test_confidence_serde_pascal_case_values() {
+        assert_eq!(
+            serde_json::to_string(&PredictionConfidence::High).unwrap(),
+            "\"High\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PredictionConfidence::Medium).unwrap(),
+            "\"Medium\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PredictionConfidence::Low).unwrap(),
+            "\"Low\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PredictionConfidence::Unknown).unwrap(),
+            "\"Unknown\""
+        );
+    }
+
+    // --- PredictionConfidence traits ---
+
+    #[test]
+    fn test_confidence_clone_copy() {
+        let a = PredictionConfidence::High;
+        let b = a; // Copy
+        let c = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+    }
+
+    #[test]
+    fn test_confidence_debug() {
+        let s = format!("{:?}", PredictionConfidence::High);
+        assert_eq!(s, "High");
+    }
+
+    #[test]
+    fn test_confidence_eq() {
+        assert_eq!(PredictionConfidence::High, PredictionConfidence::High);
+        assert_ne!(PredictionConfidence::High, PredictionConfidence::Low);
+    }
+
+    // --- PredictionConfig serde ---
+
+    #[test]
+    fn test_config_serde_roundtrip() {
+        let config = PredictionConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let back: PredictionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.enabled, config.enabled);
+        assert_eq!(back.min_samples, config.min_samples);
+        assert_eq!(back.max_samples, config.max_samples);
+        assert!((back.smoothing_factor - config.smoothing_factor).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_config_serde_custom_values() {
+        let config = PredictionConfig {
+            enabled: false,
+            min_samples: 3,
+            max_samples: 50,
+            smoothing_factor: 0.7,
+            high_confidence_min_samples: 20,
+            medium_confidence_min_samples: 10,
+            track_accuracy: false,
+            max_accuracy_history: 100,
+            prediction_file: None,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: PredictionConfig = serde_json::from_str(&json).unwrap();
+        assert!(!back.enabled);
+        assert_eq!(back.min_samples, 3);
+        assert_eq!(back.max_samples, 50);
+        assert!((back.smoothing_factor - 0.7).abs() < 1e-10);
+        assert_eq!(back.high_confidence_min_samples, 20);
+        assert!(!back.track_accuracy);
+        assert_eq!(back.max_accuracy_history, 100);
+    }
+
+    #[test]
+    fn test_config_serde_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"min_samples":5,"max_samples":100,"smoothing_factor":0.3,"high_confidence_min_samples":10,"medium_confidence_min_samples":5,"track_accuracy":true,"max_accuracy_history":50,"extra_field":"ignored"}"#;
+        let config: PredictionConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.min_samples, 5);
+    }
+
+    #[test]
+    fn test_config_serde_pretty() {
+        let config = PredictionConfig::default();
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        let back: PredictionConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(back.enabled, config.enabled);
+        assert_eq!(back.min_samples, config.min_samples);
+    }
+
+    #[test]
+    fn test_config_clone_debug() {
+        let config = PredictionConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.enabled, config.enabled);
+        assert_eq!(cloned.min_samples, config.min_samples);
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("PredictionConfig"));
+    }
+
+    // --- SpeedSample serde + traits ---
+
+    #[test]
+    fn test_speed_sample_serde_roundtrip() {
+        let sample = SpeedSample {
+            timestamp: Utc::now(),
+            speed_bps: 1_000_000,
+            progress: 50.0,
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let back: SpeedSample = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.speed_bps, 1_000_000);
+        assert!((back.progress - 50.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_speed_sample_clone_debug() {
+        let sample = SpeedSample {
+            timestamp: Utc::now(),
+            speed_bps: 500_000,
+            progress: 25.0,
+        };
+        let cloned = sample.clone();
+        assert_eq!(cloned.speed_bps, sample.speed_bps);
+        let debug = format!("{:?}", sample);
+        assert!(debug.contains("SpeedSample"));
+    }
+
+    // --- PredictionModel serde + traits ---
+
+    #[test]
+    fn test_prediction_model_serde_roundtrip() {
+        let model = PredictionModel {
+            task_id: 42,
+            speed_samples: VecDeque::from(vec![SpeedSample {
+                timestamp: Utc::now(),
+                speed_bps: 1_000_000,
+                progress: 10.0,
+            }]),
+            ewma_speed: 1_000_000.0,
+            slope: 100.0,
+            intercept: 900_000.0,
+            speed_variance: 500.0,
+            last_updated: Utc::now(),
+        };
+        let json = serde_json::to_string(&model).unwrap();
+        let back: PredictionModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.task_id, 42);
+        assert!((back.ewma_speed - 1_000_000.0).abs() < 1e-10);
+        assert_eq!(back.speed_samples.len(), 1);
+    }
+
+    #[test]
+    fn test_prediction_model_clone_debug() {
+        let model = PredictionModel {
+            task_id: 1,
+            speed_samples: VecDeque::new(),
+            ewma_speed: 0.0,
+            slope: 0.0,
+            intercept: 0.0,
+            speed_variance: 0.0,
+            last_updated: Utc::now(),
+        };
+        let cloned = model.clone();
+        assert_eq!(cloned.task_id, model.task_id);
+        let debug = format!("{:?}", model);
+        assert!(debug.contains("PredictionModel"));
+    }
+
+    // --- AccuracyRecord serde + traits ---
+
+    #[test]
+    fn test_accuracy_record_serde_roundtrip() {
+        let record = AccuracyRecord {
+            task_id: 1,
+            predicted_at: Utc::now(),
+            predicted_seconds: 100,
+            actual_seconds: Some(110),
+            error_percentage: Some(10.0),
+            confidence: PredictionConfidence::Medium,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let back: AccuracyRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.task_id, 1);
+        assert_eq!(back.actual_seconds, Some(110));
+        assert!((back.error_percentage.unwrap() - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_accuracy_record_null_actual() {
+        let record = AccuracyRecord {
+            task_id: 1,
+            predicted_at: Utc::now(),
+            predicted_seconds: 100,
+            actual_seconds: None,
+            error_percentage: None,
+            confidence: PredictionConfidence::Low,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains("null"));
+        let back: AccuracyRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.actual_seconds, None);
+        assert_eq!(back.error_percentage, None);
+    }
+
+    #[test]
+    fn test_accuracy_record_clone_debug() {
+        let record = AccuracyRecord {
+            task_id: 1,
+            predicted_at: Utc::now(),
+            predicted_seconds: 50,
+            actual_seconds: Some(55),
+            error_percentage: Some(10.0),
+            confidence: PredictionConfidence::High,
+        };
+        let cloned = record.clone();
+        assert_eq!(cloned.task_id, record.task_id);
+        let debug = format!("{:?}", record);
+        assert!(debug.contains("AccuracyRecord"));
+    }
+
+    // --- AccuracySummary serde + traits ---
+
+    #[test]
+    fn test_accuracy_summary_serde_roundtrip() {
+        let summary = AccuracySummary {
+            total_predictions: 100,
+            completed_predictions: 80,
+            avg_error_percentage: 5.5,
+            mape: 7.2,
+            within_10_percent: 60,
+            within_25_percent: 75,
+            over_50_percent: 3,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let back: AccuracySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.total_predictions, 100);
+        assert_eq!(back.completed_predictions, 80);
+        assert!((back.avg_error_percentage - 5.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_accuracy_summary_clone_debug() {
+        let summary = AccuracySummary {
+            total_predictions: 10,
+            completed_predictions: 5,
+            avg_error_percentage: 2.0,
+            mape: 3.0,
+            within_10_percent: 3,
+            within_25_percent: 4,
+            over_50_percent: 0,
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_predictions, summary.total_predictions);
+        let debug = format!("{:?}", summary);
+        assert!(debug.contains("AccuracySummary"));
+    }
+
+    // --- PredictionResult serde + traits ---
+
+    #[test]
+    fn test_prediction_result_serde_roundtrip() {
+        let result = PredictionResult {
+            task_id: 42,
+            estimated_completion: Utc::now() + chrono::Duration::seconds(60),
+            remaining_seconds: 60,
+            confidence: PredictionConfidence::High,
+            optimistic_seconds: 45,
+            pessimistic_seconds: 80,
+            sample_count: 20,
+            predicted_speed_bps: 1_000_000,
+            current_progress: 50.0,
+            predicted_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: PredictionResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.task_id, 42);
+        assert_eq!(back.remaining_seconds, 60);
+        assert_eq!(back.optimistic_seconds, 45);
+        assert_eq!(back.pessimistic_seconds, 80);
+    }
+
+    #[test]
+    fn test_prediction_result_clone_debug() {
+        let result = PredictionResult {
+            task_id: 1,
+            estimated_completion: Utc::now(),
+            remaining_seconds: 100,
+            confidence: PredictionConfidence::Medium,
+            optimistic_seconds: 80,
+            pessimistic_seconds: 120,
+            sample_count: 10,
+            predicted_speed_bps: 500_000,
+            current_progress: 25.0,
+            predicted_at: Utc::now(),
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.task_id, result.task_id);
+        assert_eq!(cloned.remaining_seconds, result.remaining_seconds);
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("PredictionResult"));
+    }
+
+    // --- ProgressPredictor serde ---
+
+    #[test]
+    fn test_predictor_serde_roundtrip() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.update_speed(1, 1_000_000, 10.0);
+        predictor.update_speed(1, 1_100_000, 20.0);
+        let json = serde_json::to_string(&predictor).unwrap();
+        let back: ProgressPredictor = serde_json::from_str(&json).unwrap();
+        assert!(back.models.contains_key(&1));
+        assert_eq!(back.models[&1].speed_samples.len(), 2);
+    }
+
+    #[test]
+    fn test_predictor_clone() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.update_speed(1, 1_000_000, 10.0);
+        let cloned = predictor.clone();
+        assert!(cloned.models.contains_key(&1));
+        assert_eq!(cloned.models[&1].speed_samples.len(), 1);
+    }
+
+    #[test]
+    fn test_predictor_clone_independence() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.update_speed(1, 1_000_000, 10.0);
+        let mut cloned = predictor.clone();
+        cloned.update_speed(2, 2_000_000, 20.0);
+        assert!(!predictor.models.contains_key(&2));
+        assert!(cloned.models.contains_key(&2));
+    }
+
+    #[test]
+    fn test_predictor_debug() {
+        let predictor = ProgressPredictor::new();
+        let debug = format!("{:?}", predictor);
+        assert!(debug.contains("ProgressPredictor"));
+    }
+
+    // --- Default impl ---
+
+    #[test]
+    fn test_predictor_default_equals_new() {
+        let new = ProgressPredictor::new();
+        let default = ProgressPredictor::default();
+        assert_eq!(default.config.enabled, new.config.enabled);
+        assert_eq!(default.config.min_samples, new.config.min_samples);
+        assert!(default.models.is_empty());
+        assert!(default.accuracy_history.is_empty());
+    }
+
+    // --- with_config ---
+
+    #[test]
+    fn test_predictor_with_config() {
+        let config = PredictionConfig {
+            enabled: true,
+            min_samples: 3,
+            max_samples: 50,
+            smoothing_factor: 0.5,
+            high_confidence_min_samples: 15,
+            medium_confidence_min_samples: 8,
+            track_accuracy: false,
+            max_accuracy_history: 25,
+            prediction_file: None,
+        };
+        let predictor = ProgressPredictor::with_config(config.clone());
+        assert_eq!(predictor.config.min_samples, 3);
+        assert_eq!(predictor.config.max_samples, 50);
+        assert!((predictor.config.smoothing_factor - 0.5).abs() < 1e-10);
+        assert!(!predictor.config.track_accuracy);
+    }
+
+    // --- update_speed boundaries ---
+
+    #[test]
+    fn test_update_speed_zero_bps() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.update_speed(1, 0, 10.0);
+        assert!(predictor.models.contains_key(&1));
+        assert_eq!(predictor.models[&1].speed_samples[0].speed_bps, 0);
+    }
+
+    #[test]
+    fn test_update_speed_large_bps() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.update_speed(1, u64::MAX, 50.0);
+        assert!(predictor.models.contains_key(&1));
+        assert_eq!(predictor.models[&1].speed_samples[0].speed_bps, u64::MAX);
+    }
+
+    #[test]
+    fn test_update_speed_zero_progress() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.update_speed(1, 1_000_000, 0.0);
+        assert!((predictor.models[&1].speed_samples[0].progress - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_update_speed_100_percent_progress() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.update_speed(1, 1_000_000, 100.0);
+        assert!((predictor.models[&1].speed_samples[0].progress - 100.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_update_speed_disabled_no_model() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.config.enabled = false;
+        predictor.update_speed(1, 1_000_000, 10.0);
+        assert!(!predictor.models.contains_key(&1));
+    }
+
+    #[test]
+    fn test_update_speed_multiple_tasks_independent() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.update_speed(1, 1_000_000, 10.0);
+        predictor.update_speed(2, 2_000_000, 20.0);
+        predictor.update_speed(3, 3_000_000, 30.0);
+        assert_eq!(predictor.models.len(), 3);
+        assert_eq!(predictor.models[&1].speed_samples[0].speed_bps, 1_000_000);
+        assert_eq!(predictor.models[&2].speed_samples[0].speed_bps, 2_000_000);
+        assert_eq!(predictor.models[&3].speed_samples[0].speed_bps, 3_000_000);
+    }
+
+    #[test]
+    fn test_update_speed_max_samples_trims_oldest() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.config.max_samples = 5;
+        for i in 0..10 {
+            predictor.update_speed(1, (i + 1) * 1000, i as f64 * 10.0);
+        }
+        let model = &predictor.models[&1];
+        assert_eq!(model.speed_samples.len(), 5);
+        // Oldest should have been removed, first remaining should be sample 5 (index 5)
+        assert_eq!(model.speed_samples[0].speed_bps, 6000);
+    }
+
+    // --- predict boundaries ---
+
+    #[test]
+    fn test_predict_nonexistent_task() {
+        let predictor = ProgressPredictor::new();
+        assert!(predictor.predict(999, 50.0, 10_000_000).is_none());
+    }
+
+    #[test]
+    fn test_predict_zero_file_size() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        let result = predictor.predict(1, 100.0, 0);
+        assert!(result.is_some());
+        let pred = result.unwrap();
+        assert_eq!(pred.remaining_seconds, 0);
+    }
+
+    #[test]
+    fn test_predict_100_percent_progress() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        let result = predictor.predict(1, 100.0, 10_000_000);
+        assert!(result.is_some());
+        let pred = result.unwrap();
+        assert_eq!(pred.remaining_seconds, 0);
+    }
+
+    #[test]
+    fn test_predict_zero_percent_progress() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        let result = predictor.predict(1, 0.0, 10_000_000);
+        assert!(result.is_some());
+        let pred = result.unwrap();
+        assert!(pred.remaining_seconds > 0);
+        assert!((pred.current_progress - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_predict_large_file() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 10_000_000, i as f64);
+        }
+        let result = predictor.predict(1, 50.0, 10_000_000_000); // 10GB
+        assert!(result.is_some());
+        let pred = result.unwrap();
+        assert!(pred.remaining_seconds > 0);
+    }
+
+    #[test]
+    fn test_predict_disabled_returns_none() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        predictor.config.enabled = false;
+        assert!(predictor.predict(1, 50.0, 10_000_000).is_none());
+    }
+
+    #[test]
+    fn test_predict_speed_is_at_least_1() {
+        // Even with zero speed samples, predicted speed should be >= 1.0
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 0, i as f64 * 10.0);
+        }
+        let result = predictor.predict(1, 50.0, 10_000_000);
+        assert!(result.is_some());
+        let pred = result.unwrap();
+        assert!(pred.predicted_speed_bps >= 1);
+    }
+
+    // --- predict_task ---
+
+    #[test]
+    fn test_predict_task_zero_file_size() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        let result = predictor.predict_task(1, 0, 0);
+        assert!(result.is_some());
+        let pred = result.unwrap();
+        assert!((pred.current_progress - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_predict_task_half_downloaded() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        let result = predictor.predict_task(1, 5_000_000, 10_000_000);
+        assert!(result.is_some());
+        let pred = result.unwrap();
+        assert!((pred.current_progress - 50.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_predict_task_nonexistent() {
+        let predictor = ProgressPredictor::new();
+        assert!(predictor.predict_task(999, 0, 10_000_000).is_none());
+    }
+
+    // --- record_completion ---
+
+    #[test]
+    fn test_record_completion_basic() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        predictor.record_completion(1, 5);
+        assert_eq!(predictor.accuracy_history.len(), 1);
+        assert_eq!(predictor.accuracy_history[0].task_id, 1);
+        assert!(predictor.accuracy_history[0].actual_seconds.is_some());
+    }
+
+    #[test]
+    fn test_record_completion_disabled() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.config.track_accuracy = false;
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        predictor.record_completion(1, 5);
+        assert!(predictor.accuracy_history.is_empty());
+    }
+
+    #[test]
+    fn test_record_completion_max_history_trimming() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.config.max_accuracy_history = 3;
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        // Record multiple completions
+        for _ in 0..5 {
+            predictor.record_completion(1, 5);
+        }
+        assert!(predictor.accuracy_history.len() <= 3);
+    }
+
+    // --- get_accuracy_summary ---
+
+    #[test]
+    fn test_accuracy_summary_with_data() {
+        let mut predictor = ProgressPredictor::new();
+        // Add enough samples for prediction
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        // Record completion
+        predictor.record_completion(1, 5);
+        let summary = predictor.get_accuracy_summary();
+        assert!(summary.total_predictions > 0);
+        assert!(summary.completed_predictions > 0);
+    }
+
+    #[test]
+    fn test_accuracy_summary_no_completed() {
+        let predictor = ProgressPredictor::new();
+        let summary = predictor.get_accuracy_summary();
+        assert_eq!(summary.total_predictions, 0);
+        assert_eq!(summary.completed_predictions, 0);
+        assert_eq!(summary.avg_error_percentage, 0.0);
+        assert_eq!(summary.mape, 0.0);
+        assert_eq!(summary.within_10_percent, 0);
+        assert_eq!(summary.within_25_percent, 0);
+        assert_eq!(summary.over_50_percent, 0);
+    }
+
+    // --- remove_task boundaries ---
+
+    #[test]
+    fn test_remove_task_nonexistent() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.remove_task(999); // Should not panic
+    }
+
+    #[test]
+    fn test_remove_task_idempotent() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.update_speed(1, 1_000_000, 10.0);
+        predictor.remove_task(1);
+        predictor.remove_task(1); // Second remove should not panic
+        assert!(!predictor.models.contains_key(&1));
+    }
+
+    // --- clear boundaries ---
+
+    #[test]
+    fn test_clear_empty() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.clear(); // Should not panic on empty
+        assert!(predictor.models.is_empty());
+        assert!(predictor.accuracy_history.is_empty());
+    }
+
+    // --- task_id_to_u64 ---
+
+    #[test]
+    fn test_task_id_to_u64_deterministic() {
+        let h1 = task_id_to_u64("task-123");
+        let h2 = task_id_to_u64("task-123");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_task_id_to_u64_different_inputs() {
+        let h1 = task_id_to_u64("task-1");
+        let h2 = task_id_to_u64("task-2");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_task_id_to_u64_unicode() {
+        let h1 = task_id_to_u64("任务-中文");
+        let h2 = task_id_to_u64("任务-中文");
+        assert_eq!(h1, h2);
+        let h3 = task_id_to_u64("任务-日文");
+        assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn test_task_id_to_u64_empty() {
+        let h = task_id_to_u64("");
+        // Should not panic, returns some hash
+        assert!(h > 0 || h == 0); // just ensure no panic
+    }
+
+    // --- Confidence boundary tests ---
+
+    #[test]
+    fn test_confidence_high_threshold() {
+        let mut predictor = ProgressPredictor::new();
+        // high_confidence_min_samples = 10, cv < 0.3
+        // Use constant speed to keep variance low
+        for i in 0..15 {
+            predictor.update_speed(1, 1_000_000, i as f64);
+        }
+        let model = predictor.models.get(&1).unwrap();
+        assert_eq!(
+            predictor.calculate_confidence(model),
+            PredictionConfidence::High
+        );
+    }
+
+    #[test]
+    fn test_confidence_medium_with_high_variance() {
+        let mut predictor = ProgressPredictor::new();
+        // 8 samples but high variance → should be Low (cv >= 0.6)
+        for i in 0..8 {
+            let speed = if i % 2 == 0 { 100 } else { 10_000_000 };
+            predictor.update_speed(1, speed, i as f64 * 10.0);
+        }
+        let model = predictor.models.get(&1).unwrap();
+        let conf = predictor.calculate_confidence(model);
+        // With such high variance, cv should be > 0.6, so Low
+        assert_eq!(conf, PredictionConfidence::Low);
+    }
+
+    #[test]
+    fn test_confidence_unknown_below_min_samples() {
+        let mut predictor = ProgressPredictor::new();
+        // Only 4 samples, below min_samples=5
+        for i in 0..4 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        let model = predictor.models.get(&1).unwrap();
+        assert_eq!(
+            predictor.calculate_confidence(model),
+            PredictionConfidence::Unknown
+        );
+    }
+
+    // --- EWMA boundaries ---
+
+    #[test]
+    fn test_ewma_smoothing_factor_zero() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.config.smoothing_factor = 0.0;
+        predictor.update_speed(1, 1_000_000, 10.0);
+        let ewma1 = predictor.models[&1].ewma_speed;
+        predictor.update_speed(1, 5_000_000, 20.0);
+        let ewma2 = predictor.models[&1].ewma_speed;
+        // With alpha=0, EWMA should not change
+        assert!((ewma2 - ewma1).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_ewma_smoothing_factor_one() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.config.smoothing_factor = 1.0;
+        predictor.update_speed(1, 1_000_000, 10.0);
+        predictor.update_speed(1, 5_000_000, 20.0);
+        let ewma = predictor.models[&1].ewma_speed;
+        // With alpha=1, EWMA should be exactly the latest value
+        assert!((ewma - 5_000_000.0).abs() < 1e-10);
+    }
+
+    // --- Linear regression boundaries ---
+
+    #[test]
+    fn test_linear_regression_single_sample() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.update_speed(1, 1_000_000, 10.0);
+        let model = predictor.models.get(&1).unwrap();
+        assert_eq!(model.slope, 0.0);
+    }
+
+    #[test]
+    fn test_linear_regression_decreasing_speed() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 10_000_000 - i * 1_000_000, i as f64 * 10.0);
+        }
+        let model = predictor.models.get(&1).unwrap();
+        assert!(model.slope < 0.0);
+    }
+
+    #[test]
+    fn test_linear_regression_constant_speed() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        let model = predictor.models.get(&1).unwrap();
+        // Constant speed → slope should be near zero
+        assert!(model.slope.abs() < 1.0);
+    }
+
+    // --- Variance boundaries ---
+
+    #[test]
+    fn test_variance_constant_speed() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        let model = predictor.models.get(&1).unwrap();
+        // Constant speed → variance should be zero or near-zero
+        assert!(model.speed_variance < 1000.0);
+    }
+
+    #[test]
+    fn test_variance_variable_speed() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            let speed = if i % 2 == 0 { 100_000 } else { 10_000_000 };
+            predictor.update_speed(1, speed, i as f64 * 10.0);
+        }
+        let model = predictor.models.get(&1).unwrap();
+        // Variable speed → variance should be significant
+        assert!(model.speed_variance > 0.0);
+    }
+
+    // --- Complex workflow ---
+
+    #[test]
+    fn test_full_lifecycle() {
+        let mut predictor = ProgressPredictor::new();
+
+        // 1. Add speed samples
+        for i in 0..15 {
+            predictor.update_speed(1, 1_000_000 + i * 50_000, i as f64 * 5.0);
+        }
+
+        // 2. Predict
+        let pred = predictor.predict(1, 50.0, 10_000_000).unwrap();
+        assert_eq!(pred.task_id, 1);
+        assert!(pred.remaining_seconds > 0);
+        assert!(pred.sample_count >= 5);
+
+        // 3. Record completion
+        predictor.record_completion(1, 8);
+
+        // 4. Check accuracy
+        let summary = predictor.get_accuracy_summary();
+        assert!(summary.total_predictions > 0);
+
+        // 5. Remove task
+        predictor.remove_task(1);
+        assert!(!predictor.models.contains_key(&1));
+
+        // 6. Accuracy history still preserved
+        assert!(!predictor.accuracy_history.is_empty());
+
+        // 7. Clear all
+        predictor.clear();
+        assert!(predictor.models.is_empty());
+        assert!(predictor.accuracy_history.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_tasks_workflow() {
+        let mut predictor = ProgressPredictor::new();
+
+        // Task 1: fast download
+        for i in 0..10 {
+            predictor.update_speed(1, 10_000_000, i as f64 * 10.0);
+        }
+        // Task 2: slow download
+        for i in 0..10 {
+            predictor.update_speed(2, 100_000, i as f64 * 10.0);
+        }
+
+        let pred1 = predictor.predict(1, 50.0, 100_000_000).unwrap();
+        let pred2 = predictor.predict(2, 50.0, 100_000_000).unwrap();
+
+        // Task 1 should have shorter remaining time (faster speed)
+        assert!(pred1.remaining_seconds < pred2.remaining_seconds);
+    }
+
+    // --- Config boundary values ---
+
+    #[test]
+    fn test_config_min_samples_zero() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.config.min_samples = 0;
+        // Even with 0 samples, predict needs a model to exist
+        predictor.update_speed(1, 1_000_000, 10.0);
+        let result = predictor.predict(1, 50.0, 10_000_000);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_config_max_samples_one() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.config.max_samples = 1;
+        predictor.update_speed(1, 1_000_000, 10.0);
+        predictor.update_speed(1, 2_000_000, 20.0);
+        assert_eq!(predictor.models[&1].speed_samples.len(), 1);
+        // Only the latest sample should remain
+        assert_eq!(predictor.models[&1].speed_samples[0].speed_bps, 2_000_000);
+    }
+
+    #[test]
+    fn test_config_max_accuracy_history_zero() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.config.max_accuracy_history = 0;
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        predictor.record_completion(1, 5);
+        // History should be trimmed to 0
+        assert!(predictor.accuracy_history.is_empty());
+    }
+
+    // --- PredictionResult field validation ---
+
+    #[test]
+    fn test_prediction_result_fields() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        let pred = predictor.predict(1, 50.0, 10_000_000).unwrap();
+        assert_eq!(pred.task_id, 1);
+        assert!((pred.current_progress - 50.0).abs() < 1e-10);
+        assert!(pred.sample_count >= 5);
+        assert!(pred.predicted_speed_bps > 0);
+        assert!(pred.optimistic_seconds <= pred.remaining_seconds);
+        assert!(pred.pessimistic_seconds >= pred.remaining_seconds);
+    }
+
+    // --- Edge cases ---
+
+    #[test]
+    fn test_predict_very_small_remaining() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        // 99.99% done, 1KB remaining
+        let result = predictor.predict(1, 99.99, 1_000_000);
+        assert!(result.is_some());
+        let pred = result.unwrap();
+        // Very small remaining → small remaining_seconds
+        assert!(pred.remaining_seconds < 10);
+    }
+
+    #[test]
+    fn test_predict_u64_max_file_size() {
+        let mut predictor = ProgressPredictor::new();
+        for i in 0..10 {
+            predictor.update_speed(1, 1_000_000, i as f64 * 10.0);
+        }
+        let result = predictor.predict(1, 50.0, u64::MAX / 2);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_sequential_updates_overwrite() {
+        let mut predictor = ProgressPredictor::new();
+        predictor.update_speed(1, 1_000_000, 10.0);
+        let ewma1 = predictor.models[&1].ewma_speed;
+        predictor.update_speed(1, 5_000_000, 50.0);
+        let ewma2 = predictor.models[&1].ewma_speed;
+        assert!(ewma2 > ewma1);
+    }
 }

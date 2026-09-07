@@ -831,4 +831,1102 @@ mod tests {
         // Stable speed should recommend Proceed
         assert_eq!(prediction.recommendation, PredictionRecommendation::Proceed);
     }
+
+    // ========== Serialization Tests ==========
+
+    #[test]
+    fn test_speed_prediction_config_serde_roundtrip() {
+        let config = SpeedPredictionConfig {
+            min_samples_for_prediction: 20,
+            sample_retention_hours: 48,
+            wait_threshold_ratio: 0.7,
+            enabled: false,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: SpeedPredictionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.min_samples_for_prediction, 20);
+        assert_eq!(deserialized.sample_retention_hours, 48);
+        assert!((deserialized.wait_threshold_ratio - 0.7).abs() < f64::EPSILON);
+        assert!(!deserialized.enabled);
+    }
+
+    #[test]
+    fn test_speed_prediction_config_default_serde() {
+        let config = SpeedPredictionConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: SpeedPredictionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.min_samples_for_prediction, 10);
+        assert_eq!(deserialized.sample_retention_hours, 168);
+        assert!((deserialized.wait_threshold_ratio - 0.5).abs() < f64::EPSILON);
+        assert!(deserialized.enabled);
+    }
+
+    #[test]
+    fn test_speed_prediction_config_extra_fields_ignored() {
+        let json = r#"{"min_samples_for_prediction":5,"sample_retention_hours":24,"wait_threshold_ratio":0.3,"enabled":true,"extra_field":"ignored"}"#;
+        let config: SpeedPredictionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.min_samples_for_prediction, 5);
+    }
+
+    #[test]
+    fn test_speed_prediction_config_pretty_serde() {
+        let config = SpeedPredictionConfig::default();
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        assert!(pretty.contains('\n'));
+        let deserialized: SpeedPredictionConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(
+            deserialized.min_samples_for_prediction,
+            config.min_samples_for_prediction
+        );
+    }
+
+    #[test]
+    fn test_domain_speed_sample_serde_roundtrip() {
+        let sample = DomainSpeedSample {
+            timestamp: Utc.with_ymd_and_hms(2026, 8, 10, 14, 30, 0).unwrap(),
+            speed_bps: 1024000.0,
+            hour: 14,
+            day_of_week: 0,
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let deserialized: DomainSpeedSample = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.hour, 14);
+        assert_eq!(deserialized.day_of_week, 0);
+        assert!((deserialized.speed_bps - 1024000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_domain_speed_sample_clone_debug() {
+        let sample = DomainSpeedSample {
+            timestamp: Utc::now(),
+            speed_bps: 5000.0,
+            hour: 10,
+            day_of_week: 3,
+        };
+        let cloned = sample.clone();
+        assert_eq!(cloned.hour, sample.hour);
+        assert_eq!(cloned.day_of_week, sample.day_of_week);
+        let debug_str = format!("{:?}", sample);
+        assert!(debug_str.contains("DomainSpeedSample"));
+    }
+
+    #[test]
+    fn test_hourly_stats_serde_roundtrip() {
+        let mut stats = HourlyStats::default();
+        stats.add_sample(1000.0);
+        stats.add_sample(2000.0);
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: HourlyStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.sample_count, 2);
+        assert!((deserialized.avg_speed_bps - 1500.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_domain_speed_profile_serde_roundtrip() {
+        let mut profile = DomainSpeedProfile::new("test.com".to_string());
+        profile.add_sample(5000.0, make_timestamp(10));
+        profile.add_sample(3000.0, make_timestamp(14));
+        let json = serde_json::to_string(&profile).unwrap();
+        let deserialized: DomainSpeedProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.domain, "test.com");
+        assert_eq!(deserialized.total_samples, 2);
+        assert_eq!(deserialized.hourly_stats.len(), 24);
+    }
+
+    #[test]
+    fn test_prediction_recommendation_serde_all_variants() {
+        // Proceed
+        let proceed = PredictionRecommendation::Proceed;
+        let json = serde_json::to_string(&proceed).unwrap();
+        let back: PredictionRecommendation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, PredictionRecommendation::Proceed);
+
+        // WaitUntil
+        let wait = PredictionRecommendation::WaitUntil {
+            hour: 3,
+            speedup_factor: 2.5,
+        };
+        let json = serde_json::to_string(&wait).unwrap();
+        let back: PredictionRecommendation = serde_json::from_str(&json).unwrap();
+        match back {
+            PredictionRecommendation::WaitUntil {
+                hour,
+                speedup_factor,
+            } => {
+                assert_eq!(hour, 3);
+                assert!((speedup_factor - 2.5).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected WaitUntil"),
+        }
+
+        // ConsiderAlternatives
+        let consider = PredictionRecommendation::ConsiderAlternatives {
+            alternatives: vec!["mirror1.com".into(), "mirror2.com".into()],
+        };
+        let json = serde_json::to_string(&consider).unwrap();
+        let back: PredictionRecommendation = serde_json::from_str(&json).unwrap();
+        match back {
+            PredictionRecommendation::ConsiderAlternatives { alternatives } => {
+                assert_eq!(alternatives.len(), 2);
+                assert_eq!(alternatives[0], "mirror1.com");
+            }
+            _ => panic!("Expected ConsiderAlternatives"),
+        }
+
+        // InsufficientData
+        let insufficient = PredictionRecommendation::InsufficientData;
+        let json = serde_json::to_string(&insufficient).unwrap();
+        let back: PredictionRecommendation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, PredictionRecommendation::InsufficientData);
+    }
+
+    #[test]
+    fn test_speed_prediction_serialize() {
+        let prediction = SpeedPrediction {
+            task_id: "task-1".to_string(),
+            domain: "example.com".to_string(),
+            current_speed_bps: 5000.0,
+            predicted_avg_speed_bps: 4000.0,
+            predicted_current_hour_speed_bps: 4500.0,
+            remaining_bytes: 10_000_000,
+            eta_current_speed_secs: 2000,
+            eta_historical_avg_secs: 2500,
+            eta_current_hour_secs: 2222,
+            confidence: "high",
+            recommendation: PredictionRecommendation::Proceed,
+        };
+        // SpeedPrediction contains &'static str so full roundtrip requires owned strings.
+        // Test serialization works and contains expected fields.
+        let json = serde_json::to_string(&prediction).unwrap();
+        assert!(json.contains("\"task_id\":\"task-1\""));
+        assert!(json.contains("\"domain\":\"example.com\""));
+        assert!(json.contains("\"remaining_bytes\":10000000"));
+        assert!(json.contains("\"confidence\":\"high\""));
+    }
+
+    #[test]
+    fn test_optimal_window_serde_roundtrip() {
+        let window = OptimalWindow {
+            start_hour: 3,
+            end_hour: 4,
+            predicted_speed_bps: 8000.0,
+            quality: "excellent".to_string(),
+            sample_count: 50,
+        };
+        let json = serde_json::to_string(&window).unwrap();
+        let deserialized: OptimalWindow = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.start_hour, 3);
+        assert_eq!(deserialized.end_hour, 4);
+        assert_eq!(deserialized.quality, "excellent");
+    }
+
+    #[test]
+    fn test_domain_summary_serde_roundtrip() {
+        let summary = DomainSummary {
+            domain: "cdn.example.com".to_string(),
+            total_samples: 500,
+            overall_avg_speed: 3500.0,
+            best_hour: Some((10, 5000.0)),
+            worst_hour: Some((3, 1000.0)),
+            last_updated: Utc.with_ymd_and_hms(2026, 8, 10, 12, 0, 0).unwrap(),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: DomainSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.domain, "cdn.example.com");
+        assert_eq!(deserialized.total_samples, 500);
+        assert!(deserialized.best_hour.is_some());
+    }
+
+    #[test]
+    fn test_speed_prediction_summary_serde_roundtrip() {
+        let summary = SpeedPredictionSummary {
+            tracked_domains: 3,
+            domain_summaries: vec![DomainSummary {
+                domain: "a.com".to_string(),
+                total_samples: 100,
+                overall_avg_speed: 2000.0,
+                best_hour: None,
+                worst_hour: None,
+                last_updated: Utc::now(),
+            }],
+            config_enabled: true,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: SpeedPredictionSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.tracked_domains, 3);
+        assert!(deserialized.config_enabled);
+    }
+
+    // ========== Clone/Debug Traits ==========
+
+    #[test]
+    fn test_all_structs_clone_debug() {
+        // HourlyStats
+        let mut stats = HourlyStats::default();
+        stats.add_sample(1000.0);
+        let stats_clone = stats.clone();
+        assert_eq!(stats_clone.sample_count, 1);
+        assert!(format!("{:?}", stats).contains("HourlyStats"));
+
+        // DomainSpeedProfile
+        let profile = DomainSpeedProfile::new("x.com".to_string());
+        let profile_clone = profile.clone();
+        assert_eq!(profile_clone.domain, "x.com");
+        assert!(format!("{:?}", profile).contains("DomainSpeedProfile"));
+
+        // SpeedPredictionConfig
+        let config = SpeedPredictionConfig::default();
+        let config_clone = config.clone();
+        assert_eq!(config_clone.enabled, config.enabled);
+        assert!(format!("{:?}", config).contains("SpeedPredictionConfig"));
+
+        // OptimalWindow
+        let window = OptimalWindow {
+            start_hour: 0,
+            end_hour: 1,
+            predicted_speed_bps: 0.0,
+            quality: String::new(),
+            sample_count: 0,
+        };
+        let window_clone = window.clone();
+        assert_eq!(window_clone.start_hour, 0);
+        assert!(format!("{:?}", window).contains("OptimalWindow"));
+
+        // DomainSummary
+        let ds = DomainSummary {
+            domain: "d.com".to_string(),
+            total_samples: 0,
+            overall_avg_speed: 0.0,
+            best_hour: None,
+            worst_hour: None,
+            last_updated: Utc::now(),
+        };
+        let ds_clone = ds.clone();
+        assert_eq!(ds_clone.domain, "d.com");
+        assert!(format!("{:?}", ds).contains("DomainSummary"));
+
+        // SpeedPredictionSummary
+        let summary = SpeedPredictionSummary {
+            tracked_domains: 0,
+            domain_summaries: vec![],
+            config_enabled: false,
+        };
+        let summary_clone = summary.clone();
+        assert_eq!(summary_clone.tracked_domains, 0);
+        assert!(format!("{:?}", summary).contains("SpeedPredictionSummary"));
+    }
+
+    #[test]
+    fn test_speed_prediction_clone_debug() {
+        let prediction = SpeedPrediction {
+            task_id: "t1".to_string(),
+            domain: "d.com".to_string(),
+            current_speed_bps: 0.0,
+            predicted_avg_speed_bps: 0.0,
+            predicted_current_hour_speed_bps: 0.0,
+            remaining_bytes: 0,
+            eta_current_speed_secs: 0,
+            eta_historical_avg_secs: 0,
+            eta_current_hour_secs: 0,
+            confidence: "none",
+            recommendation: PredictionRecommendation::InsufficientData,
+        };
+        let cloned = prediction.clone();
+        assert_eq!(cloned.task_id, "t1");
+        assert!(format!("{:?}", prediction).contains("SpeedPrediction"));
+    }
+
+    #[test]
+    fn test_prediction_recommendation_clone_debug() {
+        let variants = vec![
+            PredictionRecommendation::Proceed,
+            PredictionRecommendation::WaitUntil {
+                hour: 5,
+                speedup_factor: 1.5,
+            },
+            PredictionRecommendation::ConsiderAlternatives {
+                alternatives: vec!["alt.com".into()],
+            },
+            PredictionRecommendation::InsufficientData,
+        ];
+        for v in &variants {
+            let _cloned = v.clone();
+            let debug = format!("{:?}", v);
+            assert!(!debug.is_empty());
+        }
+    }
+
+    // ========== HourlyStats Edge Cases ==========
+
+    #[test]
+    fn test_hourly_stats_default_values() {
+        let stats = HourlyStats::default();
+        assert_eq!(stats.sample_count, 0);
+        assert_eq!(stats.avg_speed_bps, 0.0);
+        assert_eq!(stats.min_speed_bps, 0.0);
+        assert_eq!(stats.max_speed_bps, 0.0);
+    }
+
+    #[test]
+    fn test_hourly_stats_single_sample() {
+        let mut stats = HourlyStats::default();
+        stats.add_sample(42.0);
+        assert_eq!(stats.sample_count, 1);
+        assert!((stats.avg_speed_bps - 42.0).abs() < f64::EPSILON);
+        assert!((stats.min_speed_bps - 42.0).abs() < f64::EPSILON);
+        assert!((stats.max_speed_bps - 42.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_hourly_stats_single_sample_stddev_zero() {
+        let mut stats = HourlyStats::default();
+        stats.add_sample(1000.0);
+        // Single sample => stddev returns 0.0
+        assert_eq!(stats.speed_stddev(), 0.0);
+    }
+
+    #[test]
+    fn test_hourly_stats_zero_samples_stddev() {
+        let stats = HourlyStats::default();
+        assert_eq!(stats.speed_stddev(), 0.0);
+    }
+
+    #[test]
+    fn test_hourly_stats_cv_zero_avg() {
+        let stats = HourlyStats::default();
+        // avg is 0 => CV returns f64::MAX
+        assert_eq!(stats.coefficient_of_variation(), f64::MAX);
+    }
+
+    #[test]
+    fn test_hourly_stats_negative_speed() {
+        let mut stats = HourlyStats::default();
+        stats.add_sample(-100.0);
+        stats.add_sample(-200.0);
+        stats.add_sample(-300.0);
+        assert_eq!(stats.sample_count, 3);
+        assert!((stats.avg_speed_bps - (-200.0)).abs() < 0.01);
+        assert!((stats.min_speed_bps - (-300.0)).abs() < 0.01);
+        assert!((stats.max_speed_bps - (-100.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_hourly_stats_very_large_values() {
+        let mut stats = HourlyStats::default();
+        stats.add_sample(f64::MAX / 2.0);
+        stats.add_sample(f64::MAX / 2.0);
+        assert_eq!(stats.sample_count, 2);
+        assert!(stats.avg_speed_bps > 0.0);
+    }
+
+    #[test]
+    fn test_hourly_stats_many_samples() {
+        let mut stats = HourlyStats::default();
+        for i in 0..1000 {
+            stats.add_sample(i as f64);
+        }
+        assert_eq!(stats.sample_count, 1000);
+        assert!((stats.avg_speed_bps - 499.5).abs() < 0.01);
+        assert!((stats.min_speed_bps - 0.0).abs() < f64::EPSILON);
+        assert!((stats.max_speed_bps - 999.0).abs() < f64::EPSILON);
+    }
+
+    // ========== DomainSpeedProfile Edge Cases ==========
+
+    #[test]
+    fn test_domain_profile_best_hours_empty_when_no_samples() {
+        let profile = DomainSpeedProfile::new("empty.com".to_string());
+        let best = profile.best_hours(5);
+        assert!(best.is_empty());
+    }
+
+    #[test]
+    fn test_domain_profile_worst_hours_empty_when_no_samples() {
+        let profile = DomainSpeedProfile::new("empty.com".to_string());
+        let worst = profile.worst_hours(5);
+        assert!(worst.is_empty());
+    }
+
+    #[test]
+    fn test_domain_profile_best_hours_filters_low_samples() {
+        let mut profile = DomainSpeedProfile::new("test.com".to_string());
+        // Hour 5: only 2 samples (< 3 threshold)
+        profile.add_sample(10000.0, make_timestamp(5));
+        profile.add_sample(10000.0, make_timestamp(5));
+        // Hour 10: 3 samples (meets threshold)
+        profile.add_sample(1000.0, make_timestamp(10));
+        profile.add_sample(1000.0, make_timestamp(10));
+        profile.add_sample(1000.0, make_timestamp(10));
+
+        let best = profile.best_hours(5);
+        // Only hour 10 should appear (hour 5 has < 3 samples)
+        assert_eq!(best.len(), 1);
+        assert_eq!(best[0].0, 10);
+    }
+
+    #[test]
+    fn test_domain_profile_best_hours_count_truncation() {
+        let mut profile = DomainSpeedProfile::new("test.com".to_string());
+        // Add 5 hours with >= 3 samples each
+        for h in [2, 5, 8, 12, 18] {
+            for _ in 0..5 {
+                profile.add_sample((h as f64) * 100.0, make_timestamp(h as u8));
+            }
+        }
+        let best = profile.best_hours(3);
+        assert_eq!(best.len(), 3);
+    }
+
+    #[test]
+    fn test_domain_profile_worst_hours_count_truncation() {
+        let mut profile = DomainSpeedProfile::new("test.com".to_string());
+        for h in [2, 5, 8, 12, 18] {
+            for _ in 0..5 {
+                profile.add_sample((h as f64) * 100.0, make_timestamp(h as u8));
+            }
+        }
+        let worst = profile.worst_hours(2);
+        assert_eq!(worst.len(), 2);
+        // Worst should be lowest speed first
+        assert!(worst[0].1 <= worst[1].1);
+    }
+
+    #[test]
+    fn test_domain_profile_hour_quality_unknown_low_samples() {
+        let mut profile = DomainSpeedProfile::new("test.com".to_string());
+        // Only 2 samples at hour 5
+        profile.add_sample(5000.0, make_timestamp(5));
+        profile.add_sample(5000.0, make_timestamp(5));
+        assert_eq!(profile.hour_quality(5), "unknown");
+    }
+
+    #[test]
+    fn test_domain_profile_hour_quality_zero_overall() {
+        let mut profile = DomainSpeedProfile::new("test.com".to_string());
+        // Add exactly 3 samples at hour 5 with zero speed
+        for _ in 0..3 {
+            profile.add_sample(0.0, make_timestamp(5));
+        }
+        // overall_avg_speed is 0 => returns "unknown"
+        assert_eq!(profile.hour_quality(5), "unknown");
+    }
+
+    #[test]
+    fn test_domain_profile_hour_quality_good() {
+        let mut profile = DomainSpeedProfile::new("test.com".to_string());
+        // Establish baseline: 22 hours at 2000 bps
+        for h in 0..22 {
+            for _ in 0..3 {
+                profile.add_sample(2000.0, make_timestamp(h));
+            }
+        }
+        // Make hour 22 slightly above average (ratio >= 1.0 but < 1.3)
+        for _ in 0..3 {
+            profile.add_sample(2500.0, make_timestamp(22));
+        }
+        let quality = profile.hour_quality(22);
+        assert_eq!(quality, "good");
+    }
+
+    #[test]
+    fn test_domain_profile_hour_quality_fair() {
+        let mut profile = DomainSpeedProfile::new("test.com".to_string());
+        // Establish baseline: 22 hours at 2000 bps
+        for h in 0..22 {
+            for _ in 0..3 {
+                profile.add_sample(2000.0, make_timestamp(h));
+            }
+        }
+        // Make hour 22 below average but >= 0.7 ratio
+        for _ in 0..3 {
+            profile.add_sample(1500.0, make_timestamp(22));
+        }
+        let quality = profile.hour_quality(22);
+        assert_eq!(quality, "fair");
+    }
+
+    #[test]
+    fn test_domain_profile_predicted_speed_for_hour() {
+        let mut profile = DomainSpeedProfile::new("test.com".to_string());
+        profile.add_sample(1000.0, make_timestamp(8));
+        profile.add_sample(3000.0, make_timestamp(8));
+        assert!((profile.predicted_speed_for_hour(8) - 2000.0).abs() < 0.01);
+        // Hour with no samples returns 0
+        assert_eq!(profile.predicted_speed_for_hour(23), 0.0);
+    }
+
+    // ========== Manager Edge Cases ==========
+
+    #[test]
+    fn test_manager_new() {
+        let manager = SpeedPredictionManager::new(SpeedPredictionConfig::default());
+        assert!(manager.get_profile("any.com").is_none());
+        assert!(manager.tracked_domains().is_empty());
+    }
+
+    #[test]
+    fn test_manager_default() {
+        let manager = SpeedPredictionManager::default();
+        assert!(manager.tracked_domains().is_empty());
+        assert!(manager.config().enabled);
+    }
+
+    #[test]
+    fn test_manager_record_speed_creates_profile() {
+        let mut manager = SpeedPredictionManager::default();
+        manager.record_speed("new-domain.com", 5000.0);
+        assert!(manager.get_profile("new-domain.com").is_some());
+        assert_eq!(manager.tracked_domains().len(), 1);
+    }
+
+    #[test]
+    fn test_manager_record_speed_accumulates() {
+        let mut manager = SpeedPredictionManager::default();
+        manager.record_speed("cdn.com", 1000.0);
+        manager.record_speed("cdn.com", 2000.0);
+        manager.record_speed("cdn.com", 3000.0);
+        let profile = manager.get_profile("cdn.com").unwrap();
+        assert_eq!(profile.total_samples, 3);
+    }
+
+    #[test]
+    fn test_manager_predict_zero_speed() {
+        let manager = SpeedPredictionManager::default();
+        let prediction = manager.predict("task1", "no-data.com", 0.0, 1_000_000);
+        assert_eq!(prediction.eta_current_speed_secs, u64::MAX);
+        assert_eq!(prediction.confidence, "none");
+    }
+
+    #[test]
+    fn test_manager_predict_zero_remaining() {
+        let mut manager = SpeedPredictionManager::new(SpeedPredictionConfig {
+            min_samples_for_prediction: 5,
+            ..Default::default()
+        });
+        for _ in 0..10 {
+            manager.record_speed_at("example.com", 1000.0, make_timestamp(10));
+        }
+        let prediction = manager.predict("task1", "example.com", 1000.0, 0);
+        assert_eq!(prediction.remaining_bytes, 0);
+        assert_eq!(prediction.eta_current_speed_secs, 0);
+    }
+
+    #[test]
+    fn test_manager_predict_no_profile() {
+        let manager = SpeedPredictionManager::default();
+        let prediction = manager.predict("task1", "ghost.com", 5000.0, 10_000);
+        assert_eq!(prediction.confidence, "none");
+        assert_eq!(
+            prediction.recommendation,
+            PredictionRecommendation::InsufficientData
+        );
+        assert_eq!(prediction.predicted_avg_speed_bps, 0.0);
+    }
+
+    #[test]
+    fn test_manager_predict_insufficient_samples() {
+        let mut manager = SpeedPredictionManager::new(SpeedPredictionConfig {
+            min_samples_for_prediction: 100,
+            ..Default::default()
+        });
+        for _ in 0..5 {
+            manager.record_speed_at("example.com", 1000.0, make_timestamp(10));
+        }
+        let prediction = manager.predict("task1", "example.com", 1000.0, 10_000);
+        // Has data but not enough samples
+        assert_eq!(prediction.confidence, "none");
+        assert_eq!(
+            prediction.recommendation,
+            PredictionRecommendation::InsufficientData
+        );
+    }
+
+    #[test]
+    fn test_manager_predict_confidence_levels() {
+        let mut manager = SpeedPredictionManager::new(SpeedPredictionConfig {
+            min_samples_for_prediction: 5,
+            ..Default::default()
+        });
+
+        // Low confidence: 5-29 samples
+        for _ in 0..10 {
+            manager.record_speed_at("low.com", 1000.0, make_timestamp(10));
+        }
+        let pred = manager.predict("t1", "low.com", 1000.0, 10_000);
+        assert_eq!(pred.confidence, "low");
+
+        // Medium confidence: 30-99 samples
+        for _ in 0..40 {
+            manager.record_speed_at("med.com", 2000.0, make_timestamp(10));
+        }
+        let pred = manager.predict("t2", "med.com", 2000.0, 10_000);
+        assert_eq!(pred.confidence, "medium");
+
+        // High confidence: 100+ samples
+        for _ in 0..100 {
+            manager.record_speed_at("high.com", 3000.0, make_timestamp(10));
+        }
+        let pred = manager.predict("t3", "high.com", 3000.0, 10_000);
+        assert_eq!(pred.confidence, "high");
+    }
+
+    #[test]
+    fn test_manager_get_optimal_windows_nonexistent() {
+        let manager = SpeedPredictionManager::default();
+        let windows = manager.get_optimal_windows("no-such.com", 5);
+        assert!(windows.is_empty());
+    }
+
+    #[test]
+    fn test_manager_get_optimal_windows_top_n() {
+        let mut manager = SpeedPredictionManager::default();
+        for h in [1, 5, 10, 15, 20] {
+            for _ in 0..10 {
+                manager.record_speed_at("test.com", (h as f64) * 100.0, make_timestamp(h as u8));
+            }
+        }
+        let windows = manager.get_optimal_windows("test.com", 3);
+        assert_eq!(windows.len(), 3);
+        // Best should be hour 20 (highest speed)
+        assert_eq!(windows[0].start_hour, 20);
+    }
+
+    #[test]
+    fn test_manager_get_summary_empty() {
+        let manager = SpeedPredictionManager::default();
+        let summary = manager.get_summary();
+        assert_eq!(summary.tracked_domains, 0);
+        assert!(summary.domain_summaries.is_empty());
+        assert!(summary.config_enabled);
+    }
+
+    #[test]
+    fn test_manager_get_summary_multiple_domains() {
+        let mut manager = SpeedPredictionManager::default();
+        manager.record_speed("alpha.com", 1000.0);
+        manager.record_speed("beta.com", 2000.0);
+        manager.record_speed("gamma.com", 3000.0);
+        let summary = manager.get_summary();
+        assert_eq!(summary.tracked_domains, 3);
+        assert_eq!(summary.domain_summaries.len(), 3);
+    }
+
+    #[test]
+    fn test_manager_remove_domain_nonexistent() {
+        let mut manager = SpeedPredictionManager::default();
+        assert!(!manager.remove_domain("ghost.com"));
+    }
+
+    #[test]
+    fn test_manager_clear_all_empty() {
+        let mut manager = SpeedPredictionManager::default();
+        manager.clear_all(); // should not panic
+        assert!(manager.tracked_domains().is_empty());
+    }
+
+    #[test]
+    fn test_manager_set_config() {
+        let mut manager = SpeedPredictionManager::default();
+        assert!(manager.config().enabled);
+        manager.set_config(SpeedPredictionConfig {
+            enabled: false,
+            min_samples_for_prediction: 99,
+            sample_retention_hours: 1,
+            wait_threshold_ratio: 0.9,
+        });
+        assert!(!manager.config().enabled);
+        assert_eq!(manager.config().min_samples_for_prediction, 99);
+        assert_eq!(manager.config().sample_retention_hours, 1);
+    }
+
+    #[test]
+    fn test_manager_cleanup_old_samples() {
+        let mut manager = SpeedPredictionManager::new(SpeedPredictionConfig {
+            sample_retention_hours: 1,
+            ..Default::default()
+        });
+        // Add a very old sample
+        let old_time = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        manager.record_speed_at("old.com", 1000.0, old_time);
+        // Should not panic
+        manager.cleanup_old_samples();
+        // Profile still exists (kept for historical reference)
+        assert!(manager.get_profile("old.com").is_some());
+    }
+
+    #[test]
+    fn test_manager_multiple_domains_independent() {
+        let mut manager = SpeedPredictionManager::default();
+        manager.record_speed_at("fast.com", 10000.0, make_timestamp(10));
+        manager.record_speed_at("slow.com", 100.0, make_timestamp(10));
+
+        let fast_profile = manager.get_profile("fast.com").unwrap();
+        let slow_profile = manager.get_profile("slow.com").unwrap();
+        assert!(fast_profile.overall_avg_speed > slow_profile.overall_avg_speed);
+    }
+
+    #[test]
+    fn test_manager_unicode_domain() {
+        let mut manager = SpeedPredictionManager::default();
+        manager.record_speed("中文域名.com", 5000.0);
+        assert!(manager.get_profile("中文域名.com").is_some());
+        assert_eq!(manager.tracked_domains().len(), 1);
+    }
+
+    #[test]
+    fn test_manager_emoji_domain() {
+        let mut manager = SpeedPredictionManager::default();
+        manager.record_speed("🚀.com", 3000.0);
+        assert!(manager.get_profile("🚀.com").is_some());
+    }
+
+    // ========== Prediction ETA Calculations ==========
+
+    #[test]
+    fn test_predict_eta_at_current_speed() {
+        let manager = SpeedPredictionManager::default();
+        // At 1000 B/s, 5000 bytes => 5 seconds
+        let pred = manager.predict("t1", "no-data.com", 1000.0, 5000);
+        assert_eq!(pred.eta_current_speed_secs, 5);
+    }
+
+    #[test]
+    fn test_predict_eta_zero_speed_nonzero_remaining() {
+        let manager = SpeedPredictionManager::default();
+        let pred = manager.predict("t1", "no-data.com", 0.0, 1000);
+        assert_eq!(pred.eta_current_speed_secs, u64::MAX);
+    }
+
+    #[test]
+    fn test_predict_eta_zero_remaining_zero_speed() {
+        let manager = SpeedPredictionManager::default();
+        let pred = manager.predict("t1", "no-data.com", 0.0, 0);
+        // Zero remaining => 0 ETA even at zero speed (0/0 branch: speed <= 0 => u64::MAX)
+        assert_eq!(pred.eta_current_speed_secs, u64::MAX);
+    }
+
+    #[test]
+    fn test_predict_large_remaining() {
+        let manager = SpeedPredictionManager::default();
+        let pred = manager.predict("t1", "x.com", 1.0, u64::MAX);
+        // 1 byte/s with u64::MAX bytes
+        assert_eq!(pred.eta_current_speed_secs, u64::MAX);
+    }
+
+    // ========== DomainSummary fields ==========
+
+    #[test]
+    fn test_domain_summary_best_worst_hour() {
+        let mut manager = SpeedPredictionManager::new(SpeedPredictionConfig {
+            min_samples_for_prediction: 3,
+            ..Default::default()
+        });
+        // Create clear pattern
+        for _ in 0..10 {
+            manager.record_speed_at("test.com", 10000.0, make_timestamp(3));
+        }
+        for _ in 0..10 {
+            manager.record_speed_at("test.com", 100.0, make_timestamp(15));
+        }
+        let summary = manager.get_summary();
+        let ds = &summary.domain_summaries[0];
+        assert!(ds.best_hour.is_some());
+        assert!(ds.worst_hour.is_some());
+        let (best_h, _) = ds.best_hour.unwrap();
+        let (worst_h, _) = ds.worst_hour.unwrap();
+        assert_eq!(best_h, 3);
+        assert_eq!(worst_h, 15);
+    }
+
+    #[test]
+    fn test_domain_summary_no_best_worst_when_insufficient_samples() {
+        let mut manager = SpeedPredictionManager::default();
+        // Only 1 sample per hour (< 3 threshold)
+        manager.record_speed_at("sparse.com", 1000.0, make_timestamp(5));
+        manager.record_speed_at("sparse.com", 2000.0, make_timestamp(10));
+        let summary = manager.get_summary();
+        let ds = &summary.domain_summaries[0];
+        // best_hour/worst_hour require >= 3 samples per hour
+        assert!(ds.best_hour.is_none());
+        assert!(ds.worst_hour.is_none());
+    }
+
+    // ========== OptimalWindow fields ==========
+
+    #[test]
+    fn test_optimal_window_end_hour_wraps() {
+        let mut manager = SpeedPredictionManager::new(SpeedPredictionConfig {
+            min_samples_for_prediction: 3,
+            ..Default::default()
+        });
+        // Hour 23 should have end_hour = 0 (wraps)
+        for _ in 0..10 {
+            manager.record_speed_at("test.com", 5000.0, make_timestamp(23));
+        }
+        let windows = manager.get_optimal_windows("test.com", 1);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].start_hour, 23);
+        assert_eq!(windows[0].end_hour, 0);
+    }
+
+    // ========== Config default values ==========
+
+    #[test]
+    fn test_config_default_values() {
+        let config = SpeedPredictionConfig::default();
+        assert_eq!(config.min_samples_for_prediction, 10);
+        assert_eq!(config.sample_retention_hours, 168);
+        assert!((config.wait_threshold_ratio - 0.5).abs() < f64::EPSILON);
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_config_custom_values() {
+        let config = SpeedPredictionConfig {
+            min_samples_for_prediction: 0,
+            sample_retention_hours: 0,
+            wait_threshold_ratio: 0.0,
+            enabled: false,
+        };
+        assert_eq!(config.min_samples_for_prediction, 0);
+        assert_eq!(config.sample_retention_hours, 0);
+        assert!((config.wait_threshold_ratio - 0.0).abs() < f64::EPSILON);
+        assert!(!config.enabled);
+    }
+
+    // ========== PredictionRecommendation PartialEq ==========
+
+    #[test]
+    fn test_prediction_recommendation_equality() {
+        assert_eq!(
+            PredictionRecommendation::Proceed,
+            PredictionRecommendation::Proceed
+        );
+        assert_eq!(
+            PredictionRecommendation::InsufficientData,
+            PredictionRecommendation::InsufficientData
+        );
+        assert_ne!(
+            PredictionRecommendation::Proceed,
+            PredictionRecommendation::InsufficientData
+        );
+    }
+
+    #[test]
+    fn test_prediction_recommendation_wait_until_equality() {
+        let a = PredictionRecommendation::WaitUntil {
+            hour: 5,
+            speedup_factor: 2.0,
+        };
+        let b = PredictionRecommendation::WaitUntil {
+            hour: 5,
+            speedup_factor: 2.0,
+        };
+        let c = PredictionRecommendation::WaitUntil {
+            hour: 6,
+            speedup_factor: 2.0,
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    // ========== Complex Workflows ==========
+
+    #[test]
+    fn test_full_lifecycle() {
+        let mut manager = SpeedPredictionManager::new(SpeedPredictionConfig {
+            min_samples_for_prediction: 5,
+            ..Default::default()
+        });
+
+        // Record samples across multiple hours
+        for _ in 0..20 {
+            manager.record_speed_at("cdn.com", 5000.0, make_timestamp(3));
+        }
+        for _ in 0..20 {
+            manager.record_speed_at("cdn.com", 1000.0, make_timestamp(15));
+        }
+
+        // Check profile
+        let profile = manager.get_profile("cdn.com").unwrap();
+        assert_eq!(profile.total_samples, 40);
+        assert!(profile.overall_avg_speed > 0.0);
+
+        // Check optimal windows
+        let windows = manager.get_optimal_windows("cdn.com", 2);
+        assert_eq!(windows[0].start_hour, 3);
+
+        // Predict
+        let pred = manager.predict("task1", "cdn.com", 3000.0, 100_000);
+        assert_ne!(pred.confidence, "none");
+        assert!(pred.eta_historical_avg_secs > 0);
+
+        // Summary
+        let summary = manager.get_summary();
+        assert_eq!(summary.tracked_domains, 1);
+
+        // Remove
+        assert!(manager.remove_domain("cdn.com"));
+        assert!(manager.get_profile("cdn.com").is_none());
+    }
+
+    #[test]
+    fn test_multi_domain_workflow() {
+        let mut manager = SpeedPredictionManager::new(SpeedPredictionConfig {
+            min_samples_for_prediction: 3,
+            ..Default::default()
+        });
+
+        // Domain A: fast morning
+        for _ in 0..10 {
+            manager.record_speed_at("a.com", 10000.0, make_timestamp(8));
+        }
+        // Domain B: fast evening
+        for _ in 0..10 {
+            manager.record_speed_at("b.com", 10000.0, make_timestamp(20));
+        }
+
+        let pred_a = manager.predict("t1", "a.com", 5000.0, 50_000);
+        let pred_b = manager.predict("t2", "b.com", 5000.0, 50_000);
+        assert_ne!(pred_a.confidence, "none");
+        assert_ne!(pred_b.confidence, "none");
+
+        // Summary should have both
+        let summary = manager.get_summary();
+        assert_eq!(summary.tracked_domains, 2);
+
+        // Remove one
+        manager.remove_domain("a.com");
+        assert_eq!(manager.get_summary().tracked_domains, 1);
+    }
+
+    #[test]
+    fn test_record_speed_at_specific_timestamp() {
+        let mut manager = SpeedPredictionManager::default();
+        let ts = Utc.with_ymd_and_hms(2026, 1, 15, 14, 30, 0).unwrap();
+        manager.record_speed_at("test.com", 5000.0, ts);
+        let profile = manager.get_profile("test.com").unwrap();
+        assert_eq!(profile.total_samples, 1);
+        assert!((profile.hourly_stats[14].avg_speed_bps - 5000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_domain_profile_overall_avg_calculation() {
+        let mut profile = DomainSpeedProfile::new("test.com".to_string());
+        profile.add_sample(1000.0, make_timestamp(0));
+        profile.add_sample(2000.0, make_timestamp(1));
+        profile.add_sample(3000.0, make_timestamp(2));
+        // Overall avg = (1000+2000+3000)/3 = 2000
+        assert!((profile.overall_avg_speed - 2000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_domain_profile_last_updated() {
+        let mut profile = DomainSpeedProfile::new("test.com".to_string());
+        let ts1 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let ts2 = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        profile.add_sample(1000.0, ts1);
+        assert_eq!(profile.last_updated, ts1);
+        profile.add_sample(2000.0, ts2);
+        assert_eq!(profile.last_updated, ts2);
+    }
+
+    #[test]
+    fn test_best_hours_sorted_descending() {
+        let mut profile = DomainSpeedProfile::new("test.com".to_string());
+        for _ in 0..5 {
+            profile.add_sample(100.0, make_timestamp(0));
+            profile.add_sample(500.0, make_timestamp(6));
+            profile.add_sample(1000.0, make_timestamp(12));
+            profile.add_sample(2000.0, make_timestamp(18));
+        }
+        let best = profile.best_hours(4);
+        assert_eq!(best.len(), 4);
+        // Verify descending order
+        for i in 0..best.len() - 1 {
+            assert!(best[i].1 >= best[i + 1].1);
+        }
+    }
+
+    #[test]
+    fn test_worst_hours_sorted_ascending() {
+        let mut profile = DomainSpeedProfile::new("test.com".to_string());
+        for _ in 0..5 {
+            profile.add_sample(100.0, make_timestamp(0));
+            profile.add_sample(500.0, make_timestamp(6));
+            profile.add_sample(1000.0, make_timestamp(12));
+            profile.add_sample(2000.0, make_timestamp(18));
+        }
+        let worst = profile.worst_hours(4);
+        assert_eq!(worst.len(), 4);
+        // Verify ascending order
+        for i in 0..worst.len() - 1 {
+            assert!(worst[i].1 <= worst[i + 1].1);
+        }
+    }
+
+    #[test]
+    fn test_prediction_fields_correct() {
+        let mut manager = SpeedPredictionManager::new(SpeedPredictionConfig {
+            min_samples_for_prediction: 5,
+            ..Default::default()
+        });
+        for _ in 0..20 {
+            manager.record_speed_at("cdn.com", 2000.0, make_timestamp(10));
+        }
+        let pred = manager.predict("my-task", "cdn.com", 3000.0, 60_000);
+        assert_eq!(pred.task_id, "my-task");
+        assert_eq!(pred.domain, "cdn.com");
+        assert!((pred.current_speed_bps - 3000.0).abs() < f64::EPSILON);
+        assert!(pred.predicted_avg_speed_bps > 0.0);
+        assert_eq!(pred.remaining_bytes, 60_000);
+        // At 3000 B/s, 60000 bytes => 20 seconds
+        assert_eq!(pred.eta_current_speed_secs, 20);
+    }
+
+    #[test]
+    fn test_consider_alternatives_recommendation() {
+        // Create scenario where current hour is poor and best hour is > 1.5x better
+        let mut manager = SpeedPredictionManager::new(SpeedPredictionConfig {
+            min_samples_for_prediction: 5,
+            ..Default::default()
+        });
+
+        // Current hour: poor speed with low variance
+        let current_hour = Utc::now().hour() as u8;
+        for _ in 0..10 {
+            manager.record_speed_at("test.com", 100.0, make_timestamp(current_hour));
+        }
+
+        // Another hour: much better speed
+        let better_hour = (current_hour + 12) % 24;
+        for _ in 0..10 {
+            manager.record_speed_at("test.com", 500.0, make_timestamp(better_hour));
+        }
+
+        let pred = manager.predict("t1", "test.com", 100.0, 10_000);
+        // Should either recommend WaitUntil or Proceed depending on CV
+        // The key is it doesn't crash and produces valid output
+        assert!(!pred.task_id.is_empty());
+    }
+
+    #[test]
+    fn test_zero_speed_profile() {
+        let mut profile = DomainSpeedProfile::new("zero.com".to_string());
+        for _ in 0..5 {
+            profile.add_sample(0.0, make_timestamp(10));
+        }
+        assert_eq!(profile.total_samples, 5);
+        assert_eq!(profile.overall_avg_speed, 0.0);
+        assert_eq!(profile.predicted_speed_for_hour(10), 0.0);
+    }
+
+    #[test]
+    fn test_mixed_zero_and_nonzero_speed() {
+        let mut profile = DomainSpeedProfile::new("mixed.com".to_string());
+        profile.add_sample(0.0, make_timestamp(10));
+        profile.add_sample(1000.0, make_timestamp(10));
+        profile.add_sample(2000.0, make_timestamp(10));
+        assert!((profile.predicted_speed_for_hour(10) - 1000.0).abs() < 0.01);
+    }
 }

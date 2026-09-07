@@ -462,6 +462,8 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    // ─── parse_cron_field ───────────────────────────────────────────
+
     #[test]
     fn test_parse_cron_field_single() {
         let values = parse_cron_field("5", 0, 59).unwrap();
@@ -501,6 +503,221 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_cron_field_range_step() {
+        let values = parse_cron_field("0-10/2", 0, 59).unwrap();
+        assert_eq!(values, vec![0, 2, 4, 6, 8, 10]);
+    }
+
+    #[test]
+    fn test_parse_cron_field_zero() {
+        let values = parse_cron_field("0", 0, 59).unwrap();
+        assert_eq!(values, vec![0]);
+    }
+
+    #[test]
+    fn test_parse_cron_field_max_value() {
+        let values = parse_cron_field("59", 0, 59).unwrap();
+        assert_eq!(values, vec![59]);
+    }
+
+    #[test]
+    fn test_parse_cron_field_out_of_range_high() {
+        let result = parse_cron_field("60", 0, 59);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_cron_field_out_of_range_negative() {
+        let result = parse_cron_field("-1", 0, 59);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_cron_field_dedup() {
+        let values = parse_cron_field("5,5,5", 0, 59).unwrap();
+        assert_eq!(values, vec![5]);
+    }
+
+    #[test]
+    fn test_parse_cron_field_sorted() {
+        let values = parse_cron_field("30,10,50,20", 0, 59).unwrap();
+        assert_eq!(values, vec![10, 20, 30, 50]);
+    }
+
+    #[test]
+    fn test_parse_cron_field_invalid_step_format() {
+        // three slashes
+        assert!(parse_cron_field("1/2/3", 0, 59).is_err());
+    }
+
+    #[test]
+    fn test_parse_cron_field_invalid_step_value() {
+        assert!(parse_cron_field("*/abc", 0, 59).is_err());
+    }
+
+    #[test]
+    fn test_parse_cron_field_wildcard_hours() {
+        let values = parse_cron_field("*", 0, 23).unwrap();
+        assert_eq!(values.len(), 24);
+    }
+
+    #[test]
+    fn test_parse_cron_field_wildcard_day_of_month() {
+        let values = parse_cron_field("*", 1, 31).unwrap();
+        assert_eq!(values.len(), 31);
+        assert_eq!(values[0], 1);
+    }
+
+    #[test]
+    fn test_parse_cron_field_wildcard_month() {
+        let values = parse_cron_field("*", 1, 12).unwrap();
+        assert_eq!(values.len(), 12);
+    }
+
+    #[test]
+    fn test_parse_cron_field_wildcard_day_of_week() {
+        let values = parse_cron_field("*", 0, 6).unwrap();
+        assert_eq!(values.len(), 7);
+        assert_eq!(values[0], 0);
+        assert_eq!(values[6], 6);
+    }
+
+    #[test]
+    fn test_parse_cron_field_single_value_hour() {
+        let values = parse_cron_field("14", 0, 23).unwrap();
+        assert_eq!(values, vec![14]);
+    }
+
+    #[test]
+    fn test_parse_cron_field_range_full() {
+        let values = parse_cron_field("0-6", 0, 6).unwrap();
+        assert_eq!(values, vec![0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_parse_cron_field_step_10_minutes() {
+        let values = parse_cron_field("*/10", 0, 59).unwrap();
+        assert_eq!(values, vec![0, 10, 20, 30, 40, 50]);
+    }
+
+    // ─── parse_range ────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_range_basic() {
+        let values = parse_range("1-5", 0, 59).unwrap();
+        assert_eq!(values, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_parse_range_wildcard() {
+        let values = parse_range("*", 0, 59).unwrap();
+        assert_eq!(values.len(), 60);
+    }
+
+    #[test]
+    fn test_parse_range_invalid_format() {
+        assert!(parse_range("1-", 0, 59).is_err());
+    }
+
+    #[test]
+    fn test_parse_range_non_numeric() {
+        assert!(parse_range("a-b", 0, 59).is_err());
+    }
+
+    #[test]
+    fn test_parse_range_start_greater_than_end() {
+        assert!(parse_range("10-5", 0, 59).is_err());
+    }
+
+    #[test]
+    fn test_parse_range_out_of_bounds() {
+        assert!(parse_range("0-60", 0, 59).is_err());
+    }
+
+    #[test]
+    fn test_parse_range_single_element() {
+        let values = parse_range("5-5", 0, 59).unwrap();
+        assert_eq!(values, vec![5]);
+    }
+
+    #[test]
+    fn test_parse_range_three_parts() {
+        assert!(parse_range("1-2-3", 0, 59).is_err());
+    }
+
+    // ─── matches_field ──────────────────────────────────────────────
+
+    #[test]
+    fn test_matches_field_found() {
+        assert!(matches_field(5, &[1, 3, 5, 7]));
+    }
+
+    #[test]
+    fn test_matches_field_not_found() {
+        assert!(!matches_field(4, &[1, 3, 5, 7]));
+    }
+
+    #[test]
+    fn test_matches_field_empty() {
+        assert!(!matches_field(0, &[]));
+    }
+
+    // ─── TaskCronSchedulerError ─────────────────────────────────────
+
+    #[test]
+    fn test_error_display_no_schedule() {
+        let err = TaskCronSchedulerError::NoSchedule("task-abc".to_string());
+        assert_eq!(err.to_string(), "task task-abc has no cron schedule");
+    }
+
+    #[test]
+    fn test_error_display_invalid_cron() {
+        let err = TaskCronSchedulerError::InvalidCron("bad expr".to_string());
+        assert_eq!(err.to_string(), "invalid cron expression: bad expr");
+    }
+
+    #[test]
+    fn test_error_display_io() {
+        let err = TaskCronSchedulerError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file missing",
+        ));
+        assert!(err.to_string().contains("file missing"));
+    }
+
+    #[test]
+    fn test_error_display_serialize() {
+        let json_err = serde_json::from_str::<String>("invalid").unwrap_err();
+        let err = TaskCronSchedulerError::Serialize(json_err);
+        let msg = err.to_string();
+        assert!(msg.contains("serialization error"));
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let err = TaskCronSchedulerError::NoSchedule("t1".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("NoSchedule"));
+    }
+
+    #[test]
+    fn test_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err: TaskCronSchedulerError = TaskCronSchedulerError::from(io_err);
+        assert!(err.to_string().contains("denied"));
+    }
+
+    #[test]
+    fn test_error_from_serde_json() {
+        let json_err = serde_json::from_str::<String>("not json").unwrap_err();
+        let err: TaskCronSchedulerError = TaskCronSchedulerError::from(json_err);
+        let msg = err.to_string();
+        assert!(msg.contains("serialization error"));
+    }
+
+    // ─── TaskCronSchedule::new ──────────────────────────────────────
+
+    #[test]
     fn test_task_cron_schedule_new() {
         let schedule = TaskCronSchedule::new(
             "test".to_string(),
@@ -514,14 +731,81 @@ mod tests {
     }
 
     #[test]
-    fn test_task_cron_schedule_invalid() {
+    fn test_task_cron_schedule_new_fields() {
+        let schedule = TaskCronSchedule::new(
+            "id-1".to_string(),
+            "My Schedule".to_string(),
+            "30 14 * * 1".to_string(),
+        )
+        .unwrap();
+        assert_eq!(schedule.id, "id-1");
+        assert_eq!(schedule.name, "My Schedule");
+        assert_eq!(schedule.cron_expr, "30 14 * * 1");
+        assert!(schedule.duration_secs.is_none());
+        assert!(schedule.last_trigger.is_none());
+    }
+
+    #[test]
+    fn test_task_cron_schedule_invalid_too_few_fields() {
         let result = TaskCronSchedule::new(
             "test".to_string(),
             "Test".to_string(),
-            "invalid".to_string(),
+            "0 2 *".to_string(),
         );
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_task_cron_schedule_invalid_too_many_fields() {
+        let result = TaskCronSchedule::new(
+            "test".to_string(),
+            "Test".to_string(),
+            "0 2 * * * *".to_string(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_task_cron_schedule_invalid_empty() {
+        let result = TaskCronSchedule::new(
+            "test".to_string(),
+            "Test".to_string(),
+            "".to_string(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_task_cron_schedule_invalid_non_numeric() {
+        let result = TaskCronSchedule::new(
+            "test".to_string(),
+            "Test".to_string(),
+            "abc def * * *".to_string(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_task_cron_schedule_invalid_minute_out_of_range() {
+        let result = TaskCronSchedule::new(
+            "test".to_string(),
+            "Test".to_string(),
+            "60 2 * * *".to_string(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_task_cron_schedule_invalid_hour_out_of_range() {
+        let result = TaskCronSchedule::new(
+            "test".to_string(),
+            "Test".to_string(),
+            "0 25 * * *".to_string(),
+        );
+        assert!(result.is_err());
+    }
+
+    // ─── TaskCronSchedule builder methods ───────────────────────────
 
     #[test]
     fn test_task_cron_schedule_with_duration() {
@@ -536,6 +820,59 @@ mod tests {
     }
 
     #[test]
+    fn test_task_cron_schedule_with_duration_zero() {
+        let schedule = TaskCronSchedule::new(
+            "test".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap()
+        .with_duration(0);
+        assert_eq!(schedule.duration_secs, Some(0));
+    }
+
+    #[test]
+    fn test_task_cron_schedule_with_enabled_false() {
+        let schedule = TaskCronSchedule::new(
+            "test".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap()
+        .with_enabled(false);
+        assert!(!schedule.enabled);
+    }
+
+    #[test]
+    fn test_task_cron_schedule_with_enabled_true() {
+        let schedule = TaskCronSchedule::new(
+            "test".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap()
+        .with_enabled(false)
+        .with_enabled(true);
+        assert!(schedule.enabled);
+    }
+
+    #[test]
+    fn test_task_cron_schedule_builder_chain() {
+        let schedule = TaskCronSchedule::new(
+            "id".to_string(),
+            "Name".to_string(),
+            "0 3 * * *".to_string(),
+        )
+        .unwrap()
+        .with_duration(7200)
+        .with_enabled(false);
+        assert_eq!(schedule.duration_secs, Some(7200));
+        assert!(!schedule.enabled);
+    }
+
+    // ─── TaskCronSchedule::should_trigger_at ────────────────────────
+
+    #[test]
     fn test_task_cron_schedule_should_trigger() {
         let schedule = TaskCronSchedule::new(
             "test".to_string(),
@@ -544,11 +881,9 @@ mod tests {
         )
         .unwrap();
 
-        // Should trigger at 14:30
         let trigger_time = Local.with_ymd_and_hms(2026, 8, 12, 14, 30, 0).unwrap();
         assert!(schedule.should_trigger_at(trigger_time).unwrap());
 
-        // Should not trigger at 14:31
         let no_trigger = Local.with_ymd_and_hms(2026, 8, 12, 14, 31, 0).unwrap();
         assert!(!schedule.should_trigger_at(no_trigger).unwrap());
     }
@@ -568,84 +903,72 @@ mod tests {
     }
 
     #[test]
-    fn test_task_cron_scheduler_add_remove() {
-        let mut scheduler = TaskCronScheduler::new();
+    fn test_task_cron_schedule_should_trigger_specific_dow() {
+        // Monday = 1
         let schedule = TaskCronSchedule::new(
-            "sched1".to_string(),
+            "test".to_string(),
             "Test".to_string(),
-            "0 2 * * *".to_string(),
+            "0 9 * * 1".to_string(),
         )
         .unwrap();
 
-        scheduler.add_schedule("task1", schedule).unwrap();
-        assert!(scheduler.get_schedule("task1").is_some());
+        // 2026-08-10 is a Monday
+        let monday = Local.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        assert!(schedule.should_trigger_at(monday).unwrap());
 
-        let removed = scheduler.remove_schedule("task1").unwrap();
-        assert_eq!(removed.id, "sched1");
-        assert!(scheduler.get_schedule("task1").is_none());
+        // 2026-08-11 is a Tuesday
+        let tuesday = Local.with_ymd_and_hms(2026, 8, 11, 9, 0, 0).unwrap();
+        assert!(!schedule.should_trigger_at(tuesday).unwrap());
     }
 
     #[test]
-    fn test_task_cron_scheduler_remove_nonexistent() {
-        let mut scheduler = TaskCronScheduler::new();
-        assert!(scheduler.remove_schedule("nonexistent").is_err());
-    }
-
-    #[test]
-    fn test_task_cron_scheduler_enable_disable() {
-        let mut scheduler = TaskCronScheduler::new();
+    fn test_task_cron_schedule_should_trigger_specific_month() {
         let schedule = TaskCronSchedule::new(
-            "sched1".to_string(),
+            "test".to_string(),
             "Test".to_string(),
-            "0 2 * * *".to_string(),
+            "0 0 1 6 *".to_string(),
         )
         .unwrap();
 
-        scheduler.add_schedule("task1", schedule).unwrap();
-        scheduler.set_schedule_enabled("task1", false).unwrap();
+        // June 1st
+        let june1 = Local.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        assert!(schedule.should_trigger_at(june1).unwrap());
 
-        let s = scheduler.get_schedule("task1").unwrap();
-        assert!(!s.enabled);
+        // July 1st
+        let july1 = Local.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+        assert!(!schedule.should_trigger_at(july1).unwrap());
     }
 
     #[test]
-    fn test_task_cron_scheduler_summary() {
-        let mut scheduler = TaskCronScheduler::new();
-
-        let s1 = TaskCronSchedule::new("s1".to_string(), "S1".to_string(), "0 2 * * *".to_string())
-            .unwrap();
-        let s2 = TaskCronSchedule::new("s2".to_string(), "S2".to_string(), "0 3 * * *".to_string())
-            .unwrap()
-            .with_enabled(false);
-
-        scheduler.add_schedule("task1", s1).unwrap();
-        scheduler.add_schedule("task2", s2).unwrap();
-
-        let summary = scheduler.summary();
-        assert_eq!(summary.total_schedules, 2);
-        assert_eq!(summary.enabled_schedules, 1);
-        assert_eq!(summary.disabled_schedules, 1);
-        assert_eq!(summary.upcoming_triggers.len(), 2);
-    }
-
-    #[test]
-    fn test_task_cron_scheduler_persistence() {
-        let mut scheduler = TaskCronScheduler::new();
+    fn test_task_cron_schedule_should_trigger_specific_dom() {
         let schedule = TaskCronSchedule::new(
-            "sched1".to_string(),
+            "test".to_string(),
             "Test".to_string(),
-            "0 2 * * *".to_string(),
+            "0 12 15 * *".to_string(),
         )
         .unwrap();
-        scheduler.add_schedule("task1", schedule).unwrap();
 
-        let data = scheduler.to_data();
-        let json = serde_json::to_string(&data).unwrap();
-        let loaded: TaskCronSchedulerData = serde_json::from_str(&json).unwrap();
+        let day15 = Local.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+        assert!(schedule.should_trigger_at(day15).unwrap());
 
-        assert_eq!(loaded.schedules.len(), 1);
-        assert!(loaded.schedules.contains_key("task1"));
+        let day16 = Local.with_ymd_and_hms(2026, 8, 16, 12, 0, 0).unwrap();
+        assert!(!schedule.should_trigger_at(day16).unwrap());
     }
+
+    #[test]
+    fn test_task_cron_schedule_wildcard_triggers_every_minute_match() {
+        let schedule = TaskCronSchedule::new(
+            "test".to_string(),
+            "Test".to_string(),
+            "* * * * *".to_string(),
+        )
+        .unwrap();
+
+        let any_time = Local.with_ymd_and_hms(2026, 3, 15, 10, 45, 0).unwrap();
+        assert!(schedule.should_trigger_at(any_time).unwrap());
+    }
+
+    // ─── TaskCronSchedule::mark_triggered ───────────────────────────
 
     #[test]
     fn test_task_cron_schedule_mark_triggered() {
@@ -663,29 +986,1119 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_cron_field_range_step() {
-        let values = parse_cron_field("0-10/2", 0, 59).unwrap();
-        assert_eq!(values, vec![0, 2, 4, 6, 8, 10]);
+    fn test_task_cron_schedule_mark_triggered_multiple() {
+        let mut schedule = TaskCronSchedule::new(
+            "test".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+
+        schedule.mark_triggered();
+        let first_trigger = schedule.last_trigger.unwrap();
+
+        schedule.mark_triggered();
+        let second_trigger = schedule.last_trigger.unwrap();
+        assert!(second_trigger >= first_trigger);
+    }
+
+    // ─── TaskCronSchedule::update_next_trigger ──────────────────────
+
+    #[test]
+    fn test_update_next_trigger() {
+        let mut schedule = TaskCronSchedule::new(
+            "test".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+
+        let old_next = schedule.next_trigger;
+        schedule.update_next_trigger().unwrap();
+        assert!(schedule.next_trigger.is_some());
+        // next_trigger should be updated (same or later)
+        assert!(schedule.next_trigger >= old_next);
+    }
+
+    // ─── TaskCronSchedulerConfig ────────────────────────────────────
+
+    #[test]
+    fn test_config_default() {
+        let config = TaskCronSchedulerConfig::default();
+        // Default for bool is false
+        assert!(!config.enabled);
+        // Default for u64 is 0
+        assert_eq!(config.check_interval_secs, 0);
     }
 
     #[test]
-    fn test_task_cron_scheduler_update_all_next_triggers() {
+    fn test_config_serde_roundtrip() {
+        let config = TaskCronSchedulerConfig {
+            enabled: false,
+            check_interval_secs: 120,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: TaskCronSchedulerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.enabled, false);
+        assert_eq!(loaded.check_interval_secs, 120);
+    }
+
+    #[test]
+    fn test_config_clone_debug() {
+        let config = TaskCronSchedulerConfig {
+            enabled: true,
+            check_interval_secs: 30,
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.enabled, true);
+        assert_eq!(cloned.check_interval_secs, 30);
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("TaskCronSchedulerConfig"));
+    }
+
+    // ─── TaskCronSchedulerData ──────────────────────────────────────
+
+    #[test]
+    fn test_data_default() {
+        let data = TaskCronSchedulerData::default();
+        assert!(!data.config.enabled);
+        assert!(data.schedules.is_empty());
+    }
+
+    #[test]
+    fn test_data_serde_roundtrip() {
+        let mut data = TaskCronSchedulerData {
+            config: TaskCronSchedulerConfig {
+                enabled: true,
+                check_interval_secs: 60,
+            },
+            schedules: HashMap::new(),
+        };
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "S1".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        data.schedules.insert("task1".to_string(), schedule);
+
+        let json = serde_json::to_string(&data).unwrap();
+        let loaded: TaskCronSchedulerData = serde_json::from_str(&json).unwrap();
+        assert!(loaded.config.enabled);
+        assert_eq!(loaded.schedules.len(), 1);
+        assert!(loaded.schedules.contains_key("task1"));
+    }
+
+    #[test]
+    fn test_data_clone_debug() {
+        let data = TaskCronSchedulerData::default();
+        let cloned = data.clone();
+        assert_eq!(cloned.schedules.len(), 0);
+        let debug = format!("{:?}", data);
+        assert!(debug.contains("TaskCronSchedulerData"));
+    }
+
+    // ─── TaskCronScheduler::new / default ───────────────────────────
+
+    #[test]
+    fn test_scheduler_new() {
+        let scheduler = TaskCronScheduler::new();
+        assert!(scheduler.config().enabled);
+        assert_eq!(scheduler.config().check_interval_secs, 60);
+        assert!(scheduler.list_schedules().is_empty());
+    }
+
+    #[test]
+    fn test_scheduler_default_equals_new() {
+        let new = TaskCronScheduler::new();
+        let default = TaskCronScheduler::default();
+        assert_eq!(new.config().enabled, default.config().enabled);
+        assert_eq!(
+            new.config().check_interval_secs,
+            default.config().check_interval_secs
+        );
+    }
+
+    // ─── TaskCronScheduler::from_data ───────────────────────────────
+
+    #[test]
+    fn test_scheduler_from_data() {
+        let mut data = TaskCronSchedulerData {
+            config: TaskCronSchedulerConfig {
+                enabled: false,
+                check_interval_secs: 30,
+            },
+            schedules: HashMap::new(),
+        };
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Schedule 1".to_string(),
+            "0 5 * * *".to_string(),
+        )
+        .unwrap();
+        data.schedules.insert("task1".to_string(), schedule);
+
+        let scheduler = TaskCronScheduler::from_data(data);
+        assert!(!scheduler.config().enabled);
+        assert_eq!(scheduler.config().check_interval_secs, 30);
+        assert!(scheduler.get_schedule("task1").is_some());
+    }
+
+    #[test]
+    fn test_scheduler_from_data_empty() {
+        let data = TaskCronSchedulerData::default();
+        let scheduler = TaskCronScheduler::from_data(data);
+        assert!(scheduler.list_schedules().is_empty());
+    }
+
+    // ─── TaskCronScheduler::config / set_config ─────────────────────
+
+    #[test]
+    fn test_scheduler_config_ref() {
+        let scheduler = TaskCronScheduler::new();
+        let config = scheduler.config();
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn test_scheduler_set_config() {
+        let mut scheduler = TaskCronScheduler::new();
+        scheduler.set_config(TaskCronSchedulerConfig {
+            enabled: false,
+            check_interval_secs: 120,
+        });
+        assert!(!scheduler.config().enabled);
+        assert_eq!(scheduler.config().check_interval_secs, 120);
+    }
+
+    // ─── TaskCronScheduler::add_schedule ────────────────────────────
+
+    #[test]
+    fn test_add_schedule() {
         let mut scheduler = TaskCronScheduler::new();
         let schedule = TaskCronSchedule::new(
-            "sched1".to_string(),
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", schedule).unwrap();
+        assert!(scheduler.get_schedule("task1").is_some());
+    }
+
+    #[test]
+    fn test_add_schedule_overwrite() {
+        let mut scheduler = TaskCronScheduler::new();
+        let s1 = TaskCronSchedule::new(
+            "s1".to_string(),
+            "First".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        let s2 = TaskCronSchedule::new(
+            "s2".to_string(),
+            "Second".to_string(),
+            "0 3 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", s1).unwrap();
+        scheduler.add_schedule("task1", s2).unwrap();
+        assert_eq!(scheduler.get_schedule("task1").unwrap().id, "s2");
+    }
+
+    #[test]
+    fn test_add_schedule_multiple_tasks() {
+        let mut scheduler = TaskCronScheduler::new();
+        for i in 0..5 {
+            let schedule = TaskCronSchedule::new(
+                format!("s{}", i),
+                format!("Schedule {}", i),
+                "0 2 * * *".to_string(),
+            )
+            .unwrap();
+            scheduler
+                .add_schedule(&format!("task{}", i), schedule)
+                .unwrap();
+        }
+        assert_eq!(scheduler.list_schedules().len(), 5);
+    }
+
+    // ─── TaskCronScheduler::remove_schedule ─────────────────────────
+
+    #[test]
+    fn test_remove_schedule() {
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", schedule).unwrap();
+        let removed = scheduler.remove_schedule("task1").unwrap();
+        assert_eq!(removed.id, "s1");
+        assert!(scheduler.get_schedule("task1").is_none());
+    }
+
+    #[test]
+    fn test_remove_schedule_nonexistent() {
+        let mut scheduler = TaskCronScheduler::new();
+        let result = scheduler.remove_schedule("nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_remove_schedule_idempotent() {
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", schedule).unwrap();
+        scheduler.remove_schedule("task1").unwrap();
+        assert!(scheduler.remove_schedule("task1").is_err());
+    }
+
+    // ─── TaskCronScheduler::get_schedule / get_schedule_mut ─────────
+
+    #[test]
+    fn test_get_schedule_exists() {
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", schedule).unwrap();
+        let s = scheduler.get_schedule("task1").unwrap();
+        assert_eq!(s.id, "s1");
+    }
+
+    #[test]
+    fn test_get_schedule_not_exists() {
+        let scheduler = TaskCronScheduler::new();
+        assert!(scheduler.get_schedule("nope").is_none());
+    }
+
+    #[test]
+    fn test_get_schedule_mut() {
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
             "Test".to_string(),
             "0 2 * * *".to_string(),
         )
         .unwrap();
         scheduler.add_schedule("task1", schedule).unwrap();
 
-        scheduler.update_all_next_triggers().unwrap();
-        assert!(
+        let s = scheduler.get_schedule_mut("task1").unwrap();
+        s.enabled = false;
+
+        assert!(!scheduler.get_schedule("task1").unwrap().enabled);
+    }
+
+    #[test]
+    fn test_get_schedule_mut_not_exists() {
+        let mut scheduler = TaskCronScheduler::new();
+        assert!(scheduler.get_schedule_mut("nope").is_none());
+    }
+
+    // ─── TaskCronScheduler::list_schedules ──────────────────────────
+
+    #[test]
+    fn test_list_schedules_empty() {
+        let scheduler = TaskCronScheduler::new();
+        assert!(scheduler.list_schedules().is_empty());
+    }
+
+    #[test]
+    fn test_list_schedules_multiple() {
+        let mut scheduler = TaskCronScheduler::new();
+        for i in 0..3 {
+            let schedule = TaskCronSchedule::new(
+                format!("s{}", i),
+                format!("S{}", i),
+                "0 2 * * *".to_string(),
+            )
+            .unwrap();
             scheduler
-                .get_schedule("task1")
-                .unwrap()
-                .next_trigger
-                .is_some()
-        );
+                .add_schedule(&format!("task{}", i), schedule)
+                .unwrap();
+        }
+        assert_eq!(scheduler.list_schedules().len(), 3);
+    }
+
+    // ─── TaskCronScheduler::set_schedule_enabled ────────────────────
+
+    #[test]
+    fn test_set_schedule_enabled() {
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", schedule).unwrap();
+        scheduler.set_schedule_enabled("task1", false).unwrap();
+        assert!(!scheduler.get_schedule("task1").unwrap().enabled);
+    }
+
+    #[test]
+    fn test_set_schedule_enabled_nonexistent() {
+        let mut scheduler = TaskCronScheduler::new();
+        assert!(scheduler.set_schedule_enabled("nope", false).is_err());
+    }
+
+    #[test]
+    fn test_set_schedule_enabled_toggle() {
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", schedule).unwrap();
+
+        scheduler.set_schedule_enabled("task1", false).unwrap();
+        assert!(!scheduler.get_schedule("task1").unwrap().enabled);
+
+        scheduler.set_schedule_enabled("task1", true).unwrap();
+        assert!(scheduler.get_schedule("task1").unwrap().enabled);
+    }
+
+    // ─── TaskCronScheduler::check_schedules ─────────────────────────
+
+    #[test]
+    fn test_check_schedules_disabled_global() {
+        let mut scheduler = TaskCronScheduler::new();
+        scheduler.set_config(TaskCronSchedulerConfig {
+            enabled: false,
+            check_interval_secs: 60,
+        });
+
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "* * * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", schedule).unwrap();
+
+        let triggered = scheduler.check_schedules().unwrap();
+        assert!(triggered.is_empty());
+    }
+
+    #[test]
+    fn test_check_schedules_disabled_schedule() {
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "* * * * *".to_string(),
+        )
+        .unwrap()
+        .with_enabled(false);
+        scheduler.add_schedule("task1", schedule).unwrap();
+
+        let triggered = scheduler.check_schedules().unwrap();
+        assert!(triggered.is_empty());
+    }
+
+    #[test]
+    fn test_check_schedules_empty() {
+        let mut scheduler = TaskCronScheduler::new();
+        let triggered = scheduler.check_schedules().unwrap();
+        assert!(triggered.is_empty());
+    }
+
+    // ─── TaskCronScheduler::update_all_next_triggers ────────────────
+
+    #[test]
+    fn test_update_all_next_triggers() {
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", schedule).unwrap();
+        scheduler.update_all_next_triggers().unwrap();
+        assert!(scheduler.get_schedule("task1").unwrap().next_trigger.is_some());
+    }
+
+    #[test]
+    fn test_update_all_next_triggers_empty() {
+        let mut scheduler = TaskCronScheduler::new();
+        scheduler.update_all_next_triggers().unwrap();
+    }
+
+    #[test]
+    fn test_update_all_next_triggers_multiple() {
+        let mut scheduler = TaskCronScheduler::new();
+        for i in 0..3 {
+            let schedule = TaskCronSchedule::new(
+                format!("s{}", i),
+                format!("S{}", i),
+                format!("{} 2 * * *", i).as_str().to_string(),
+            )
+            .unwrap();
+            scheduler
+                .add_schedule(&format!("task{}", i), schedule)
+                .unwrap();
+        }
+        scheduler.update_all_next_triggers().unwrap();
+        for i in 0..3 {
+            assert!(
+                scheduler
+                    .get_schedule(&format!("task{}", i))
+                    .unwrap()
+                    .next_trigger
+                    .is_some()
+            );
+        }
+    }
+
+    // ─── TaskCronScheduler::summary ─────────────────────────────────
+
+    #[test]
+    fn test_summary_empty() {
+        let scheduler = TaskCronScheduler::new();
+        let summary = scheduler.summary();
+        assert_eq!(summary.total_schedules, 0);
+        assert_eq!(summary.enabled_schedules, 0);
+        assert_eq!(summary.disabled_schedules, 0);
+        assert!(summary.upcoming_triggers.is_empty());
+    }
+
+    #[test]
+    fn test_summary() {
+        let mut scheduler = TaskCronScheduler::new();
+        let s1 = TaskCronSchedule::new("s1".to_string(), "S1".to_string(), "0 2 * * *".to_string())
+            .unwrap();
+        let s2 = TaskCronSchedule::new("s2".to_string(), "S2".to_string(), "0 3 * * *".to_string())
+            .unwrap()
+            .with_enabled(false);
+        scheduler.add_schedule("task1", s1).unwrap();
+        scheduler.add_schedule("task2", s2).unwrap();
+
+        let summary = scheduler.summary();
+        assert_eq!(summary.total_schedules, 2);
+        assert_eq!(summary.enabled_schedules, 1);
+        assert_eq!(summary.disabled_schedules, 1);
+        assert_eq!(summary.upcoming_triggers.len(), 2);
+    }
+
+    #[test]
+    fn test_summary_upcoming_sorted() {
+        let mut scheduler = TaskCronScheduler::new();
+        let s1 = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Early".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        let s2 = TaskCronSchedule::new(
+            "s2".to_string(),
+            "Late".to_string(),
+            "0 5 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", s1).unwrap();
+        scheduler.add_schedule("task2", s2).unwrap();
+
+        let summary = scheduler.summary();
+        // upcoming_triggers should be sorted by time
+        assert!(summary.upcoming_triggers.len() >= 2);
+        assert!(summary.upcoming_triggers[0].1 <= summary.upcoming_triggers[1].1);
+    }
+
+    #[test]
+    fn test_summary_max_10_upcoming() {
+        let mut scheduler = TaskCronScheduler::new();
+        for i in 0..15 {
+            let schedule = TaskCronSchedule::new(
+                format!("s{}", i),
+                format!("S{}", i),
+                format!("{} * * * *", i % 60).as_str().to_string(),
+            )
+            .unwrap();
+            scheduler
+                .add_schedule(&format!("task{}", i), schedule)
+                .unwrap();
+        }
+        let summary = scheduler.summary();
+        assert!(summary.upcoming_triggers.len() <= 10);
+    }
+
+    // ─── TaskCronScheduler::to_data ─────────────────────────────────
+
+    #[test]
+    fn test_to_data() {
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", schedule).unwrap();
+
+        let data = scheduler.to_data();
+        assert!(data.config.enabled);
+        assert_eq!(data.schedules.len(), 1);
+        assert!(data.schedules.contains_key("task1"));
+    }
+
+    #[test]
+    fn test_to_data_empty() {
+        let scheduler = TaskCronScheduler::new();
+        let data = scheduler.to_data();
+        assert!(data.schedules.is_empty());
+    }
+
+    // ─── TaskCronScheduler::save / load (async) ─────────────────────
+
+    #[tokio::test]
+    async fn test_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", schedule).unwrap();
+
+        scheduler.save(dir.path()).await.unwrap();
+
+        let loaded = TaskCronScheduler::load(dir.path()).await.unwrap();
+        assert!(loaded.get_schedule("task1").is_some());
+        assert_eq!(loaded.get_schedule("task1").unwrap().id, "s1");
+    }
+
+    #[tokio::test]
+    async fn test_load_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = TaskCronScheduler::load(dir.path()).await.unwrap();
+        assert!(loaded.list_schedules().is_empty());
+        assert!(loaded.config().enabled);
+    }
+
+    #[tokio::test]
+    async fn test_save_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut scheduler = TaskCronScheduler::new();
+
+        let s1 = TaskCronSchedule::new(
+            "s1".to_string(),
+            "First".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", s1).unwrap();
+        scheduler.save(dir.path()).await.unwrap();
+
+        // Overwrite with different data
+        let s2 = TaskCronSchedule::new(
+            "s2".to_string(),
+            "Second".to_string(),
+            "0 3 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", s2).unwrap();
+        scheduler.save(dir.path()).await.unwrap();
+
+        let loaded = TaskCronScheduler::load(dir.path()).await.unwrap();
+        assert_eq!(loaded.get_schedule("task1").unwrap().id, "s2");
+    }
+
+    #[tokio::test]
+    async fn test_load_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("task_cron_scheduler.json");
+        tokio::fs::write(&path, "not valid json").await.unwrap();
+
+        let result = TaskCronScheduler::load(dir.path()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_save_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let scheduler = TaskCronScheduler::new();
+        scheduler.save(dir.path()).await.unwrap();
+
+        let path = dir.path().join("task_cron_scheduler.json");
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_save_empty_schedules() {
+        let dir = tempfile::tempdir().unwrap();
+        let scheduler = TaskCronScheduler::new();
+        scheduler.save(dir.path()).await.unwrap();
+
+        let loaded = TaskCronScheduler::load(dir.path()).await.unwrap();
+        assert!(loaded.list_schedules().is_empty());
+    }
+
+    // ─── TaskCronSchedulerSummary ───────────────────────────────────
+
+    #[test]
+    fn test_summary_serde_roundtrip() {
+        let summary = TaskCronSchedulerSummary {
+            total_schedules: 5,
+            enabled_schedules: 3,
+            disabled_schedules: 2,
+            upcoming_triggers: vec![],
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let loaded: TaskCronSchedulerSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.total_schedules, 5);
+        assert_eq!(loaded.enabled_schedules, 3);
+        assert_eq!(loaded.disabled_schedules, 2);
+    }
+
+    #[test]
+    fn test_summary_clone_debug() {
+        let summary = TaskCronSchedulerSummary {
+            total_schedules: 1,
+            enabled_schedules: 1,
+            disabled_schedules: 0,
+            upcoming_triggers: vec![],
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_schedules, 1);
+        let debug = format!("{:?}", summary);
+        assert!(debug.contains("TaskCronSchedulerSummary"));
+    }
+
+    // ─── TaskCronSchedule serde ─────────────────────────────────────
+
+    #[test]
+    fn test_schedule_serde_roundtrip() {
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "My Schedule".to_string(),
+            "30 14 * * 1".to_string(),
+        )
+        .unwrap()
+        .with_duration(3600);
+
+        let json = serde_json::to_string(&schedule).unwrap();
+        let loaded: TaskCronSchedule = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.id, "s1");
+        assert_eq!(loaded.name, "My Schedule");
+        assert_eq!(loaded.cron_expr, "30 14 * * 1");
+        assert_eq!(loaded.duration_secs, Some(3600));
+        assert!(loaded.enabled);
+    }
+
+    #[test]
+    fn test_schedule_clone() {
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        let cloned = schedule.clone();
+        assert_eq!(cloned.id, schedule.id);
+        assert_eq!(cloned.cron_expr, schedule.cron_expr);
+    }
+
+    #[test]
+    fn test_schedule_debug() {
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        let debug = format!("{:?}", schedule);
+        assert!(debug.contains("TaskCronSchedule"));
+        assert!(debug.contains("s1"));
+    }
+
+    // ─── Scheduler Clone / Debug ────────────────────────────────────
+
+    #[test]
+    fn test_scheduler_clone() {
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", schedule).unwrap();
+
+        let cloned = scheduler.clone();
+        assert!(cloned.get_schedule("task1").is_some());
+        assert_eq!(cloned.config().enabled, scheduler.config().enabled);
+    }
+
+    #[test]
+    fn test_scheduler_clone_independence() {
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("task1", schedule).unwrap();
+
+        let mut cloned = scheduler.clone();
+        cloned.remove_schedule("task1").unwrap();
+
+        // Original still has it
+        assert!(scheduler.get_schedule("task1").is_some());
+        // Clone doesn't
+        assert!(cloned.get_schedule("task1").is_none());
+    }
+
+    #[test]
+    fn test_scheduler_debug() {
+        let scheduler = TaskCronScheduler::new();
+        let debug = format!("{:?}", scheduler);
+        assert!(debug.contains("TaskCronScheduler"));
+    }
+
+    // ─── Unicode ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_unicode_task_id() {
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "中文任务".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("任务-α", schedule).unwrap();
+        assert!(scheduler.get_schedule("任务-α").is_some());
+        assert_eq!(scheduler.get_schedule("任务-α").unwrap().name, "中文任务");
+    }
+
+    #[test]
+    fn test_unicode_schedule_name() {
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "🌙 夜间下载".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        assert_eq!(schedule.name, "🌙 夜间下载");
+    }
+
+    #[test]
+    fn test_unicode_persistence() {
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "日本語タスク".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        scheduler.add_schedule("任务-🚀", schedule).unwrap();
+
+        let data = scheduler.to_data();
+        let json = serde_json::to_string(&data).unwrap();
+        let loaded: TaskCronSchedulerData = serde_json::from_str(&json).unwrap();
+        assert!(loaded.schedules.contains_key("任务-🚀"));
+        assert_eq!(loaded.schedules["任务-🚀"].name, "日本語タスク");
+    }
+
+    // ─── Complex workflows ──────────────────────────────────────────
+
+    #[test]
+    fn test_full_lifecycle() {
+        let mut scheduler = TaskCronScheduler::new();
+
+        // Add schedules
+        let s1 = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Morning".to_string(),
+            "0 8 * * *".to_string(),
+        )
+        .unwrap()
+        .with_duration(3600);
+        let s2 = TaskCronSchedule::new(
+            "s2".to_string(),
+            "Night".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap()
+        .with_duration(7200);
+
+        scheduler.add_schedule("task1", s1).unwrap();
+        scheduler.add_schedule("task2", s2).unwrap();
+
+        // Verify
+        assert_eq!(scheduler.list_schedules().len(), 2);
+        assert_eq!(scheduler.summary().total_schedules, 2);
+
+        // Disable one
+        scheduler.set_schedule_enabled("task1", false).unwrap();
+        assert_eq!(scheduler.summary().enabled_schedules, 1);
+        assert_eq!(scheduler.summary().disabled_schedules, 1);
+
+        // Remove one
+        scheduler.remove_schedule("task1").unwrap();
+        assert_eq!(scheduler.list_schedules().len(), 1);
+
+        // to_data roundtrip
+        let data = scheduler.to_data();
+        let restored = TaskCronScheduler::from_data(data);
+        assert_eq!(restored.list_schedules().len(), 1);
+        assert!(restored.get_schedule("task2").is_some());
+    }
+
+    #[test]
+    fn test_multiple_schedules_independent() {
+        let mut scheduler = TaskCronScheduler::new();
+
+        for i in 0..10 {
+            let schedule = TaskCronSchedule::new(
+                format!("s{}", i),
+                format!("Schedule {}", i),
+                format!("{} * * * *", i % 60).as_str().to_string(),
+            )
+            .unwrap();
+            scheduler
+                .add_schedule(&format!("task{}", i), schedule)
+                .unwrap();
+        }
+
+        assert_eq!(scheduler.list_schedules().len(), 10);
+
+        // Disable even-numbered tasks
+        for i in (0..10).step_by(2) {
+            scheduler
+                .set_schedule_enabled(&format!("task{}", i), false)
+                .unwrap();
+        }
+
+        let summary = scheduler.summary();
+        assert_eq!(summary.enabled_schedules, 5);
+        assert_eq!(summary.disabled_schedules, 5);
+    }
+
+    #[tokio::test]
+    async fn test_full_persistence_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create and populate
+        let mut scheduler = TaskCronScheduler::new();
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Daily Backup".to_string(),
+            "0 3 * * *".to_string(),
+        )
+        .unwrap()
+        .with_duration(1800);
+        scheduler.add_schedule("backup-task", schedule).unwrap();
+
+        // Save
+        scheduler.save(dir.path()).await.unwrap();
+
+        // Load
+        let loaded = TaskCronScheduler::load(dir.path()).await.unwrap();
+        assert!(loaded.get_schedule("backup-task").is_some());
+        let s = loaded.get_schedule("backup-task").unwrap();
+        assert_eq!(s.name, "Daily Backup");
+        assert_eq!(s.duration_secs, Some(1800));
+
+        // Modify and save again
+        let mut loaded = loaded;
+        loaded.set_schedule_enabled("backup-task", false).unwrap();
+        loaded.save(dir.path()).await.unwrap();
+
+        // Reload
+        let reloaded = TaskCronScheduler::load(dir.path()).await.unwrap();
+        assert!(!reloaded.get_schedule("backup-task").unwrap().enabled);
+    }
+
+    // ─── Cron expression edge cases ─────────────────────────────────
+
+    #[test]
+    fn test_cron_midnight() {
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Midnight".to_string(),
+            "0 0 * * *".to_string(),
+        )
+        .unwrap();
+
+        let midnight = Local.with_ymd_and_hms(2026, 8, 12, 0, 0, 0).unwrap();
+        assert!(schedule.should_trigger_at(midnight).unwrap());
+
+        let not_midnight = Local.with_ymd_and_hms(2026, 8, 12, 0, 1, 0).unwrap();
+        assert!(!schedule.should_trigger_at(not_midnight).unwrap());
+    }
+
+    #[test]
+    fn test_cron_end_of_day() {
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "End of day".to_string(),
+            "59 23 * * *".to_string(),
+        )
+        .unwrap();
+
+        let eod = Local.with_ymd_and_hms(2026, 8, 12, 23, 59, 0).unwrap();
+        assert!(schedule.should_trigger_at(eod).unwrap());
+    }
+
+    #[test]
+    fn test_cron_range_dow() {
+        // Weekdays only (Mon-Fri = 1-5)
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Weekdays".to_string(),
+            "0 9 * * 1-5".to_string(),
+        )
+        .unwrap();
+
+        // 2026-08-10 is Monday
+        let monday = Local.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        assert!(schedule.should_trigger_at(monday).unwrap());
+
+        // 2026-08-14 is Friday
+        let friday = Local.with_ymd_and_hms(2026, 8, 14, 9, 0, 0).unwrap();
+        assert!(schedule.should_trigger_at(friday).unwrap());
+
+        // 2026-08-15 is Saturday
+        let saturday = Local.with_ymd_and_hms(2026, 8, 15, 9, 0, 0).unwrap();
+        assert!(!schedule.should_trigger_at(saturday).unwrap());
+    }
+
+    #[test]
+    fn test_cron_step_minutes() {
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Every 15 min".to_string(),
+            "*/15 * * * *".to_string(),
+        )
+        .unwrap();
+
+        let at_0 = Local.with_ymd_and_hms(2026, 8, 12, 10, 0, 0).unwrap();
+        assert!(schedule.should_trigger_at(at_0).unwrap());
+
+        let at_15 = Local.with_ymd_and_hms(2026, 8, 12, 10, 15, 0).unwrap();
+        assert!(schedule.should_trigger_at(at_15).unwrap());
+
+        let at_7 = Local.with_ymd_and_hms(2026, 8, 12, 10, 7, 0).unwrap();
+        assert!(!schedule.should_trigger_at(at_7).unwrap());
+    }
+
+    #[test]
+    fn test_cron_list_values() {
+        let schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Specific hours".to_string(),
+            "0 8,12,18 * * *".to_string(),
+        )
+        .unwrap();
+
+        let at_8 = Local.with_ymd_and_hms(2026, 8, 12, 8, 0, 0).unwrap();
+        assert!(schedule.should_trigger_at(at_8).unwrap());
+
+        let at_12 = Local.with_ymd_and_hms(2026, 8, 12, 12, 0, 0).unwrap();
+        assert!(schedule.should_trigger_at(at_12).unwrap());
+
+        let at_18 = Local.with_ymd_and_hms(2026, 8, 12, 18, 0, 0).unwrap();
+        assert!(schedule.should_trigger_at(at_18).unwrap());
+
+        let at_10 = Local.with_ymd_and_hms(2026, 8, 12, 10, 0, 0).unwrap();
+        assert!(!schedule.should_trigger_at(at_10).unwrap());
+    }
+
+    // ─── Boundary: large number of schedules ────────────────────────
+
+    #[test]
+    fn test_large_number_of_schedules() {
+        let mut scheduler = TaskCronScheduler::new();
+        for i in 0..100 {
+            let schedule = TaskCronSchedule::new(
+                format!("s{}", i),
+                format!("Schedule {}", i),
+                "0 2 * * *".to_string(),
+            )
+            .unwrap();
+            scheduler
+                .add_schedule(&format!("task{}", i), schedule)
+                .unwrap();
+        }
+        assert_eq!(scheduler.list_schedules().len(), 100);
+        assert_eq!(scheduler.summary().total_schedules, 100);
+    }
+
+    // ─── Error message quality ──────────────────────────────────────
+
+    #[test]
+    fn test_error_message_contains_task_id() {
+        let err = TaskCronSchedulerError::NoSchedule("my-task-123".to_string());
+        assert!(err.to_string().contains("my-task-123"));
+    }
+
+    #[test]
+    fn test_error_message_contains_cron_expr() {
+        let err = TaskCronSchedulerError::InvalidCron("bad expression".to_string());
+        assert!(err.to_string().contains("bad expression"));
+    }
+
+    // ─── Data extra fields ignored ──────────────────────────────────
+
+    #[test]
+    fn test_config_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"check_interval_secs":30,"extra_field":"ignored"}"#;
+        let config: TaskCronSchedulerConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.check_interval_secs, 30);
+    }
+
+    #[test]
+    fn test_data_extra_fields_ignored() {
+        let json = r#"{"config":{"enabled":true,"check_interval_secs":60},"schedules":{},"extra":42}"#;
+        let data: TaskCronSchedulerData = serde_json::from_str(json).unwrap();
+        assert!(data.config.enabled);
+        assert!(data.schedules.is_empty());
+    }
+
+    // ─── Scheduler with custom config ───────────────────────────────
+
+    #[test]
+    fn test_scheduler_with_custom_config() {
+        let mut scheduler = TaskCronScheduler::new();
+        scheduler.set_config(TaskCronSchedulerConfig {
+            enabled: true,
+            check_interval_secs: 30,
+        });
+        assert_eq!(scheduler.config().check_interval_secs, 30);
+    }
+
+    // ─── should_trigger_at with invalid cron ────────────────────────
+
+    #[test]
+    fn test_should_trigger_at_invalid_cron() {
+        let mut schedule = TaskCronSchedule::new(
+            "s1".to_string(),
+            "Test".to_string(),
+            "0 2 * * *".to_string(),
+        )
+        .unwrap();
+        // Corrupt the cron expression
+        schedule.cron_expr = "invalid".to_string();
+        let time = Local.with_ymd_and_hms(2026, 8, 12, 2, 0, 0).unwrap();
+        assert!(schedule.should_trigger_at(time).is_err());
     }
 }
