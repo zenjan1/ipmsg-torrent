@@ -522,6 +522,51 @@ impl P2PSwarm {
             .any(|p| p.to_string().contains("circuit/relay"));
         tracing::info!(peer = %pid_str, supports_relay, "Peer relay support check");
 
+        // If peer supports relay, trigger reservation
+        if supports_relay {
+            // Use the observed address (how the peer sees us) to build relay address
+            let mut relay_addr = info.observed_addr.clone();
+            
+            // Check if address already contains /p2p/<peer_id>
+            let has_p2p = relay_addr
+                .iter()
+                .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)));
+
+            if !has_p2p {
+                relay_addr.push(libp2p::multiaddr::Protocol::P2p(info.public_key.to_peer_id()));
+            }
+
+            // Add p2p-circuit protocol
+            relay_addr.push(libp2p::multiaddr::Protocol::P2pCircuit);
+
+            tracing::info!(
+                peer = %pid_str,
+                relay_addr = %relay_addr,
+                "Attempting relay reservation"
+            );
+
+            match self.swarm.listen_on(relay_addr.clone()) {
+                Ok(id) => {
+                    tracing::info!(
+                        peer = %pid_str,
+                        listener_id = ?id,
+                        "Relay listen initiated, reservation will be requested"
+                    );
+                    events.push(P2PEvent::Status(format!(
+                        "Relay reservation requested for {}",
+                        &pid_str[..8]
+                    )));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        peer = %pid_str,
+                        error = ?e,
+                        "Failed to initiate relay listen"
+                    );
+                }
+            }
+        }
+
         let peer = ConnectedPeer {
             peer_id: pid_str.clone(),
             username: username.clone(),
@@ -919,53 +964,9 @@ impl futures::Stream for P2PSwarm {
                             // for private IPs in on_identify_received).
                             // Trigger Kademlia bootstrap to refresh routing table
                             let _ = self.swarm.behaviour_mut().kademlia.bootstrap();
-
-                            // Trigger relay reservation by listening on p2p-circuit address
-                            // This sends a reservation request to the relay peer
-                            if let libp2p::core::ConnectedPoint::Dialer { address, .. } = endpoint {
-                                // Build proper relay address: /ip4/.../tcp/.../p2p/<peer_id>/p2p-circuit
-                                // The address must include the peer's ID for the relay client to work
-                                let mut relay_addr = address.clone();
-
-                                // Check if address already contains /p2p/<peer_id>
-                                let has_p2p = address
-                                    .iter()
-                                    .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)));
-
-                                if !has_p2p {
-                                    relay_addr.push(libp2p::multiaddr::Protocol::P2p(*peer_id));
-                                }
-
-                                // Add p2p-circuit protocol
-                                relay_addr.push(libp2p::multiaddr::Protocol::P2pCircuit);
-
-                                tracing::info!(
-                                    %peer_id,
-                                    "Attempting to listen on relay address: {}",
-                                    relay_addr
-                                );
-
-                                match self.swarm.listen_on(relay_addr.clone()) {
-                                    Ok(id) => {
-                                        tracing::info!(
-                                            %peer_id,
-                                            listener_id = ?id,
-                                            "Successfully initiated relay listen, reservation will be requested"
-                                        );
-                                        events.push(P2PEvent::Status(format!(
-                                            "Relay reservation requested for {}",
-                                            &peer_id.to_base58()[..8]
-                                        )));
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            %peer_id,
-                                            "Failed to listen on relay address: {:?}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
+                            
+                            // Note: Relay reservation is now triggered in Identify handler
+                            // after confirming the peer supports relay protocol
                         }
                         SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
                             tracing::info!("Disconnected from {}: {:?}", peer_id, cause);
