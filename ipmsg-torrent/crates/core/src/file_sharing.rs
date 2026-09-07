@@ -116,6 +116,7 @@ impl FileSharingManager {
     }
 
     /// Process incoming file share announcements from other peers
+    /// Evicts oldest entries if capacity exceeds MAX_DISCOVERED_FILES
     pub async fn process_announce(&self, shares: &[FileShareInfo]) {
         let mut discovered = self.discovered_files.lock().unwrap();
         for share in shares {
@@ -126,6 +127,20 @@ impl FileSharingManager {
                 owner = %share.owner,
                 "Discovered shared file"
             );
+        }
+        
+        // Evict oldest entries if over capacity (prevent memory leak)
+        if discovered.len() > crate::MAX_DISCOVERED_FILES {
+            let evict_count = discovered.len() - crate::MAX_DISCOVERED_FILES;
+            // Sort by created_at and remove oldest
+            let mut entries: Vec<_> = discovered.iter()
+                .map(|(k, v)| (k.clone(), v.created_at))
+                .collect();
+            entries.sort_by_key(|(_, ts)| *ts);
+            for (hash, _) in entries.into_iter().take(evict_count) {
+                discovered.remove(&hash);
+            }
+            tracing::warn!(evicted = evict_count, "Discovered files capacity reached, evicted oldest");
         }
     }
 

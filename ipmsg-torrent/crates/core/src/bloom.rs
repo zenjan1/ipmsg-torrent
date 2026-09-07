@@ -219,8 +219,10 @@ impl DedupCache {
         }
 
         self.bloom.insert(id);
-        self.queue.push_back(id.to_string());
-        self.set.insert(id.to_string());
+        // Allocate String once and reuse for both queue and set
+        let id_string = id.to_string();
+        self.queue.push_back(id_string.clone());
+        self.set.insert(id_string);
     }
 
     pub fn len(&self) -> usize {

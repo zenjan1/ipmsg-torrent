@@ -41,6 +41,13 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+/// Maximum number of pending ACKs before rejecting new ones
+const MAX_PENDING_ACKS: usize = 8192;
+/// Maximum number of discovered files to track (evict oldest beyond this)
+const MAX_DISCOVERED_FILES: usize = 10_000;
+/// Maximum number of circuit breaker entries (evict stale entries beyond this)
+const MAX_CIRCUIT_BREAKERS: usize = 1024;
+
 /// Maximum tracked message IDs for dedup
 const MAX_DEDUP_CACHE: usize = 4096;
 /// Number of chunks to request in a single batch for P2P file downloads
@@ -51,6 +58,44 @@ const ACK_TIMEOUT_SECS: u64 = 30;
 const MAX_RETRIES: u32 = 3;
 /// Noise session re-key threshold (messages)
 const NOISE_REKEY_THRESHOLD: u64 = 100;
+
+/// Memory usage statistics for monitoring and diagnostics
+#[derive(Debug, Clone)]
+pub struct MemoryStats {
+    /// Number of pending ACKs awaiting confirmation
+    pub pending_acks: usize,
+    /// Total bytes stored in pending ACKs
+    pub pending_acks_bytes: usize,
+    /// Number of entries in the dedup cache
+    pub dedup_cache_entries: usize,
+    /// Number of joined channels
+    pub joined_channels: usize,
+    /// Number of blocked peers
+    pub blocked_peers: usize,
+    /// Number of favorite peers
+    pub favorite_peers: usize,
+    /// Number of peer score entries
+    pub peer_scores: usize,
+    /// Number of reputation entries
+    pub reputation_peers: usize,
+}
+
+impl std::fmt::Display for MemoryStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Memory: pending_acks={} ({}B), dedup={}, channels={}, blocked={}, favorites={}, scores={}, reputation={}",
+            self.pending_acks,
+            self.pending_acks_bytes,
+            self.dedup_cache_entries,
+            self.joined_channels,
+            self.blocked_peers,
+            self.favorite_peers,
+            self.peer_scores,
+            self.reputation_peers
+        )
+    }
+}
 
 /// Error types for the P2P engine
 #[derive(Debug, Error)]
@@ -329,8 +374,8 @@ pub struct P2PEngine {
     swarm: Option<transport::P2PSwarm>,
     /// Next sequence number for outgoing messages
     next_seq: u64,
-    /// Channels we've joined
-    joined_channels: Vec<ChannelId>,
+    /// Channels we've joined (HashSet for O(1) contains/insert/remove)
+    joined_channels: HashSet<ChannelId>,
     /// Bloom filter + LRU cache for message dedup
     dedup: DedupCache,
     /// Messages awaiting ACK
@@ -400,7 +445,7 @@ impl P2PEngine {
             command_tx: Some(command_tx),
             swarm: None,
             next_seq: 0,
-            joined_channels: Vec::new(),
+            joined_channels: HashSet::new(),
             dedup: DedupCache::new(MAX_DEDUP_CACHE),
             pending_acks: HashMap::new(),
             noise_sessions: NoiseSessionManager::new(NOISE_REKEY_THRESHOLD),
@@ -886,6 +931,7 @@ impl P2PEngine {
 
     /// Check pending ACKs and retry timed-out messages
     async fn check_pending_acks(&mut self) {
+        // Collect IDs to retry (avoid cloning all keys)
         let timed_out: Vec<String> = self
             .pending_acks
             .iter()
@@ -893,10 +939,11 @@ impl P2PEngine {
             .map(|(id, _)| id.clone())
             .collect();
 
-        for msg_id in timed_out {
-            if let Some(pending) = self.pending_acks.get_mut(&msg_id) {
+        for msg_id in &timed_out {
+            if let Some(pending) = self.pending_acks.get_mut(msg_id) {
                 pending.retries += 1;
                 tracing::warn!(message_id = %msg_id, retry = pending.retries, "Retrying message (ACK timeout)");
+                // Reuse the stored bytes directly — no extra clone
                 let bytes = pending.content.clone();
                 if let Some(s) = self.swarm.as_mut() {
                     let _ = s.publish_to_topic(crate::messaging::CHAT_TOPIC, bytes);
@@ -904,6 +951,7 @@ impl P2PEngine {
             }
         }
 
+        // Single retain pass removes expired entries
         self.pending_acks.retain(|id, p| {
             if p.retries >= MAX_RETRIES {
                 tracing::error!(message_id = %id, "Message delivery failed after max retries");
@@ -996,13 +1044,22 @@ impl P2PEngine {
             }
         }
 
-        // Track for ACK
+        // Track for ACK (with bounded capacity to prevent memory leak)
+        if self.pending_acks.len() >= MAX_PENDING_ACKS {
+            // Evict oldest entries to prevent unbounded growth
+            let evict_count = MAX_PENDING_ACKS / 4;
+            let keys_to_remove: Vec<String> = self.pending_acks.keys().take(evict_count).cloned().collect();
+            for key in keys_to_remove {
+                self.pending_acks.remove(&key);
+            }
+            tracing::warn!(evicted = evict_count, "Pending ACKs capacity reached, evicted oldest");
+        }
         self.pending_acks.insert(
             msg.id.clone(),
             PendingAck {
                 message_id: msg.id.clone(),
                 retries: 0,
-                content: bytes.clone(),
+                content: bytes,
             },
         );
 
@@ -1137,13 +1194,13 @@ impl P2PEngine {
         &self.data_dir
     }
 
-    pub fn joined_channels(&self) -> &[ChannelId] {
+    pub fn joined_channels(&self) -> &HashSet<ChannelId> {
         &self.joined_channels
     }
 
     pub fn add_channel(&mut self, channel: ChannelId) {
-        if !self.joined_channels.contains(&channel) {
-            self.joined_channels.push(channel.clone());
+        // HashSet::insert returns false if already present — O(1) vs O(n) for Vec
+        if self.joined_channels.insert(channel.clone()) {
             // Subscribe to channel topic
             let topic_name = crate::messaging::channel_topic(&format!("{:?}", channel));
             if let Some(swarm) = &mut self.swarm {
@@ -1153,10 +1210,11 @@ impl P2PEngine {
     }
 
     pub fn remove_channel(&mut self, channel: &ChannelId) {
-        self.joined_channels.retain(|c| c != channel);
-        let topic_name = crate::messaging::channel_topic(&format!("{:?}", channel));
-        if let Some(swarm) = &mut self.swarm {
-            let _ = swarm.unsubscribe_topic(&topic_name);
+        if self.joined_channels.remove(channel) {
+            let topic_name = crate::messaging::channel_topic(&format!("{:?}", channel));
+            if let Some(swarm) = &mut self.swarm {
+                let _ = swarm.unsubscribe_topic(&topic_name);
+            }
         }
     }
 
@@ -1205,6 +1263,20 @@ impl P2PEngine {
     /// Get list of favorite peers
     pub fn favorite_peers(&self) -> Vec<&str> {
         self.favorite_peers.iter().map(|s| s.as_str()).collect()
+    }
+
+    /// Get memory usage statistics for monitoring
+    pub fn memory_stats(&self) -> MemoryStats {
+        MemoryStats {
+            pending_acks: self.pending_acks.len(),
+            pending_acks_bytes: self.pending_acks.values().map(|p| p.content.len()).sum(),
+            dedup_cache_entries: self.dedup.len(),
+            joined_channels: self.joined_channels.len(),
+            blocked_peers: self.blocked_peers.len(),
+            favorite_peers: self.favorite_peers.len(),
+            peer_scores: self.peer_scores.peer_count(),
+            reputation_peers: self.reputation_manager.peer_count(),
+        }
     }
 
     /// Verify a peer's fingerprint (out-of-band verification)

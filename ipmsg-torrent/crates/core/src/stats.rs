@@ -40,6 +40,18 @@ pub struct NetworkStats {
     pub processing_count: AtomicU64,
     /// Peak message processing latency in microseconds
     pub peak_processing_latency_us: AtomicU64,
+    /// Total serialization operations
+    pub serialization_count: AtomicU64,
+    /// Total serialization time in microseconds
+    pub serialization_time_us: AtomicU64,
+    /// Total deserialization operations
+    pub deserialization_count: AtomicU64,
+    /// Total deserialization time in microseconds
+    pub deserialization_time_us: AtomicU64,
+    /// Total gossipsub messages propagated
+    pub gossipsub_propagated: AtomicU64,
+    /// Total gossipsub messages received
+    pub gossipsub_received: AtomicU64,
     /// Start time for uptime calculation
     start_time: Instant,
 }
@@ -65,6 +77,12 @@ impl NetworkStats {
             processing_latency_us: AtomicU64::new(0),
             processing_count: AtomicU64::new(0),
             peak_processing_latency_us: AtomicU64::new(0),
+            serialization_count: AtomicU64::new(0),
+            serialization_time_us: AtomicU64::new(0),
+            deserialization_count: AtomicU64::new(0),
+            deserialization_time_us: AtomicU64::new(0),
+            gossipsub_propagated: AtomicU64::new(0),
+            gossipsub_received: AtomicU64::new(0),
             start_time: Instant::now(),
         }
     }
@@ -143,6 +161,62 @@ impl NetworkStats {
         }
     }
 
+    /// Record serialization operation (for performance monitoring)
+    #[inline]
+    pub fn record_serialization(&self, time_us: u64) {
+        self.serialization_count.fetch_add(1, Ordering::Relaxed);
+        self.serialization_time_us.fetch_add(time_us, Ordering::Relaxed);
+    }
+
+    /// Record deserialization operation (for performance monitoring)
+    #[inline]
+    pub fn record_deserialization(&self, time_us: u64) {
+        self.deserialization_count.fetch_add(1, Ordering::Relaxed);
+        self.deserialization_time_us.fetch_add(time_us, Ordering::Relaxed);
+    }
+
+    /// Record gossipsub message propagation
+    #[inline]
+    pub fn record_gossipsub_propagated(&self) {
+        self.gossipsub_propagated.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record gossipsub message received
+    #[inline]
+    pub fn record_gossipsub_received(&self) {
+        self.gossipsub_received.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get average serialization time in microseconds
+    pub fn avg_serialization_time_us(&self) -> f64 {
+        let count = self.serialization_count.load(Ordering::Relaxed);
+        if count == 0 {
+            return 0.0;
+        }
+        let total = self.serialization_time_us.load(Ordering::Relaxed);
+        total as f64 / count as f64
+    }
+
+    /// Get average deserialization time in microseconds
+    pub fn avg_deserialization_time_us(&self) -> f64 {
+        let count = self.deserialization_count.load(Ordering::Relaxed);
+        if count == 0 {
+            return 0.0;
+        }
+        let total = self.deserialization_time_us.load(Ordering::Relaxed);
+        total as f64 / count as f64
+    }
+
+    /// Get gossipsub propagation rate (propagated / received)
+    pub fn gossipsub_propagation_rate(&self) -> f64 {
+        let received = self.gossipsub_received.load(Ordering::Relaxed);
+        if received == 0 {
+            return 0.0;
+        }
+        let propagated = self.gossipsub_propagated.load(Ordering::Relaxed);
+        propagated as f64 / received as f64
+    }
+
     /// Get uptime in seconds
     pub fn uptime_seconds(&self) -> u64 {
         self.start_time.elapsed().as_secs()
@@ -215,6 +289,9 @@ impl NetworkStats {
         let bandwidth = format!("{:.2}", self.bytes_per_second());
         let avg_lat = self.avg_processing_latency_us();
         let peak_lat = self.peak_processing_latency_us();
+        let avg_ser = self.avg_serialization_time_us();
+        let avg_deser = self.avg_deserialization_time_us();
+        let gossip_rate = self.gossipsub_propagation_rate();
         format!(
             "Uptime: {}\n\
              Peers: {} connected ({} total connections)\n\
@@ -222,7 +299,10 @@ impl NetworkStats {
              Traffic: {} sent, {} received ({} B/s avg)\n\
              Files: {} shared, {} downloaded\n\
              Rejected: {} duplicates, {} invalid, {} blocked\n\
-             Latency: avg {:.1} µs, peak {} µs",
+             Latency: avg {:.1} µs, peak {} µs\n\
+             Serialization: avg {:.1} µs\n\
+             Deserialization: avg {:.1} µs\n\
+             Gossipsub: {:.2}% propagation rate",
             self.uptime_string(),
             self.connected_peers(),
             self.total_connections.load(Ordering::Relaxed),
@@ -239,6 +319,9 @@ impl NetworkStats {
             self.blocked_messages.load(Ordering::Relaxed),
             avg_lat,
             peak_lat,
+            avg_ser,
+            avg_deser,
+            gossip_rate * 100.0,
         )
     }
 }

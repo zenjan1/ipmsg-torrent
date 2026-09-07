@@ -150,7 +150,8 @@ impl Codec for FileTransferCodec {
 pub struct FileDownload {
     pub file_ref: FileRef,
     pub received_chunks: HashMap<u32, Vec<u8>>,
-    pub missing_chunks: Vec<u32>,
+    /// Missing chunk indices (HashSet for O(1) removal vs O(n) for Vec)
+    pub missing_chunks: std::collections::HashSet<u32>,
     pub owner: String,
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// Bytes received so far (for progress tracking)
@@ -166,8 +167,8 @@ impl FileDownload {
         let missing_chunks = (0..file_ref.chunks).collect();
         let now = chrono::Utc::now();
         Self {
+            received_chunks: HashMap::with_capacity(file_ref.chunks as usize),
             file_ref,
-            received_chunks: HashMap::new(),
             missing_chunks,
             owner,
             started_at: now,
@@ -222,11 +223,10 @@ impl FileDownload {
 
     /// Get the next batch of missing chunk indices for parallel downloading
     pub fn next_missing_chunks(&self, batch_size: usize) -> Vec<u32> {
-        self.missing_chunks
-            .iter()
-            .take(batch_size)
-            .copied()
-            .collect()
+        let mut chunks: Vec<u32> = self.missing_chunks.iter().copied().collect();
+        chunks.sort_unstable();
+        chunks.truncate(batch_size);
+        chunks
     }
 
     /// Check if download is stalled (no activity for given duration)
@@ -279,7 +279,7 @@ impl FileDownload {
 
         let received_indices: std::collections::HashSet<u32> =
             received_chunks.keys().copied().collect();
-        let missing_chunks: Vec<u32> = (0..file_ref.chunks)
+        let missing_chunks: std::collections::HashSet<u32> = (0..file_ref.chunks)
             .filter(|i| !received_indices.contains(i))
             .collect();
 
@@ -380,7 +380,8 @@ impl FileTransferManager {
             }
 
             download.received_chunks.insert(chunk_index, data);
-            download.missing_chunks.retain(|&i| i != chunk_index);
+            // O(1) removal with HashSet vs O(n) with Vec
+            download.missing_chunks.remove(&chunk_index);
             download.bytes_received += chunk_size;
             download.last_activity = chrono::Utc::now();
 
@@ -585,15 +586,15 @@ mod tests {
         assert!(!download.is_complete());
 
         download.received_chunks.insert(0, vec![0; 250]);
-        download.missing_chunks.retain(|&i| i != 0);
+        download.missing_chunks.remove(&0);
         assert_eq!(download.progress(), 25.0);
 
         download.received_chunks.insert(1, vec![0; 250]);
-        download.missing_chunks.retain(|&i| i != 1);
+        download.missing_chunks.remove(&1);
         download.received_chunks.insert(2, vec![0; 250]);
-        download.missing_chunks.retain(|&i| i != 2);
+        download.missing_chunks.remove(&2);
         download.received_chunks.insert(3, vec![0; 250]);
-        download.missing_chunks.retain(|&i| i != 3);
+        download.missing_chunks.remove(&3);
 
         assert_eq!(download.progress(), 100.0);
         assert!(download.is_complete());
@@ -619,7 +620,7 @@ mod tests {
 
         // Receive chunk 0
         download.received_chunks.insert(0, vec![0; 250]);
-        download.missing_chunks.retain(|&i| i != 0);
+        download.missing_chunks.remove(&0);
 
         // Next batch should skip chunk 0
         let batch = download.next_missing_chunks(2);
@@ -627,9 +628,9 @@ mod tests {
 
         // Request more than available
         download.received_chunks.insert(1, vec![0; 250]);
-        download.missing_chunks.retain(|&i| i != 1);
+        download.missing_chunks.remove(&1);
         download.received_chunks.insert(2, vec![0; 250]);
-        download.missing_chunks.retain(|&i| i != 2);
+        download.missing_chunks.remove(&2);
 
         let batch = download.next_missing_chunks(10);
         assert_eq!(batch, vec![3]);
@@ -650,10 +651,10 @@ mod tests {
 
         // Receive some chunks
         download.received_chunks.insert(0, vec![0xAA; 256]);
-        download.missing_chunks.retain(|&i| i != 0);
+        download.missing_chunks.remove(&0);
         download.bytes_received += 256;
         download.received_chunks.insert(2, vec![0xCC; 256]);
-        download.missing_chunks.retain(|&i| i != 2);
+        download.missing_chunks.remove(&2);
         download.bytes_received += 256;
 
         let snapshot = download.to_snapshot();

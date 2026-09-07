@@ -157,6 +157,7 @@ impl CircuitBreakerEntry {
     }
 
     /// Reset the circuit breaker manually.
+    #[allow(dead_code)]
     fn reset(&mut self) {
         self.consecutive_failures = 0;
         self.opened_at = None;
@@ -642,6 +643,20 @@ impl P2PSwarm {
 
     /// Dial a peer with exponential backoff and circuit breaker protection
     pub fn dial_with_backoff(&mut self, peer_id: PeerId, addr: Multiaddr) -> Result<(), P2PError> {
+        // Evict stale circuit breaker entries if over capacity
+        if self.circuit_breakers.len() > crate::MAX_CIRCUIT_BREAKERS {
+            self.circuit_breakers.retain(|_, entry| !entry.is_open() || entry.opened_at.map_or(true, |t| t.elapsed() < Duration::from_secs(300)));
+            // If still over capacity after cleanup, remove oldest entries
+            if self.circuit_breakers.len() > crate::MAX_CIRCUIT_BREAKERS {
+                let excess = self.circuit_breakers.len() - crate::MAX_CIRCUIT_BREAKERS;
+                let keys: Vec<PeerId> = self.circuit_breakers.keys().take(excess).copied().collect();
+                for key in keys {
+                    self.circuit_breakers.remove(&key);
+                }
+                tracing::warn!(evicted = excess, "Circuit breaker capacity reached, evicted stale entries");
+            }
+        }
+
         // Check circuit breaker state
         let breaker = self.circuit_breakers.entry(peer_id).or_insert_with(CircuitBreakerEntry::new);
         
