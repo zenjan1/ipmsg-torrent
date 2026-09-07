@@ -924,28 +924,45 @@ impl futures::Stream for P2PSwarm {
                             // This sends a reservation request to the relay peer
                             if let libp2p::core::ConnectedPoint::Dialer { address, .. } = endpoint {
                                 // Build proper relay address: /ip4/.../tcp/.../p2p/<peer_id>/p2p-circuit
-                                // Check if address already contains /p2p/<peer_id> to avoid duplication
+                                // The address must include the peer's ID for the relay client to work
+                                let mut relay_addr = address.clone();
+                                
+                                // Check if address already contains /p2p/<peer_id>
                                 let has_p2p = address
                                     .iter()
                                     .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)));
-                                let relay_addr = if has_p2p {
-                                    address
-                                        .clone()
-                                        .with(libp2p::multiaddr::Protocol::P2pCircuit)
-                                } else {
-                                    address
-                                        .clone()
-                                        .with(libp2p::multiaddr::Protocol::P2p(*peer_id))
-                                        .with(libp2p::multiaddr::Protocol::P2pCircuit)
-                                };
+                                
+                                if !has_p2p {
+                                    relay_addr.push(libp2p::multiaddr::Protocol::P2p(*peer_id));
+                                }
+                                
+                                // Add p2p-circuit protocol
+                                relay_addr.push(libp2p::multiaddr::Protocol::P2pCircuit);
+                                
                                 tracing::info!(
+                                    %peer_id,
                                     "Attempting to listen on relay address: {}",
                                     relay_addr
                                 );
-                                match self.swarm.listen_on(relay_addr) {
-                                    Ok(_) => tracing::info!("Successfully initiated relay listen"),
+                                
+                                match self.swarm.listen_on(relay_addr.clone()) {
+                                    Ok(id) => {
+                                        tracing::info!(
+                                            %peer_id,
+                                            listener_id = ?id,
+                                            "Successfully initiated relay listen, reservation will be requested"
+                                        );
+                                        events.push(P2PEvent::Status(format!(
+                                            "Relay reservation requested for {}",
+                                            &peer_id.to_base58()[..8]
+                                        )));
+                                    }
                                     Err(e) => {
-                                        tracing::warn!("Failed to listen on relay address: {:?}", e)
+                                        tracing::warn!(
+                                            %peer_id,
+                                            "Failed to listen on relay address: {:?}",
+                                            e
+                                        );
                                     }
                                 }
                             }
