@@ -216,11 +216,12 @@ mod inner {
         }
 
         pub fn cleanup_stale_peers(&self, max_age_secs: i64) -> Result<usize> {
+            let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(max_age_secs)).to_rfc3339();
             let conn = self.conn.lock().unwrap();
             let deleted = conn
                 .execute(
-                    "DELETE FROM peers WHERE last_seen < datetime('now', ?1 || ' seconds')",
-                    params![format!("-{}", max_age_secs)],
+                    "DELETE FROM peers WHERE last_seen < ?1",
+                    params![cutoff],
                 )
                 .map_err(|e| StoreError(e.to_string()))?;
             Ok(deleted)
@@ -525,6 +526,8 @@ mod tests {
     fn test_save_and_get_message() {
         let dir = TempDir::new().unwrap();
         let store = make_store(&dir);
+        // Create peer first to satisfy foreign key constraint
+        store.upsert_peer(&make_peer("peer_a", "Alice")).unwrap();
         let msg = make_text_msg("msg1", "peer_a", Some("peer_b"), "hello");
         store.save_message(&msg).unwrap();
         let msgs = store.get_messages("peer_a", 10);
@@ -536,6 +539,8 @@ mod tests {
     fn test_get_messages_by_to_peer() {
         let dir = TempDir::new().unwrap();
         let store = make_store(&dir);
+        // Create peer first to satisfy foreign key constraint
+        store.upsert_peer(&make_peer("peer_a", "Alice")).unwrap();
         let msg = make_text_msg("msg2", "peer_a", Some("peer_b"), "hi");
         store.save_message(&msg).unwrap();
         let msgs = store.get_messages("peer_b", 10);
@@ -546,6 +551,8 @@ mod tests {
     fn test_get_messages_limit() {
         let dir = TempDir::new().unwrap();
         let store = make_store(&dir);
+        // Create peer first to satisfy foreign key constraint
+        store.upsert_peer(&make_peer("peer", "Peer")).unwrap();
         for i in 0..5 {
             let msg = make_text_msg(&format!("m{}", i), "peer", Some("other"), &format!("msg {}", i));
             store.save_message(&msg).unwrap();
@@ -623,6 +630,8 @@ mod tests {
     fn test_search_messages() {
         let dir = TempDir::new().unwrap();
         let store = make_store(&dir);
+        // Create peer first to satisfy foreign key constraint
+        store.upsert_peer(&make_peer("p1", "P1")).unwrap();
         let msg1 = make_text_msg("s1", "p1", None, "hello world");
         let msg2 = make_text_msg("s2", "p1", None, "goodbye world");
         let msg3 = make_text_msg("s3", "p1", None, "hello rust");
@@ -637,6 +646,8 @@ mod tests {
     fn test_search_messages_limit() {
         let dir = TempDir::new().unwrap();
         let store = make_store(&dir);
+        // Create peer first to satisfy foreign key constraint
+        store.upsert_peer(&make_peer("p", "P")).unwrap();
         for i in 0..5 {
             let msg = make_text_msg(&format!("sl{}", i), "p", None, &format!("hello {}", i));
             store.save_message(&msg).unwrap();

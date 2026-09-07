@@ -318,7 +318,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
         let content = b"0123456789abcdef";
-        let path = make_test_file(&dir, "chunk.dat", content);
+        // Create file in manager's files_dir, not in dir.path()
+        let files_dir = dir.path().join("shared");
+        let path = files_dir.join("chunk.dat");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(content).unwrap();
         let info = mgr.share_file(&path, vec![], None, "peer".into()).await.unwrap();
         // chunk_size is 256KB, so one chunk for 16 bytes
         let chunk = mgr.read_chunk(&info.file_ref.hash, 0).await.unwrap();
@@ -459,10 +463,22 @@ mod tests {
     async fn test_share_multiple_files_same_name() {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
-        let p1 = make_test_file(&dir, "same.txt", b"content1");
-        let p2 = make_test_file(&dir, "same.txt", b"content2");
+        
+        // Create two files with the same name but in different directories
+        let dir1 = dir.path().join("dir1");
+        let dir2 = dir.path().join("dir2");
+        std::fs::create_dir_all(&dir1).unwrap();
+        std::fs::create_dir_all(&dir2).unwrap();
+        
+        let p1 = dir1.join("same.txt");
+        let p2 = dir2.join("same.txt");
+        
+        std::fs::write(&p1, b"content1").unwrap();
+        std::fs::write(&p2, b"content2").unwrap();
+        
         let i1 = mgr.share_file(&p1, vec![], None, "peer".into()).await.unwrap();
         let i2 = mgr.share_file(&p2, vec![], None, "peer".into()).await.unwrap();
+        
         // Different content -> different hashes
         assert_ne!(i1.file_ref.hash, i2.file_ref.hash);
         assert_eq!(mgr.shared_count().await, 2);
