@@ -470,3 +470,236 @@ mod inner {
 }
 
 pub use inner::MessageStore;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ipmsg_protocol::message::{ChatMessage, MessageType};
+    use tempfile::TempDir;
+
+    fn make_store(dir: &TempDir) -> MessageStore {
+        let db_path = dir.path().join("test.db");
+        MessageStore::new(&db_path).unwrap()
+    }
+
+    fn make_peer(id: &str, name: &str) -> PeerInfo {
+        PeerInfo {
+            peer_id: id.to_string(),
+            username: name.to_string(),
+            public_key: vec![1, 2, 3],
+            platforms: "[]".to_string(),
+            last_seen: chrono::Utc::now(),
+            first_seen: chrono::Utc::now(),
+        }
+    }
+
+    fn make_text_msg(id: &str, from: &str, to: Option<&str>, text: &str) -> ChatMessage {
+        ChatMessage {
+            id: id.to_string(),
+            from: from.to_string(),
+            to: to.map(|s| s.to_string()),
+            channel: None,
+            seq: 0,
+            timestamp: chrono::Utc::now(),
+            ttl: 0,
+            kind: MessageType::Text { content: text.to_string() },
+            encrypted_payload: None,
+            signature: vec![],
+            reply_to: None,
+        }
+    }
+
+    #[test]
+    fn test_create_store() {
+        let dir = TempDir::new().unwrap();
+        let _store = make_store(&dir);
+    }
+
+    #[test]
+    fn test_create_store_invalid_path() {
+        let result = MessageStore::new(std::path::Path::new("/nonexistent/dir/test.db"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_and_get_message() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let msg = make_text_msg("msg1", "peer_a", Some("peer_b"), "hello");
+        store.save_message(&msg).unwrap();
+        let msgs = store.get_messages("peer_a", 10);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].id, "msg1");
+    }
+
+    #[test]
+    fn test_get_messages_by_to_peer() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let msg = make_text_msg("msg2", "peer_a", Some("peer_b"), "hi");
+        store.save_message(&msg).unwrap();
+        let msgs = store.get_messages("peer_b", 10);
+        assert_eq!(msgs.len(), 1);
+    }
+
+    #[test]
+    fn test_get_messages_limit() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        for i in 0..5 {
+            let msg = make_text_msg(&format!("m{}", i), "peer", Some("other"), &format!("msg {}", i));
+            store.save_message(&msg).unwrap();
+        }
+        let msgs = store.get_messages("peer", 3);
+        assert_eq!(msgs.len(), 3);
+    }
+
+    #[test]
+    fn test_get_messages_empty() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let msgs = store.get_messages("nonexistent", 10);
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn test_upsert_and_get_peer() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let peer = make_peer("p1", "alice");
+        store.upsert_peer(&peer).unwrap();
+        let peers = store.get_all_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_id, "p1");
+        assert_eq!(peers[0].username, "alice");
+    }
+
+    #[test]
+    fn test_upsert_peer_updates_existing() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let peer1 = make_peer("p1", "alice");
+        store.upsert_peer(&peer1).unwrap();
+        let peer2 = make_peer("p1", "alice_updated");
+        store.upsert_peer(&peer2).unwrap();
+        let peers = store.get_all_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].username, "alice_updated");
+    }
+
+    #[test]
+    fn test_get_all_peers_sorted_by_last_seen() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let mut p1 = make_peer("p1", "old");
+        p1.last_seen = chrono::Utc::now() - chrono::Duration::hours(2);
+        let mut p2 = make_peer("p2", "new");
+        p2.last_seen = chrono::Utc::now();
+        store.upsert_peer(&p1).unwrap();
+        store.upsert_peer(&p2).unwrap();
+        let peers = store.get_all_peers();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].peer_id, "p2"); // most recent first
+    }
+
+    #[test]
+    fn test_cleanup_stale_peers() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let mut old = make_peer("old_peer", "old");
+        old.last_seen = chrono::Utc::now() - chrono::Duration::seconds(1000);
+        store.upsert_peer(&old).unwrap();
+        let mut fresh = make_peer("fresh_peer", "fresh");
+        fresh.last_seen = chrono::Utc::now();
+        store.upsert_peer(&fresh).unwrap();
+        let deleted = store.cleanup_stale_peers(500).unwrap();
+        assert_eq!(deleted, 1);
+        let peers = store.get_all_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_id, "fresh_peer");
+    }
+
+    #[test]
+    fn test_search_messages() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let msg1 = make_text_msg("s1", "p1", None, "hello world");
+        let msg2 = make_text_msg("s2", "p1", None, "goodbye world");
+        let msg3 = make_text_msg("s3", "p1", None, "hello rust");
+        store.save_message(&msg1).unwrap();
+        store.save_message(&msg2).unwrap();
+        store.save_message(&msg3).unwrap();
+        let results = store.search_messages("hello", 10);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_search_messages_limit() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        for i in 0..5 {
+            let msg = make_text_msg(&format!("sl{}", i), "p", None, &format!("hello {}", i));
+            store.save_message(&msg).unwrap();
+        }
+        let results = store.search_messages("hello", 2);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_search_messages_empty() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let results = store.search_messages("nonexistent", 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_save_and_get_peer_public_key() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let peer = make_peer("pk_peer", "bob");
+        store.upsert_peer(&peer).unwrap();
+        let key = store.get_peer_public_key("pk_peer");
+        assert_eq!(key, Some(vec![1, 2, 3]));
+        assert!(store.get_peer_public_key("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_save_peer_addresses() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let addrs = vec!["/ip4/1.2.3.4/tcp/4001".to_string(), "/ip4/5.6.7.8/udp/4001/quic-v1".to_string()];
+        store.save_peer_addresses("peer1", &addrs).unwrap();
+        let known = store.get_known_addresses(7);
+        assert!(!known.is_empty());
+        let (pid, addr_list) = &known[0];
+        assert_eq!(pid, "peer1");
+        assert_eq!(addr_list.len(), 2);
+    }
+
+    #[test]
+    fn test_save_peer_addresses_upsert() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let addr = vec!["/ip4/1.2.3.4/tcp/4001".to_string()];
+        store.save_peer_addresses("peer1", &addr).unwrap();
+        store.save_peer_addresses("peer1", &addr).unwrap(); // upsert
+        let known = store.get_known_addresses(7);
+        let (_, addr_list) = &known[0];
+        assert_eq!(addr_list.len(), 1); // no duplicate
+    }
+
+    #[test]
+    fn test_get_known_addresses_empty() {
+        let dir = TempDir::new().unwrap();
+        let store = make_store(&dir);
+        let known = store.get_known_addresses(7);
+        assert!(known.is_empty());
+    }
+
+    #[test]
+    fn test_store_error_display() {
+        let err = StoreError("something went wrong".to_string());
+        assert_eq!(format!("{}", err), "store error: something went wrong");
+    }
+}

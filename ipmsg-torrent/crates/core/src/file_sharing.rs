@@ -211,3 +211,260 @@ impl FileSharingManager {
         discovered.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn make_test_file(dir: &TempDir, name: &str, content: &[u8]) -> PathBuf {
+        let path = dir.path().join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(content).unwrap();
+        path
+    }
+
+    async fn make_manager(dir: &TempDir) -> FileSharingManager {
+        let files_dir = dir.path().join("shared");
+        std::fs::create_dir_all(&files_dir).unwrap();
+        FileSharingManager::new(files_dir)
+    }
+
+    #[tokio::test]
+    async fn test_new_manager_empty() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        assert_eq!(mgr.shared_count().await, 0);
+        assert_eq!(mgr.discovered_count().await, 0);
+        assert!(mgr.list_shared_files().await.is_empty());
+        assert!(mgr.list_discovered_files().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_share_file_basic() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let path = make_test_file(&dir, "hello.txt", b"hello world");
+        let info = mgr.share_file(&path, vec!["test".into()], None, "peer1".into()).await.unwrap();
+        assert_eq!(info.file_ref.name, "hello.txt");
+        assert_eq!(info.file_ref.size, 11);
+        assert_eq!(info.owner, "peer1");
+        assert_eq!(info.tags, vec!["test"]);
+        assert_eq!(mgr.shared_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_share_file_with_description() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let path = make_test_file(&dir, "doc.pdf", b"pdf content");
+        let info = mgr.share_file(&path, vec![], Some("A document".into()), "peer2".into()).await.unwrap();
+        assert_eq!(info.description, Some("A document".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_share_file_not_found() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let result = mgr.share_file(Path::new("/nonexistent/file.txt"), vec![], None, "peer".into()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_unshare_file() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let path = make_test_file(&dir, "a.txt", b"aaa");
+        let info = mgr.share_file(&path, vec![], None, "peer".into()).await.unwrap();
+        assert_eq!(mgr.shared_count().await, 1);
+        assert!(mgr.unshare_file(&info.file_ref.hash).await);
+        assert_eq!(mgr.shared_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_unshare_nonexistent() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        assert!(!mgr.unshare_file("nonexistent_hash").await);
+    }
+
+    #[tokio::test]
+    async fn test_get_shared_file() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let path = make_test_file(&dir, "b.txt", b"bbb");
+        let info = mgr.share_file(&path, vec![], None, "peer".into()).await.unwrap();
+        let found = mgr.get_shared_file(&info.file_ref.hash).await;
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().file_ref.name, "b.txt");
+        assert!(mgr.get_shared_file("bad_hash").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_shared_files() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let p1 = make_test_file(&dir, "f1.txt", b"1");
+        let p2 = make_test_file(&dir, "f2.txt", b"2");
+        mgr.share_file(&p1, vec![], None, "peer".into()).await.unwrap();
+        mgr.share_file(&p2, vec![], None, "peer".into()).await.unwrap();
+        let list = mgr.list_shared_files().await;
+        assert_eq!(list.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_read_chunk() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let content = b"0123456789abcdef";
+        let path = make_test_file(&dir, "chunk.dat", content);
+        let info = mgr.share_file(&path, vec![], None, "peer".into()).await.unwrap();
+        // chunk_size is 256KB, so one chunk for 16 bytes
+        let chunk = mgr.read_chunk(&info.file_ref.hash, 0).await.unwrap();
+        assert_eq!(chunk, content);
+    }
+
+    #[tokio::test]
+    async fn test_read_chunk_not_found() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let result = mgr.read_chunk("bad_hash", 0).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_process_announce() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let data = b"announce data";
+        let file_ref = FileRef::new("ann.txt".into(), data.len() as u64, "text/plain".into(), data);
+        let info = FileShareInfo {
+            file_ref: file_ref.clone(),
+            owner: "remote_peer".into(),
+            tags: vec!["tag1".into()],
+            description: None,
+            created_at: Utc::now(),
+        };
+        mgr.process_announce(&[info.clone()]).await;
+        assert_eq!(mgr.discovered_count().await, 1);
+        let discovered = mgr.list_discovered_files().await;
+        assert_eq!(discovered[0].file_ref.hash, file_ref.hash);
+    }
+
+    #[tokio::test]
+    async fn test_search_by_filename() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let p = make_test_file(&dir, "rust_book.pdf", b"content");
+        mgr.share_file(&p, vec![], None, "peer".into()).await.unwrap();
+        let results = mgr.search("rust", &[]).await;
+        assert_eq!(results.len(), 1);
+        let empty = mgr.search("python", &[]).await;
+        assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_by_description() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let p = make_test_file(&dir, "x.bin", b"data");
+        mgr.share_file(&p, vec![], Some("important binary file".into()), "peer".into()).await.unwrap();
+        let results = mgr.search("important", &[]).await;
+        assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_by_tags() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let p = make_test_file(&dir, "song.mp3", b"music");
+        mgr.share_file(&p, vec!["music".into(), "rock".into()], None, "peer".into()).await.unwrap();
+        let results = mgr.search("", &["music".into()]).await;
+        assert_eq!(results.len(), 1);
+        let results2 = mgr.search("", &["jazz".into()]).await;
+        assert!(results2.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_empty_query_matches_all() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let p1 = make_test_file(&dir, "a.txt", b"a");
+        let p2 = make_test_file(&dir, "b.txt", b"b");
+        mgr.share_file(&p1, vec![], None, "peer".into()).await.unwrap();
+        mgr.share_file(&p2, vec![], None, "peer".into()).await.unwrap();
+        let results = mgr.search("", &[]).await;
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_search_case_insensitive() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let p = make_test_file(&dir, "README.md", b"readme");
+        mgr.share_file(&p, vec![], None, "peer".into()).await.unwrap();
+        let results = mgr.search("readme", &[]).await;
+        assert_eq!(results.len(), 1);
+        let results2 = mgr.search("README", &[]).await;
+        assert_eq!(results2.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_includes_discovered() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let data = b"discovered content";
+        let file_ref = FileRef::new("remote_file.txt".into(), data.len() as u64, "text/plain".into(), data);
+        let info = FileShareInfo {
+            file_ref,
+            owner: "remote".into(),
+            tags: vec![],
+            description: None,
+            created_at: Utc::now(),
+        };
+        mgr.process_announce(&[info]).await;
+        let results = mgr.search("remote_file", &[]).await;
+        assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_files_dir() {
+        let dir = TempDir::new().unwrap();
+        let files_dir = dir.path().join("my_files");
+        let mgr = FileSharingManager::new(files_dir.clone());
+        assert_eq!(mgr.files_dir(), files_dir.as_path());
+    }
+
+    #[tokio::test]
+    async fn test_set_event_sender() {
+        let dir = TempDir::new().unwrap();
+        let mut mgr = make_manager(&dir).await;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        mgr.set_event_sender(tx);
+        // Just verify it doesn't panic
+    }
+
+    #[tokio::test]
+    async fn test_share_empty_file() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let path = make_test_file(&dir, "empty.dat", b"");
+        let info = mgr.share_file(&path, vec![], None, "peer".into()).await.unwrap();
+        assert_eq!(info.file_ref.size, 0);
+        assert_eq!(info.file_ref.chunks, 0);
+    }
+
+    #[tokio::test]
+    async fn test_share_multiple_files_same_name() {
+        let dir = TempDir::new().unwrap();
+        let mgr = make_manager(&dir).await;
+        let p1 = make_test_file(&dir, "same.txt", b"content1");
+        let p2 = make_test_file(&dir, "same.txt", b"content2");
+        let i1 = mgr.share_file(&p1, vec![], None, "peer".into()).await.unwrap();
+        let i2 = mgr.share_file(&p2, vec![], None, "peer".into()).await.unwrap();
+        // Different content -> different hashes
+        assert_ne!(i1.file_ref.hash, i2.file_ref.hash);
+        assert_eq!(mgr.shared_count().await, 2);
+    }
+}
