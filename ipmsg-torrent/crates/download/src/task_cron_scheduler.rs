@@ -747,11 +747,8 @@ mod tests {
 
     #[test]
     fn test_task_cron_schedule_invalid_too_few_fields() {
-        let result = TaskCronSchedule::new(
-            "test".to_string(),
-            "Test".to_string(),
-            "0 2 *".to_string(),
-        );
+        let result =
+            TaskCronSchedule::new("test".to_string(), "Test".to_string(), "0 2 *".to_string());
         assert!(result.is_err());
     }
 
@@ -767,11 +764,7 @@ mod tests {
 
     #[test]
     fn test_task_cron_schedule_invalid_empty() {
-        let result = TaskCronSchedule::new(
-            "test".to_string(),
-            "Test".to_string(),
-            "".to_string(),
-        );
+        let result = TaskCronSchedule::new("test".to_string(), "Test".to_string(), "".to_string());
         assert!(result.is_err());
     }
 
@@ -1074,12 +1067,9 @@ mod tests {
             },
             schedules: HashMap::new(),
         };
-        let schedule = TaskCronSchedule::new(
-            "s1".to_string(),
-            "S1".to_string(),
-            "0 2 * * *".to_string(),
-        )
-        .unwrap();
+        let schedule =
+            TaskCronSchedule::new("s1".to_string(), "S1".to_string(), "0 2 * * *".to_string())
+                .unwrap();
         data.schedules.insert("task1".to_string(), schedule);
 
         let json = serde_json::to_string(&data).unwrap();
@@ -1429,7 +1419,13 @@ mod tests {
         .unwrap();
         scheduler.add_schedule("task1", schedule).unwrap();
         scheduler.update_all_next_triggers().unwrap();
-        assert!(scheduler.get_schedule("task1").unwrap().next_trigger.is_some());
+        assert!(
+            scheduler
+                .get_schedule("task1")
+                .unwrap()
+                .next_trigger
+                .is_some()
+        );
     }
 
     #[test]
@@ -2068,7 +2064,8 @@ mod tests {
 
     #[test]
     fn test_data_extra_fields_ignored() {
-        let json = r#"{"config":{"enabled":true,"check_interval_secs":60},"schedules":{},"extra":42}"#;
+        let json =
+            r#"{"config":{"enabled":true,"check_interval_secs":60},"schedules":{},"extra":42}"#;
         let data: TaskCronSchedulerData = serde_json::from_str(json).unwrap();
         assert!(data.config.enabled);
         assert!(data.schedules.is_empty());
