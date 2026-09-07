@@ -56,6 +56,7 @@ Key features:
 - **Resume support** — Bitmap-based progress persistence (`.progress` files)
 - **Adaptive concurrency** — RTT-based connection tuning (BBR-inspired)
 - **Connection pool** — TCP reuse, DNS caching, per-domain limits
+- **Priority Queue** — Intelligent task scheduling with 4-level priority (Urgent/High/Normal/Low), dynamic adjustment based on speed/age/progress, priority inheritance for parent-child tasks, and bandwidth allocation weights
 - **Dashboard** — Real-time speed, ETA, health monitoring
 - **Scheduling** — Time windows, bandwidth budgets, auto-pause
 - **Analytics** — Speed history, cost tracking, source quality scoring

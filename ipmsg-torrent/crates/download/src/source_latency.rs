@@ -548,30 +548,257 @@ pub type SourceLatencyMonitorRef = Arc<Mutex<SourceLatencyMonitor>>;
 mod tests {
     use super::*;
 
+    // ========== SourceLatencyConfig serde ==========
+
     #[test]
-    fn test_config_default() {
+    fn config_serde_roundtrip_default() {
+        let config = SourceLatencyConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: SourceLatencyConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.enabled, config.enabled);
+        assert_eq!(loaded.max_samples_per_domain, config.max_samples_per_domain);
+        assert!((loaded.ema_alpha - config.ema_alpha).abs() < 1e-10);
+    }
+
+    #[test]
+    fn config_serde_roundtrip_custom() {
+        let config = SourceLatencyConfig {
+            enabled: false,
+            max_samples_per_domain: 100,
+            ema_alpha: 0.7,
+            excellent_threshold_ms: 25.0,
+            good_threshold_ms: 75.0,
+            fair_threshold_ms: 250.0,
+            poor_threshold_ms: 500.0,
+            hourly_decay_factor: 0.9,
+            ignored_domains: vec!["localhost".into(), "127.0.0.1".into()],
+            enable_percentiles: false,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: SourceLatencyConfig = serde_json::from_str(&json).unwrap();
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.max_samples_per_domain, 100);
+        assert_eq!(loaded.ignored_domains.len(), 2);
+        assert!(!loaded.enable_percentiles);
+    }
+
+    #[test]
+    fn config_serde_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"max_samples_per_domain":50,"ema_alpha":0.3,"excellent_threshold_ms":50.0,"good_threshold_ms":150.0,"fair_threshold_ms":500.0,"poor_threshold_ms":1000.0,"hourly_decay_factor":0.95,"ignored_domains":[],"enable_percentiles":true,"extra_field":"ignored"}"#;
+        let loaded: SourceLatencyConfig = serde_json::from_str(json).unwrap();
+        assert!(loaded.enabled);
+    }
+
+    #[test]
+    fn config_serde_pretty_json() {
+        let config = SourceLatencyConfig::default();
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        let loaded: SourceLatencyConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(loaded.enabled, config.enabled);
+    }
+
+    #[test]
+    fn config_default_values() {
         let config = SourceLatencyConfig::default();
         assert!(config.enabled);
         assert_eq!(config.max_samples_per_domain, 50);
-        assert_eq!(config.excellent_threshold_ms, 50.0);
+        assert!((config.ema_alpha - 0.3).abs() < 1e-10);
+        assert!((config.excellent_threshold_ms - 50.0).abs() < 1e-10);
+        assert!((config.good_threshold_ms - 150.0).abs() < 1e-10);
+        assert!((config.fair_threshold_ms - 500.0).abs() < 1e-10);
+        assert!((config.poor_threshold_ms - 1000.0).abs() < 1e-10);
+        assert!((config.hourly_decay_factor - 0.95).abs() < 1e-10);
+        assert_eq!(config.ignored_domains, vec!["localhost"]);
+        assert!(config.enable_percentiles);
+    }
+
+    // ========== SourceLatencyConfig traits ==========
+
+    #[test]
+    fn config_clone() {
+        let config = SourceLatencyConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.enabled, config.enabled);
+        assert_eq!(cloned.max_samples_per_domain, config.max_samples_per_domain);
     }
 
     #[test]
-    fn test_latency_health_display() {
+    fn config_clone_independence() {
+        let mut config = SourceLatencyConfig::default();
+        let cloned = config.clone();
+        config.enabled = false;
+        assert!(cloned.enabled);
+    }
+
+    #[test]
+    fn config_debug() {
+        let config = SourceLatencyConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("SourceLatencyConfig"));
+        assert!(debug.contains("enabled"));
+    }
+
+    // ========== LatencyHealth ==========
+
+    #[test]
+    fn health_display_all_variants() {
         assert_eq!(format!("{}", LatencyHealth::Excellent), "Excellent");
-        assert_eq!(LatencyHealth::Good.emoji(), "🟡");
+        assert_eq!(format!("{}", LatencyHealth::Good), "Good");
+        assert_eq!(format!("{}", LatencyHealth::Fair), "Fair");
+        assert_eq!(format!("{}", LatencyHealth::Poor), "Poor");
+        assert_eq!(format!("{}", LatencyHealth::Unreachable), "Unreachable");
     }
 
     #[test]
-    fn test_domain_stats_new() {
+    fn health_emoji_all_variants() {
+        assert_eq!(LatencyHealth::Excellent.emoji(), "🟢");
+        assert_eq!(LatencyHealth::Good.emoji(), "🟡");
+        assert_eq!(LatencyHealth::Fair.emoji(), "🟠");
+        assert_eq!(LatencyHealth::Poor.emoji(), "🔴");
+        assert_eq!(LatencyHealth::Unreachable.emoji(), "⚫");
+    }
+
+    #[test]
+    fn health_serde_roundtrip_all_variants() {
+        for health in [
+            LatencyHealth::Excellent,
+            LatencyHealth::Good,
+            LatencyHealth::Fair,
+            LatencyHealth::Poor,
+            LatencyHealth::Unreachable,
+        ] {
+            let json = serde_json::to_string(&health).unwrap();
+            let loaded: LatencyHealth = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded, health);
+        }
+    }
+
+    #[test]
+    fn health_serde_snake_case_values() {
+        let json = serde_json::to_string(&LatencyHealth::Excellent).unwrap();
+        assert_eq!(json, "\"excellent\"");
+        let json = serde_json::to_string(&LatencyHealth::Unreachable).unwrap();
+        assert_eq!(json, "\"unreachable\"");
+    }
+
+    #[test]
+    fn health_traits_clone_copy_debug_eq() {
+        let h = LatencyHealth::Excellent;
+        let h2 = h; // Copy
+        let h3 = h.clone();
+        assert_eq!(h, h2);
+        assert_eq!(h, h3);
+        let _ = format!("{:?}", h);
+    }
+
+    // ========== LatencySample ==========
+
+    #[test]
+    fn sample_serde_roundtrip_success() {
+        let sample = LatencySample {
+            timestamp: Utc::now(),
+            latency_ms: 123.45,
+            success: true,
+            error: None,
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let loaded: LatencySample = serde_json::from_str(&json).unwrap();
+        assert!((loaded.latency_ms - 123.45).abs() < 1e-10);
+        assert!(loaded.success);
+        assert!(loaded.error.is_none());
+    }
+
+    #[test]
+    fn sample_serde_roundtrip_failure() {
+        let sample = LatencySample {
+            timestamp: Utc::now(),
+            latency_ms: 0.0,
+            success: false,
+            error: Some("Connection refused".to_string()),
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let loaded: LatencySample = serde_json::from_str(&json).unwrap();
+        assert!(!loaded.success);
+        assert_eq!(loaded.error.as_deref(), Some("Connection refused"));
+    }
+
+    #[test]
+    fn sample_serde_unicode() {
+        let sample = LatencySample {
+            timestamp: Utc::now(),
+            latency_ms: 100.0,
+            success: false,
+            error: Some("连接超时".to_string()),
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let loaded: LatencySample = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.error.as_deref(), Some("连接超时"));
+    }
+
+    #[test]
+    fn sample_clone_debug() {
+        let sample = LatencySample {
+            timestamp: Utc::now(),
+            latency_ms: 50.0,
+            success: true,
+            error: None,
+        };
+        let cloned = sample.clone();
+        assert!((cloned.latency_ms - 50.0).abs() < 1e-10);
+        let _ = format!("{:?}", sample);
+    }
+
+    // ========== DomainLatencyStats ==========
+
+    #[test]
+    fn stats_new_fields() {
         let stats = DomainLatencyStats::new("example.com".to_string());
         assert_eq!(stats.domain, "example.com");
         assert_eq!(stats.total_samples, 0);
+        assert_eq!(stats.successful_connections, 0);
+        assert_eq!(stats.failed_connections, 0);
+        assert_eq!(stats.consecutive_failures, 0);
         assert_eq!(stats.ema_latency_ms, 0.0);
+        assert_eq!(stats.min_latency_ms, f64::MAX);
+        assert_eq!(stats.max_latency_ms, 0.0);
+        assert!(stats.last_success_at.is_none());
+        assert!(stats.last_sample_at.is_none());
+        assert_eq!(stats.health, LatencyHealth::Excellent);
+        assert!(stats.recent_samples.is_empty());
+        assert!(stats.p50_ms.is_none());
+        assert!(stats.p90_ms.is_none());
+        assert!(stats.p99_ms.is_none());
     }
 
     #[test]
-    fn test_add_sample_success() {
+    fn stats_serde_roundtrip() {
+        let mut stats = DomainLatencyStats::new("test.com".to_string());
+        let config = SourceLatencyConfig::default();
+        stats.add_sample(
+            LatencySample {
+                timestamp: Utc::now(),
+                latency_ms: 100.0,
+                success: true,
+                error: None,
+            },
+            &config,
+        );
+        let json = serde_json::to_string(&stats).unwrap();
+        let loaded: DomainLatencyStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.domain, "test.com");
+        assert_eq!(loaded.total_samples, 1);
+    }
+
+    #[test]
+    fn stats_clone_debug() {
+        let stats = DomainLatencyStats::new("example.com".to_string());
+        let cloned = stats.clone();
+        assert_eq!(cloned.domain, stats.domain);
+        let _ = format!("{:?}", stats);
+    }
+
+    #[test]
+    fn stats_add_sample_success_updates_all() {
         let mut stats = DomainLatencyStats::new("example.com".to_string());
         let config = SourceLatencyConfig::default();
 
@@ -589,10 +816,13 @@ mod tests {
         assert_eq!(stats.ema_latency_ms, 100.0);
         assert_eq!(stats.min_latency_ms, 100.0);
         assert_eq!(stats.max_latency_ms, 100.0);
+        assert!(stats.last_success_at.is_some());
+        assert!(stats.last_sample_at.is_some());
+        assert_eq!(stats.consecutive_failures, 0);
     }
 
     #[test]
-    fn test_add_sample_failure() {
+    fn stats_add_sample_failure() {
         let mut stats = DomainLatencyStats::new("example.com".to_string());
         let config = SourceLatencyConfig::default();
 
@@ -608,17 +838,17 @@ mod tests {
         assert_eq!(stats.successful_connections, 0);
         assert_eq!(stats.failed_connections, 1);
         assert_eq!(stats.consecutive_failures, 1);
+        assert!(stats.last_success_at.is_none());
     }
 
     #[test]
-    fn test_ema_calculation() {
+    fn stats_ema_calculation() {
         let mut stats = DomainLatencyStats::new("example.com".to_string());
         let config = SourceLatencyConfig {
             ema_alpha: 0.5,
             ..Default::default()
         };
 
-        // First sample
         stats.add_sample(
             LatencySample {
                 timestamp: Utc::now(),
@@ -630,7 +860,6 @@ mod tests {
         );
         assert_eq!(stats.ema_latency_ms, 100.0);
 
-        // Second sample (EMA = 0.5 * 200 + 0.5 * 100 = 150)
         stats.add_sample(
             LatencySample {
                 timestamp: Utc::now(),
@@ -640,44 +869,127 @@ mod tests {
             },
             &config,
         );
+        // EMA = 0.5 * 200 + 0.5 * 100 = 150
         assert_eq!(stats.ema_latency_ms, 150.0);
     }
 
     #[test]
-    fn test_health_classification() {
-        let config = SourceLatencyConfig::default();
-
+    fn stats_ema_first_sample_sets_directly() {
         let mut stats = DomainLatencyStats::new("example.com".to_string());
+        let config = SourceLatencyConfig {
+            ema_alpha: 0.1,
+            ..Default::default()
+        };
+
         stats.add_sample(
             LatencySample {
                 timestamp: Utc::now(),
-                latency_ms: 30.0,
+                latency_ms: 500.0,
                 success: true,
                 error: None,
             },
             &config,
         );
+        // First sample: EMA = latency directly
+        assert_eq!(stats.ema_latency_ms, 500.0);
+    }
+
+    #[test]
+    fn stats_min_max_tracking() {
+        let mut stats = DomainLatencyStats::new("example.com".to_string());
+        let config = SourceLatencyConfig::default();
+
+        for latency in [100.0, 50.0, 200.0, 30.0, 150.0] {
+            stats.add_sample(
+                LatencySample {
+                    timestamp: Utc::now(),
+                    latency_ms: latency,
+                    success: true,
+                    error: None,
+                },
+                &config,
+            );
+        }
+
+        assert_eq!(stats.min_latency_ms, 30.0);
+        assert_eq!(stats.max_latency_ms, 200.0);
+    }
+
+    #[test]
+    fn stats_consecutive_failures_reset_on_success() {
+        let mut stats = DomainLatencyStats::new("example.com".to_string());
+        let config = SourceLatencyConfig::default();
+
+        for _ in 0..2 {
+            stats.add_sample(
+                LatencySample {
+                    timestamp: Utc::now(),
+                    latency_ms: 0.0,
+                    success: false,
+                    error: Some("err".to_string()),
+                },
+                &config,
+            );
+        }
+        assert_eq!(stats.consecutive_failures, 2);
+
+        stats.add_sample(
+            LatencySample {
+                timestamp: Utc::now(),
+                latency_ms: 100.0,
+                success: true,
+                error: None,
+            },
+            &config,
+        );
+        assert_eq!(stats.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn stats_health_classification_boundaries() {
+        let config = SourceLatencyConfig::default();
+
+        // Excellent: < 50ms
+        let mut stats = DomainLatencyStats::new("x".to_string());
+        stats.ema_latency_ms = 49.9;
+        stats.update_health(&config);
         assert_eq!(stats.health, LatencyHealth::Excellent);
 
-        stats.ema_latency_ms = 100.0;
+        // Good: < 150ms
+        stats.ema_latency_ms = 50.0;
         stats.update_health(&config);
         assert_eq!(stats.health, LatencyHealth::Good);
 
-        stats.ema_latency_ms = 300.0;
+        stats.ema_latency_ms = 149.9;
+        stats.update_health(&config);
+        assert_eq!(stats.health, LatencyHealth::Good);
+
+        // Fair: < 500ms
+        stats.ema_latency_ms = 150.0;
         stats.update_health(&config);
         assert_eq!(stats.health, LatencyHealth::Fair);
 
-        stats.ema_latency_ms = 800.0;
+        stats.ema_latency_ms = 499.9;
+        stats.update_health(&config);
+        assert_eq!(stats.health, LatencyHealth::Fair);
+
+        // Poor: < 1000ms
+        stats.ema_latency_ms = 500.0;
         stats.update_health(&config);
         assert_eq!(stats.health, LatencyHealth::Poor);
 
-        stats.ema_latency_ms = 1500.0;
+        stats.ema_latency_ms = 999.9;
+        stats.update_health(&config);
+        assert_eq!(stats.health, LatencyHealth::Poor);
+
+        // Unreachable: >= 1000ms
+        stats.ema_latency_ms = 1000.0;
         stats.update_health(&config);
         assert_eq!(stats.health, LatencyHealth::Unreachable);
     }
 
     #[test]
-    fn test_consecutive_failures_unreachable() {
+    fn stats_consecutive_failures_unreachable() {
         let mut stats = DomainLatencyStats::new("example.com".to_string());
         let config = SourceLatencyConfig::default();
 
@@ -698,7 +1010,51 @@ mod tests {
     }
 
     #[test]
-    fn test_percentile_calculation() {
+    fn stats_consecutive_failures_2_not_unreachable() {
+        let mut stats = DomainLatencyStats::new("example.com".to_string());
+        let config = SourceLatencyConfig::default();
+
+        for _ in 0..2 {
+            stats.add_sample(
+                LatencySample {
+                    timestamp: Utc::now(),
+                    latency_ms: 0.0,
+                    success: false,
+                    error: Some("err".to_string()),
+                },
+                &config,
+            );
+        }
+
+        assert_ne!(stats.health, LatencyHealth::Unreachable);
+    }
+
+    #[test]
+    fn stats_percentile_calculation_3_samples() {
+        let mut stats = DomainLatencyStats::new("example.com".to_string());
+        let config = SourceLatencyConfig::default();
+
+        for latency in [100.0, 200.0, 300.0] {
+            stats.add_sample(
+                LatencySample {
+                    timestamp: Utc::now(),
+                    latency_ms: latency,
+                    success: true,
+                    error: None,
+                },
+                &config,
+            );
+        }
+
+        assert!(stats.p50_ms.is_some());
+        assert!(stats.p90_ms.is_some());
+        assert!(stats.p99_ms.is_some());
+        // sorted: [100, 200, 300], len=3, p50 index=1 => 200
+        assert_eq!(stats.p50_ms.unwrap(), 200.0);
+    }
+
+    #[test]
+    fn stats_percentile_calculation_5_samples() {
         let mut stats = DomainLatencyStats::new("example.com".to_string());
         let config = SourceLatencyConfig::default();
 
@@ -714,14 +1070,157 @@ mod tests {
             );
         }
 
-        assert!(stats.p50_ms.is_some());
-        assert!(stats.p90_ms.is_some());
-        assert!(stats.p99_ms.is_some());
         assert_eq!(stats.p50_ms.unwrap(), 150.0);
     }
 
     #[test]
-    fn test_monitor_record_success() {
+    fn stats_percentile_not_updated_when_disabled() {
+        let mut stats = DomainLatencyStats::new("example.com".to_string());
+        let config = SourceLatencyConfig {
+            enable_percentiles: false,
+            ..Default::default()
+        };
+
+        for latency in [100.0, 200.0, 300.0] {
+            stats.add_sample(
+                LatencySample {
+                    timestamp: Utc::now(),
+                    latency_ms: latency,
+                    success: true,
+                    error: None,
+                },
+                &config,
+            );
+        }
+
+        assert!(stats.p50_ms.is_none());
+    }
+
+    #[test]
+    fn stats_percentile_requires_3_samples() {
+        let mut stats = DomainLatencyStats::new("example.com".to_string());
+        let config = SourceLatencyConfig::default();
+
+        stats.add_sample(
+            LatencySample {
+                timestamp: Utc::now(),
+                latency_ms: 100.0,
+                success: true,
+                error: None,
+            },
+            &config,
+        );
+        assert!(stats.p50_ms.is_none());
+
+        stats.add_sample(
+            LatencySample {
+                timestamp: Utc::now(),
+                latency_ms: 200.0,
+                success: true,
+                error: None,
+            },
+            &config,
+        );
+        assert!(stats.p50_ms.is_none());
+    }
+
+    #[test]
+    fn stats_recent_samples_capped() {
+        let mut stats = DomainLatencyStats::new("example.com".to_string());
+        let config = SourceLatencyConfig {
+            max_samples_per_domain: 5,
+            ..Default::default()
+        };
+
+        for i in 0..10 {
+            stats.add_sample(
+                LatencySample {
+                    timestamp: Utc::now(),
+                    latency_ms: (i as f64) * 10.0,
+                    success: true,
+                    error: None,
+                },
+                &config,
+            );
+        }
+
+        assert!(stats.recent_samples.len() <= 5);
+    }
+
+    #[test]
+    fn stats_apply_decay_moves_towards_baseline() {
+        let mut stats = DomainLatencyStats::new("example.com".to_string());
+        stats.ema_latency_ms = 200.0;
+
+        stats.apply_decay(1.0, 0.95);
+        // EMA should move towards baseline (1000ms)
+        // 1000 + (200 - 1000) * 0.95 = 1000 - 722 = 278
+        assert!(stats.ema_latency_ms > 200.0);
+        assert!(stats.ema_latency_ms < 1000.0);
+    }
+
+    #[test]
+    fn stats_apply_decay_zero_hours_no_change() {
+        let mut stats = DomainLatencyStats::new("example.com".to_string());
+        stats.ema_latency_ms = 200.0;
+
+        stats.apply_decay(0.0, 0.95);
+        assert_eq!(stats.ema_latency_ms, 200.0);
+    }
+
+    #[test]
+    fn stats_apply_decay_zero_ema_no_change() {
+        let mut stats = DomainLatencyStats::new("example.com".to_string());
+        stats.ema_latency_ms = 0.0;
+
+        stats.apply_decay(1.0, 0.95);
+        assert_eq!(stats.ema_latency_ms, 0.0);
+    }
+
+    #[test]
+    fn stats_apply_decay_above_baseline_moves_down() {
+        let mut stats = DomainLatencyStats::new("example.com".to_string());
+        stats.ema_latency_ms = 2000.0;
+
+        stats.apply_decay(1.0, 0.95);
+        // 1000 + (2000 - 1000) * 0.95 = 1000 + 950 = 1950
+        assert!(stats.ema_latency_ms < 2000.0);
+        assert!(stats.ema_latency_ms > 1000.0);
+    }
+
+    // ========== SourceLatencyMonitor ==========
+
+    #[test]
+    fn monitor_new_default_equal() {
+        let m1 = SourceLatencyMonitor::new();
+        let m2 = SourceLatencyMonitor::default();
+        assert_eq!(m1.get_all_stats().len(), m2.get_all_stats().len());
+        assert_eq!(m1.config().enabled, m2.config().enabled);
+    }
+
+    #[test]
+    fn monitor_with_config() {
+        let config = SourceLatencyConfig {
+            max_samples_per_domain: 100,
+            ..Default::default()
+        };
+        let monitor = SourceLatencyMonitor::with_config(config);
+        assert_eq!(monitor.config().max_samples_per_domain, 100);
+    }
+
+    #[test]
+    fn monitor_set_config() {
+        let mut monitor = SourceLatencyMonitor::new();
+        let new_config = SourceLatencyConfig {
+            max_samples_per_domain: 200,
+            ..Default::default()
+        };
+        monitor.set_config(new_config);
+        assert_eq!(monitor.config().max_samples_per_domain, 200);
+    }
+
+    #[test]
+    fn monitor_record_success() {
         let mut monitor = SourceLatencyMonitor::new();
         monitor.record_success("example.com", 100.0);
 
@@ -731,7 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn test_monitor_record_failure() {
+    fn monitor_record_failure() {
         let mut monitor = SourceLatencyMonitor::new();
         monitor.record_failure("example.com", "Timeout".to_string());
 
@@ -741,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn test_monitor_ignored_domains() {
+    fn monitor_ignored_domains() {
         let mut monitor = SourceLatencyMonitor::new();
         monitor.record_success("localhost", 10.0);
 
@@ -749,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn test_monitor_disabled() {
+    fn monitor_disabled_no_records() {
         let mut monitor = SourceLatencyMonitor::with_config(SourceLatencyConfig {
             enabled: false,
             ..Default::default()
@@ -760,22 +1259,103 @@ mod tests {
     }
 
     #[test]
-    fn test_get_summary() {
+    fn monitor_multiple_domains() {
         let mut monitor = SourceLatencyMonitor::new();
-        monitor.record_success("fast.com", 30.0);
-        monitor.record_success("medium.com", 200.0);
-        monitor.record_success("slow.com", 800.0);
+        monitor.record_success("a.com", 50.0);
+        monitor.record_success("b.com", 100.0);
+        monitor.record_success("c.com", 200.0);
+
+        assert_eq!(monitor.get_all_stats().len(), 3);
+        assert!(monitor.get_domain_stats("a.com").is_some());
+        assert!(monitor.get_domain_stats("b.com").is_some());
+        assert!(monitor.get_domain_stats("c.com").is_some());
+    }
+
+    #[test]
+    fn monitor_nonexistent_domain() {
+        let monitor = SourceLatencyMonitor::new();
+        assert!(monitor.get_domain_stats("nonexistent.com").is_none());
+    }
+
+    #[test]
+    fn monitor_get_all_stats_mut() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("example.com", 100.0);
+
+        let all = monitor.get_all_stats_mut();
+        assert_eq!(all.len(), 1);
+        assert!(all.contains_key("example.com"));
+    }
+
+    #[test]
+    fn monitor_get_summary_empty() {
+        let monitor = SourceLatencyMonitor::new();
+        let summary = monitor.get_summary();
+        assert_eq!(summary.total_domains, 0);
+        assert_eq!(summary.excellent_count, 0);
+        assert_eq!(summary.good_count, 0);
+        assert_eq!(summary.fair_count, 0);
+        assert_eq!(summary.poor_count, 0);
+        assert_eq!(summary.unreachable_count, 0);
+        assert_eq!(summary.overall_avg_latency_ms, 0.0);
+        assert!(summary.fastest_domains.is_empty());
+        assert!(summary.slowest_domains.is_empty());
+        assert_eq!(summary.total_samples, 0);
+    }
+
+    #[test]
+    fn monitor_get_summary_health_counts() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("fast.com", 30.0); // Excellent
+        monitor.record_success("medium.com", 200.0); // Fair
+        monitor.record_success("slow.com", 800.0); // Poor
 
         let summary = monitor.get_summary();
         assert_eq!(summary.total_domains, 3);
-        assert_eq!(summary.excellent_count, 1); // 30ms < 50ms
-        assert_eq!(summary.fair_count, 1); // 200ms in [150, 500)
-        assert_eq!(summary.poor_count, 1); // 800ms in [500, 1000)
+        assert_eq!(summary.excellent_count, 1);
+        assert_eq!(summary.fair_count, 1);
+        assert_eq!(summary.poor_count, 1);
         assert_eq!(summary.total_samples, 3);
     }
 
     #[test]
-    fn test_get_best_domain() {
+    fn monitor_get_summary_overall_avg() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("a.com", 100.0);
+        monitor.record_success("b.com", 200.0);
+
+        let summary = monitor.get_summary();
+        // avg of 100 and 200 = 150
+        assert!((summary.overall_avg_latency_ms - 150.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn monitor_get_summary_fastest_slowest() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("slow.com", 500.0);
+        monitor.record_success("fast.com", 50.0);
+        monitor.record_success("medium.com", 200.0);
+
+        let summary = monitor.get_summary();
+        assert_eq!(summary.fastest_domains.len(), 3);
+        assert_eq!(summary.fastest_domains[0].0, "fast.com");
+        assert_eq!(summary.slowest_domains[0].0, "slow.com");
+    }
+
+    #[test]
+    fn monitor_get_summary_top_3_cap() {
+        let mut monitor = SourceLatencyMonitor::new();
+        for i in 0..10 {
+            monitor.record_success(&format!("domain{}.com", i), (i as f64 + 1.0) * 10.0);
+        }
+
+        let summary = monitor.get_summary();
+        assert_eq!(summary.fastest_domains.len(), 3);
+        assert_eq!(summary.slowest_domains.len(), 3);
+    }
+
+    #[test]
+    fn monitor_get_best_domain() {
         let mut monitor = SourceLatencyMonitor::new();
         monitor.record_success("slow.com", 500.0);
         monitor.record_success("fast.com", 50.0);
@@ -786,7 +1366,27 @@ mod tests {
     }
 
     #[test]
-    fn test_rank_domains() {
+    fn monitor_get_best_domain_empty() {
+        let monitor = SourceLatencyMonitor::new();
+        assert!(monitor.get_best_domain().is_none());
+    }
+
+    #[test]
+    fn monitor_get_best_domain_excludes_unreachable() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("good.com", 100.0);
+
+        // Make bad.com unreachable (3 consecutive failures)
+        for _ in 0..3 {
+            monitor.record_failure("bad.com", "err".to_string());
+        }
+
+        let best = monitor.get_best_domain();
+        assert_eq!(best, Some("good.com"));
+    }
+
+    #[test]
+    fn monitor_rank_domains() {
         let mut monitor = SourceLatencyMonitor::new();
         monitor.record_success("slow.com", 500.0);
         monitor.record_success("fast.com", 50.0);
@@ -800,7 +1400,14 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_domain() {
+    fn monitor_rank_domains_empty() {
+        let monitor = SourceLatencyMonitor::new();
+        let ranked = monitor.rank_domains();
+        assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn monitor_clear_domain() {
         let mut monitor = SourceLatencyMonitor::new();
         monitor.record_success("example.com", 100.0);
         assert!(monitor.get_domain_stats("example.com").is_some());
@@ -810,7 +1417,13 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_all() {
+    fn monitor_clear_domain_nonexistent() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.clear_domain("nonexistent.com"); // should not panic
+    }
+
+    #[test]
+    fn monitor_clear_all() {
         let mut monitor = SourceLatencyMonitor::new();
         monitor.record_success("a.com", 100.0);
         monitor.record_success("b.com", 200.0);
@@ -820,45 +1433,268 @@ mod tests {
     }
 
     #[test]
-    fn test_decay() {
-        let mut stats = DomainLatencyStats::new("example.com".to_string());
-        stats.ema_latency_ms = 200.0;
-
-        // Apply 1 hour of decay with factor 0.95
-        stats.apply_decay(1.0, 0.95);
-
-        // EMA should move towards baseline (1000ms)
-        // New EMA = 1000 + (200 - 1000) * 0.95 = 1000 - 760 * 0.95 = 1000 - 722 = 278
-        assert!(stats.ema_latency_ms > 200.0);
-        assert!(stats.ema_latency_ms < 1000.0);
+    fn monitor_clear_all_empty() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.clear_all(); // should not panic
+        assert_eq!(monitor.get_all_stats().len(), 0);
     }
 
     #[test]
-    fn test_format_summary() {
+    fn monitor_apply_periodic_decay() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("example.com", 100.0);
+
+        // This should not panic even if < 1 hour
+        monitor.apply_periodic_decay();
+    }
+
+    #[test]
+    fn monitor_unicode_domain() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("中文域名.com", 100.0);
+
+        let stats = monitor.get_domain_stats("中文域名.com").unwrap();
+        assert_eq!(stats.domain, "中文域名.com");
+    }
+
+    #[test]
+    fn monitor_emoji_domain() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("🚀.com", 100.0);
+
+        let stats = monitor.get_domain_stats("🚀.com").unwrap();
+        assert_eq!(stats.domain, "🚀.com");
+    }
+
+    #[test]
+    fn monitor_same_domain_multiple_samples() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("example.com", 100.0);
+        monitor.record_success("example.com", 200.0);
+        monitor.record_success("example.com", 300.0);
+
+        let stats = monitor.get_domain_stats("example.com").unwrap();
+        assert_eq!(stats.total_samples, 3);
+        assert_eq!(stats.successful_connections, 3);
+    }
+
+    #[test]
+    fn monitor_mixed_success_failure() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("example.com", 100.0);
+        monitor.record_failure("example.com", "err".to_string());
+        monitor.record_success("example.com", 200.0);
+
+        let stats = monitor.get_domain_stats("example.com").unwrap();
+        assert_eq!(stats.total_samples, 3);
+        assert_eq!(stats.successful_connections, 2);
+        assert_eq!(stats.failed_connections, 1);
+        assert_eq!(stats.consecutive_failures, 0);
+    }
+
+    // ========== SourceLatencySummary ==========
+
+    #[test]
+    fn summary_serde_roundtrip() {
+        let summary = SourceLatencySummary {
+            total_domains: 5,
+            excellent_count: 1,
+            good_count: 2,
+            fair_count: 1,
+            poor_count: 1,
+            unreachable_count: 0,
+            overall_avg_latency_ms: 150.0,
+            fastest_domains: vec![("fast.com".to_string(), 30.0)],
+            slowest_domains: vec![("slow.com".to_string(), 500.0)],
+            total_samples: 100,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let loaded: SourceLatencySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.total_domains, 5);
+        assert_eq!(loaded.total_samples, 100);
+    }
+
+    #[test]
+    fn summary_clone_debug() {
+        let summary = SourceLatencySummary {
+            total_domains: 0,
+            excellent_count: 0,
+            good_count: 0,
+            fair_count: 0,
+            poor_count: 0,
+            unreachable_count: 0,
+            overall_avg_latency_ms: 0.0,
+            fastest_domains: vec![],
+            slowest_domains: vec![],
+            total_samples: 0,
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_domains, summary.total_domains);
+        let _ = format!("{:?}", summary);
+    }
+
+    // ========== format_summary ==========
+
+    #[test]
+    fn format_summary_empty() {
         let monitor = SourceLatencyMonitor::new();
         let summary = monitor.get_summary();
         let formatted = monitor.format_summary(&summary);
 
         assert!(formatted.contains("Source Latency Monitor Summary"));
-        assert!(formatted.contains("Total Domains"));
+        assert!(formatted.contains("Total Domains: 0"));
+        assert!(formatted.contains("Overall Avg Latency: 0.0 ms"));
     }
 
+    #[test]
+    fn format_summary_with_domains() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("fast.com", 30.0);
+        monitor.record_success("slow.com", 800.0);
+
+        let summary = monitor.get_summary();
+        let formatted = monitor.format_summary(&summary);
+
+        assert!(formatted.contains("Total Domains: 2"));
+        assert!(formatted.contains("Fastest Domains"));
+        assert!(formatted.contains("Slowest Domains"));
+        assert!(formatted.contains("fast.com"));
+        assert!(formatted.contains("slow.com"));
+    }
+
+    #[test]
+    fn format_summary_health_counts() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("a.com", 30.0);
+        monitor.record_success("b.com", 200.0);
+
+        let summary = monitor.get_summary();
+        let formatted = monitor.format_summary(&summary);
+
+        assert!(formatted.contains("Excellent"));
+        assert!(formatted.contains("Fair"));
+    }
+
+    #[test]
+    fn format_summary_unicode() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("中文.com", 100.0);
+
+        let summary = monitor.get_summary();
+        let formatted = monitor.format_summary(&summary);
+
+        assert!(formatted.contains("中文.com"));
+    }
+
+    // ========== Persistence ==========
+
     #[tokio::test]
-    async fn test_save_load_config() {
+    async fn save_config_creates_file() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("latency_config.json");
 
         let monitor = SourceLatencyMonitor::new();
         monitor.save_config(&config_path).await.unwrap();
 
-        let loaded = SourceLatencyMonitor::load_config(&config_path)
-            .await
-            .unwrap();
-        assert_eq!(loaded.enabled, monitor.config().enabled);
+        assert!(config_path.exists());
     }
 
     #[tokio::test]
-    async fn test_save_load_stats() {
+    async fn save_config_no_tmp_residual() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("latency_config.json");
+
+        let monitor = SourceLatencyMonitor::new();
+        monitor.save_config(&config_path).await.unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn save_config_overwrite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("latency_config.json");
+
+        let monitor = SourceLatencyMonitor::new();
+        monitor.save_config(&config_path).await.unwrap();
+
+        let monitor2 = SourceLatencyMonitor::with_config(SourceLatencyConfig {
+            max_samples_per_domain: 999,
+            ..Default::default()
+        });
+        monitor2.save_config(&config_path).await.unwrap();
+
+        let loaded = SourceLatencyMonitor::load_config(&config_path)
+            .await
+            .unwrap();
+        assert_eq!(loaded.max_samples_per_domain, 999);
+    }
+
+    #[tokio::test]
+    async fn load_config_missing_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("nonexistent.json");
+
+        let result = SourceLatencyMonitor::load_config(&config_path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn load_config_corrupted_json() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("bad_config.json");
+        std::fs::write(&config_path, "not json").unwrap();
+
+        let result = SourceLatencyMonitor::load_config(&config_path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn save_load_config_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("latency_config.json");
+
+        let config = SourceLatencyConfig {
+            enabled: false,
+            max_samples_per_domain: 123,
+            ema_alpha: 0.7,
+            ..Default::default()
+        };
+        let monitor = SourceLatencyMonitor::with_config(config);
+        monitor.save_config(&config_path).await.unwrap();
+
+        let loaded = SourceLatencyMonitor::load_config(&config_path)
+            .await
+            .unwrap();
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.max_samples_per_domain, 123);
+        assert!((loaded.ema_alpha - 0.7).abs() < 1e-10);
+    }
+
+    #[tokio::test]
+    async fn save_load_config_unicode() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("latency_config_unicode.json");
+
+        let config = SourceLatencyConfig {
+            ignored_domains: vec!["localhost".into(), "中文域名.com".into()],
+            ..Default::default()
+        };
+        let monitor = SourceLatencyMonitor::with_config(config);
+        monitor.save_config(&config_path).await.unwrap();
+
+        let loaded = SourceLatencyMonitor::load_config(&config_path)
+            .await
+            .unwrap();
+        assert_eq!(loaded.ignored_domains, vec!["localhost", "中文域名.com"]);
+    }
+
+    #[tokio::test]
+    async fn save_stats_creates_file() {
         let temp_dir = tempfile::tempdir().unwrap();
         let stats_path = temp_dir.path().join("latency_stats.json");
 
@@ -866,8 +1702,248 @@ mod tests {
         monitor.record_success("example.com", 100.0);
         monitor.save_stats(&stats_path).await.unwrap();
 
+        assert!(stats_path.exists());
+    }
+
+    #[tokio::test]
+    async fn save_stats_no_tmp_residual() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stats_path = temp_dir.path().join("latency_stats.json");
+
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("example.com", 100.0);
+        monitor.save_stats(&stats_path).await.unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn save_load_stats_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stats_path = temp_dir.path().join("latency_stats.json");
+
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("example.com", 100.0);
+        monitor.record_failure("example.com", "err".to_string());
+        monitor.record_success("example.com", 200.0);
+        monitor.save_stats(&stats_path).await.unwrap();
+
         let loaded = SourceLatencyMonitor::load_stats(&stats_path).await.unwrap();
         assert_eq!(loaded.len(), 1);
-        assert!(loaded.contains_key("example.com"));
+        let stats = loaded.get("example.com").unwrap();
+        assert_eq!(stats.total_samples, 3);
+        assert_eq!(stats.successful_connections, 2);
+        assert_eq!(stats.failed_connections, 1);
+    }
+
+    #[tokio::test]
+    async fn load_stats_missing_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stats_path = temp_dir.path().join("nonexistent_stats.json");
+
+        let result = SourceLatencyMonitor::load_stats(&stats_path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn load_stats_corrupted_json() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stats_path = temp_dir.path().join("bad_stats.json");
+        std::fs::write(&stats_path, "{bad json").unwrap();
+
+        let result = SourceLatencyMonitor::load_stats(&stats_path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn save_stats_overwrite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stats_path = temp_dir.path().join("latency_stats.json");
+
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("a.com", 100.0);
+        monitor.save_stats(&stats_path).await.unwrap();
+
+        monitor.clear_all();
+        monitor.record_success("b.com", 200.0);
+        monitor.save_stats(&stats_path).await.unwrap();
+
+        let loaded = SourceLatencyMonitor::load_stats(&stats_path).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.contains_key("b.com"));
+        assert!(!loaded.contains_key("a.com"));
+    }
+
+    #[tokio::test]
+    async fn save_load_stats_unicode() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stats_path = temp_dir.path().join("latency_stats_unicode.json");
+
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("中文域名.com", 100.0);
+        monitor.record_success("🚀.com", 50.0);
+        monitor.save_stats(&stats_path).await.unwrap();
+
+        let loaded = SourceLatencyMonitor::load_stats(&stats_path).await.unwrap();
+        assert!(loaded.contains_key("中文域名.com"));
+        assert!(loaded.contains_key("🚀.com"));
+    }
+
+    #[tokio::test]
+    async fn save_stats_empty_monitor() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stats_path = temp_dir.path().join("empty_stats.json");
+
+        let monitor = SourceLatencyMonitor::new();
+        monitor.save_stats(&stats_path).await.unwrap();
+
+        let loaded = SourceLatencyMonitor::load_stats(&stats_path).await.unwrap();
+        assert_eq!(loaded.len(), 0);
+    }
+
+    // ========== Complex workflows ==========
+
+    #[test]
+    fn workflow_complete_lifecycle() {
+        let mut monitor = SourceLatencyMonitor::new();
+
+        // Record multiple domains
+        monitor.record_success("fast.com", 30.0);
+        monitor.record_success("medium.com", 200.0);
+        monitor.record_success("slow.com", 800.0);
+
+        // Check summary
+        let summary = monitor.get_summary();
+        assert_eq!(summary.total_domains, 3);
+
+        // Check ranking
+        let ranked = monitor.rank_domains();
+        assert_eq!(ranked[0].0, "fast.com");
+
+        // Check best
+        assert_eq!(monitor.get_best_domain(), Some("fast.com"));
+
+        // Clear one
+        monitor.clear_domain("slow.com");
+        assert_eq!(monitor.get_all_stats().len(), 2);
+        assert!(monitor.get_best_domain() == Some("fast.com"));
+
+        // Clear all
+        monitor.clear_all();
+        assert_eq!(monitor.get_all_stats().len(), 0);
+        assert!(monitor.get_best_domain().is_none());
+    }
+
+    #[test]
+    fn workflow_multi_domain_independent() {
+        let mut monitor = SourceLatencyMonitor::new();
+
+        for i in 0..10 {
+            monitor.record_success(&format!("domain{}.com", i), (i as f64 + 1.0) * 50.0);
+        }
+
+        assert_eq!(monitor.get_all_stats().len(), 10);
+
+        let summary = monitor.get_summary();
+        assert_eq!(summary.total_domains, 10);
+        assert_eq!(summary.total_samples, 10);
+
+        let ranked = monitor.rank_domains();
+        assert_eq!(ranked.len(), 10);
+        // Lowest latency first
+        assert_eq!(ranked[0].0, "domain0.com");
+    }
+
+    #[test]
+    fn workflow_failure_then_recovery() {
+        let mut monitor = SourceLatencyMonitor::new();
+
+        // 2 failures - not yet unreachable
+        monitor.record_failure("example.com", "err1".to_string());
+        monitor.record_failure("example.com", "err2".to_string());
+
+        let stats = monitor.get_domain_stats("example.com").unwrap();
+        assert_ne!(stats.health, LatencyHealth::Unreachable);
+
+        // 3rd failure - unreachable
+        monitor.record_failure("example.com", "err3".to_string());
+        let stats = monitor.get_domain_stats("example.com").unwrap();
+        assert_eq!(stats.health, LatencyHealth::Unreachable);
+
+        // Recovery: success resets consecutive failures
+        monitor.record_success("example.com", 100.0);
+        let stats = monitor.get_domain_stats("example.com").unwrap();
+        assert_eq!(stats.consecutive_failures, 0);
+        assert_eq!(stats.successful_connections, 1);
+    }
+
+    #[test]
+    fn workflow_config_change_takes_effect() {
+        let mut monitor = SourceLatencyMonitor::new();
+
+        // Record with default config
+        monitor.record_success("example.com", 100.0);
+        assert!(monitor.get_domain_stats("example.com").is_some());
+
+        // Change ignored domains
+        let mut new_config = SourceLatencyConfig::default();
+        new_config.ignored_domains.push("example.com".to_string());
+        monitor.set_config(new_config);
+
+        // New records for example.com should be ignored
+        monitor.record_success("example.com", 200.0);
+        let stats = monitor.get_domain_stats("example.com").unwrap();
+        // Still 1 sample (the second was ignored)
+        assert_eq!(stats.total_samples, 1);
+    }
+
+    #[test]
+    fn workflow_zero_latency() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("example.com", 0.0);
+
+        let stats = monitor.get_domain_stats("example.com").unwrap();
+        assert_eq!(stats.total_samples, 1);
+        assert_eq!(stats.ema_latency_ms, 0.0);
+        assert_eq!(stats.min_latency_ms, 0.0);
+    }
+
+    #[test]
+    fn workflow_very_large_latency() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("example.com", f64::MAX / 2.0);
+
+        let stats = monitor.get_domain_stats("example.com").unwrap();
+        assert_eq!(stats.total_samples, 1);
+        assert!(stats.ema_latency_ms > 0.0);
+    }
+
+    #[test]
+    fn rank_domains_includes_health() {
+        let mut monitor = SourceLatencyMonitor::new();
+        monitor.record_success("fast.com", 30.0);
+        monitor.record_success("slow.com", 800.0);
+
+        let ranked = monitor.rank_domains();
+        assert_eq!(ranked[0].2, LatencyHealth::Excellent); // 30ms
+        assert_eq!(ranked[1].2, LatencyHealth::Poor); // 800ms
+    }
+
+    #[test]
+    fn monitor_independent_instances() {
+        let mut m1 = SourceLatencyMonitor::new();
+        let mut m2 = SourceLatencyMonitor::new();
+
+        m1.record_success("a.com", 100.0);
+        m2.record_success("b.com", 200.0);
+
+        assert_eq!(m1.get_all_stats().len(), 1);
+        assert_eq!(m2.get_all_stats().len(), 1);
+        assert!(m1.get_domain_stats("b.com").is_none());
+        assert!(m2.get_domain_stats("a.com").is_none());
     }
 }

@@ -82,6 +82,7 @@ pub mod path_validator;
 pub mod post_hooks;
 pub mod preflight_check;
 pub mod priority_aging;
+pub mod priority_queue;
 pub mod progress;
 pub mod progress_milestone;
 pub mod progress_prediction;
@@ -1105,6 +1106,8 @@ pub struct DownloadManager {
     health_dashboard_config: Arc<tokio::sync::RwLock<health_dashboard::HealthDashboardConfig>>,
     /// CSV export configuration (Phase 175)
     csv_export_config: Arc<tokio::sync::RwLock<csv_export::CsvExportConfig>>,
+    /// Priority queue for intelligent task scheduling
+    priority_queue: Arc<priority_queue::PriorityQueue>,
 }
 
 impl DownloadManager {
@@ -1234,6 +1237,7 @@ impl DownloadManager {
             csv_export_config: Arc::new(tokio::sync::RwLock::new(
                 csv_export::CsvExportConfig::default(),
             )),
+            priority_queue: Arc::new(priority_queue::PriorityQueue::new()),
             task_snooze: Arc::new(Mutex::new(task_snooze::TaskSnoozeManager::new())),
             task_scheduler: Arc::new(Mutex::new(task_scheduler::TaskSchedulerManager::new())),
             progress_milestone: Arc::new(Mutex::new(
@@ -1547,6 +1551,7 @@ impl DownloadManager {
             csv_export_config: Arc::new(tokio::sync::RwLock::new(
                 csv_export::CsvExportConfig::default(),
             )),
+            priority_queue: Arc::new(priority_queue::PriorityQueue::new()),
             speed_alerts: Arc::new(speed_alert::SpeedAlertManager::new()),
             speed_anomaly: Arc::new(Mutex::new(speed_anomaly::SpeedAnomalyDetector::new(
                 speed_anomaly::AnomalyConfig::default(),
@@ -7064,6 +7069,17 @@ impl DownloadManager {
         file_size: u64,
         sources: Vec<xunlei::XunleiSource>,
     ) -> Result<String, DownloadManagerError> {
+        self.add_xunlei_with_priority(file_name, file_size, sources, None).await
+    }
+
+    /// Add a Xunlei download task with optional priority.
+    pub async fn add_xunlei_with_priority(
+        &self,
+        file_name: String,
+        file_size: u64,
+        sources: Vec<xunlei::XunleiSource>,
+        priority: Option<priority_queue::Priority>,
+    ) -> Result<String, DownloadManagerError> {
         // Check for duplicate by first HTTP URL in sources
         let source_url = sources.iter().find_map(|s| match s {
             xunlei::XunleiSource::Http { url, .. } => Some(url.clone()),
@@ -7081,6 +7097,12 @@ impl DownloadManager {
         let task_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
 
+        // Determine priority level
+        let download_priority = match priority {
+            Some(pq_priority) => pq_priority.to_download_priority(),
+            None => DownloadPriority::Normal,
+        };
+
         let task = DownloadTask {
             id: task_id.clone(),
             name: file_name.clone(),
@@ -7094,7 +7116,7 @@ impl DownloadManager {
             created_at: now,
             updated_at: now,
             tags: Vec::new(),
-            priority: DownloadPriority::Normal,
+            priority: download_priority,
             schedule: None,
             bandwidth_weight: 1,
             queue_position: None,
@@ -7124,6 +7146,10 @@ impl DownloadManager {
         self.emit_event(TaskEvent::Added {
             task: TaskInfoEvent::from_task(&task),
         });
+
+        // Add to priority queue
+        let pq_priority = priority.unwrap_or(priority_queue::Priority::Normal);
+        let _ = self.priority_queue.add_task(task_id.clone(), pq_priority).await;
 
         let params = TaskParams::Xunlei {
             file_name,
@@ -15575,6 +15601,52 @@ impl DownloadManager {
     pub async fn get_dynamic_priority_summary(&self) -> dynamic_priority::DynamicPrioritySummary {
         let mgr = self.dynamic_priority.read().await;
         mgr.get_summary(0, 0)
+    }
+
+    // === Priority Queue API ===
+
+    /// Get priority queue status
+    pub async fn get_priority_queue_status(&self) -> priority_queue::QueueStatus {
+        self.priority_queue.get_queue_status().await
+    }
+
+    /// Get priority queue configuration
+    pub async fn get_priority_queue_config(&self) -> priority_queue::PriorityConfig {
+        self.priority_queue.get_config().await
+    }
+
+    /// Update priority queue configuration
+    pub async fn set_priority_queue_config(&self, config: priority_queue::PriorityConfig) {
+        self.priority_queue.update_config(config).await;
+    }
+
+    /// Update task priority in the queue
+    pub async fn update_task_priority(
+        &self,
+        task_id: &str,
+        priority: priority_queue::Priority,
+    ) -> Result<(), priority_queue::QueueError> {
+        self.priority_queue.update_priority(task_id, priority).await
+    }
+
+    /// Get the next task to execute based on priority
+    pub async fn get_next_priority_task(&self) -> Option<String> {
+        self.priority_queue.get_next_task().await
+    }
+
+    /// Get all tasks in scheduling order
+    pub async fn get_priority_queue_order(&self) -> Vec<String> {
+        self.priority_queue.get_scheduled_order().await
+    }
+
+    /// Manually trigger auto-adjustment of priorities
+    pub async fn auto_adjust_priorities(&self) -> Result<usize, priority_queue::QueueError> {
+        self.priority_queue.auto_adjust_priorities().await
+    }
+
+    /// Get bandwidth allocation weights for all tasks
+    pub async fn get_priority_bandwidth_weights(&self) -> std::collections::HashMap<String, f64> {
+        self.priority_queue.calculate_bandwidth_weights().await
     }
 
     // === Upload Tracker API ===
