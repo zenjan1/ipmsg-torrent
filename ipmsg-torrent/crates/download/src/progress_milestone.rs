@@ -537,4 +537,264 @@ mod tests {
         let triggered = tracker.check_progress("task-1", 50.0, &config);
         assert_eq!(triggered, vec![50]);
     }
+
+    // ===== Milestone boundary =====
+
+    #[test]
+    fn test_milestone_new_boundary_values() {
+        let m1 = Milestone::new(1);
+        assert_eq!(m1.percentage, 1);
+
+        let m99 = Milestone::new(99);
+        assert_eq!(m99.percentage, 99);
+
+        let m0 = Milestone::new(0);
+        assert_eq!(m0.percentage, 1); // clamped
+
+        let m100 = Milestone::new(100);
+        assert_eq!(m100.percentage, 99); // clamped
+    }
+
+    // ===== Progress milestone serde =====
+
+    #[test]
+    fn test_milestone_serde_roundtrip() {
+        let m = Milestone::with_description(50, "Halfway");
+        let json = serde_json::to_string(&m).unwrap();
+        let d: Milestone = serde_json::from_str(&json).unwrap();
+        assert_eq!(d.percentage, 50);
+        assert_eq!(d.description.as_deref(), Some("Halfway"));
+        assert!(d.enabled);
+    }
+
+    #[test]
+    fn test_progress_milestone_config_serde_roundtrip() {
+        let config = ProgressMilestoneConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let d: ProgressMilestoneConfig = serde_json::from_str(&json).unwrap();
+        assert!(d.enabled);
+        assert_eq!(d.milestones.len(), 4);
+    }
+
+    #[test]
+    fn test_task_milestone_state_serde_roundtrip() {
+        let mut state = TaskMilestoneState::new("task-1");
+        state.mark_triggered(25);
+        state.mark_triggered(50);
+        let json = serde_json::to_string(&state).unwrap();
+        let d: TaskMilestoneState = serde_json::from_str(&json).unwrap();
+        assert_eq!(d.task_id, "task-1");
+        assert!(d.is_triggered(25));
+        assert!(d.is_triggered(50));
+        assert!(!d.is_triggered(75));
+    }
+
+    // ===== Progress milestone persistence =====
+
+    #[test]
+    fn test_persistence_no_tmp_leftover() {
+        let dir = std::env::temp_dir().join("ipmsg_test_milestone_no_tmp");
+        let _ = fs::create_dir_all(&dir);
+
+        let config = ProgressMilestoneConfig::default();
+        save_progress_milestone_config(&config, &dir).unwrap();
+
+        let tmp = dir.join("progress_milestone_config.json.tmp");
+        assert!(!tmp.exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_persistence_overwrite() {
+        let dir = std::env::temp_dir().join("ipmsg_test_milestone_overwrite");
+        let _ = fs::create_dir_all(&dir);
+
+        let config1 = ProgressMilestoneConfig::default();
+        save_progress_milestone_config(&config1, &dir).unwrap();
+
+        let config2 = ProgressMilestoneConfig::disabled();
+        save_progress_milestone_config(&config2, &dir).unwrap();
+
+        let loaded = load_progress_milestone_config(&dir).unwrap().unwrap();
+        assert!(!loaded.enabled);
+        assert!(loaded.milestones.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ===== Progress milestone tracker edge cases =====
+
+    #[test]
+    fn test_tracker_remove_nonexistent_task() {
+        let mut tracker = ProgressMilestoneTracker::new();
+        // Should not panic
+        tracker.remove_task("nonexistent");
+    }
+
+    #[test]
+    fn test_tracker_reset_nonexistent_task() {
+        let mut tracker = ProgressMilestoneTracker::new();
+        // Should not panic
+        tracker.reset_task("nonexistent");
+    }
+
+    #[test]
+    fn test_tracker_negative_progress() {
+        let mut tracker = ProgressMilestoneTracker::new();
+        let config = ProgressMilestoneConfig::default();
+        // Negative progress should not trigger any milestones
+        let triggered = tracker.check_progress("task-1", -10.0, &config);
+        assert!(triggered.is_empty());
+    }
+
+    #[test]
+    fn test_tracker_over_100_progress() {
+        let mut tracker = ProgressMilestoneTracker::new();
+        let config = ProgressMilestoneConfig::default();
+        // Over 100% should trigger all milestones
+        let triggered = tracker.check_progress("task-1", 150.0, &config);
+        assert_eq!(triggered, vec![25, 50, 75, 90]);
+    }
+
+    #[test]
+    fn test_tracker_nan_progress() {
+        let mut tracker = ProgressMilestoneTracker::new();
+        let config = ProgressMilestoneConfig::default();
+        // NaN comparisons should not trigger (NaN >= x is false)
+        let triggered = tracker.check_progress("task-1", f32::NAN, &config);
+        assert!(triggered.is_empty());
+    }
+
+    #[test]
+    fn test_tracker_empty_config_milestones() {
+        let mut tracker = ProgressMilestoneTracker::new();
+        let config = ProgressMilestoneConfig {
+            enabled: true,
+            milestones: vec![],
+        };
+        let triggered = tracker.check_progress("task-1", 50.0, &config);
+        assert!(triggered.is_empty());
+    }
+
+    #[test]
+    fn test_tracker_custom_milestones() {
+        let mut tracker = ProgressMilestoneTracker::new();
+        let mut config = ProgressMilestoneConfig {
+            enabled: true,
+            milestones: vec![],
+        };
+        config.add_milestone(10);
+        config.add_milestone(33);
+        config.add_milestone(66);
+        config.add_milestone(99);
+
+        let triggered = tracker.check_progress("task-1", 35.0, &config);
+        assert_eq!(triggered, vec![10, 33]);
+
+        let triggered = tracker.check_progress("task-1", 70.0, &config);
+        assert_eq!(triggered, vec![66]);
+
+        let triggered = tracker.check_progress("task-1", 100.0, &config);
+        assert_eq!(triggered, vec![99]);
+    }
+
+    #[test]
+    fn test_tracker_get_task_state() {
+        let mut tracker = ProgressMilestoneTracker::new();
+        let config = ProgressMilestoneConfig::default();
+
+        assert!(tracker.get_task_state("task-1").is_none());
+
+        tracker.check_progress("task-1", 30.0, &config);
+        let state = tracker.get_task_state("task-1").unwrap();
+        assert!(state.is_triggered(25));
+        assert!(!state.is_triggered(50));
+    }
+
+    #[test]
+    fn test_tracker_tracked_task_ids() {
+        let mut tracker = ProgressMilestoneTracker::new();
+        let config = ProgressMilestoneConfig::default();
+
+        assert!(tracker.tracked_task_ids().is_empty());
+
+        tracker.check_progress("task-a", 30.0, &config);
+        tracker.check_progress("task-b", 30.0, &config);
+
+        let mut ids = tracker.tracked_task_ids();
+        ids.sort();
+        assert_eq!(ids, vec!["task-a", "task-b"]);
+    }
+
+    // ===== Progress milestone config methods =====
+
+    #[test]
+    fn test_add_milestone_sorted() {
+        let mut config = ProgressMilestoneConfig {
+            enabled: true,
+            milestones: vec![],
+        };
+        config.add_milestone(75);
+        config.add_milestone(25);
+        config.add_milestone(50);
+
+        // Should be sorted
+        let pcts: Vec<u8> = config.milestones.iter().map(|m| m.percentage).collect();
+        assert_eq!(pcts, vec![25, 50, 75]);
+    }
+
+    #[test]
+    fn test_remove_milestone_not_found() {
+        let mut config = ProgressMilestoneConfig::default();
+        assert!(!config.remove_milestone(42)); // doesn't exist
+    }
+
+    #[test]
+    fn test_set_milestone_enabled_roundtrip() {
+        let mut config = ProgressMilestoneConfig::default();
+        assert!(config.set_milestone_enabled(25, false));
+        let pcts = config.enabled_percentages();
+        assert_eq!(pcts, vec![50, 75, 90]);
+
+        assert!(config.set_milestone_enabled(25, true));
+        let pcts = config.enabled_percentages();
+        assert_eq!(pcts, vec![25, 50, 75, 90]);
+    }
+
+    #[test]
+    fn test_disabled_config_has_no_milestones() {
+        let config = ProgressMilestoneConfig::disabled();
+        assert!(!config.enabled);
+        assert!(config.milestones.is_empty());
+    }
+
+    // ===== Unicode in task IDs =====
+
+    #[test]
+    fn test_tracker_unicode_task_id() {
+        let mut tracker = ProgressMilestoneTracker::new();
+        let config = ProgressMilestoneConfig::default();
+
+        tracker.check_progress("任务-中文", 50.0, &config);
+        assert!(tracker.get_task_state("任务-中文").is_some());
+        assert!(
+            tracker
+                .get_task_state("任务-中文")
+                .unwrap()
+                .is_triggered(25)
+        );
+    }
+
+    #[test]
+    fn test_tracker_emoji_task_id() {
+        let mut tracker = ProgressMilestoneTracker::new();
+        let config = ProgressMilestoneConfig::default();
+
+        tracker.check_progress("task-🚀", 80.0, &config);
+        let state = tracker.get_task_state("task-🚀").unwrap();
+        assert!(state.is_triggered(25));
+        assert!(state.is_triggered(50));
+        assert!(state.is_triggered(75));
+    }
 }

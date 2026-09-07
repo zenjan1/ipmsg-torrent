@@ -886,7 +886,8 @@ mod tests {
         ));
         assert!(io_err.to_string().contains("file missing"));
 
-        let json_err = PriorityAgingError::Json(serde_json::from_str::<String>("invalid").unwrap_err());
+        let json_err =
+            PriorityAgingError::Json(serde_json::from_str::<String>("invalid").unwrap_err());
         assert!(json_err.to_string().contains("JSON"));
 
         let invalid = PriorityAgingError::InvalidThreshold("bad value".to_string());
@@ -940,7 +941,10 @@ mod tests {
 
     #[test]
     fn format_wait_duration_large_value() {
-        assert_eq!(format_wait_duration(u64::MAX), format!("{}h{}m", u64::MAX / 3600, (u64::MAX % 3600) / 60));
+        assert_eq!(
+            format_wait_duration(u64::MAX),
+            format!("{}h{}m", u64::MAX / 3600, (u64::MAX % 3600) / 60)
+        );
     }
 
     // --- evaluate_task_aging edge cases ---
@@ -1077,12 +1081,7 @@ mod tests {
         };
         let now = Utc::now();
         // queued_at == now means wait_secs = 0, threshold = 0, so 0 >= 0 is true
-        let task = make_task(
-            "t1",
-            AgingPriority::Low,
-            Some(now),
-            DownloadState::Queued,
-        );
+        let task = make_task("t1", AgingPriority::Low, Some(now), DownloadState::Queued);
         let decision = evaluate_task_aging(&task, &config, now);
         assert!(decision.is_some());
         assert_eq!(decision.unwrap().wait_secs, 0);
@@ -1153,7 +1152,12 @@ mod tests {
         };
         let now = Utc::now();
         let queued_at = now - chrono::Duration::seconds(120);
-        let task = make_task("t1", AgingPriority::Low, Some(queued_at), DownloadState::Queued);
+        let task = make_task(
+            "t1",
+            AgingPriority::Low,
+            Some(queued_at),
+            DownloadState::Queued,
+        );
         let decision = evaluate_task_aging(&task, &config, now).unwrap();
         // wait_secs should be approximately 120
         assert!(decision.wait_secs >= 119 && decision.wait_secs <= 121);
@@ -1326,8 +1330,7 @@ mod tests {
             check_interval_secs: 15,
         };
         save_priority_aging_config(&config, dir.path()).unwrap();
-        let json =
-            std::fs::read_to_string(dir.path().join("priority_aging_config.json")).unwrap();
+        let json = std::fs::read_to_string(dir.path().join("priority_aging_config.json")).unwrap();
         // Should be pretty-printed
         assert!(json.contains('\n'));
         let loaded: PriorityAgingConfig = serde_json::from_str(&json).unwrap();
@@ -1460,7 +1463,12 @@ mod tests {
                 DownloadState::Downloading,
             ),
             // Low, no queued_at -> no aging
-            make_task("no-queue-time", AgingPriority::Low, None, DownloadState::Queued),
+            make_task(
+                "no-queue-time",
+                AgingPriority::Low,
+                None,
+                DownloadState::Queued,
+            ),
         ];
         let decisions = evaluate_batch_aging(&tasks, &config, now);
         assert_eq!(decisions.len(), 2);
@@ -1535,7 +1543,12 @@ mod tests {
         assert!(decision.is_some());
 
         // Normal task with 0 wait -> should age (0 >= 0)
-        let normal_task = make_task("t2", AgingPriority::Normal, Some(now), DownloadState::Queued);
+        let normal_task = make_task(
+            "t2",
+            AgingPriority::Normal,
+            Some(now),
+            DownloadState::Queued,
+        );
         let decision = evaluate_task_aging(&normal_task, &config, now);
         assert!(decision.is_some());
     }
@@ -1549,7 +1562,12 @@ mod tests {
         };
         let now = Utc::now();
         let queued_at = now - chrono::Duration::seconds(200);
-        let task = make_task("my-task", AgingPriority::Low, Some(queued_at), DownloadState::Queued);
+        let task = make_task(
+            "my-task",
+            AgingPriority::Low,
+            Some(queued_at),
+            DownloadState::Queued,
+        );
         let decision = evaluate_task_aging(&task, &config, now).unwrap();
         assert_eq!(decision.task_id, "my-task");
         assert_eq!(decision.old_priority, AgingPriority::Low);
