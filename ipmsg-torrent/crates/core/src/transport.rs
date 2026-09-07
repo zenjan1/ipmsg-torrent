@@ -524,8 +524,10 @@ impl P2PSwarm {
             .iter()
             .any(|p| {
                 let proto = p.to_string();
-                // Check for relay server protocol (stop indicates server capability)
-                proto.contains("circuit/relay") && proto.contains("stop")
+                // Check for relay server protocol - accept both old and new format
+                // Old: /libp2p/circuit/relay/0.2.0/stop
+                // New: /libp2p/circuit/relay (without hop suffix)
+                proto.contains("circuit/relay") && (proto.contains("stop") || !proto.contains("hop"))
             });
         
         // Log all protocols for debugging
