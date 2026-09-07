@@ -1,5 +1,5 @@
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ipmsg_core::{P2PEngine, P2PEvent, SendCommand};
 use ipmsg_protocol::message::{ChannelId, ChatMessage};
 use ratatui::Terminal;
@@ -1005,6 +1005,13 @@ enum Command {
     /// List legacy IPMSG peers
     IpMsgPeers,
     Clear,
+    /// Show recent message history
+    History {
+        /// Number of messages to show (default 20)
+        count: Option<usize>,
+    },
+    /// Show network statistics
+    Stats,
     Quit,
     Unknown(String),
 }
@@ -3245,6 +3252,17 @@ fn parse_command(input: &str) -> Command {
         }
         "dlhelp" | "dl-help" => Command::DlHelp,
         "clear" | "cls" => Command::Clear,
+        "history" | "hist" => {
+            if parts.len() > 1 {
+                match parts[1].parse::<usize>() {
+                    Ok(n) => Command::History { count: Some(n) },
+                    Err(_) => Command::Unknown("/history [number]".to_string()),
+                }
+            } else {
+                Command::History { count: None }
+            }
+        }
+        "stats" | "status" => Command::Stats,
         "quit" | "exit" | "q" => Command::Quit,
         _ => Command::Unknown(input.to_string()),
     }
@@ -3406,7 +3424,9 @@ fn command_help() -> String {
         "/fingerprint   - Show your fingerprint for verification",
         "/ipmsg <ip> <msg> - Send message to legacy IPMSG peer",
         "/ipmsg-peers     - List legacy IPMSG peers",
-        "/clear         - Clear messages",
+        "/clear         - Clear messages in current tab",
+        "/history [n]   - Show last n messages (default 20)",
+        "/stats         - Show network statistics",
         "/quit          - Exit",
     ]
     .join("\n")
@@ -3752,6 +3772,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                // Handle Ctrl key combinations first
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    match key.code {
+                        KeyCode::Char('l') => {
+                            // Ctrl+L: Clear screen (redraw)
+                            drop(state.lock().await);
+                            terminal.clear()?;
+                            continue;
+                        }
+                        KeyCode::Char('p') => {
+                            // Ctrl+P: Previous tab/channel
+                            let mut s = state.lock().await;
+                            if s.active_tab > 0 {
+                                s.active_tab -= 1;
+                            } else if s.tabs.len() > 1 {
+                                s.active_tab = s.tabs.len() - 1;
+                            }
+                            continue;
+                        }
+                        KeyCode::Char('n') => {
+                            // Ctrl+N: Next tab/channel
+                            let mut s = state.lock().await;
+                            if s.tabs.len() > 1 {
+                                s.active_tab = (s.active_tab + 1) % s.tabs.len();
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
                 let mut s = state.lock().await;
                 match key.code {
                     KeyCode::Enter => {
@@ -3770,20 +3820,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         state.lock().await.running = false;
                     }
                     KeyCode::Tab => {
-                        let len = state.lock().await.tabs.len();
-                        if len > 1 {
-                            let mut s = state.lock().await;
-                            s.active_tab = (s.active_tab + 1) % len;
+                        // Tab completion: if input starts with '/', complete command name
+                        let input = s.input.clone();
+                        if input.starts_with('/') && !input.contains(' ') {
+                            // Try to complete the command
+                            let partial = input.strip_prefix('/').unwrap_or(&input).to_lowercase();
+                            let commands = vec![
+                                "help", "nick", "msg", "peers", "join", "leave", "who", "ping",
+                                "share", "unshare", "search", "files", "download",
+                                "dl", "dls", "dlp", "dlr", "dlspeed", "dltimeout", "dlconcurrent",
+                                "dlpauseall", "dlresumeall", "dlrmcompleted", "dlrmfailed",
+                                "dlstats", "dlhealth", "block", "unblock", "fingerprint",
+                                "ipmsg", "ipmsg-peers", "clear", "history", "stats", "quit",
+                            ];
+                            let matches: Vec<&str> = commands
+                                .iter()
+                                .filter(|cmd| cmd.starts_with(&partial))
+                                .copied()
+                                .collect();
+                            if matches.len() == 1 {
+                                // Single match: auto-complete
+                                s.input = format!("/{} ", matches[0]);
+                            } else if matches.len() > 1 {
+                                // Multiple matches: show them
+                                let suggestion = matches.join(", ");
+                                drop(s);
+                                let mut s = state.lock().await;
+                                s.set_status(format!("Completions: {}", suggestion));
+                            }
+                        } else {
+                            // Normal tab behavior: cycle tabs
+                            let len = s.tabs.len();
+                            if len > 1 {
+                                s.active_tab = (s.active_tab + 1) % len;
+                            }
                         }
                     }
                     KeyCode::Left => {
-                        let mut s = state.lock().await;
                         if s.active_tab > 0 {
                             s.active_tab -= 1;
                         }
                     }
                     KeyCode::Right => {
-                        let mut s = state.lock().await;
                         if s.active_tab + 1 < s.tabs.len() {
                             s.active_tab += 1;
                         }
@@ -3983,6 +4061,61 @@ async fn handle_command(
             let mut s = state.lock().await;
             let idx = s.active_tab;
             s.tabs[idx].messages.clear();
+        }
+        Command::History { count } => {
+            let n = count.unwrap_or(20);
+            let s = state.lock().await;
+            let idx = s.active_tab;
+            let tab = &s.tabs[idx];
+            let total = tab.messages.len();
+            let start = total.saturating_sub(n);
+            let msgs = &tab.messages[start..];
+            let mut lines = vec![format!("Last {} messages (of {} total):", msgs.len(), total)];
+            for m in msgs {
+                let content = match &m.kind {
+                    ipmsg_protocol::message::MessageType::Text { content } => content.clone(),
+                    _ => format!("[{}]", m.kind.label()),
+                };
+                let sender = if m.from == "system" {
+                    "system".to_string()
+                } else if m.from == s.my_peer_id {
+                    "you".to_string()
+                } else {
+                    m.from[..8.min(m.from.len())].to_string()
+                };
+                lines.push(format!(
+                    "  [{}] {}: {}",
+                    m.timestamp.format("%H:%M:%S"),
+                    sender,
+                    content
+                ));
+            }
+            drop(s);
+            let mut s = state.lock().await;
+            s.add_system_message("main", lines.join("\n"));
+        }
+        Command::Stats => {
+            // Show network statistics from the engine
+            // We need to send a command to the engine to get stats
+            // For now, show local stats from SharedState
+            let s = state.lock().await;
+            let peer_count = s.peers.len();
+            let tab_count = s.tabs.len();
+            let total_messages: usize = s.tabs.iter().map(|t| t.messages.len()).sum();
+            let mut lines = vec![
+                "Network Statistics:".to_string(),
+                format!("  Connected peers: {}", peer_count),
+                format!("  Active tabs: {}", tab_count),
+                format!("  Total messages in memory: {}", total_messages),
+                format!("  Username: {}", s.username),
+                format!("  Peer ID: {}...", &s.my_peer_id[..8.min(s.my_peer_id.len())]),
+            ];
+            if !s.my_fingerprint.is_empty() {
+                lines.push(format!("  Fingerprint: {}...", &s.my_fingerprint[..16.min(s.my_fingerprint.len())]));
+            }
+            drop(s);
+            let mut s = state.lock().await;
+            s.add_system_message("main", lines.join("\n"));
         }
         Command::Quit => {
             state.lock().await.running = false;
