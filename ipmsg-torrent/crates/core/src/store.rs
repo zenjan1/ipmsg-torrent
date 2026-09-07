@@ -236,13 +236,11 @@ mod inner {
         }
 
         pub fn cleanup_stale_peers(&self, max_age_secs: i64) -> Result<usize> {
-            let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(max_age_secs)).to_rfc3339();
+            let cutoff =
+                (chrono::Utc::now() - chrono::Duration::seconds(max_age_secs)).to_rfc3339();
             let conn = self.conn.lock().unwrap();
             let deleted = conn
-                .execute(
-                    "DELETE FROM peers WHERE last_seen < ?1",
-                    params![cutoff],
-                )
+                .execute("DELETE FROM peers WHERE last_seen < ?1", params![cutoff])
                 .map_err(|e| StoreError(e.to_string()))?;
             Ok(deleted)
         }
@@ -346,37 +344,41 @@ mod inner {
 
         pub fn load_all_reputation(&self) -> Result<Vec<crate::reputation::PeerReputation>> {
             let conn = self.conn.lock().unwrap();
-            let mut stmt = conn.prepare(
-                "SELECT peer_id, score, message_quality, response_latency_ms, file_shares,
+            let mut stmt = conn
+                .prepare(
+                    "SELECT peer_id, score, message_quality, response_latency_ms, file_shares,
                         file_downloads, uptime_hours, violations, total_messages, valid_messages,
                         latency_samples, connected_since, last_updated
-                 FROM peer_reputation"
-            ).map_err(|e| StoreError(e.to_string()))?;
+                 FROM peer_reputation",
+                )
+                .map_err(|e| StoreError(e.to_string()))?;
 
-            let rows = stmt.query_map([], |row| {
-                let connected_since_str: Option<String> = row.get(11)?;
-                let connected_since = connected_since_str
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-                    .map(|dt| dt.with_timezone(&chrono::Utc));
+            let rows = stmt
+                .query_map([], |row| {
+                    let connected_since_str: Option<String> = row.get(11)?;
+                    let connected_since = connected_since_str
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&chrono::Utc));
 
-                Ok(crate::reputation::PeerReputation::from_db(
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get::<_, i64>(3)? as u64,
-                    row.get::<_, i64>(4)? as u32,
-                    row.get::<_, i64>(5)? as u32,
-                    row.get(6)?,
-                    row.get::<_, i64>(7)? as u32,
-                    row.get::<_, i64>(8)? as u64,
-                    row.get::<_, i64>(9)? as u64,
-                    row.get::<_, i64>(10)? as u64,
-                    connected_since,
-                    row.get::<_, String>(12)?
-                        .parse()
-                        .unwrap_or_else(|_| chrono::Utc::now()),
-                ))
-            }).map_err(|e| StoreError(e.to_string()))?;
+                    Ok(crate::reputation::PeerReputation::from_db(
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get::<_, i64>(3)? as u64,
+                        row.get::<_, i64>(4)? as u32,
+                        row.get::<_, i64>(5)? as u32,
+                        row.get(6)?,
+                        row.get::<_, i64>(7)? as u32,
+                        row.get::<_, i64>(8)? as u64,
+                        row.get::<_, i64>(9)? as u64,
+                        row.get::<_, i64>(10)? as u64,
+                        connected_since,
+                        row.get::<_, String>(12)?
+                            .parse()
+                            .unwrap_or_else(|_| chrono::Utc::now()),
+                    ))
+                })
+                .map_err(|e| StoreError(e.to_string()))?;
 
             let mut result = Vec::new();
             for row in rows {
@@ -587,37 +589,41 @@ mod inner {
 
         pub fn load_all_reputation(&self) -> Result<Vec<crate::reputation::PeerReputation>> {
             let conn = self.conn.lock().unwrap();
-            let mut stmt = conn.prepare(
-                "SELECT peer_id, score, message_quality, response_latency_ms, file_shares,
+            let mut stmt = conn
+                .prepare(
+                    "SELECT peer_id, score, message_quality, response_latency_ms, file_shares,
                         file_downloads, uptime_hours, violations, total_messages, valid_messages,
                         latency_samples, connected_since, last_updated
-                 FROM peer_reputation"
-            ).map_err(|e| StoreError(e.to_string()))?;
+                 FROM peer_reputation",
+                )
+                .map_err(|e| StoreError(e.to_string()))?;
 
-            let rows = stmt.query_map([], |row| {
-                let connected_since_str: Option<String> = row.get(11)?;
-                let connected_since = connected_since_str
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-                    .map(|dt| dt.with_timezone(&chrono::Utc));
+            let rows = stmt
+                .query_map([], |row| {
+                    let connected_since_str: Option<String> = row.get(11)?;
+                    let connected_since = connected_since_str
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&chrono::Utc));
 
-                Ok(crate::reputation::PeerReputation::from_db(
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get::<_, i64>(3)? as u64,
-                    row.get::<_, i64>(4)? as u32,
-                    row.get::<_, i64>(5)? as u32,
-                    row.get(6)?,
-                    row.get::<_, i64>(7)? as u32,
-                    row.get::<_, i64>(8)? as u64,
-                    row.get::<_, i64>(9)? as u64,
-                    row.get::<_, i64>(10)? as u64,
-                    connected_since,
-                    row.get::<_, String>(12)?
-                        .parse()
-                        .unwrap_or_else(|_| chrono::Utc::now()),
-                ))
-            }).map_err(|e| StoreError(e.to_string()))?;
+                    Ok(crate::reputation::PeerReputation::from_db(
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get::<_, i64>(3)? as u64,
+                        row.get::<_, i64>(4)? as u32,
+                        row.get::<_, i64>(5)? as u32,
+                        row.get(6)?,
+                        row.get::<_, i64>(7)? as u32,
+                        row.get::<_, i64>(8)? as u64,
+                        row.get::<_, i64>(9)? as u64,
+                        row.get::<_, i64>(10)? as u64,
+                        connected_since,
+                        row.get::<_, String>(12)?
+                            .parse()
+                            .unwrap_or_else(|_| chrono::Utc::now()),
+                    ))
+                })
+                .map_err(|e| StoreError(e.to_string()))?;
 
             let mut result = Vec::new();
             for row in rows {
@@ -661,7 +667,9 @@ mod tests {
             seq: 0,
             timestamp: chrono::Utc::now(),
             ttl: 0,
-            kind: MessageType::Text { content: text.to_string() },
+            kind: MessageType::Text {
+                content: text.to_string(),
+            },
             encrypted_payload: None,
             signature: vec![],
             reply_to: None,
@@ -712,7 +720,12 @@ mod tests {
         // Create peer first to satisfy foreign key constraint
         store.upsert_peer(&make_peer("peer", "Peer")).unwrap();
         for i in 0..5 {
-            let msg = make_text_msg(&format!("m{}", i), "peer", Some("other"), &format!("msg {}", i));
+            let msg = make_text_msg(
+                &format!("m{}", i),
+                "peer",
+                Some("other"),
+                &format!("msg {}", i),
+            );
             store.save_message(&msg).unwrap();
         }
         let msgs = store.get_messages("peer", 3);
@@ -837,7 +850,10 @@ mod tests {
     fn test_save_peer_addresses() {
         let dir = TempDir::new().unwrap();
         let store = make_store(&dir);
-        let addrs = vec!["/ip4/1.2.3.4/tcp/4001".to_string(), "/ip4/5.6.7.8/udp/4001/quic-v1".to_string()];
+        let addrs = vec![
+            "/ip4/1.2.3.4/tcp/4001".to_string(),
+            "/ip4/5.6.7.8/udp/4001/quic-v1".to_string(),
+        ];
         store.save_peer_addresses("peer1", &addrs).unwrap();
         let known = store.get_known_addresses(7);
         assert!(!known.is_empty());

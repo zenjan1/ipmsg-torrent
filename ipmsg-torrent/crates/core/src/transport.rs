@@ -540,23 +540,22 @@ impl P2PSwarm {
         // Relay server protocol: /libp2p/circuit/relay/0.2.0/stop
         // Relay client protocol: /libp2p/circuit/relay/0.2.0/hop
         // We need the server protocol to request reservation
-        let supports_relay_server = info
+        let supports_relay_server = info.protocols.iter().any(|p| {
+            let proto = p.to_string();
+            // Check for relay server protocol - accept both old and new format
+            // Old: /libp2p/circuit/relay/0.2.0/stop
+            // New: /libp2p/circuit/relay (without hop suffix)
+            proto.contains("circuit/relay") && (proto.contains("stop") || !proto.contains("hop"))
+        });
+
+        // Log all protocols for debugging
+        let relay_protocols: Vec<_> = info
             .protocols
             .iter()
-            .any(|p| {
-                let proto = p.to_string();
-                // Check for relay server protocol - accept both old and new format
-                // Old: /libp2p/circuit/relay/0.2.0/stop
-                // New: /libp2p/circuit/relay (without hop suffix)
-                proto.contains("circuit/relay") && (proto.contains("stop") || !proto.contains("hop"))
-            });
-        
-        // Log all protocols for debugging
-        let relay_protocols: Vec<_> = info.protocols.iter()
             .filter(|p| p.to_string().contains("circuit") || p.to_string().contains("relay"))
             .map(|p| p.to_string())
             .collect();
-        
+
         tracing::info!(
             peer = %pid_str,
             supports_relay_server,
@@ -568,21 +567,21 @@ impl P2PSwarm {
         // If peer supports relay server, trigger reservation using the peer's listen addresses
         if supports_relay_server {
             let peer_id = info.public_key.to_peer_id();
-            
+
             tracing::info!(
                 peer = %pid_str,
                 listen_addrs_count = info.listen_addrs.len(),
                 "🎯 Peer supports relay server, attempting reservation"
             );
-            
+
             // Use the peer's listen addresses from Identify info
             if !info.listen_addrs.is_empty() {
                 // Try the first listen address
                 let listen_addr = &info.listen_addrs[0];
-                
+
                 // Build proper relay address: /peer_listen_addr/p2p/peer_id/p2p-circuit
                 let mut relay_addr = listen_addr.clone();
-                
+
                 // Check if address already contains /p2p/<peer_id>
                 let has_p2p = relay_addr
                     .iter()
@@ -1019,7 +1018,7 @@ impl futures::Stream for P2PSwarm {
                             // for private IPs in on_identify_received).
                             // Trigger Kademlia bootstrap to refresh routing table
                             let _ = self.swarm.behaviour_mut().kademlia.bootstrap();
-                            
+
                             // Note: Relay reservation is now triggered in Identify handler
                             // after confirming the peer supports relay protocol
                         }

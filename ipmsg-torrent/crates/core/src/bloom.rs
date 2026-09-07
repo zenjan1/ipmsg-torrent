@@ -145,7 +145,11 @@ impl BloomFilter {
         if self.item_count == 0 {
             return 0.0;
         }
-        let set_bits = self.bits.iter().map(|w| w.count_ones() as usize).sum::<usize>() as f64;
+        let set_bits = self
+            .bits
+            .iter()
+            .map(|w| w.count_ones() as usize)
+            .sum::<usize>() as f64;
         let total_bits = self.num_bits as f64;
         if total_bits == 0.0 {
             return 1.0;

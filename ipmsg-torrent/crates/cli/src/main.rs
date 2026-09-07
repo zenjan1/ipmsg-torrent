@@ -3826,12 +3826,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Try to complete the command
                             let partial = input.strip_prefix('/').unwrap_or(&input).to_lowercase();
                             let commands = vec![
-                                "help", "nick", "msg", "peers", "join", "leave", "who", "ping",
-                                "share", "unshare", "search", "files", "download",
-                                "dl", "dls", "dlp", "dlr", "dlspeed", "dltimeout", "dlconcurrent",
-                                "dlpauseall", "dlresumeall", "dlrmcompleted", "dlrmfailed",
-                                "dlstats", "dlhealth", "block", "unblock", "fingerprint",
-                                "ipmsg", "ipmsg-peers", "clear", "history", "stats", "quit",
+                                "help",
+                                "nick",
+                                "msg",
+                                "peers",
+                                "join",
+                                "leave",
+                                "who",
+                                "ping",
+                                "share",
+                                "unshare",
+                                "search",
+                                "files",
+                                "download",
+                                "dl",
+                                "dls",
+                                "dlp",
+                                "dlr",
+                                "dlspeed",
+                                "dltimeout",
+                                "dlconcurrent",
+                                "dlpauseall",
+                                "dlresumeall",
+                                "dlrmcompleted",
+                                "dlrmfailed",
+                                "dlstats",
+                                "dlhealth",
+                                "block",
+                                "unblock",
+                                "fingerprint",
+                                "ipmsg",
+                                "ipmsg-peers",
+                                "clear",
+                                "history",
+                                "stats",
+                                "quit",
                             ];
                             let matches: Vec<&str> = commands
                                 .iter()
@@ -4070,7 +4099,11 @@ async fn handle_command(
             let total = tab.messages.len();
             let start = total.saturating_sub(n);
             let msgs = &tab.messages[start..];
-            let mut lines = vec![format!("Last {} messages (of {} total):", msgs.len(), total)];
+            let mut lines = vec![format!(
+                "Last {} messages (of {} total):",
+                msgs.len(),
+                total
+            )];
             for m in msgs {
                 let content = match &m.kind {
                     ipmsg_protocol::message::MessageType::Text { content } => content.clone(),
@@ -4108,10 +4141,16 @@ async fn handle_command(
                 format!("  Active tabs: {}", tab_count),
                 format!("  Total messages in memory: {}", total_messages),
                 format!("  Username: {}", s.username),
-                format!("  Peer ID: {}...", &s.my_peer_id[..8.min(s.my_peer_id.len())]),
+                format!(
+                    "  Peer ID: {}...",
+                    &s.my_peer_id[..8.min(s.my_peer_id.len())]
+                ),
             ];
             if !s.my_fingerprint.is_empty() {
-                lines.push(format!("  Fingerprint: {}...", &s.my_fingerprint[..16.min(s.my_fingerprint.len())]));
+                lines.push(format!(
+                    "  Fingerprint: {}...",
+                    &s.my_fingerprint[..16.min(s.my_fingerprint.len())]
+                ));
             }
             drop(s);
             let mut s = state.lock().await;

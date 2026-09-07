@@ -1731,7 +1731,8 @@ impl P2PEngine {
     /// Save all reputation data to database
     pub fn save_reputation_data(&self) -> Result<(), P2PError> {
         for (_, rep) in self.reputation_manager.all_peers() {
-            self.store.save_reputation(rep)
+            self.store
+                .save_reputation(rep)
                 .map_err(|e| P2PError::Store(e.to_string()))?;
         }
         Ok(())

@@ -246,7 +246,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
         let path = make_test_file(&dir, "hello.txt", b"hello world");
-        let info = mgr.share_file(&path, vec!["test".into()], None, "peer1".into()).await.unwrap();
+        let info = mgr
+            .share_file(&path, vec!["test".into()], None, "peer1".into())
+            .await
+            .unwrap();
         assert_eq!(info.file_ref.name, "hello.txt");
         assert_eq!(info.file_ref.size, 11);
         assert_eq!(info.owner, "peer1");
@@ -259,7 +262,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
         let path = make_test_file(&dir, "doc.pdf", b"pdf content");
-        let info = mgr.share_file(&path, vec![], Some("A document".into()), "peer2".into()).await.unwrap();
+        let info = mgr
+            .share_file(&path, vec![], Some("A document".into()), "peer2".into())
+            .await
+            .unwrap();
         assert_eq!(info.description, Some("A document".to_string()));
     }
 
@@ -267,7 +273,14 @@ mod tests {
     async fn test_share_file_not_found() {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
-        let result = mgr.share_file(Path::new("/nonexistent/file.txt"), vec![], None, "peer".into()).await;
+        let result = mgr
+            .share_file(
+                Path::new("/nonexistent/file.txt"),
+                vec![],
+                None,
+                "peer".into(),
+            )
+            .await;
         assert!(result.is_err());
     }
 
@@ -276,7 +289,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
         let path = make_test_file(&dir, "a.txt", b"aaa");
-        let info = mgr.share_file(&path, vec![], None, "peer".into()).await.unwrap();
+        let info = mgr
+            .share_file(&path, vec![], None, "peer".into())
+            .await
+            .unwrap();
         assert_eq!(mgr.shared_count().await, 1);
         assert!(mgr.unshare_file(&info.file_ref.hash).await);
         assert_eq!(mgr.shared_count().await, 0);
@@ -294,7 +310,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
         let path = make_test_file(&dir, "b.txt", b"bbb");
-        let info = mgr.share_file(&path, vec![], None, "peer".into()).await.unwrap();
+        let info = mgr
+            .share_file(&path, vec![], None, "peer".into())
+            .await
+            .unwrap();
         let found = mgr.get_shared_file(&info.file_ref.hash).await;
         assert!(found.is_some());
         assert_eq!(found.unwrap().file_ref.name, "b.txt");
@@ -307,8 +326,12 @@ mod tests {
         let mgr = make_manager(&dir).await;
         let p1 = make_test_file(&dir, "f1.txt", b"1");
         let p2 = make_test_file(&dir, "f2.txt", b"2");
-        mgr.share_file(&p1, vec![], None, "peer".into()).await.unwrap();
-        mgr.share_file(&p2, vec![], None, "peer".into()).await.unwrap();
+        mgr.share_file(&p1, vec![], None, "peer".into())
+            .await
+            .unwrap();
+        mgr.share_file(&p2, vec![], None, "peer".into())
+            .await
+            .unwrap();
         let list = mgr.list_shared_files().await;
         assert_eq!(list.len(), 2);
     }
@@ -323,7 +346,10 @@ mod tests {
         let path = files_dir.join("chunk.dat");
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content).unwrap();
-        let info = mgr.share_file(&path, vec![], None, "peer".into()).await.unwrap();
+        let info = mgr
+            .share_file(&path, vec![], None, "peer".into())
+            .await
+            .unwrap();
         // chunk_size is 256KB, so one chunk for 16 bytes
         let chunk = mgr.read_chunk(&info.file_ref.hash, 0).await.unwrap();
         assert_eq!(chunk, content);
@@ -342,7 +368,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
         let data = b"announce data";
-        let file_ref = FileRef::new("ann.txt".into(), data.len() as u64, "text/plain".into(), data);
+        let file_ref = FileRef::new(
+            "ann.txt".into(),
+            data.len() as u64,
+            "text/plain".into(),
+            data,
+        );
         let info = FileShareInfo {
             file_ref: file_ref.clone(),
             owner: "remote_peer".into(),
@@ -361,7 +392,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
         let p = make_test_file(&dir, "rust_book.pdf", b"content");
-        mgr.share_file(&p, vec![], None, "peer".into()).await.unwrap();
+        mgr.share_file(&p, vec![], None, "peer".into())
+            .await
+            .unwrap();
         let results = mgr.search("rust", &[]).await;
         assert_eq!(results.len(), 1);
         let empty = mgr.search("python", &[]).await;
@@ -373,7 +406,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
         let p = make_test_file(&dir, "x.bin", b"data");
-        mgr.share_file(&p, vec![], Some("important binary file".into()), "peer".into()).await.unwrap();
+        mgr.share_file(
+            &p,
+            vec![],
+            Some("important binary file".into()),
+            "peer".into(),
+        )
+        .await
+        .unwrap();
         let results = mgr.search("important", &[]).await;
         assert_eq!(results.len(), 1);
     }
@@ -383,7 +423,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
         let p = make_test_file(&dir, "song.mp3", b"music");
-        mgr.share_file(&p, vec!["music".into(), "rock".into()], None, "peer".into()).await.unwrap();
+        mgr.share_file(&p, vec!["music".into(), "rock".into()], None, "peer".into())
+            .await
+            .unwrap();
         let results = mgr.search("", &["music".into()]).await;
         assert_eq!(results.len(), 1);
         let results2 = mgr.search("", &["jazz".into()]).await;
@@ -396,8 +438,12 @@ mod tests {
         let mgr = make_manager(&dir).await;
         let p1 = make_test_file(&dir, "a.txt", b"a");
         let p2 = make_test_file(&dir, "b.txt", b"b");
-        mgr.share_file(&p1, vec![], None, "peer".into()).await.unwrap();
-        mgr.share_file(&p2, vec![], None, "peer".into()).await.unwrap();
+        mgr.share_file(&p1, vec![], None, "peer".into())
+            .await
+            .unwrap();
+        mgr.share_file(&p2, vec![], None, "peer".into())
+            .await
+            .unwrap();
         let results = mgr.search("", &[]).await;
         assert_eq!(results.len(), 2);
     }
@@ -407,7 +453,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
         let p = make_test_file(&dir, "README.md", b"readme");
-        mgr.share_file(&p, vec![], None, "peer".into()).await.unwrap();
+        mgr.share_file(&p, vec![], None, "peer".into())
+            .await
+            .unwrap();
         let results = mgr.search("readme", &[]).await;
         assert_eq!(results.len(), 1);
         let results2 = mgr.search("README", &[]).await;
@@ -419,7 +467,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
         let data = b"discovered content";
-        let file_ref = FileRef::new("remote_file.txt".into(), data.len() as u64, "text/plain".into(), data);
+        let file_ref = FileRef::new(
+            "remote_file.txt".into(),
+            data.len() as u64,
+            "text/plain".into(),
+            data,
+        );
         let info = FileShareInfo {
             file_ref,
             owner: "remote".into(),
@@ -454,7 +507,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
         let path = make_test_file(&dir, "empty.dat", b"");
-        let info = mgr.share_file(&path, vec![], None, "peer".into()).await.unwrap();
+        let info = mgr
+            .share_file(&path, vec![], None, "peer".into())
+            .await
+            .unwrap();
         assert_eq!(info.file_ref.size, 0);
         assert_eq!(info.file_ref.chunks, 0);
     }
@@ -463,22 +519,28 @@ mod tests {
     async fn test_share_multiple_files_same_name() {
         let dir = TempDir::new().unwrap();
         let mgr = make_manager(&dir).await;
-        
+
         // Create two files with the same name but in different directories
         let dir1 = dir.path().join("dir1");
         let dir2 = dir.path().join("dir2");
         std::fs::create_dir_all(&dir1).unwrap();
         std::fs::create_dir_all(&dir2).unwrap();
-        
+
         let p1 = dir1.join("same.txt");
         let p2 = dir2.join("same.txt");
-        
+
         std::fs::write(&p1, b"content1").unwrap();
         std::fs::write(&p2, b"content2").unwrap();
-        
-        let i1 = mgr.share_file(&p1, vec![], None, "peer".into()).await.unwrap();
-        let i2 = mgr.share_file(&p2, vec![], None, "peer".into()).await.unwrap();
-        
+
+        let i1 = mgr
+            .share_file(&p1, vec![], None, "peer".into())
+            .await
+            .unwrap();
+        let i2 = mgr
+            .share_file(&p2, vec![], None, "peer".into())
+            .await
+            .unwrap();
+
         // Different content -> different hashes
         assert_ne!(i1.file_ref.hash, i2.file_ref.hash);
         assert_eq!(mgr.shared_count().await, 2);

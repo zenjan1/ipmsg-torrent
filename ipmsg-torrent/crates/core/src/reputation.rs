@@ -152,11 +152,8 @@ impl PeerReputation {
     /// Mark the peer as disconnected; accumulate elapsed uptime.
     pub fn mark_disconnected(&mut self) {
         if let Some(since) = self.connected_since.take() {
-            let elapsed = Utc::now()
-                .signed_duration_since(since)
-                .num_seconds()
-                .max(0) as f64
-                / 3600.0;
+            let elapsed =
+                Utc::now().signed_duration_since(since).num_seconds().max(0) as f64 / 3600.0;
             self.uptime_hours += elapsed;
             self.recompute();
         }
@@ -223,8 +220,8 @@ impl PeerReputation {
         if self.latency_samples == 0 {
             self.response_latency_ms = latency_ms;
         } else {
-            let ema = (alpha * latency_ms as f64)
-                + ((1.0 - alpha) * self.response_latency_ms as f64);
+            let ema =
+                (alpha * latency_ms as f64) + ((1.0 - alpha) * self.response_latency_ms as f64);
             self.response_latency_ms = ema.round() as u64;
         }
         self.latency_samples += 1;
