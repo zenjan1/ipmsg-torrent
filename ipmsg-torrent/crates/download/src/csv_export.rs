@@ -306,8 +306,7 @@ pub async fn save_csv_export_config(
     config: &CsvExportConfig,
     path: &Path,
 ) -> Result<(), CsvExportError> {
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(config).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("csv_config.tmp");
     fs::write(&tmp, json.as_bytes()).await?;
     fs::rename(&tmp, path).await?;
@@ -701,5 +700,962 @@ mod tests {
 
         // Progress should be 0.00% (avoid division by zero)
         assert!(csv_string.contains("0.00"));
+    }
+
+    // ========== Phase 252: Comprehensive Test Coverage ==========
+
+    // --- CsvExportConfig serde tests ---
+
+    #[test]
+    fn test_csv_export_config_serde_roundtrip() {
+        let config = CsvExportConfig {
+            delimiter: ';',
+            include_headers: false,
+            quote_all: true,
+            datetime_format: "%Y-%m-%d".to_string(),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: CsvExportConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.delimiter, ';');
+        assert!(!deserialized.include_headers);
+        assert!(deserialized.quote_all);
+        assert_eq!(deserialized.datetime_format, "%Y-%m-%d");
+    }
+
+    #[test]
+    fn test_csv_export_config_serde_default_values() {
+        let json = r#"{}"#;
+        let config: CsvExportConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.delimiter, ',');
+        assert!(config.include_headers);
+        assert!(!config.quote_all);
+        assert_eq!(config.datetime_format, "%+");
+    }
+
+    #[test]
+    fn test_csv_export_config_serde_extra_fields_ignored() {
+        let json = r#"{"delimiter":"\t","unknown_field":123}"#;
+        let config: CsvExportConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.delimiter, '\t');
+    }
+
+    #[test]
+    fn test_csv_export_config_serde_pretty() {
+        let config = CsvExportConfig::default();
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        let deserialized: CsvExportConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(deserialized.delimiter, config.delimiter);
+        assert_eq!(deserialized.include_headers, config.include_headers);
+    }
+
+    // --- CsvExportConfig traits ---
+
+    #[test]
+    fn test_csv_export_config_clone() {
+        let config = CsvExportConfig {
+            delimiter: '|',
+            include_headers: false,
+            quote_all: true,
+            datetime_format: "%H:%M".to_string(),
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.delimiter, '|');
+        assert_eq!(cloned.include_headers, false);
+        assert_eq!(cloned.quote_all, true);
+        assert_eq!(cloned.datetime_format, "%H:%M");
+    }
+
+    #[test]
+    fn test_csv_export_config_clone_independence() {
+        let mut config = CsvExportConfig::default();
+        let cloned = config.clone();
+        config.delimiter = ';';
+        config.include_headers = false;
+        assert_eq!(cloned.delimiter, ',');
+        assert!(cloned.include_headers);
+    }
+
+    #[test]
+    fn test_csv_export_config_debug() {
+        let config = CsvExportConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("CsvExportConfig"));
+        assert!(debug.contains("delimiter"));
+    }
+
+    // --- CsvExportResult traits ---
+
+    #[test]
+    fn test_csv_export_result_clone() {
+        let result = CsvExportResult {
+            task_count: 5,
+            path: PathBuf::from("/tmp/test.csv"),
+            file_size: 1024,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.task_count, 5);
+        assert_eq!(cloned.path, PathBuf::from("/tmp/test.csv"));
+        assert_eq!(cloned.file_size, 1024);
+    }
+
+    #[test]
+    fn test_csv_export_result_debug() {
+        let result = CsvExportResult {
+            task_count: 3,
+            path: PathBuf::from("/tmp/export.csv"),
+            file_size: 512,
+        };
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("CsvExportResult"));
+        assert!(debug.contains("task_count: 3"));
+    }
+
+    // --- CsvExportError tests ---
+
+    #[test]
+    fn test_csv_export_error_display_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err = CsvExportError::Io(io_err);
+        let display = format!("{}", err);
+        assert!(display.contains("IO error"));
+        assert!(display.contains("file not found"));
+    }
+
+    #[test]
+    fn test_csv_export_error_display_empty() {
+        let err = CsvExportError::EmptyTaskList;
+        let display = format!("{}", err);
+        assert!(display.contains("No tasks"));
+    }
+
+    #[test]
+    fn test_csv_export_error_debug() {
+        let err = CsvExportError::EmptyTaskList;
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("EmptyTaskList"));
+    }
+
+    #[test]
+    fn test_csv_export_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let err: CsvExportError = CsvExportError::from(io_err);
+        match err {
+            CsvExportError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied),
+            _ => panic!("Expected Io variant"),
+        }
+    }
+
+    // --- escape_csv_field boundary tests ---
+
+    #[test]
+    fn test_escape_csv_field_empty_string() {
+        assert_eq!(escape_csv_field("", ',', false), "");
+        assert_eq!(escape_csv_field("", ',', true), "\"\"");
+    }
+
+    #[test]
+    fn test_escape_csv_field_carriage_return() {
+        assert_eq!(
+            escape_csv_field("line1\rline2", ',', false),
+            "\"line1\rline2\""
+        );
+    }
+
+    #[test]
+    fn test_escape_csv_field_unicode() {
+        assert_eq!(escape_csv_field("中文文件名", ',', false), "中文文件名");
+        assert_eq!(escape_csv_field("中文,文件", ',', false), "\"中文,文件\"");
+    }
+
+    #[test]
+    fn test_escape_csv_field_emoji() {
+        assert_eq!(escape_csv_field("🎉🎊", ',', false), "🎉🎊");
+        assert_eq!(escape_csv_field("🎉,🎊", ',', false), "\"🎉,🎊\"");
+    }
+
+    #[test]
+    fn test_escape_csv_field_tab_delimiter() {
+        assert_eq!(
+            escape_csv_field("hello\tworld", '\t', false),
+            "\"hello\tworld\""
+        );
+        assert_eq!(escape_csv_field("hello", '\t', false), "hello");
+    }
+
+    #[test]
+    fn test_escape_csv_field_pipe_delimiter() {
+        assert_eq!(
+            escape_csv_field("hello|world", '|', false),
+            "\"hello|world\""
+        );
+    }
+
+    #[test]
+    fn test_escape_csv_field_multiple_special_chars() {
+        let field = "hello,\"world\"\ntest";
+        let escaped = escape_csv_field(field, ',', false);
+        assert!(escaped.starts_with('"'));
+        assert!(escaped.ends_with('"'));
+        assert!(escaped.contains("\"\""));
+    }
+
+    // --- task_to_csv_row comprehensive tests ---
+
+    #[test]
+    fn test_task_to_csv_row_complete_progress() {
+        let mut task = make_test_task("task-1", "complete.mp4");
+        task.size = 1000;
+        task.downloaded = 1000;
+        task.state = DownloadState::Complete;
+
+        let config = CsvExportConfig::default();
+        let row = task_to_csv_row(&task, &config);
+
+        assert!(row.contains("100.00"));
+        assert!(row.contains("complete"));
+    }
+
+    #[test]
+    fn test_task_to_csv_row_no_progress() {
+        let mut task = make_test_task("task-1", "notstarted.mp4");
+        task.size = 1000;
+        task.downloaded = 0;
+        task.state = DownloadState::Queued;
+
+        let config = CsvExportConfig::default();
+        let row = task_to_csv_row(&task, &config);
+
+        assert!(row.contains("0.00"));
+        assert!(row.contains("queued"));
+    }
+
+    #[test]
+    fn test_task_to_csv_row_with_error() {
+        let mut task = make_test_task("task-1", "failed.mp4");
+        task.state = DownloadState::Error;
+        task.error = Some("connection timeout".to_string());
+
+        let config = CsvExportConfig::default();
+        let row = task_to_csv_row(&task, &config);
+
+        assert!(row.contains("connection timeout"));
+        assert!(row.contains("error"));
+    }
+
+    #[test]
+    fn test_task_to_csv_row_with_group() {
+        let mut task = make_test_task("task-1", "file.txt");
+        task.group = Some("work".to_string());
+
+        let config = CsvExportConfig::default();
+        let row = task_to_csv_row(&task, &config);
+
+        assert!(row.contains("work"));
+    }
+
+    #[test]
+    fn test_task_to_csv_row_with_notes() {
+        let mut task = make_test_task("task-1", "file.txt");
+        task.notes = Some("important download".to_string());
+
+        let config = CsvExportConfig::default();
+        let row = task_to_csv_row(&task, &config);
+
+        assert!(row.contains("important download"));
+    }
+
+    #[test]
+    fn test_task_to_csv_row_with_source_url() {
+        let mut task = make_test_task("task-1", "file.txt");
+        task.source_url = Some("http://example.com/file.txt".to_string());
+
+        let config = CsvExportConfig::default();
+        let row = task_to_csv_row(&task, &config);
+
+        assert!(row.contains("http://example.com/file.txt"));
+    }
+
+    #[test]
+    fn test_task_to_csv_row_with_queue_position() {
+        let mut task = make_test_task("task-1", "file.txt");
+        task.queue_position = Some(5);
+
+        let config = CsvExportConfig::default();
+        let row = task_to_csv_row(&task, &config);
+
+        // Queue position should be in the row
+        let fields: Vec<&str> = row.split(',').collect();
+        assert!(fields.len() >= 14);
+    }
+
+    #[test]
+    fn test_task_to_csv_row_unicode_task_id() {
+        let task = make_test_task("任务-001", "中文文件.txt");
+        let config = CsvExportConfig::default();
+        let row = task_to_csv_row(&task, &config);
+
+        assert!(row.contains("任务-001"));
+        assert!(row.contains("中文文件.txt"));
+    }
+
+    #[test]
+    fn test_task_to_csv_row_emoji_task_id() {
+        let task = make_test_task("🎉-task", "📁-file.txt");
+        let config = CsvExportConfig::default();
+        let row = task_to_csv_row(&task, &config);
+
+        assert!(row.contains("🎉-task"));
+        assert!(row.contains("📁-file.txt"));
+    }
+
+    #[test]
+    fn test_task_to_csv_row_custom_datetime_format() {
+        let task = make_test_task("task-1", "file.txt");
+        let config = CsvExportConfig {
+            datetime_format: "%Y-%m-%d".to_string(),
+            ..Default::default()
+        };
+        let row = task_to_csv_row(&task, &config);
+
+        // Should contain date in YYYY-MM-DD format
+        let now = chrono::Utc::now();
+        let expected = now.format("%Y-%m-%d").to_string();
+        assert!(row.contains(&expected));
+    }
+
+    #[test]
+    fn test_task_to_csv_row_semicolon_delimiter() {
+        let task = make_test_task("task-1", "file.txt");
+        let config = CsvExportConfig {
+            delimiter: ';',
+            ..Default::default()
+        };
+        let row = task_to_csv_row(&task, &config);
+
+        assert!(row.contains(';'));
+        // Fields should be separated by semicolons
+        let fields: Vec<&str> = row.split(';').collect();
+        assert!(fields.len() > 10);
+    }
+
+    #[test]
+    fn test_task_to_csv_row_quote_all() {
+        let task = make_test_task("task-1", "file.txt");
+        let config = CsvExportConfig {
+            quote_all: true,
+            ..Default::default()
+        };
+        let row = task_to_csv_row(&task, &config);
+
+        // All fields should be quoted
+        assert!(row.contains("\"task-1\""));
+        assert!(row.contains("\"file.txt\""));
+    }
+
+    // --- export_tasks_to_csv boundary tests ---
+
+    #[test]
+    fn test_export_tasks_to_csv_single_task() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let csv_path = temp_dir.path().join("single.csv");
+
+        let tasks = vec![make_test_task("task-1", "file.txt")];
+        let result = export_tasks_to_csv(&tasks, &csv_path, None).unwrap();
+
+        assert_eq!(result.task_count, 1);
+        assert_eq!(result.path, csv_path);
+        assert!(result.file_size > 0);
+
+        let content = std::fs::read_to_string(&csv_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2); // header + 1 data row
+    }
+
+    #[test]
+    fn test_export_tasks_to_csv_many_tasks() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let csv_path = temp_dir.path().join("many.csv");
+
+        let tasks: Vec<DownloadTask> = (0..100)
+            .map(|i| make_test_task(&format!("task-{}", i), &format!("file-{}.txt", i)))
+            .collect();
+
+        let result = export_tasks_to_csv(&tasks, &csv_path, None).unwrap();
+        assert_eq!(result.task_count, 100);
+
+        let content = std::fs::read_to_string(&csv_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 101); // header + 100 data rows
+    }
+
+    #[test]
+    fn test_export_tasks_to_csv_overwrite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let csv_path = temp_dir.path().join("overwrite.csv");
+
+        // First export
+        let tasks1 = vec![make_test_task("task-1", "file1.txt")];
+        export_tasks_to_csv(&tasks1, &csv_path, None).unwrap();
+
+        // Second export (overwrite)
+        let tasks2 = vec![make_test_task("task-2", "file2.txt")];
+        export_tasks_to_csv(&tasks2, &csv_path, None).unwrap();
+
+        let content = std::fs::read_to_string(&csv_path).unwrap();
+        assert!(content.contains("task-2"));
+        assert!(!content.contains("task-1"));
+    }
+
+    #[test]
+    fn test_export_tasks_to_csv_no_tmp_leftover() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let csv_path = temp_dir.path().join("no_tmp.csv");
+
+        let tasks = vec![make_test_task("task-1", "file.txt")];
+        export_tasks_to_csv(&tasks, &csv_path, None).unwrap();
+
+        let tmp_path = csv_path.with_extension("csv.tmp");
+        assert!(!tmp_path.exists());
+    }
+
+    #[test]
+    fn test_export_tasks_to_csv_file_size_correct() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let csv_path = temp_dir.path().join("size.csv");
+
+        let tasks = vec![make_test_task("task-1", "file.txt")];
+        let result = export_tasks_to_csv(&tasks, &csv_path, None).unwrap();
+
+        let actual_size = std::fs::metadata(&csv_path).unwrap().len();
+        assert_eq!(result.file_size, actual_size);
+    }
+
+    #[test]
+    fn test_export_tasks_to_csv_unicode_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let csv_path = temp_dir.path().join("中文导出.csv");
+
+        let tasks = vec![make_test_task("task-1", "文件.txt")];
+        let result = export_tasks_to_csv(&tasks, &csv_path, None).unwrap();
+
+        assert_eq!(result.task_count, 1);
+        assert!(csv_path.exists());
+    }
+
+    // --- export_tasks_to_csv_string boundary tests ---
+
+    #[test]
+    fn test_export_tasks_to_csv_string_empty() {
+        let csv_string = export_tasks_to_csv_string(&[], None).unwrap();
+        let lines: Vec<&str> = csv_string.lines().collect();
+        assert_eq!(lines.len(), 1); // only header
+    }
+
+    #[test]
+    fn test_export_tasks_to_csv_string_many_tasks() {
+        let tasks: Vec<DownloadTask> = (0..50)
+            .map(|i| make_test_task(&format!("task-{}", i), &format!("file-{}.txt", i)))
+            .collect();
+
+        let csv_string = export_tasks_to_csv_string(&tasks, None).unwrap();
+        let lines: Vec<&str> = csv_string.lines().collect();
+        assert_eq!(lines.len(), 51); // header + 50 data rows
+    }
+
+    #[test]
+    fn test_export_tasks_to_csv_string_unicode_content() {
+        let mut task = make_test_task("task-1", "中文文件.txt");
+        task.notes = Some("这是备注".to_string());
+        task.tags = vec!["标签1".to_string(), "标签2".to_string()];
+
+        let csv_string = export_tasks_to_csv_string(&[task], None).unwrap();
+        assert!(csv_string.contains("中文文件.txt"));
+        assert!(csv_string.contains("这是备注"));
+        assert!(csv_string.contains("标签1;标签2"));
+    }
+
+    // --- generate_csv_summary comprehensive tests ---
+
+    #[test]
+    fn test_generate_csv_summary_empty() {
+        let summary = generate_csv_summary(&[]);
+        assert!(summary.contains("# Total tasks: 0"));
+        assert!(summary.contains("Overall progress: 0.0%"));
+        assert!(summary.contains("Total size: 0 bytes"));
+    }
+
+    #[test]
+    fn test_generate_csv_summary_single_task() {
+        let tasks = vec![make_test_task("task-1", "file.txt")];
+        let summary = generate_csv_summary(&tasks);
+
+        assert!(summary.contains("# Total tasks: 1"));
+        assert!(summary.contains("downloading: 1"));
+    }
+
+    #[test]
+    fn test_generate_csv_summary_all_states() {
+        let mut tasks = vec![
+            make_test_task("task-1", "file1.txt"),
+            make_test_task("task-2", "file2.txt"),
+            make_test_task("task-3", "file3.txt"),
+            make_test_task("task-4", "file4.txt"),
+        ];
+        tasks[0].state = DownloadState::Downloading;
+        tasks[1].state = DownloadState::Complete;
+        tasks[2].state = DownloadState::Error;
+        tasks[3].state = DownloadState::Paused;
+
+        let summary = generate_csv_summary(&tasks);
+        assert!(summary.contains("downloading: 1"));
+        assert!(summary.contains("complete: 1"));
+        assert!(summary.contains("error: 1"));
+        assert!(summary.contains("paused: 1"));
+    }
+
+    #[test]
+    fn test_generate_csv_summary_total_bytes() {
+        let mut tasks = vec![
+            make_test_task("task-1", "file1.txt"),
+            make_test_task("task-2", "file2.txt"),
+        ];
+        tasks[0].size = 1000;
+        tasks[0].downloaded = 500;
+        tasks[1].size = 2000;
+        tasks[1].downloaded = 1000;
+
+        let summary = generate_csv_summary(&tasks);
+        assert!(summary.contains("Total size: 3000 bytes"));
+        assert!(summary.contains("Total downloaded: 1500 bytes"));
+        assert!(summary.contains("Overall progress: 50.0%"));
+    }
+
+    #[test]
+    fn test_generate_csv_summary_complete_progress() {
+        let mut tasks = vec![make_test_task("task-1", "file.txt")];
+        tasks[0].size = 1000;
+        tasks[0].downloaded = 1000;
+        tasks[0].state = DownloadState::Complete;
+
+        let summary = generate_csv_summary(&tasks);
+        assert!(summary.contains("Overall progress: 100.0%"));
+    }
+
+    #[test]
+    fn test_generate_csv_summary_unicode() {
+        let mut tasks = vec![make_test_task("任务-1", "中文文件.txt")];
+        tasks[0].state = DownloadState::Complete;
+
+        let summary = generate_csv_summary(&tasks);
+        assert!(summary.contains("# Total tasks: 1"));
+    }
+
+    // --- Persistence tests (async) ---
+
+    #[tokio::test]
+    async fn test_save_csv_export_config_creates_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("csv_config.json");
+
+        let config = CsvExportConfig::default();
+        save_csv_export_config(&config, &config_path).await.unwrap();
+
+        assert!(config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_save_csv_export_config_overwrite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("csv_config.json");
+
+        let config1 = CsvExportConfig {
+            delimiter: ',',
+            ..Default::default()
+        };
+        save_csv_export_config(&config1, &config_path)
+            .await
+            .unwrap();
+
+        let config2 = CsvExportConfig {
+            delimiter: ';',
+            ..Default::default()
+        };
+        save_csv_export_config(&config2, &config_path)
+            .await
+            .unwrap();
+
+        let loaded = load_csv_export_config(&config_path).await.unwrap();
+        assert_eq!(loaded.delimiter, ';');
+    }
+
+    #[tokio::test]
+    async fn test_save_csv_export_config_no_tmp_leftover() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("csv_config.json");
+
+        let config = CsvExportConfig::default();
+        save_csv_export_config(&config, &config_path).await.unwrap();
+
+        let tmp_path = config_path.with_extension("csv_config.tmp");
+        assert!(!tmp_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_save_load_csv_export_config_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("csv_config.json");
+
+        let config = CsvExportConfig {
+            delimiter: '|',
+            include_headers: false,
+            quote_all: true,
+            datetime_format: "%Y/%m/%d %H:%M".to_string(),
+        };
+
+        save_csv_export_config(&config, &config_path).await.unwrap();
+        let loaded = load_csv_export_config(&config_path).await.unwrap();
+
+        assert_eq!(loaded.delimiter, '|');
+        assert_eq!(loaded.include_headers, false);
+        assert_eq!(loaded.quote_all, true);
+        assert_eq!(loaded.datetime_format, "%Y/%m/%d %H:%M");
+    }
+
+    #[tokio::test]
+    async fn test_load_csv_export_config_missing_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("nonexistent.json");
+
+        let result = load_csv_export_config(&config_path).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_load_csv_export_config_corrupted_json() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("corrupted.json");
+
+        std::fs::write(&config_path, "not valid json").unwrap();
+        let result = load_csv_export_config(&config_path).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_load_csv_export_config_empty_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("empty.json");
+
+        std::fs::write(&config_path, "").unwrap();
+        let result = load_csv_export_config(&config_path).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_save_csv_export_config_unicode() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("中文配置.json");
+
+        let config = CsvExportConfig::default();
+        save_csv_export_config(&config, &config_path).await.unwrap();
+
+        assert!(config_path.exists());
+        let loaded = load_csv_export_config(&config_path).await.unwrap();
+        assert_eq!(loaded.delimiter, ',');
+    }
+
+    #[tokio::test]
+    async fn test_save_csv_export_config_pretty_json() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("pretty.json");
+
+        let config = CsvExportConfig::default();
+        save_csv_export_config(&config, &config_path).await.unwrap();
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        // Pretty JSON should have newlines and indentation
+        assert!(content.contains('\n'));
+        assert!(content.contains("  "));
+    }
+
+    // --- Header row tests ---
+
+    #[test]
+    fn test_csv_headers_constant() {
+        assert_eq!(CSV_HEADERS.len(), 22);
+        assert_eq!(CSV_HEADERS[0], "id");
+        assert_eq!(CSV_HEADERS[1], "name");
+        assert_eq!(CSV_HEADERS[2], "protocol");
+        assert!(CSV_HEADERS.contains(&"size_bytes"));
+        assert!(CSV_HEADERS.contains(&"downloaded_bytes"));
+        assert!(CSV_HEADERS.contains(&"progress_percent"));
+        assert!(CSV_HEADERS.contains(&"state"));
+        assert!(CSV_HEADERS.contains(&"source_url"));
+        assert!(CSV_HEADERS.contains(&"mirror_urls"));
+    }
+
+    #[test]
+    fn test_csv_header_row_matches_config() {
+        let config = CsvExportConfig::default();
+        let expected_header = CSV_HEADERS.join(&config.delimiter.to_string());
+        assert!(expected_header.contains("id,name,protocol"));
+    }
+
+    #[test]
+    fn test_csv_header_row_semicolon() {
+        let config = CsvExportConfig {
+            delimiter: ';',
+            ..Default::default()
+        };
+        let header = CSV_HEADERS.join(&config.delimiter.to_string());
+        assert!(header.contains("id;name;protocol"));
+    }
+
+    // --- Complex workflow tests ---
+
+    #[test]
+    fn test_csv_export_complete_workflow() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let csv_path = temp_dir.path().join("workflow.csv");
+
+        let mut tasks = vec![
+            make_test_task("task-1", "file1.txt"),
+            make_test_task("task-2", "file2.mp4"),
+            make_test_task("task-3", "file3.zip"),
+        ];
+
+        tasks[0].state = DownloadState::Complete;
+        tasks[0].downloaded = 1024;
+        tasks[0].size = 1024;
+        tasks[0].tags = vec!["work".to_string(), "important".to_string()];
+
+        tasks[1].state = DownloadState::Downloading;
+        tasks[1].downloaded = 512;
+        tasks[1].size = 2048;
+        tasks[1].source_url = Some("http://example.com/file2.mp4".to_string());
+        tasks[1].mirror_urls = vec!["http://mirror.com/file2.mp4".to_string()];
+
+        tasks[2].state = DownloadState::Error;
+        tasks[2].error = Some("timeout".to_string());
+        tasks[2].notes = Some("retry later".to_string());
+
+        let result = export_tasks_to_csv(&tasks, &csv_path, None).unwrap();
+        assert_eq!(result.task_count, 3);
+
+        let content = std::fs::read_to_string(&csv_path).unwrap();
+        assert!(content.contains("complete"));
+        assert!(content.contains("downloading"));
+        assert!(content.contains("error"));
+        assert!(content.contains("work;important"));
+        assert!(content.contains("http://example.com/file2.mp4"));
+        assert!(content.contains("timeout"));
+        assert!(content.contains("retry later"));
+    }
+
+    #[test]
+    fn test_csv_export_string_matches_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let csv_path = temp_dir.path().join("compare.csv");
+
+        let tasks = vec![
+            make_test_task("task-1", "file1.txt"),
+            make_test_task("task-2", "file2.mp4"),
+        ];
+
+        let csv_string = export_tasks_to_csv_string(&tasks, None).unwrap();
+        export_tasks_to_csv(&tasks, &csv_path, None).unwrap();
+
+        let file_content = std::fs::read_to_string(&csv_path).unwrap();
+
+        // File content should match string output (minus trailing newline handling)
+        let string_lines: Vec<&str> = csv_string.lines().collect();
+        let file_lines: Vec<&str> = file_content.lines().collect();
+        assert_eq!(string_lines.len(), file_lines.len());
+    }
+
+    #[test]
+    fn test_csv_export_different_priorities() {
+        let mut tasks = vec![
+            make_test_task("task-1", "low.txt"),
+            make_test_task("task-2", "normal.txt"),
+            make_test_task("task-3", "high.txt"),
+        ];
+
+        tasks[0].priority = DownloadPriority::Low;
+        tasks[1].priority = DownloadPriority::Normal;
+        tasks[2].priority = DownloadPriority::High;
+
+        let csv_string = export_tasks_to_csv_string(&tasks, None).unwrap();
+        assert!(csv_string.contains("Low"));
+        assert!(csv_string.contains("Normal"));
+        assert!(csv_string.contains("High"));
+    }
+
+    #[test]
+    fn test_csv_export_different_protocols() {
+        let mut tasks = vec![
+            make_test_task("task-1", "http.txt"),
+            make_test_task("task-2", "torrent.txt"),
+            make_test_task("task-3", "ed2k.txt"),
+            make_test_task("task-4", "magnet.txt"),
+            make_test_task("task-5", "p2p.txt"),
+        ];
+
+        tasks[0].protocol = DownloadProtocol::Xunlei;
+        tasks[1].protocol = DownloadProtocol::Torrent;
+        tasks[2].protocol = DownloadProtocol::Ed2k;
+        tasks[3].protocol = DownloadProtocol::Magnet;
+        tasks[4].protocol = DownloadProtocol::P2P;
+
+        let csv_string = export_tasks_to_csv_string(&tasks, None).unwrap();
+        assert!(csv_string.contains("Xunlei"));
+        assert!(csv_string.contains("Torrent"));
+        assert!(csv_string.contains("Ed2k"));
+        assert!(csv_string.contains("Magnet"));
+        assert!(csv_string.contains("P2P"));
+    }
+
+    // --- Boundary value tests ---
+
+    #[test]
+    fn test_csv_export_large_file_size() {
+        let mut task = make_test_task("task-1", "huge.mkv");
+        task.size = u64::MAX;
+        task.downloaded = u64::MAX / 2;
+
+        let csv_string = export_tasks_to_csv_string(&[task], None).unwrap();
+        assert!(csv_string.contains(&u64::MAX.to_string()));
+    }
+
+    #[test]
+    fn test_csv_export_zero_bandwidth_weight() {
+        let mut task = make_test_task("task-1", "file.txt");
+        task.bandwidth_weight = 0;
+
+        let csv_string = export_tasks_to_csv_string(&[task], None).unwrap();
+        // Should contain the bandwidth weight field
+        let lines: Vec<&str> = csv_string.lines().collect();
+        assert!(lines.len() >= 2);
+    }
+
+    #[test]
+    fn test_csv_export_max_bandwidth_weight() {
+        let mut task = make_test_task("task-1", "file.txt");
+        task.bandwidth_weight = 255;
+
+        let csv_string = export_tasks_to_csv_string(&[task], None).unwrap();
+        assert!(csv_string.contains("255"));
+    }
+
+    #[test]
+    fn test_csv_export_negative_speed() {
+        let mut task = make_test_task("task-1", "file.txt");
+        task.speed_bps = -1.0;
+
+        let csv_string = export_tasks_to_csv_string(&[task], None).unwrap();
+        assert!(csv_string.contains("-1.00"));
+    }
+
+    #[test]
+    fn test_csv_export_very_high_speed() {
+        let mut task = make_test_task("task-1", "file.txt");
+        task.speed_bps = 1e15;
+
+        let csv_string = export_tasks_to_csv_string(&[task], None).unwrap();
+        // Should handle large float values
+        let lines: Vec<&str> = csv_string.lines().collect();
+        assert!(lines.len() >= 2);
+    }
+
+    #[test]
+    fn test_csv_export_active_time_precision() {
+        let mut task = make_test_task("task-1", "file.txt");
+        task.active_time_seconds = 123.456;
+
+        let csv_string = export_tasks_to_csv_string(&[task], None).unwrap();
+        // Should format with 1 decimal place
+        assert!(csv_string.contains("123.5"));
+    }
+
+    #[test]
+    fn test_csv_export_zero_active_time() {
+        let mut task = make_test_task("task-1", "file.txt");
+        task.active_time_seconds = 0.0;
+
+        let csv_string = export_tasks_to_csv_string(&[task], None).unwrap();
+        assert!(csv_string.contains("0.0"));
+    }
+
+    // --- Unicode edge cases ---
+
+    #[test]
+    fn test_csv_export_japanese_filename() {
+        let task = make_test_task("task-1", "日本語ファイル.txt");
+        let csv_string = export_tasks_to_csv_string(&[task], None).unwrap();
+        assert!(csv_string.contains("日本語ファイル.txt"));
+    }
+
+    #[test]
+    fn test_csv_export_korean_filename() {
+        let task = make_test_task("task-1", "한국어파일.txt");
+        let csv_string = export_tasks_to_csv_string(&[task], None).unwrap();
+        assert!(csv_string.contains("한국어파일.txt"));
+    }
+
+    #[test]
+    fn test_csv_export_mixed_unicode() {
+        let mut task = make_test_task("任务-🎉-1", "文件-📁.txt");
+        task.notes = Some("备注-📝".to_string());
+        task.tags = vec!["标签-🏷️".to_string()];
+
+        let csv_string = export_tasks_to_csv_string(&[task], None).unwrap();
+        assert!(csv_string.contains("任务-🎉-1"));
+        assert!(csv_string.contains("文件-📁.txt"));
+        assert!(csv_string.contains("备注-📝"));
+    }
+
+    // --- Default function tests ---
+
+    #[test]
+    fn test_default_delimiter() {
+        assert_eq!(default_delimiter(), ',');
+    }
+
+    #[test]
+    fn test_default_true() {
+        assert!(default_true());
+    }
+
+    #[test]
+    fn test_default_datetime_format() {
+        assert_eq!(default_datetime_format(), "%+");
+    }
+
+    // --- Column count verification ---
+
+    #[test]
+    fn test_csv_row_column_count_matches_headers() {
+        let task = make_test_task("task-1", "file.txt");
+        let config = CsvExportConfig::default();
+        let row = task_to_csv_row(&task, &config);
+
+        let header_count = CSV_HEADERS.len();
+        let row_fields: Vec<&str> = row.split(',').collect();
+
+        assert_eq!(row_fields.len(), header_count);
+    }
+
+    #[test]
+    fn test_csv_row_column_count_with_semicolon() {
+        let task = make_test_task("task-1", "file.txt");
+        let config = CsvExportConfig {
+            delimiter: ';',
+            ..Default::default()
+        };
+        let row = task_to_csv_row(&task, &config);
+
+        let header_count = CSV_HEADERS.len();
+        let row_fields: Vec<&str> = row.split(';').collect();
+
+        assert_eq!(row_fields.len(), header_count);
     }
 }

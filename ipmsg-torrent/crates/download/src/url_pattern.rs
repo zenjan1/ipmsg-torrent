@@ -719,7 +719,10 @@ mod tests {
     #[test]
     fn test_pattern_expansion_result_serde_roundtrip() {
         let result = PatternExpansionResult {
-            urls: vec!["http://a.com/1.txt".to_string(), "http://a.com/2.txt".to_string()],
+            urls: vec![
+                "http://a.com/1.txt".to_string(),
+                "http://a.com/2.txt".to_string(),
+            ],
             pattern: "http://a.com/{1-2}.txt".to_string(),
             count: 2,
             truncated: false,
@@ -1058,10 +1061,7 @@ mod tests {
         };
         // 6 URLs should fail
         let result = expand_pattern_with_config("{1-6}", &config);
-        assert!(matches!(
-            result,
-            Err(PatternError::TooManyUrls { .. })
-        ));
+        assert!(matches!(result, Err(PatternError::TooManyUrls { .. })));
     }
 
     // Error messages
@@ -1110,10 +1110,7 @@ mod tests {
     #[test]
     fn test_expand_numeric_padding_width_4() {
         let urls = expand_pattern("file{0001-0003}.txt").unwrap();
-        assert_eq!(
-            urls,
-            vec!["file0001.txt", "file0002.txt", "file0003.txt"]
-        );
+        assert_eq!(urls, vec!["file0001.txt", "file0002.txt", "file0003.txt"]);
     }
 
     #[test]
@@ -1141,10 +1138,7 @@ mod tests {
     fn test_expand_image_sequence_pattern() {
         let urls = expand_pattern("http://cdn.example.com/photos/2024/img_{001-005}.jpg").unwrap();
         assert_eq!(urls.len(), 5);
-        assert_eq!(
-            urls[0],
-            "http://cdn.example.com/photos/2024/img_001.jpg"
-        );
+        assert_eq!(urls[0], "http://cdn.example.com/photos/2024/img_001.jpg");
     }
 
     #[test]

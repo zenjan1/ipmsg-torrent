@@ -636,7 +636,10 @@ mod tests {
     fn test_config_clone() {
         let config = BlacklistConfig {
             enabled: true,
-            entries: vec![make_entry("1", BlacklistPattern::Domain("test.com".to_string()))],
+            entries: vec![make_entry(
+                "1",
+                BlacklistPattern::Domain("test.com".to_string()),
+            )],
         };
         let cloned = config.clone();
         assert_eq!(cloned.entries.len(), 1);
@@ -677,7 +680,10 @@ mod tests {
     fn test_config_pretty_serde() {
         let config = BlacklistConfig {
             enabled: true,
-            entries: vec![make_entry("1", BlacklistPattern::Domain("test.com".to_string()))],
+            entries: vec![make_entry(
+                "1",
+                BlacklistPattern::Domain("test.com".to_string()),
+            )],
         };
         let pretty = serde_json::to_string_pretty(&config).unwrap();
         assert!(pretty.contains('\n'));
@@ -730,12 +736,18 @@ mod tests {
 
     #[test]
     fn test_domain_matches_with_port() {
-        assert!(domain_matches("http://example.com:8080/file.txt", "example.com"));
+        assert!(domain_matches(
+            "http://example.com:8080/file.txt",
+            "example.com"
+        ));
     }
 
     #[test]
     fn test_domain_matches_deep_subdomain() {
-        assert!(domain_matches("http://a.b.c.example.com/file", "example.com"));
+        assert!(domain_matches(
+            "http://a.b.c.example.com/file",
+            "example.com"
+        ));
     }
 
     #[test]
@@ -768,8 +780,14 @@ mod tests {
 
     #[test]
     fn test_wildcard_matches_exact_no_wildcard() {
-        assert!(wildcard_matches("http://example.com/file.txt", "http://example.com/file.txt"));
-        assert!(!wildcard_matches("http://example.com/file.txt", "http://example.com/other.txt"));
+        assert!(wildcard_matches(
+            "http://example.com/file.txt",
+            "http://example.com/file.txt"
+        ));
+        assert!(!wildcard_matches(
+            "http://example.com/file.txt",
+            "http://example.com/other.txt"
+        ));
     }
 
     #[test]
@@ -787,8 +805,14 @@ mod tests {
 
     #[test]
     fn test_wildcard_matches_star_at_end() {
-        assert!(wildcard_matches("http://example.com/*", "http://example.com/anything"));
-        assert!(wildcard_matches("http://example.com/*", "http://example.com/"));
+        assert!(wildcard_matches(
+            "http://example.com/*",
+            "http://example.com/anything"
+        ));
+        assert!(wildcard_matches(
+            "http://example.com/*",
+            "http://example.com/"
+        ));
     }
 
     #[test]
@@ -799,7 +823,10 @@ mod tests {
 
     #[test]
     fn test_wildcard_matches_unicode() {
-        assert!(wildcard_matches("*中文*", "http://example.com/中文文件.txt"));
+        assert!(wildcard_matches(
+            "*中文*",
+            "http://example.com/中文文件.txt"
+        ));
     }
 
     #[test]
@@ -925,13 +952,19 @@ mod tests {
 
         let config1 = BlacklistConfig {
             enabled: true,
-            entries: vec![make_entry("1", BlacklistPattern::Domain("old.com".to_string()))],
+            entries: vec![make_entry(
+                "1",
+                BlacklistPattern::Domain("old.com".to_string()),
+            )],
         };
         save_blacklist_config(&config1, temp_dir.path()).unwrap();
 
         let config2 = BlacklistConfig {
             enabled: false,
-            entries: vec![make_entry("2", BlacklistPattern::Domain("new.com".to_string()))],
+            entries: vec![make_entry(
+                "2",
+                BlacklistPattern::Domain("new.com".to_string()),
+            )],
         };
         save_blacklist_config(&config2, temp_dir.path()).unwrap();
 
@@ -1014,7 +1047,10 @@ mod tests {
             enabled: true,
             entries: vec![
                 make_entry("d", BlacklistPattern::Domain("example.com".to_string())),
-                make_entry("e", BlacklistPattern::Exact("http://exact.com/file".to_string())),
+                make_entry(
+                    "e",
+                    BlacklistPattern::Exact("http://exact.com/file".to_string()),
+                ),
                 make_entry("w", BlacklistPattern::Wildcard("*.exe".to_string())),
                 make_entry("r", BlacklistPattern::Regex(r"\d+".to_string())),
             ],
