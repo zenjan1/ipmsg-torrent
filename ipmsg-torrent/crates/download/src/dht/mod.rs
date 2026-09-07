@@ -439,7 +439,10 @@ mod tests {
         // Extremely unlikely to be all zeros with random generation
         let manager = DhtManager::new();
         let id = manager.node_id();
-        assert!(id.iter().any(|&b| b != 0), "node_id should not be all zeros");
+        assert!(
+            id.iter().any(|&b| b != 0),
+            "node_id should not be all zeros"
+        );
     }
 
     #[test]
@@ -517,11 +520,7 @@ mod tests {
     async fn test_set_socket() {
         let mut manager = DhtManager::new();
         assert!(manager.socket.is_none());
-        let socket = Arc::new(
-            tokio::net::UdpSocket::bind("127.0.0.1:0")
-                .await
-                .unwrap(),
-        );
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
         manager.set_socket(socket.clone());
         assert!(manager.socket.is_some());
     }
@@ -529,16 +528,8 @@ mod tests {
     #[tokio::test]
     async fn test_set_socket_replaces_existing() {
         let mut manager = DhtManager::new();
-        let socket1 = Arc::new(
-            tokio::net::UdpSocket::bind("127.0.0.1:0")
-                .await
-                .unwrap(),
-        );
-        let socket2 = Arc::new(
-            tokio::net::UdpSocket::bind("127.0.0.1:0")
-                .await
-                .unwrap(),
-        );
+        let socket1 = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let socket2 = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let addr1 = socket1.local_addr().unwrap();
         let addr2 = socket2.local_addr().unwrap();
         manager.set_socket(socket1);
@@ -884,7 +875,10 @@ mod tests {
         let addr2: SocketAddr = "192.168.1.2:6882".parse().unwrap();
         let token1 = manager.generate_token(addr1).await;
         let token2 = manager.generate_token(addr2).await;
-        assert_ne!(token1, token2, "different addrs should get different tokens");
+        assert_ne!(
+            token1, token2,
+            "different addrs should get different tokens"
+        );
     }
 
     #[tokio::test]
@@ -995,18 +989,12 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_with_socket_sends_queries() {
         let mut manager = DhtManager::new();
-        let socket = Arc::new(
-            tokio::net::UdpSocket::bind("127.0.0.1:0")
-                .await
-                .unwrap(),
-        );
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let local_addr = socket.local_addr().unwrap();
         manager.set_socket(socket.clone());
 
         // Create a receiver socket to capture the bootstrap query
-        let recv_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let recv_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let recv_addr = recv_socket.local_addr().unwrap();
 
         let result = manager.bootstrap(&[recv_addr]).await;
@@ -1014,30 +1002,19 @@ mod tests {
 
         // Should receive a find_node query
         let mut buf = vec![0u8; 65535];
-        let received = tokio::time::timeout(
-            Duration::from_millis(500),
-            recv_socket.recv_from(&mut buf),
-        )
-        .await;
+        let received =
+            tokio::time::timeout(Duration::from_millis(500), recv_socket.recv_from(&mut buf)).await;
         assert!(received.is_ok(), "should receive bootstrap query");
     }
 
     #[tokio::test]
     async fn test_bootstrap_multiple_nodes() {
         let mut manager = DhtManager::new();
-        let socket = Arc::new(
-            tokio::net::UdpSocket::bind("127.0.0.1:0")
-                .await
-                .unwrap(),
-        );
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
         manager.set_socket(socket);
 
-        let recv1 = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .unwrap();
-        let recv2 = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let recv1 = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let recv2 = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr1 = recv1.local_addr().unwrap();
         let addr2 = recv2.local_addr().unwrap();
 
@@ -1085,11 +1062,7 @@ mod tests {
     #[tokio::test]
     async fn test_find_peers_with_socket_no_nodes() {
         let mut manager = DhtManager::new();
-        let socket = Arc::new(
-            tokio::net::UdpSocket::bind("127.0.0.1:0")
-                .await
-                .unwrap(),
-        );
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
         manager.set_socket(socket);
 
         let hash: InfoHash = [1u8; 20];
@@ -1119,11 +1092,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_metadata_no_peers_error() {
         let mut manager = DhtManager::new();
-        let socket = Arc::new(
-            tokio::net::UdpSocket::bind("127.0.0.1:0")
-                .await
-                .unwrap(),
-        );
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
         manager.set_socket(socket);
 
         let hash: InfoHash = [1u8; 20];
@@ -1159,16 +1128,10 @@ mod tests {
     #[tokio::test]
     async fn test_send_find_node_with_socket() {
         let mut manager = DhtManager::new();
-        let socket = Arc::new(
-            tokio::net::UdpSocket::bind("127.0.0.1:0")
-                .await
-                .unwrap(),
-        );
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
         manager.set_socket(socket);
 
-        let recv_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let recv_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let recv_addr = recv_socket.local_addr().unwrap();
 
         let target: NodeId = [42u8; 20];
@@ -1177,11 +1140,8 @@ mod tests {
 
         // Verify message received
         let mut buf = vec![0u8; 65535];
-        let received = tokio::time::timeout(
-            Duration::from_millis(500),
-            recv_socket.recv_from(&mut buf),
-        )
-        .await;
+        let received =
+            tokio::time::timeout(Duration::from_millis(500), recv_socket.recv_from(&mut buf)).await;
         assert!(received.is_ok());
     }
 
@@ -1409,7 +1369,9 @@ mod tests {
 
         // Perform various operations
         let hash: InfoHash = [1u8; 20];
-        manager.add_peer(hash, "10.0.0.1:6881".parse().unwrap()).await;
+        manager
+            .add_peer(hash, "10.0.0.1:6881".parse().unwrap())
+            .await;
         manager
             .generate_token("10.0.0.1:6881".parse().unwrap())
             .await;
