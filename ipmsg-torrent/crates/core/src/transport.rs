@@ -542,10 +542,8 @@ impl P2PSwarm {
         // We need the server protocol to request reservation
         let supports_relay_server = info.protocols.iter().any(|p| {
             let proto = p.to_string();
-            // Check for relay server protocol - accept both old and new format
-            // Old: /libp2p/circuit/relay/0.2.0/stop
-            // New: /libp2p/circuit/relay (without hop suffix)
-            proto.contains("circuit/relay") && (proto.contains("stop") || !proto.contains("hop"))
+            // Only check for "stop" which indicates relay server capability
+            proto.contains("circuit/relay") && proto.contains("stop")
         });
 
         // Log all protocols for debugging
@@ -564,66 +562,70 @@ impl P2PSwarm {
             "🔍 Peer relay protocol check"
         );
 
-        // If peer supports relay server, trigger reservation using the peer's listen addresses
+        // If peer supports relay server, trigger reservation using the stored connection address
         if supports_relay_server {
             let peer_id = info.public_key.to_peer_id();
 
             tracing::info!(
                 peer = %pid_str,
-                listen_addrs_count = info.listen_addrs.len(),
+                stored_addrs_count = self.relay_node_addrs.get(&peer_id).map(|v| v.len()).unwrap_or(0),
                 "🎯 Peer supports relay server, attempting reservation"
             );
 
-            // Use the peer's listen addresses from Identify info
-            if !info.listen_addrs.is_empty() {
-                // Try the first listen address
-                let listen_addr = &info.listen_addrs[0];
+            // Use the stored relay node address from ConnectionEstablished
+            if let Some(relay_addrs) = self.relay_node_addrs.get(&peer_id) {
+                if let Some(relay_addr_base) = relay_addrs.first() {
+                    // Build proper relay address: /relay_node_addr/p2p/relay_peer_id/p2p-circuit
+                    let mut relay_addr = relay_addr_base.clone();
 
-                // Build proper relay address: /peer_listen_addr/p2p/peer_id/p2p-circuit
-                let mut relay_addr = listen_addr.clone();
+                    // Check if address already contains /p2p/<peer_id>
+                    let has_p2p = relay_addr
+                        .iter()
+                        .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)));
 
-                // Check if address already contains /p2p/<peer_id>
-                let has_p2p = relay_addr
-                    .iter()
-                    .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)));
-
-                if !has_p2p {
-                    relay_addr.push(libp2p::multiaddr::Protocol::P2p(peer_id));
-                }
-
-                // Add p2p-circuit protocol to request reservation
-                relay_addr.push(libp2p::multiaddr::Protocol::P2pCircuit);
-
-                tracing::info!(
-                    peer = %pid_str,
-                    relay_addr = %relay_addr,
-                    "🔗 Attempting relay reservation via peer's listen address"
-                );
-
-                match self.swarm.listen_on(relay_addr.clone()) {
-                    Ok(id) => {
-                        tracing::info!(
-                            peer = %pid_str,
-                            listener_id = ?id,
-                            "✅ Relay listen initiated, reservation will be requested"
-                        );
-                        events.push(P2PEvent::Status(format!(
-                            "Relay reservation requested for {}",
-                            &pid_str[..8]
-                        )));
+                    if !has_p2p {
+                        relay_addr.push(libp2p::multiaddr::Protocol::P2p(peer_id));
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            peer = %pid_str,
-                            error = ?e,
-                            "❌ Failed to initiate relay listen"
-                        );
+
+                    // Add p2p-circuit protocol to request reservation
+                    relay_addr.push(libp2p::multiaddr::Protocol::P2pCircuit);
+
+                    tracing::info!(
+                        peer = %pid_str,
+                        relay_addr = %relay_addr,
+                        "🔗 Attempting relay reservation via stored relay node address"
+                    );
+
+                    match self.swarm.listen_on(relay_addr.clone()) {
+                        Ok(id) => {
+                            tracing::info!(
+                                peer = %pid_str,
+                                listener_id = ?id,
+                                "✅ Relay listen initiated, reservation will be requested"
+                            );
+                            events.push(P2PEvent::Status(format!(
+                                "Relay reservation requested for {}",
+                                &pid_str[..8]
+                            )));
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                peer = %pid_str,
+                                error = ?e,
+                                "❌ Failed to initiate relay listen"
+                            );
+                        }
                     }
+                } else {
+                    tracing::warn!(
+                        peer = %pid_str,
+                        "⚠️ Peer supports relay but stored address list is empty"
+                    );
                 }
             } else {
                 tracing::warn!(
                     peer = %pid_str,
-                    "⚠️ Peer supports relay but has no listen addresses"
+                    "⚠️ Peer supports relay but no stored address (not connected via relay?)"
                 );
             }
         } else {
