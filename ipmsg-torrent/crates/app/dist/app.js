@@ -25,6 +25,9 @@ async function connect() {
     btn.disabled = true;
 
     try {
+        // IMPORTANT: Set up event listener BEFORE starting P2P to avoid missing events
+        await listen('p2p-event', handleEvent);
+
         const peerId = await invoke('p2p_start', {
             args: { username, bootstrap_nodes: [], data_dir: '' }
         });
@@ -37,8 +40,7 @@ async function connect() {
         await invoke('p2p_join_channel', { args: { name: 'general' } });
         selectChannel('general');
 
-        // Listen for events
-        await listen('p2p-event', handleEvent);
+        setStatus('Connected');
     } catch (e) {
         btn.textContent = 'Error: ' + e;
         btn.disabled = false;
