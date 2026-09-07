@@ -518,13 +518,14 @@ impl P2PSwarm {
         // Check if peer supports relay SERVER protocol (not just client)
         // Relay server protocol: /libp2p/circuit/relay/0.2.0/stop
         // Relay client protocol: /libp2p/circuit/relay/0.2.0/hop
+        // We need the server protocol to request reservation
         let supports_relay_server = info
             .protocols
             .iter()
             .any(|p| {
                 let proto = p.to_string();
-                // Accept any relay protocol that contains "stop" (server) or just "circuit/relay"
-                proto.contains("circuit/relay")
+                // Check for relay server protocol (stop indicates server capability)
+                proto.contains("circuit/relay") && proto.contains("stop")
             });
         
         // Log all protocols for debugging
