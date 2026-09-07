@@ -100,6 +100,26 @@ mod inner {
                 "CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel, timestamp DESC)", [],
             ).map_err(|e| StoreError(e.to_string()))?;
 
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS peer_reputation (
+                    peer_id TEXT PRIMARY KEY,
+                    score REAL NOT NULL DEFAULT 0.5,
+                    message_quality REAL NOT NULL DEFAULT 0.5,
+                    response_latency_ms INTEGER NOT NULL DEFAULT 0,
+                    file_shares INTEGER NOT NULL DEFAULT 0,
+                    file_downloads INTEGER NOT NULL DEFAULT 0,
+                    uptime_hours REAL NOT NULL DEFAULT 0.0,
+                    violations INTEGER NOT NULL DEFAULT 0,
+                    total_messages INTEGER NOT NULL DEFAULT 0,
+                    valid_messages INTEGER NOT NULL DEFAULT 0,
+                    latency_samples INTEGER NOT NULL DEFAULT 0,
+                    connected_since TEXT,
+                    last_updated TEXT NOT NULL
+                )",
+                [],
+            )
+            .map_err(|e| StoreError(e.to_string()))?;
+
             Ok(Self {
                 conn: Mutex::new(conn),
             })
@@ -295,6 +315,75 @@ mod inner {
             }
             map.into_iter().collect()
         }
+
+        pub fn save_reputation(&self, rep: &crate::reputation::PeerReputation) -> Result<()> {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO peer_reputation
+                 (peer_id, score, message_quality, response_latency_ms, file_shares,
+                  file_downloads, uptime_hours, violations, total_messages, valid_messages,
+                  latency_samples, connected_since, last_updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    rep.peer_id,
+                    rep.score,
+                    rep.message_quality,
+                    rep.response_latency_ms as i64,
+                    rep.file_shares as i64,
+                    rep.file_downloads as i64,
+                    rep.uptime_hours,
+                    rep.violations as i64,
+                    rep.total_messages() as i64,
+                    rep.valid_messages() as i64,
+                    rep.latency_samples() as i64,
+                    rep.connected_since().map(|t| t.to_rfc3339()),
+                    rep.last_updated.to_rfc3339(),
+                ],
+            )
+            .map_err(|e| StoreError(e.to_string()))?;
+            Ok(())
+        }
+
+        pub fn load_all_reputation(&self) -> Result<Vec<crate::reputation::PeerReputation>> {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT peer_id, score, message_quality, response_latency_ms, file_shares,
+                        file_downloads, uptime_hours, violations, total_messages, valid_messages,
+                        latency_samples, connected_since, last_updated
+                 FROM peer_reputation"
+            ).map_err(|e| StoreError(e.to_string()))?;
+
+            let rows = stmt.query_map([], |row| {
+                let connected_since_str: Option<String> = row.get(11)?;
+                let connected_since = connected_since_str
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Utc));
+
+                Ok(crate::reputation::PeerReputation::from_db(
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get::<_, i64>(3)? as u64,
+                    row.get::<_, i64>(4)? as u32,
+                    row.get::<_, i64>(5)? as u32,
+                    row.get(6)?,
+                    row.get::<_, i64>(7)? as u32,
+                    row.get::<_, i64>(8)? as u64,
+                    row.get::<_, i64>(9)? as u64,
+                    row.get::<_, i64>(10)? as u64,
+                    connected_since,
+                    row.get::<_, String>(12)?
+                        .parse()
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                ))
+            }).map_err(|e| StoreError(e.to_string()))?;
+
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row.map_err(|e| StoreError(e.to_string()))?);
+            }
+            Ok(result)
+        }
     }
 
     fn decode_message_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
@@ -466,6 +555,75 @@ mod inner {
                 })
                 .filter(|(_, addrs)| !addrs.is_empty())
                 .collect()
+        }
+
+        pub fn save_reputation(&self, rep: &crate::reputation::PeerReputation) -> Result<()> {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO peer_reputation
+                 (peer_id, score, message_quality, response_latency_ms, file_shares,
+                  file_downloads, uptime_hours, violations, total_messages, valid_messages,
+                  latency_samples, connected_since, last_updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    rep.peer_id,
+                    rep.score,
+                    rep.message_quality,
+                    rep.response_latency_ms as i64,
+                    rep.file_shares as i64,
+                    rep.file_downloads as i64,
+                    rep.uptime_hours,
+                    rep.violations as i64,
+                    rep.total_messages() as i64,
+                    rep.valid_messages() as i64,
+                    rep.latency_samples() as i64,
+                    rep.connected_since().map(|t| t.to_rfc3339()),
+                    rep.last_updated.to_rfc3339(),
+                ],
+            )
+            .map_err(|e| StoreError(e.to_string()))?;
+            Ok(())
+        }
+
+        pub fn load_all_reputation(&self) -> Result<Vec<crate::reputation::PeerReputation>> {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT peer_id, score, message_quality, response_latency_ms, file_shares,
+                        file_downloads, uptime_hours, violations, total_messages, valid_messages,
+                        latency_samples, connected_since, last_updated
+                 FROM peer_reputation"
+            ).map_err(|e| StoreError(e.to_string()))?;
+
+            let rows = stmt.query_map([], |row| {
+                let connected_since_str: Option<String> = row.get(11)?;
+                let connected_since = connected_since_str
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Utc));
+
+                Ok(crate::reputation::PeerReputation::from_db(
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get::<_, i64>(3)? as u64,
+                    row.get::<_, i64>(4)? as u32,
+                    row.get::<_, i64>(5)? as u32,
+                    row.get(6)?,
+                    row.get::<_, i64>(7)? as u32,
+                    row.get::<_, i64>(8)? as u64,
+                    row.get::<_, i64>(9)? as u64,
+                    row.get::<_, i64>(10)? as u64,
+                    connected_since,
+                    row.get::<_, String>(12)?
+                        .parse()
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                ))
+            }).map_err(|e| StoreError(e.to_string()))?;
+
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row.map_err(|e| StoreError(e.to_string()))?);
+            }
+            Ok(result)
         }
     }
 }

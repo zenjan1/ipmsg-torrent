@@ -10,6 +10,7 @@ pub mod ipmsg_compat;
 pub mod messaging;
 pub mod noise;
 pub mod p2p_progress;
+pub mod reputation;
 pub mod scoring;
 pub mod stats;
 pub mod store;
@@ -23,6 +24,7 @@ pub use identity::Identity;
 #[cfg(not(target_arch = "wasm32"))]
 pub use ipmsg_compat::{IpMsgCompat, IpMsgCompatEvent, IpMsgPacket};
 pub use noise::NoiseSessionManager;
+pub use reputation::{PeerReputation, ReputationEvent, ReputationManager};
 pub use scoring::{PeerBehavior, PeerScore, PeerScoreManager};
 pub use stats::NetworkStats;
 pub use store::{MessageStore, PeerInfo};
@@ -343,6 +345,8 @@ pub struct P2PEngine {
     file_transfer: Arc<Mutex<FileTransferManager>>,
     /// Peer scoring manager (inspired by libp2p gossipsub PeerScore)
     peer_scores: PeerScoreManager,
+    /// Peer reputation manager for node selection optimization
+    reputation_manager: ReputationManager,
     /// Network statistics tracker
     stats: NetworkStats,
     /// Classic IPMSG compatibility server
@@ -404,6 +408,7 @@ impl P2PEngine {
             file_sharing,
             file_transfer,
             peer_scores: PeerScoreManager::new(),
+            reputation_manager: ReputationManager::new(),
             stats: NetworkStats::new(),
             #[cfg(not(target_arch = "wasm32"))]
             ipmsg_compat: None,
@@ -422,6 +427,17 @@ impl P2PEngine {
     ) -> Result<String, P2PError> {
         self.username = username.clone();
         self.platforms = detect_platforms();
+
+        // Load persisted reputation data
+        if let Ok(reputations) = self.store.load_all_reputation() {
+            for rep in reputations {
+                self.reputation_manager.insert(rep);
+            }
+            tracing::info!(
+                count = self.reputation_manager.peer_count(),
+                "Loaded peer reputation data"
+            );
+        }
 
         let known_addrs = self
             .store
@@ -502,6 +518,11 @@ impl P2PEngine {
                                                     &msg.from,
                                                     PeerBehavior::DuplicateMessage
                                                 );
+                                                // Update reputation: duplicate message
+                                                self.reputation_manager.update_score(
+                                                    &msg.from,
+                                                    ReputationEvent::DuplicateMessage,
+                                                );
                                                 continue;
                                             }
                                             self.dedup.mark_seen(&msg.id);
@@ -509,6 +530,11 @@ impl P2PEngine {
                                             self.peer_scores.record_behavior(
                                                 &msg.from,
                                                 PeerBehavior::ValidMessage
+                                            );
+                                            // Update reputation: valid message
+                                            self.reputation_manager.update_score(
+                                                &msg.from,
+                                                ReputationEvent::ValidMessage,
                                             );
                                             // Auto-ACK
                                             let ack_msg = ChatMessage::new_ack(
@@ -1142,9 +1168,9 @@ impl P2PEngine {
         tracing::info!(peer_id = %peer_id, "Peer unblocked");
     }
 
-    /// Check if a peer is blocked
+    /// Check if a peer is blocked (manual block or auto-blocked by reputation)
     pub fn is_blocked(&self, peer_id: &str) -> bool {
-        self.blocked_peers.contains(peer_id)
+        self.blocked_peers.contains(peer_id) || self.reputation_manager.should_block(peer_id)
     }
 
     /// Mark a peer as favorite
@@ -1682,6 +1708,25 @@ impl P2PEngine {
     /// Get peer scoring manager reference
     pub fn peer_scores(&self) -> &PeerScoreManager {
         &self.peer_scores
+    }
+
+    /// Get reputation manager reference
+    pub fn reputation_manager(&self) -> &ReputationManager {
+        &self.reputation_manager
+    }
+
+    /// Get mutable reputation manager reference
+    pub fn reputation_manager_mut(&mut self) -> &mut ReputationManager {
+        &mut self.reputation_manager
+    }
+
+    /// Save all reputation data to database
+    pub fn save_reputation_data(&self) -> Result<(), P2PError> {
+        for (_, rep) in self.reputation_manager.all_peers() {
+            self.store.save_reputation(rep)
+                .map_err(|e| P2PError::Store(e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Get network statistics reference
