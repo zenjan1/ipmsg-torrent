@@ -7069,7 +7069,8 @@ impl DownloadManager {
         file_size: u64,
         sources: Vec<xunlei::XunleiSource>,
     ) -> Result<String, DownloadManagerError> {
-        self.add_xunlei_with_priority(file_name, file_size, sources, None).await
+        self.add_xunlei_with_priority(file_name, file_size, sources, None)
+            .await
     }
 
     /// Add a Xunlei download task with optional priority.
@@ -7149,7 +7150,10 @@ impl DownloadManager {
 
         // Add to priority queue
         let pq_priority = priority.unwrap_or(priority_queue::Priority::Normal);
-        let _ = self.priority_queue.add_task(task_id.clone(), pq_priority).await;
+        let _ = self
+            .priority_queue
+            .add_task(task_id.clone(), pq_priority)
+            .await;
 
         let params = TaskParams::Xunlei {
             file_name,

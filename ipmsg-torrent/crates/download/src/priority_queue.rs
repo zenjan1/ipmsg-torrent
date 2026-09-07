@@ -492,10 +492,7 @@ impl PriorityQueue {
     }
 
     /// Estimate total completion time for all tasks.
-    async fn estimate_completion_time(
-        &self,
-        tasks: &HashMap<String, PriorityTask>,
-    ) -> u64 {
+    async fn estimate_completion_time(&self, tasks: &HashMap<String, PriorityTask>) -> u64 {
         let mut total_secs: u64 = 0;
 
         for task in tasks.values() {
@@ -887,10 +884,7 @@ mod tests {
             .add_task("slow".to_string(), Priority::High)
             .await
             .unwrap();
-        queue
-            .update_task_metrics("slow", 0.5, 1000)
-            .await
-            .unwrap(); // Very slow
+        queue.update_task_metrics("slow", 0.5, 1000).await.unwrap(); // Very slow
 
         let adjusted = queue.auto_adjust_priorities().await.unwrap();
         assert_eq!(adjusted, 1);
@@ -1010,10 +1004,7 @@ mod tests {
             .add_task("task".to_string(), Priority::High)
             .await
             .unwrap();
-        queue
-            .update_task_metrics("task", 0.5, 1000)
-            .await
-            .unwrap();
+        queue.update_task_metrics("task", 0.5, 1000).await.unwrap();
 
         // First adjustment
         queue.auto_adjust_priorities().await.unwrap();
@@ -1185,10 +1176,7 @@ mod tests {
             .add_task("task".to_string(), Priority::High)
             .await
             .unwrap();
-        queue
-            .update_task_metrics("task", 0.5, 1000)
-            .await
-            .unwrap();
+        queue.update_task_metrics("task", 0.5, 1000).await.unwrap();
 
         let adjusted = queue.auto_adjust_priorities().await.unwrap();
         assert_eq!(adjusted, 0); // Should not adjust
