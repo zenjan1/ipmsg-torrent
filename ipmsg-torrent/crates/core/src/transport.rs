@@ -516,18 +516,20 @@ impl P2PSwarm {
         );
 
         // Check if peer supports relay SERVER protocol (not just client)
-        // Relay server protocol: /libp2p/circuit/relay/0.2.0/stop or similar
+        // Relay server protocol: /libp2p/circuit/relay/0.2.0/stop
+        // Relay client protocol: /libp2p/circuit/relay/0.2.0/hop
         let supports_relay_server = info
             .protocols
             .iter()
             .any(|p| {
                 let proto = p.to_string();
-                proto.contains("circuit/relay") && (proto.contains("stop") || proto.contains("relay/0.2"))
+                // Accept any relay protocol that contains "stop" (server) or just "circuit/relay"
+                proto.contains("circuit/relay")
             });
         
         // Log all protocols for debugging
         let relay_protocols: Vec<_> = info.protocols.iter()
-            .filter(|p| p.to_string().contains("circuit"))
+            .filter(|p| p.to_string().contains("circuit") || p.to_string().contains("relay"))
             .map(|p| p.to_string())
             .collect();
         
@@ -535,7 +537,8 @@ impl P2PSwarm {
             peer = %pid_str,
             supports_relay_server,
             relay_protocols = ?relay_protocols,
-            "Peer relay protocol check"
+            all_protocols_count = info.protocols.len(),
+            "🔍 Peer relay protocol check"
         );
 
         // If peer supports relay server, trigger reservation using the relay node's address
