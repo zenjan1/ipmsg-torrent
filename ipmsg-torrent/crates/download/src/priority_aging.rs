@@ -647,4 +647,970 @@ mod tests {
         assert_eq!(deserialized.max_aged_priority, config.max_aged_priority);
         assert_eq!(deserialized.check_interval_secs, config.check_interval_secs);
     }
+
+    // ================================================================
+    // Comprehensive test coverage (Phase 251)
+    // ================================================================
+
+    // --- AgingPriority serde ---
+
+    #[test]
+    fn aging_priority_serde_all_variants() {
+        for (variant, expected) in [
+            (AgingPriority::Low, "\"low\""),
+            (AgingPriority::Normal, "\"normal\""),
+            (AgingPriority::High, "\"high\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+            let back: AgingPriority = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn aging_priority_serde_snake_case_values() {
+        let low: AgingPriority = serde_json::from_str("\"low\"").unwrap();
+        let normal: AgingPriority = serde_json::from_str("\"normal\"").unwrap();
+        let high: AgingPriority = serde_json::from_str("\"high\"").unwrap();
+        assert_eq!(low, AgingPriority::Low);
+        assert_eq!(normal, AgingPriority::Normal);
+        assert_eq!(high, AgingPriority::High);
+    }
+
+    #[test]
+    fn aging_priority_serde_invalid_variant() {
+        let result: Result<AgingPriority, _> = serde_json::from_str("\"critical\"");
+        assert!(result.is_err());
+    }
+
+    // --- AgingPriority traits ---
+
+    #[test]
+    fn aging_priority_clone_copy_debug() {
+        let p = AgingPriority::High;
+        let cloned = p;
+        assert_eq!(cloned, AgingPriority::High);
+        let debug = format!("{p:?}");
+        assert!(debug.contains("High"));
+    }
+
+    #[test]
+    fn aging_priority_eq_and_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(AgingPriority::Low);
+        set.insert(AgingPriority::Low);
+        set.insert(AgingPriority::Normal);
+        set.insert(AgingPriority::High);
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn aging_priority_default_is_normal() {
+        assert_eq!(AgingPriority::default(), AgingPriority::Normal);
+    }
+
+    #[test]
+    fn aging_priority_ord() {
+        assert!(AgingPriority::Low < AgingPriority::Normal);
+        assert!(AgingPriority::Normal < AgingPriority::High);
+        assert!(AgingPriority::Low < AgingPriority::High);
+    }
+
+    #[test]
+    fn aging_priority_partial_ord_consistency() {
+        assert_eq!(
+            AgingPriority::Low.partial_cmp(&AgingPriority::Normal),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(
+            AgingPriority::High.partial_cmp(&AgingPriority::High),
+            Some(std::cmp::Ordering::Equal)
+        );
+    }
+
+    // --- AgingDecision serde ---
+
+    #[test]
+    fn aging_decision_serde_roundtrip() {
+        let decision = AgingDecision {
+            task_id: "task-123".to_string(),
+            old_priority: AgingPriority::Low,
+            new_priority: AgingPriority::Normal,
+            wait_secs: 7200,
+        };
+        let json = serde_json::to_string(&decision).unwrap();
+        let back: AgingDecision = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.task_id, "task-123");
+        assert_eq!(back.old_priority, AgingPriority::Low);
+        assert_eq!(back.new_priority, AgingPriority::Normal);
+        assert_eq!(back.wait_secs, 7200);
+    }
+
+    #[test]
+    fn aging_decision_serde_extra_fields_ignored() {
+        let json = r#"{"task_id":"t1","old_priority":"low","new_priority":"normal","wait_secs":100,"extra":"field"}"#;
+        let decision: AgingDecision = serde_json::from_str(json).unwrap();
+        assert_eq!(decision.task_id, "t1");
+        assert_eq!(decision.wait_secs, 100);
+    }
+
+    #[test]
+    fn aging_decision_clone_debug_eq() {
+        let d = AgingDecision {
+            task_id: "t".to_string(),
+            old_priority: AgingPriority::Normal,
+            new_priority: AgingPriority::High,
+            wait_secs: 500,
+        };
+        let cloned = d.clone();
+        assert_eq!(cloned.task_id, d.task_id);
+        assert_eq!(cloned, d);
+        let debug = format!("{d:?}");
+        assert!(debug.contains("Normal"));
+        assert!(debug.contains("High"));
+    }
+
+    // --- TaskAgingData traits ---
+
+    #[test]
+    fn task_aging_data_clone_debug() {
+        let now = Utc::now();
+        let task = TaskAgingData {
+            id: "task-1".to_string(),
+            priority: AgingPriority::Low,
+            queued_at: Some(now),
+            state: DownloadState::Queued,
+        };
+        let cloned = task.clone();
+        assert_eq!(cloned.id, "task-1");
+        assert_eq!(cloned.priority, AgingPriority::Low);
+        let debug = format!("{task:?}");
+        assert!(debug.contains("task-1"));
+    }
+
+    #[test]
+    fn task_aging_data_unicode_id() {
+        let task = TaskAgingData {
+            id: "任务-中文".to_string(),
+            priority: AgingPriority::Normal,
+            queued_at: None,
+            state: DownloadState::Queued,
+        };
+        assert_eq!(task.id, "任务-中文");
+    }
+
+    // --- PriorityAgingConfig serde ---
+
+    #[test]
+    fn config_serde_roundtrip_default() {
+        let config = PriorityAgingConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let back: PriorityAgingConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.enabled, config.enabled);
+        assert_eq!(back.low_to_normal_secs, config.low_to_normal_secs);
+        assert_eq!(back.normal_to_high_secs, config.normal_to_high_secs);
+        assert_eq!(back.max_aged_priority, config.max_aged_priority);
+        assert_eq!(back.check_interval_secs, config.check_interval_secs);
+    }
+
+    #[test]
+    fn config_serde_snake_case_values() {
+        let config = PriorityAgingConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"enabled\""));
+        assert!(json.contains("\"low_to_normal_secs\""));
+        assert!(json.contains("\"normal_to_high_secs\""));
+        assert!(json.contains("\"max_aged_priority\""));
+        assert!(json.contains("\"check_interval_secs\""));
+    }
+
+    #[test]
+    fn config_serde_extra_fields_ignored() {
+        let json = r#"{
+            "enabled":true,
+            "low_to_normal_secs":100,
+            "normal_to_high_secs":200,
+            "max_aged_priority":"high",
+            "check_interval_secs":30,
+            "unknown_field":"ignored"
+        }"#;
+        let config: PriorityAgingConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.low_to_normal_secs, 100);
+    }
+
+    #[test]
+    fn config_serde_pretty() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        assert!(pretty.contains('\n'));
+        let back: PriorityAgingConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(back.enabled, config.enabled);
+    }
+
+    #[test]
+    fn config_clone_debug() {
+        let config = PriorityAgingConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.enabled, config.enabled);
+        let debug = format!("{config:?}");
+        assert!(debug.contains("PriorityAgingConfig"));
+    }
+
+    #[test]
+    fn config_custom_values() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 0,
+            normal_to_high_secs: u64::MAX,
+            max_aged_priority: AgingPriority::Low,
+            check_interval_secs: 1,
+        };
+        assert_eq!(config.low_to_normal_secs, 0);
+        assert_eq!(config.normal_to_high_secs, u64::MAX);
+        assert_eq!(config.max_aged_priority, AgingPriority::Low);
+    }
+
+    // --- PriorityAgingError ---
+
+    #[test]
+    fn error_display_all_variants() {
+        let io_err = PriorityAgingError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file missing",
+        ));
+        assert!(io_err.to_string().contains("file missing"));
+
+        let json_err = PriorityAgingError::Json(serde_json::from_str::<String>("invalid").unwrap_err());
+        assert!(json_err.to_string().contains("JSON"));
+
+        let invalid = PriorityAgingError::InvalidThreshold("bad value".to_string());
+        assert!(invalid.to_string().contains("bad value"));
+        assert!(invalid.to_string().contains("Invalid threshold"));
+    }
+
+    #[test]
+    fn error_debug() {
+        let err = PriorityAgingError::InvalidThreshold("test".to_string());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InvalidThreshold"));
+    }
+
+    #[test]
+    fn error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err: PriorityAgingError = PriorityAgingError::from(io_err);
+        assert!(err.to_string().contains("denied"));
+    }
+
+    #[test]
+    fn error_from_json() {
+        let json_err = serde_json::from_str::<PriorityAgingConfig>("{}").unwrap_err();
+        let err: PriorityAgingError = PriorityAgingError::from(json_err);
+        assert!(err.to_string().contains("JSON"));
+    }
+
+    #[test]
+    fn error_is_std_error() {
+        let err: Box<dyn std::error::Error> =
+            Box::new(PriorityAgingError::InvalidThreshold("x".to_string()));
+        assert!(err.to_string().contains("x"));
+    }
+
+    // --- format_wait_duration ---
+
+    #[test]
+    fn format_wait_duration_boundaries() {
+        assert_eq!(format_wait_duration(0), "0s");
+        assert_eq!(format_wait_duration(1), "1s");
+        assert_eq!(format_wait_duration(59), "59s");
+        assert_eq!(format_wait_duration(60), "1m0s");
+        assert_eq!(format_wait_duration(61), "1m1s");
+        assert_eq!(format_wait_duration(3599), "59m59s");
+        assert_eq!(format_wait_duration(3600), "1h0m");
+        assert_eq!(format_wait_duration(3601), "1h0m");
+        assert_eq!(format_wait_duration(7200), "2h0m");
+        assert_eq!(format_wait_duration(86400), "24h0m");
+    }
+
+    #[test]
+    fn format_wait_duration_large_value() {
+        assert_eq!(format_wait_duration(u64::MAX), format!("{}h{}m", u64::MAX / 3600, (u64::MAX % 3600) / 60));
+    }
+
+    // --- evaluate_task_aging edge cases ---
+
+    #[test]
+    fn evaluate_paused_task_no_aging() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "t1",
+            AgingPriority::Low,
+            Some(now - chrono::Duration::seconds(10000)),
+            DownloadState::Paused,
+        );
+        assert!(evaluate_task_aging(&task, &config, now).is_none());
+    }
+
+    #[test]
+    fn evaluate_completed_task_no_aging() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "t1",
+            AgingPriority::Low,
+            Some(now - chrono::Duration::seconds(10000)),
+            DownloadState::Complete,
+        );
+        assert!(evaluate_task_aging(&task, &config, now).is_none());
+    }
+
+    #[test]
+    fn evaluate_failed_task_no_aging() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "t1",
+            AgingPriority::Low,
+            Some(now - chrono::Duration::seconds(10000)),
+            DownloadState::Error,
+        );
+        assert!(evaluate_task_aging(&task, &config, now).is_none());
+    }
+
+    #[test]
+    fn evaluate_downloading_task_no_aging() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "t1",
+            AgingPriority::Low,
+            Some(now - chrono::Duration::seconds(10000)),
+            DownloadState::Downloading,
+        );
+        assert!(evaluate_task_aging(&task, &config, now).is_none());
+    }
+
+    #[test]
+    fn evaluate_empty_task_id() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "",
+            AgingPriority::Low,
+            Some(now - chrono::Duration::seconds(120)),
+            DownloadState::Queued,
+        );
+        let decision = evaluate_task_aging(&task, &config, now);
+        assert!(decision.is_some());
+        assert_eq!(decision.unwrap().task_id, "");
+    }
+
+    #[test]
+    fn evaluate_unicode_task_id() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "任务-中文-🚀",
+            AgingPriority::Low,
+            Some(now - chrono::Duration::seconds(120)),
+            DownloadState::Queued,
+        );
+        let decision = evaluate_task_aging(&task, &config, now).unwrap();
+        assert_eq!(decision.task_id, "任务-中文-🚀");
+    }
+
+    #[test]
+    fn evaluate_emoji_task_id() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "🎯🎮🎲",
+            AgingPriority::Normal,
+            Some(now - chrono::Duration::seconds(10000)),
+            DownloadState::Queued,
+        );
+        let decision = evaluate_task_aging(&task, &config, now).unwrap();
+        assert_eq!(decision.task_id, "🎯🎮🎲");
+    }
+
+    #[test]
+    fn evaluate_zero_wait_secs() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 0,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        // queued_at == now means wait_secs = 0, threshold = 0, so 0 >= 0 is true
+        let task = make_task(
+            "t1",
+            AgingPriority::Low,
+            Some(now),
+            DownloadState::Queued,
+        );
+        let decision = evaluate_task_aging(&task, &config, now);
+        assert!(decision.is_some());
+        assert_eq!(decision.unwrap().wait_secs, 0);
+    }
+
+    #[test]
+    fn evaluate_normal_to_high_exact_threshold() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            normal_to_high_secs: 7200,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "t1",
+            AgingPriority::Normal,
+            Some(now - chrono::Duration::seconds(7200)),
+            DownloadState::Queued,
+        );
+        let decision = evaluate_task_aging(&task, &config, now);
+        assert!(decision.is_some());
+        assert_eq!(decision.unwrap().new_priority, AgingPriority::High);
+    }
+
+    #[test]
+    fn evaluate_normal_to_high_one_second_before() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            normal_to_high_secs: 7200,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "t1",
+            AgingPriority::Normal,
+            Some(now - chrono::Duration::seconds(7199)),
+            DownloadState::Queued,
+        );
+        assert!(evaluate_task_aging(&task, &config, now).is_none());
+    }
+
+    #[test]
+    fn evaluate_max_aged_priority_low() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            normal_to_high_secs: 120,
+            max_aged_priority: AgingPriority::Low,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        // Low task can't age because max_aged_priority is Low (already at or above cap)
+        let task = make_task(
+            "t1",
+            AgingPriority::Low,
+            Some(now - chrono::Duration::seconds(10000)),
+            DownloadState::Queued,
+        );
+        assert!(evaluate_task_aging(&task, &config, now).is_none());
+    }
+
+    #[test]
+    fn evaluate_decision_wait_secs_accuracy() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let queued_at = now - chrono::Duration::seconds(120);
+        let task = make_task("t1", AgingPriority::Low, Some(queued_at), DownloadState::Queued);
+        let decision = evaluate_task_aging(&task, &config, now).unwrap();
+        // wait_secs should be approximately 120
+        assert!(decision.wait_secs >= 119 && decision.wait_secs <= 121);
+    }
+
+    // --- evaluate_batch_aging edge cases ---
+
+    #[test]
+    fn batch_empty_tasks() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let decisions = evaluate_batch_aging(&[], &config, now);
+        assert!(decisions.is_empty());
+    }
+
+    #[test]
+    fn batch_all_same_priority_no_aging() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        // All High priority - none should age
+        let tasks: Vec<_> = (0..10)
+            .map(|i| {
+                make_task(
+                    &format!("t{i}"),
+                    AgingPriority::High,
+                    Some(now - chrono::Duration::seconds(10000)),
+                    DownloadState::Queued,
+                )
+            })
+            .collect();
+        let decisions = evaluate_batch_aging(&tasks, &config, now);
+        assert!(decisions.is_empty());
+    }
+
+    #[test]
+    fn batch_many_tasks() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let tasks: Vec<_> = (0..100)
+            .map(|i| {
+                make_task(
+                    &format!("task-{i}"),
+                    AgingPriority::Low,
+                    Some(now - chrono::Duration::seconds(120)),
+                    DownloadState::Queued,
+                )
+            })
+            .collect();
+        let decisions = evaluate_batch_aging(&tasks, &config, now);
+        assert_eq!(decisions.len(), 100);
+    }
+
+    #[test]
+    fn batch_unicode_task_ids() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let tasks = vec![
+            make_task(
+                "日本語タスク",
+                AgingPriority::Low,
+                Some(now - chrono::Duration::seconds(120)),
+                DownloadState::Queued,
+            ),
+            make_task(
+                "한국어작업",
+                AgingPriority::Low,
+                Some(now - chrono::Duration::seconds(120)),
+                DownloadState::Queued,
+            ),
+        ];
+        let decisions = evaluate_batch_aging(&tasks, &config, now);
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[0].task_id, "日本語タスク");
+        assert_eq!(decisions[1].task_id, "한국어작업");
+    }
+
+    #[test]
+    fn batch_preserves_order() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let tasks = vec![
+            make_task(
+                "a",
+                AgingPriority::Low,
+                Some(now - chrono::Duration::seconds(120)),
+                DownloadState::Queued,
+            ),
+            make_task(
+                "b",
+                AgingPriority::Low,
+                Some(now - chrono::Duration::seconds(120)),
+                DownloadState::Queued,
+            ),
+            make_task(
+                "c",
+                AgingPriority::Low,
+                Some(now - chrono::Duration::seconds(120)),
+                DownloadState::Queued,
+            ),
+        ];
+        let decisions = evaluate_batch_aging(&tasks, &config, now);
+        assert_eq!(decisions[0].task_id, "a");
+        assert_eq!(decisions[1].task_id, "b");
+        assert_eq!(decisions[2].task_id, "c");
+    }
+
+    // --- Persistence ---
+
+    #[test]
+    fn persistence_save_creates_file() {
+        let dir = tempdir().unwrap();
+        let config = PriorityAgingConfig::default();
+        save_priority_aging_config(&config, dir.path()).unwrap();
+        assert!(dir.path().join("priority_aging_config.json").exists());
+    }
+
+    #[test]
+    fn persistence_no_tmp_leftover() {
+        let dir = tempdir().unwrap();
+        let config = PriorityAgingConfig::default();
+        save_priority_aging_config(&config, dir.path()).unwrap();
+        assert!(!dir.path().join("priority_aging_config.json.tmp").exists());
+    }
+
+    #[test]
+    fn persistence_corrupted_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("priority_aging_config.json");
+        std::fs::write(&path, "not valid json{{{").unwrap();
+        let result = load_priority_aging_config(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn persistence_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("priority_aging_config.json");
+        std::fs::write(&path, "").unwrap();
+        let result = load_priority_aging_config(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn persistence_pretty_roundtrip() {
+        let dir = tempdir().unwrap();
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 999,
+            normal_to_high_secs: 1111,
+            max_aged_priority: AgingPriority::Normal,
+            check_interval_secs: 15,
+        };
+        save_priority_aging_config(&config, dir.path()).unwrap();
+        let json =
+            std::fs::read_to_string(dir.path().join("priority_aging_config.json")).unwrap();
+        // Should be pretty-printed
+        assert!(json.contains('\n'));
+        let loaded: PriorityAgingConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.enabled, config.enabled);
+        assert_eq!(loaded.low_to_normal_secs, 999);
+        assert_eq!(loaded.normal_to_high_secs, 1111);
+    }
+
+    #[test]
+    fn persistence_unicode_config() {
+        let dir = tempdir().unwrap();
+        let config = PriorityAgingConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        save_priority_aging_config(&config, dir.path()).unwrap();
+        let loaded = load_priority_aging_config(dir.path()).unwrap();
+        assert_eq!(loaded.enabled, config.enabled);
+    }
+
+    #[test]
+    fn persistence_save_to_nested_dir() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("sub").join("dir");
+        std::fs::create_dir_all(&nested).unwrap();
+        let config = PriorityAgingConfig::default();
+        save_priority_aging_config(&config, &nested).unwrap();
+        assert!(nested.join("priority_aging_config.json").exists());
+    }
+
+    #[test]
+    fn persistence_atomic_write() {
+        let dir = tempdir().unwrap();
+        // Save multiple times to verify atomic overwrite
+        for i in 0..5 {
+            let config = PriorityAgingConfig {
+                enabled: i % 2 == 0,
+                low_to_normal_secs: i * 100,
+                ..Default::default()
+            };
+            save_priority_aging_config(&config, dir.path()).unwrap();
+        }
+        let loaded = load_priority_aging_config(dir.path()).unwrap();
+        // Last iteration: i=4, 4%2==0 -> enabled=true
+        assert!(loaded.enabled);
+        assert_eq!(loaded.low_to_normal_secs, 400);
+    }
+
+    // --- Complex workflows ---
+
+    #[test]
+    fn complex_lifecycle() {
+        let dir = tempdir().unwrap();
+        // 1. Load default config
+        let config = load_priority_aging_config(dir.path()).unwrap();
+        assert!(!config.enabled);
+
+        // 2. Create custom config and save
+        let custom = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            normal_to_high_secs: 120,
+            max_aged_priority: AgingPriority::High,
+            check_interval_secs: 30,
+        };
+        save_priority_aging_config(&custom, dir.path()).unwrap();
+
+        // 3. Load and verify
+        let loaded = load_priority_aging_config(dir.path()).unwrap();
+        assert!(loaded.enabled);
+        assert_eq!(loaded.low_to_normal_secs, 60);
+
+        // 4. Evaluate aging
+        let now = Utc::now();
+        let task = make_task(
+            "t1",
+            AgingPriority::Low,
+            Some(now - chrono::Duration::seconds(120)),
+            DownloadState::Queued,
+        );
+        let decision = evaluate_task_aging(&task, &loaded, now);
+        assert!(decision.is_some());
+        assert_eq!(decision.unwrap().new_priority, AgingPriority::Normal);
+    }
+
+    #[test]
+    fn complex_multi_task_workflow() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 3600,
+            normal_to_high_secs: 7200,
+            max_aged_priority: AgingPriority::High,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let tasks = vec![
+            // Low, 0s wait -> no aging
+            make_task(
+                "fresh",
+                AgingPriority::Low,
+                Some(now),
+                DownloadState::Queued,
+            ),
+            // Low, 1h wait -> age to Normal
+            make_task(
+                "aged-low",
+                AgingPriority::Low,
+                Some(now - chrono::Duration::seconds(3600)),
+                DownloadState::Queued,
+            ),
+            // Normal, 2h wait -> age to High
+            make_task(
+                "aged-normal",
+                AgingPriority::Normal,
+                Some(now - chrono::Duration::seconds(7200)),
+                DownloadState::Queued,
+            ),
+            // High, any wait -> no aging
+            make_task(
+                "high",
+                AgingPriority::High,
+                Some(now - chrono::Duration::seconds(100000)),
+                DownloadState::Queued,
+            ),
+            // Low, downloading -> no aging
+            make_task(
+                "downloading",
+                AgingPriority::Low,
+                Some(now - chrono::Duration::seconds(100000)),
+                DownloadState::Downloading,
+            ),
+            // Low, no queued_at -> no aging
+            make_task("no-queue-time", AgingPriority::Low, None, DownloadState::Queued),
+        ];
+        let decisions = evaluate_batch_aging(&tasks, &config, now);
+        assert_eq!(decisions.len(), 2);
+        let ids: Vec<&str> = decisions.iter().map(|d| d.task_id.as_str()).collect();
+        assert!(ids.contains(&"aged-low"));
+        assert!(ids.contains(&"aged-normal"));
+    }
+
+    #[test]
+    fn independent_configs() {
+        // evaluate_task_aging doesn't check config.enabled (only batch does)
+        // Test with different thresholds instead
+        let config1 = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let config2 = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 10000,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "t1",
+            AgingPriority::Low,
+            Some(now - chrono::Duration::seconds(120)),
+            DownloadState::Queued,
+        );
+        // config1 should age (120 >= 60), config2 should not (120 < 10000)
+        assert!(evaluate_task_aging(&task, &config1, now).is_some());
+        assert!(evaluate_task_aging(&task, &config2, now).is_none());
+    }
+
+    #[test]
+    fn batch_respects_enabled_flag() {
+        let config_enabled = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let config_disabled = PriorityAgingConfig {
+            enabled: false,
+            low_to_normal_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "t1",
+            AgingPriority::Low,
+            Some(now - chrono::Duration::seconds(120)),
+            DownloadState::Queued,
+        );
+        let decisions_enabled = evaluate_batch_aging(&[task.clone()], &config_enabled, now);
+        assert_eq!(decisions_enabled.len(), 1);
+        let decisions_disabled = evaluate_batch_aging(&[task], &config_disabled, now);
+        assert!(decisions_disabled.is_empty());
+    }
+
+    #[test]
+    fn config_with_zero_thresholds() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 0,
+            normal_to_high_secs: 0,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        // Low task with 0 wait -> should age (0 >= 0)
+        let low_task = make_task("t1", AgingPriority::Low, Some(now), DownloadState::Queued);
+        let decision = evaluate_task_aging(&low_task, &config, now);
+        assert!(decision.is_some());
+
+        // Normal task with 0 wait -> should age (0 >= 0)
+        let normal_task = make_task("t2", AgingPriority::Normal, Some(now), DownloadState::Queued);
+        let decision = evaluate_task_aging(&normal_task, &config, now);
+        assert!(decision.is_some());
+    }
+
+    #[test]
+    fn aging_decision_fields_correctness() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 100,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let queued_at = now - chrono::Duration::seconds(200);
+        let task = make_task("my-task", AgingPriority::Low, Some(queued_at), DownloadState::Queued);
+        let decision = evaluate_task_aging(&task, &config, now).unwrap();
+        assert_eq!(decision.task_id, "my-task");
+        assert_eq!(decision.old_priority, AgingPriority::Low);
+        assert_eq!(decision.new_priority, AgingPriority::Normal);
+        assert!(decision.wait_secs >= 199 && decision.wait_secs <= 201);
+    }
+
+    #[test]
+    fn low_ages_to_normal_not_high() {
+        // Low should always go to Normal, never skip to High
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 60,
+            normal_to_high_secs: 120,
+            max_aged_priority: AgingPriority::High,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "t1",
+            AgingPriority::Low,
+            Some(now - chrono::Duration::seconds(10000)),
+            DownloadState::Queued,
+        );
+        let decision = evaluate_task_aging(&task, &config, now).unwrap();
+        assert_eq!(decision.new_priority, AgingPriority::Normal);
+    }
+
+    #[test]
+    fn normal_ages_to_high() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            normal_to_high_secs: 60,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "t1",
+            AgingPriority::Normal,
+            Some(now - chrono::Duration::seconds(120)),
+            DownloadState::Queued,
+        );
+        let decision = evaluate_task_aging(&task, &config, now).unwrap();
+        assert_eq!(decision.new_priority, AgingPriority::High);
+    }
+
+    #[test]
+    fn high_never_ages() {
+        let config = PriorityAgingConfig {
+            enabled: true,
+            low_to_normal_secs: 0,
+            normal_to_high_secs: 0,
+            ..Default::default()
+        };
+        let now = Utc::now();
+        let task = make_task(
+            "t1",
+            AgingPriority::High,
+            Some(now - chrono::Duration::seconds(u64::MAX as i64 % 100000)),
+            DownloadState::Queued,
+        );
+        assert!(evaluate_task_aging(&task, &config, now).is_none());
+    }
 }

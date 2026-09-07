@@ -514,6 +514,9 @@ impl Default for SpeedBoostManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    // === SpeedBoostConfig defaults ===
 
     #[test]
     fn test_default_config() {
@@ -528,10 +531,480 @@ mod tests {
     }
 
     #[test]
+    fn test_default_config_has_night_preset() {
+        let config = SpeedBoostConfig::default();
+        let night = config.presets.get("night").unwrap();
+        assert_eq!(night.name, "Night Boost");
+        assert_eq!(night.multiplier, 2.0);
+        assert_eq!(night.duration_secs, 3600);
+    }
+
+    #[test]
+    fn test_default_config_has_turbo_preset() {
+        let config = SpeedBoostConfig::default();
+        let turbo = config.presets.get("turbo").unwrap();
+        assert_eq!(turbo.name, "Turbo Mode");
+        assert_eq!(turbo.multiplier, 5.0);
+        assert_eq!(turbo.duration_secs, 1800);
+    }
+
+    #[test]
+    fn test_default_config_has_unlimited_preset() {
+        let config = SpeedBoostConfig::default();
+        let unlimited = config.presets.get("unlimited").unwrap();
+        assert_eq!(unlimited.name, "Unlimited");
+        assert_eq!(unlimited.multiplier, 100.0);
+        assert_eq!(unlimited.duration_secs, 900);
+    }
+
+    // === SpeedBoostConfig serde ===
+
+    #[test]
+    fn test_config_serde_roundtrip() {
+        let config = SpeedBoostConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: SpeedBoostConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.enabled, config.enabled);
+        assert_eq!(loaded.default_duration_secs, config.default_duration_secs);
+        assert_eq!(loaded.default_multiplier, config.default_multiplier);
+        assert_eq!(loaded.max_duration_secs, config.max_duration_secs);
+        assert_eq!(loaded.max_multiplier, config.max_multiplier);
+        assert_eq!(loaded.presets.len(), config.presets.len());
+    }
+
+    #[test]
+    fn test_config_pretty_serde() {
+        let config = SpeedBoostConfig::default();
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        assert!(pretty.contains('\n'));
+        let loaded: SpeedBoostConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(loaded.enabled, config.enabled);
+    }
+
+    #[test]
+    fn test_config_serde_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"default_duration_secs":100,"default_multiplier":1.5,"max_duration_secs":200,"max_multiplier":10.0,"presets":{},"scheduled_windows":[],"extra_field":"ignored"}"#;
+        let config: SpeedBoostConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.default_duration_secs, 100);
+    }
+
+    // === SpeedBoostConfig Clone/Debug ===
+
+    #[test]
+    fn test_config_clone() {
+        let config = SpeedBoostConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.enabled, config.enabled);
+        assert_eq!(cloned.default_duration_secs, config.default_duration_secs);
+    }
+
+    #[test]
+    fn test_config_clone_independence() {
+        let mut config = SpeedBoostConfig::default();
+        let cloned = config.clone();
+        config.enabled = false;
+        assert!(cloned.enabled);
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = SpeedBoostConfig::default();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("SpeedBoostConfig"));
+        assert!(debug.contains("enabled"));
+    }
+
+    // === BoostPreset ===
+
+    #[test]
+    fn test_boost_preset_clone() {
+        let preset = BoostPreset {
+            name: "Test".to_string(),
+            multiplier: 3.0,
+            duration_secs: 900,
+            description: "Desc".to_string(),
+        };
+        let cloned = preset.clone();
+        assert_eq!(cloned.name, "Test");
+        assert_eq!(cloned.multiplier, 3.0);
+        assert_eq!(cloned.duration_secs, 900);
+        assert_eq!(cloned.description, "Desc");
+    }
+
+    #[test]
+    fn test_boost_preset_clone_independence() {
+        let mut preset = BoostPreset {
+            name: "Test".to_string(),
+            multiplier: 3.0,
+            duration_secs: 900,
+            description: "Desc".to_string(),
+        };
+        let cloned = preset.clone();
+        preset.name = "Changed".to_string();
+        assert_eq!(cloned.name, "Test");
+    }
+
+    #[test]
+    fn test_boost_preset_debug() {
+        let preset = BoostPreset {
+            name: "Turbo".to_string(),
+            multiplier: 5.0,
+            duration_secs: 1800,
+            description: "Fast".to_string(),
+        };
+        let debug = format!("{preset:?}");
+        assert!(debug.contains("Turbo"));
+        assert!(debug.contains("5.0"));
+    }
+
+    #[test]
+    fn test_boost_preset_serde_roundtrip() {
+        let preset = BoostPreset {
+            name: "Night".to_string(),
+            multiplier: 2.0,
+            duration_secs: 3600,
+            description: "Nighttime boost".to_string(),
+        };
+        let json = serde_json::to_string(&preset).unwrap();
+        let loaded: BoostPreset = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.name, preset.name);
+        assert_eq!(loaded.multiplier, preset.multiplier);
+        assert_eq!(loaded.duration_secs, preset.duration_secs);
+        assert_eq!(loaded.description, preset.description);
+    }
+
+    #[test]
+    fn test_boost_preset_unicode() {
+        let preset = BoostPreset {
+            name: "夜间加速".to_string(),
+            multiplier: 2.0,
+            duration_secs: 3600,
+            description: "🚀 快速下载".to_string(),
+        };
+        let json = serde_json::to_string(&preset).unwrap();
+        let loaded: BoostPreset = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.name, "夜间加速");
+        assert_eq!(loaded.description, "🚀 快速下载");
+    }
+
+    // === ScheduledBoostWindow ===
+
+    #[test]
+    fn test_scheduled_window_clone() {
+        let window = ScheduledBoostWindow {
+            id: "w1".to_string(),
+            name: "Window 1".to_string(),
+            multiplier: 2.0,
+            start_time: "22:00".to_string(),
+            end_time: "06:00".to_string(),
+            days_of_week: vec![0, 6],
+            enabled: true,
+        };
+        let cloned = window.clone();
+        assert_eq!(cloned.id, "w1");
+        assert_eq!(cloned.days_of_week, vec![0, 6]);
+    }
+
+    #[test]
+    fn test_scheduled_window_clone_independence() {
+        let mut window = ScheduledBoostWindow {
+            id: "w1".to_string(),
+            name: "Window 1".to_string(),
+            multiplier: 2.0,
+            start_time: "22:00".to_string(),
+            end_time: "06:00".to_string(),
+            days_of_week: vec![0, 6],
+            enabled: true,
+        };
+        let cloned = window.clone();
+        window.enabled = false;
+        assert!(cloned.enabled);
+    }
+
+    #[test]
+    fn test_scheduled_window_debug() {
+        let window = ScheduledBoostWindow {
+            id: "night".to_string(),
+            name: "Night".to_string(),
+            multiplier: 2.0,
+            start_time: "22:00".to_string(),
+            end_time: "06:00".to_string(),
+            days_of_week: vec![],
+            enabled: true,
+        };
+        let debug = format!("{window:?}");
+        assert!(debug.contains("night"));
+        assert!(debug.contains("22:00"));
+    }
+
+    #[test]
+    fn test_scheduled_window_serde_roundtrip() {
+        let window = ScheduledBoostWindow {
+            id: "w1".to_string(),
+            name: "Window 1".to_string(),
+            multiplier: 3.0,
+            start_time: "08:00".to_string(),
+            end_time: "12:00".to_string(),
+            days_of_week: vec![1, 2, 3, 4, 5],
+            enabled: true,
+        };
+        let json = serde_json::to_string(&window).unwrap();
+        let loaded: ScheduledBoostWindow = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.id, window.id);
+        assert_eq!(loaded.multiplier, window.multiplier);
+        assert_eq!(loaded.days_of_week, window.days_of_week);
+    }
+
+    // === ActiveBoost ===
+
+    #[test]
+    fn test_active_boost_clone() {
+        let boost = ActiveBoost {
+            started_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::seconds(300),
+            multiplier: 2.0,
+            original_limit: Some(1_000_000),
+            boosted_limit: Some(2_000_000),
+            source: "manual".to_string(),
+        };
+        let cloned = boost.clone();
+        assert_eq!(cloned.multiplier, boost.multiplier);
+        assert_eq!(cloned.source, boost.source);
+    }
+
+    #[test]
+    fn test_active_boost_debug() {
+        let boost = ActiveBoost {
+            started_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::seconds(300),
+            multiplier: 2.0,
+            original_limit: Some(1_000_000),
+            boosted_limit: Some(2_000_000),
+            source: "manual".to_string(),
+        };
+        let debug = format!("{boost:?}");
+        assert!(debug.contains("ActiveBoost"));
+        assert!(debug.contains("manual"));
+    }
+
+    #[test]
+    fn test_active_boost_serde_roundtrip() {
+        let now = Utc::now();
+        let boost = ActiveBoost {
+            started_at: now,
+            expires_at: now + chrono::Duration::seconds(300),
+            multiplier: 2.0,
+            original_limit: Some(1_000_000),
+            boosted_limit: Some(2_000_000),
+            source: "manual".to_string(),
+        };
+        let json = serde_json::to_string(&boost).unwrap();
+        let loaded: ActiveBoost = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.multiplier, boost.multiplier);
+        assert_eq!(loaded.source, boost.source);
+        assert_eq!(loaded.original_limit, boost.original_limit);
+    }
+
+    #[test]
+    fn test_active_boost_remaining_secs_future() {
+        let boost = ActiveBoost {
+            started_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::seconds(300),
+            multiplier: 2.0,
+            original_limit: Some(1_000_000),
+            boosted_limit: Some(2_000_000),
+            source: "manual".to_string(),
+        };
+        let remaining = boost.remaining_secs();
+        assert!(remaining > 290 && remaining <= 300);
+    }
+
+    #[test]
+    fn test_active_boost_remaining_secs_expired() {
+        let boost = ActiveBoost {
+            started_at: Utc::now() - chrono::Duration::seconds(400),
+            expires_at: Utc::now() - chrono::Duration::seconds(100),
+            multiplier: 2.0,
+            original_limit: Some(1_000_000),
+            boosted_limit: Some(2_000_000),
+            source: "manual".to_string(),
+        };
+        assert!(boost.is_expired());
+        assert_eq!(boost.remaining_secs(), 0);
+    }
+
+    #[test]
+    fn test_active_boost_is_expired_false() {
+        let boost = ActiveBoost {
+            started_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::seconds(600),
+            multiplier: 2.0,
+            original_limit: Some(1_000_000),
+            boosted_limit: Some(2_000_000),
+            source: "manual".to_string(),
+        };
+        assert!(!boost.is_expired());
+    }
+
+    // === BoostStartResult variants ===
+
+    #[test]
+    fn test_boost_start_result_started() {
+        let boost = ActiveBoost {
+            started_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::seconds(300),
+            multiplier: 2.0,
+            original_limit: Some(1_000_000),
+            boosted_limit: Some(2_000_000),
+            source: "manual".to_string(),
+        };
+        let result = BoostStartResult::Started(boost);
+        assert!(matches!(result, BoostStartResult::Started(_)));
+    }
+
+    #[test]
+    fn test_boost_start_result_disabled() {
+        let result = BoostStartResult::Disabled;
+        assert!(matches!(result, BoostStartResult::Disabled));
+    }
+
+    #[test]
+    fn test_boost_start_result_invalid_params() {
+        let result = BoostStartResult::InvalidParams("bad".to_string());
+        assert!(matches!(result, BoostStartResult::InvalidParams(_)));
+    }
+
+    #[test]
+    fn test_boost_start_result_already_active() {
+        let result = BoostStartResult::AlreadyActive;
+        assert!(matches!(result, BoostStartResult::AlreadyActive));
+    }
+
+    #[test]
+    fn test_boost_start_result_clone() {
+        let result = BoostStartResult::Disabled;
+        let cloned = result.clone();
+        assert!(matches!(cloned, BoostStartResult::Disabled));
+    }
+
+    #[test]
+    fn test_boost_start_result_debug() {
+        let result = BoostStartResult::Disabled;
+        let debug = format!("{result:?}");
+        assert!(debug.contains("Disabled"));
+    }
+
+    // === SpeedBoostStatus ===
+
+    #[test]
+    fn test_status_serde_roundtrip() {
+        let status = SpeedBoostStatus {
+            active_boost: None,
+            total_boosts_started: 10,
+            total_boosts_completed: 8,
+            total_manual_boosts: 6,
+            total_scheduled_boosts: 4,
+            preset_count: 3,
+            scheduled_window_count: 2,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let loaded: SpeedBoostStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.total_boosts_started, 10);
+        assert_eq!(loaded.total_boosts_completed, 8);
+        assert_eq!(loaded.total_manual_boosts, 6);
+        assert_eq!(loaded.total_scheduled_boosts, 4);
+    }
+
+    #[test]
+    fn test_status_clone() {
+        let status = SpeedBoostStatus {
+            active_boost: None,
+            total_boosts_started: 5,
+            total_boosts_completed: 3,
+            total_manual_boosts: 2,
+            total_scheduled_boosts: 1,
+            preset_count: 3,
+            scheduled_window_count: 1,
+        };
+        let cloned = status.clone();
+        assert_eq!(cloned.total_boosts_started, 5);
+        assert_eq!(cloned.total_scheduled_boosts, 1);
+    }
+
+    #[test]
+    fn test_status_debug() {
+        let status = SpeedBoostStatus {
+            active_boost: None,
+            total_boosts_started: 0,
+            total_boosts_completed: 0,
+            total_manual_boosts: 0,
+            total_scheduled_boosts: 0,
+            preset_count: 3,
+            scheduled_window_count: 0,
+        };
+        let debug = format!("{status:?}");
+        assert!(debug.contains("SpeedBoostStatus"));
+    }
+
+    // === SpeedBoostManager::new / default ===
+
+    #[test]
+    fn test_manager_new() {
+        let manager = SpeedBoostManager::new();
+        assert!(manager.config().enabled);
+        assert_eq!(manager.total_started, 0);
+        assert_eq!(manager.total_completed, 0);
+        assert_eq!(manager.total_manual, 0);
+        assert_eq!(manager.total_scheduled, 0);
+        assert!(manager.active_boost.is_none());
+    }
+
+    #[test]
+    fn test_manager_default_equals_new() {
+        let new = SpeedBoostManager::new();
+        let default = SpeedBoostManager::default();
+        assert_eq!(default.config().enabled, new.config().enabled);
+        assert_eq!(
+            default.config().default_duration_secs,
+            new.config().default_duration_secs
+        );
+        assert_eq!(default.config().presets.len(), new.config().presets.len());
+    }
+
+    #[test]
+    fn test_manager_with_config() {
+        let config = SpeedBoostConfig {
+            enabled: false,
+            default_duration_secs: 600,
+            default_multiplier: 3.0,
+            max_duration_secs: 7200,
+            max_multiplier: 50.0,
+            presets: HashMap::new(),
+            scheduled_windows: Vec::new(),
+        };
+        let manager = SpeedBoostManager::with_config(config);
+        assert!(!manager.config().enabled);
+        assert_eq!(manager.config().default_duration_secs, 600);
+        assert_eq!(manager.config().default_multiplier, 3.0);
+    }
+
+    #[test]
+    fn test_manager_set_config() {
+        let mut manager = SpeedBoostManager::new();
+        assert!(manager.config().enabled);
+        let mut new_config = manager.config().clone();
+        new_config.enabled = false;
+        manager.set_config(new_config);
+        assert!(!manager.config().enabled);
+    }
+
+    // === start_boost ===
+
+    #[test]
     fn test_start_boost_success() {
         let mut manager = SpeedBoostManager::new();
         let result = manager.start_boost(Some(1_000_000), Some(600), Some(2.0));
-
         match result {
             BoostStartResult::Started(boost) => {
                 assert_eq!(boost.multiplier, 2.0);
@@ -542,7 +1015,6 @@ mod tests {
             }
             _ => panic!("Expected Started result"),
         }
-
         assert_eq!(manager.total_started, 1);
         assert_eq!(manager.total_manual, 1);
     }
@@ -551,7 +1023,6 @@ mod tests {
     fn test_start_boost_disabled() {
         let mut manager = SpeedBoostManager::new();
         manager.config.enabled = false;
-
         let result = manager.start_boost(Some(1_000_000), None, None);
         assert!(matches!(result, BoostStartResult::Disabled));
     }
@@ -560,38 +1031,91 @@ mod tests {
     fn test_start_boost_already_active() {
         let mut manager = SpeedBoostManager::new();
         let _ = manager.start_boost(Some(1_000_000), Some(600), Some(2.0));
-
         let result = manager.start_boost(Some(1_000_000), Some(600), Some(2.0));
         assert!(matches!(result, BoostStartResult::AlreadyActive));
     }
 
     #[test]
-    fn test_start_boost_invalid_duration() {
+    fn test_start_boost_invalid_duration_zero() {
         let mut manager = SpeedBoostManager::new();
-
         let result = manager.start_boost(Some(1_000_000), Some(0), Some(2.0));
         assert!(matches!(result, BoostStartResult::InvalidParams(_)));
+    }
 
+    #[test]
+    fn test_start_boost_invalid_duration_too_large() {
+        let mut manager = SpeedBoostManager::new();
         let result = manager.start_boost(Some(1_000_000), Some(999999), Some(2.0));
         assert!(matches!(result, BoostStartResult::InvalidParams(_)));
     }
 
     #[test]
-    fn test_start_boost_invalid_multiplier() {
+    fn test_start_boost_invalid_multiplier_too_low() {
         let mut manager = SpeedBoostManager::new();
-
         let result = manager.start_boost(Some(1_000_000), Some(600), Some(0.5));
         assert!(matches!(result, BoostStartResult::InvalidParams(_)));
+    }
 
+    #[test]
+    fn test_start_boost_invalid_multiplier_too_high() {
+        let mut manager = SpeedBoostManager::new();
         let result = manager.start_boost(Some(1_000_000), Some(600), Some(200.0));
         assert!(matches!(result, BoostStartResult::InvalidParams(_)));
+    }
+
+    #[test]
+    fn test_start_boost_multiplier_exactly_one() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_boost(Some(1_000_000), Some(600), Some(1.0));
+        assert!(matches!(result, BoostStartResult::InvalidParams(_)));
+    }
+
+    #[test]
+    fn test_start_boost_multiplier_just_above_one() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_boost(Some(1_000_000), Some(600), Some(1.01));
+        assert!(matches!(result, BoostStartResult::Started(_)));
+    }
+
+    #[test]
+    fn test_start_boost_multiplier_at_max() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_boost(Some(1_000_000), Some(600), Some(100.0));
+        assert!(matches!(result, BoostStartResult::Started(_)));
+    }
+
+    #[test]
+    fn test_start_boost_multiplier_just_above_max() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_boost(Some(1_000_000), Some(600), Some(100.01));
+        assert!(matches!(result, BoostStartResult::InvalidParams(_)));
+    }
+
+    #[test]
+    fn test_start_boost_duration_at_max() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_boost(Some(1_000_000), Some(14400), Some(2.0));
+        assert!(matches!(result, BoostStartResult::Started(_)));
+    }
+
+    #[test]
+    fn test_start_boost_duration_just_over_max() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_boost(Some(1_000_000), Some(14401), Some(2.0));
+        assert!(matches!(result, BoostStartResult::InvalidParams(_)));
+    }
+
+    #[test]
+    fn test_start_boost_duration_at_one() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_boost(Some(1_000_000), Some(1), Some(2.0));
+        assert!(matches!(result, BoostStartResult::Started(_)));
     }
 
     #[test]
     fn test_start_boost_unlimited() {
         let mut manager = SpeedBoostManager::new();
         let result = manager.start_boost(None, Some(600), Some(2.0));
-
         match result {
             BoostStartResult::Started(boost) => {
                 assert_eq!(boost.original_limit, None);
@@ -602,20 +1126,96 @@ mod tests {
     }
 
     #[test]
-    fn test_stop_boost() {
+    fn test_start_boost_zero_limit() {
         let mut manager = SpeedBoostManager::new();
-        let _ = manager.start_boost(Some(1_000_000), Some(600), Some(2.0));
-
-        assert!(manager.stop_boost());
-        assert!(manager.active_boost.is_none());
-        assert!(!manager.stop_boost()); // Already stopped
+        let result = manager.start_boost(Some(0), Some(600), Some(2.0));
+        match result {
+            BoostStartResult::Started(boost) => {
+                assert_eq!(boost.boosted_limit, None);
+            }
+            _ => panic!("Expected Started result"),
+        }
     }
 
     #[test]
-    fn test_status() {
+    fn test_start_boost_default_params() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_boost(Some(1_000_000), None, None);
+        match result {
+            BoostStartResult::Started(boost) => {
+                assert_eq!(boost.multiplier, 2.0);
+            }
+            _ => panic!("Expected Started result"),
+        }
+    }
+
+    #[test]
+    fn test_start_boost_boosted_limit_calculation() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_boost(Some(500_000), Some(600), Some(3.0));
+        match result {
+            BoostStartResult::Started(boost) => {
+                assert_eq!(boost.boosted_limit, Some(1_500_000));
+            }
+            _ => panic!("Expected Started result"),
+        }
+    }
+
+    #[test]
+    fn test_start_boost_source_is_manual() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_boost(Some(1_000_000), Some(600), Some(2.0));
+        match result {
+            BoostStartResult::Started(boost) => {
+                assert_eq!(boost.source, "manual");
+            }
+            _ => panic!("Expected Started result"),
+        }
+    }
+
+    #[test]
+    fn test_start_boost_increments_counters() {
         let mut manager = SpeedBoostManager::new();
         let _ = manager.start_boost(Some(1_000_000), Some(600), Some(2.0));
+        assert_eq!(manager.total_started, 1);
+        assert_eq!(manager.total_manual, 1);
+        assert_eq!(manager.total_scheduled, 0);
+        manager.active_boost = None;
+        let _ = manager.start_boost(Some(1_000_000), Some(600), Some(2.0));
+        assert_eq!(manager.total_started, 2);
+        assert_eq!(manager.total_manual, 2);
+    }
 
+    // === stop_boost ===
+
+    #[test]
+    fn test_stop_boost_active() {
+        let mut manager = SpeedBoostManager::new();
+        let _ = manager.start_boost(Some(1_000_000), Some(600), Some(2.0));
+        assert!(manager.stop_boost());
+        assert!(manager.active_boost.is_none());
+    }
+
+    #[test]
+    fn test_stop_boost_none() {
+        let mut manager = SpeedBoostManager::new();
+        assert!(!manager.stop_boost());
+    }
+
+    #[test]
+    fn test_stop_boost_idempotent() {
+        let mut manager = SpeedBoostManager::new();
+        let _ = manager.start_boost(Some(1_000_000), Some(600), Some(2.0));
+        assert!(manager.stop_boost());
+        assert!(!manager.stop_boost());
+    }
+
+    // === status ===
+
+    #[test]
+    fn test_status_with_active_boost() {
+        let mut manager = SpeedBoostManager::new();
+        let _ = manager.start_boost(Some(1_000_000), Some(600), Some(2.0));
         let status = manager.status();
         assert!(status.active_boost.is_some());
         assert_eq!(status.total_boosts_started, 1);
@@ -624,10 +1224,51 @@ mod tests {
     }
 
     #[test]
+    fn test_status_no_active_boost() {
+        let manager = SpeedBoostManager::new();
+        let status = manager.status();
+        assert!(status.active_boost.is_none());
+        assert_eq!(status.total_boosts_started, 0);
+    }
+
+    #[test]
+    fn test_status_hides_expired_boost() {
+        let mut manager = SpeedBoostManager::new();
+        let boost = ActiveBoost {
+            started_at: Utc::now() - chrono::Duration::seconds(400),
+            expires_at: Utc::now() - chrono::Duration::seconds(1),
+            multiplier: 2.0,
+            original_limit: Some(1_000_000),
+            boosted_limit: Some(2_000_000),
+            source: "manual".to_string(),
+        };
+        manager.active_boost = Some(boost);
+        let status = manager.status();
+        assert!(status.active_boost.is_none());
+    }
+
+    #[test]
+    fn test_status_scheduled_window_count() {
+        let mut manager = SpeedBoostManager::new();
+        manager.add_scheduled_window(ScheduledBoostWindow {
+            id: "w1".to_string(),
+            name: "W1".to_string(),
+            multiplier: 2.0,
+            start_time: "22:00".to_string(),
+            end_time: "06:00".to_string(),
+            days_of_week: vec![],
+            enabled: true,
+        });
+        let status = manager.status();
+        assert_eq!(status.scheduled_window_count, 1);
+    }
+
+    // === effective_limit ===
+
+    #[test]
     fn test_effective_limit_with_boost() {
         let mut manager = SpeedBoostManager::new();
         let _ = manager.start_boost(Some(1_000_000), Some(600), Some(2.0));
-
         assert_eq!(manager.effective_limit(Some(1_000_000)), Some(2_000_000));
     }
 
@@ -638,10 +1279,31 @@ mod tests {
     }
 
     #[test]
-    fn test_process_expired() {
-        let mut manager = SpeedBoostManager::new();
+    fn test_effective_limit_none_base() {
+        let manager = SpeedBoostManager::new();
+        assert_eq!(manager.effective_limit(None), None);
+    }
 
-        // Create a boost that's already expired
+    #[test]
+    fn test_effective_limit_with_expired_boost() {
+        let mut manager = SpeedBoostManager::new();
+        let boost = ActiveBoost {
+            started_at: Utc::now() - chrono::Duration::seconds(400),
+            expires_at: Utc::now() - chrono::Duration::seconds(1),
+            multiplier: 2.0,
+            original_limit: Some(1_000_000),
+            boosted_limit: Some(2_000_000),
+            source: "manual".to_string(),
+        };
+        manager.active_boost = Some(boost);
+        assert_eq!(manager.effective_limit(Some(500_000)), Some(500_000));
+    }
+
+    // === process_expired ===
+
+    #[test]
+    fn test_process_expired_removes_expired() {
+        let mut manager = SpeedBoostManager::new();
         let boost = ActiveBoost {
             started_at: Utc::now() - chrono::Duration::seconds(100),
             expires_at: Utc::now() - chrono::Duration::seconds(1),
@@ -651,36 +1313,134 @@ mod tests {
             source: "manual".to_string(),
         };
         manager.active_boost = Some(boost);
-
         manager.process_expired();
         assert!(manager.active_boost.is_none());
         assert_eq!(manager.total_completed, 1);
     }
 
     #[test]
-    fn test_preset_operations() {
+    fn test_process_expired_keeps_active() {
         let mut manager = SpeedBoostManager::new();
+        let boost = ActiveBoost {
+            started_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::seconds(300),
+            multiplier: 2.0,
+            original_limit: Some(1_000_000),
+            boosted_limit: Some(2_000_000),
+            source: "manual".to_string(),
+        };
+        manager.active_boost = Some(boost);
+        manager.process_expired();
+        assert!(manager.active_boost.is_some());
+        assert_eq!(manager.total_completed, 0);
+    }
 
-        // Add preset
+    #[test]
+    fn test_process_expired_no_boost() {
+        let mut manager = SpeedBoostManager::new();
+        manager.process_expired();
+        assert!(manager.active_boost.is_none());
+        assert_eq!(manager.total_completed, 0);
+    }
+
+    #[test]
+    fn test_process_expired_idempotent() {
+        let mut manager = SpeedBoostManager::new();
+        let boost = ActiveBoost {
+            started_at: Utc::now() - chrono::Duration::seconds(100),
+            expires_at: Utc::now() - chrono::Duration::seconds(1),
+            multiplier: 2.0,
+            original_limit: Some(1_000_000),
+            boosted_limit: Some(2_000_000),
+            source: "manual".to_string(),
+        };
+        manager.active_boost = Some(boost);
+        manager.process_expired();
+        manager.process_expired();
+        assert_eq!(manager.total_completed, 1);
+    }
+
+    // === Preset operations ===
+
+    #[test]
+    fn test_add_preset() {
+        let mut manager = SpeedBoostManager::new();
         let preset = BoostPreset {
-            name: "Test Preset".to_string(),
+            name: "Custom".to_string(),
             multiplier: 3.0,
             duration_secs: 900,
-            description: "Test".to_string(),
+            description: "Custom preset".to_string(),
         };
-        assert!(manager.add_preset("test", preset));
-        assert_eq!(manager.list_presets().len(), 4); // 3 default + 1 new
+        assert!(manager.add_preset("custom", preset));
+        assert_eq!(manager.list_presets().len(), 4);
+        assert!(manager.list_presets().contains_key("custom"));
+    }
 
-        // Start preset boost
-        let result = manager.start_preset_boost("test", Some(1_000_000));
-        assert!(matches!(result, BoostStartResult::Started(_)));
+    #[test]
+    fn test_add_preset_replaces_existing() {
+        let mut manager = SpeedBoostManager::new();
+        let preset1 = BoostPreset {
+            name: "V1".to_string(),
+            multiplier: 2.0,
+            duration_secs: 600,
+            description: "V1".to_string(),
+        };
+        let preset2 = BoostPreset {
+            name: "V2".to_string(),
+            multiplier: 4.0,
+            duration_secs: 1200,
+            description: "V2".to_string(),
+        };
+        manager.add_preset("custom", preset1);
+        manager.add_preset("custom", preset2);
+        assert_eq!(manager.list_presets().get("custom").unwrap().name, "V2");
+    }
 
-        // Remove preset
-        assert!(manager.remove_preset("test"));
-        assert_eq!(manager.list_presets().len(), 3);
+    #[test]
+    fn test_remove_preset_existing() {
+        let mut manager = SpeedBoostManager::new();
+        assert!(manager.remove_preset("night"));
+        assert_eq!(manager.list_presets().len(), 2);
+    }
 
-        // Remove non-existent
+    #[test]
+    fn test_remove_preset_nonexistent() {
+        let mut manager = SpeedBoostManager::new();
         assert!(!manager.remove_preset("nonexistent"));
+        assert_eq!(manager.list_presets().len(), 3);
+    }
+
+    #[test]
+    fn test_list_presets_default_count() {
+        let manager = SpeedBoostManager::new();
+        assert_eq!(manager.list_presets().len(), 3);
+    }
+
+    // === start_preset_boost ===
+
+    #[test]
+    fn test_start_preset_boost_success() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_preset_boost("night", Some(1_000_000));
+        assert!(matches!(result, BoostStartResult::Started(_)));
+        // Internal active_boost has the preset source
+        assert_eq!(
+            manager.active_boost.as_ref().unwrap().source,
+            "preset:night"
+        );
+        assert_eq!(manager.active_boost.as_ref().unwrap().multiplier, 2.0);
+    }
+
+    #[test]
+    fn test_start_preset_boost_turbo() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_preset_boost("turbo", Some(1_000_000));
+        assert!(matches!(result, BoostStartResult::Started(_)));
+        assert_eq!(
+            manager.active_boost.as_ref().unwrap().source,
+            "preset:turbo"
+        );
+        assert_eq!(manager.active_boost.as_ref().unwrap().multiplier, 5.0);
     }
 
     #[test]
@@ -691,89 +1451,103 @@ mod tests {
     }
 
     #[test]
-    fn test_scheduled_window_operations() {
+    fn test_start_preset_boost_with_none_limit() {
         let mut manager = SpeedBoostManager::new();
+        let result = manager.start_preset_boost("night", None);
+        assert!(matches!(result, BoostStartResult::Started(_)));
+    }
 
+    // === Scheduled window operations ===
+
+    #[test]
+    fn test_add_scheduled_window() {
+        let mut manager = SpeedBoostManager::new();
         let window = ScheduledBoostWindow {
-            id: "night_window".to_string(),
-            name: "Night Window".to_string(),
+            id: "w1".to_string(),
+            name: "Window 1".to_string(),
             multiplier: 2.0,
             start_time: "22:00".to_string(),
             end_time: "06:00".to_string(),
-            days_of_week: vec![0, 6], // Weekend
+            days_of_week: vec![0, 6],
             enabled: true,
         };
-
         assert!(manager.add_scheduled_window(window));
         assert_eq!(manager.list_scheduled_windows().len(), 1);
+    }
 
-        // Enable/disable
-        assert!(manager.set_scheduled_window_enabled("night_window", false));
-        assert!(!manager.list_scheduled_windows()[0].enabled);
+    #[test]
+    fn test_add_multiple_scheduled_windows() {
+        let mut manager = SpeedBoostManager::new();
+        for i in 0..5 {
+            manager.add_scheduled_window(ScheduledBoostWindow {
+                id: format!("w{i}"),
+                name: format!("Window {i}"),
+                multiplier: 2.0,
+                start_time: "22:00".to_string(),
+                end_time: "06:00".to_string(),
+                days_of_week: vec![],
+                enabled: true,
+            });
+        }
+        assert_eq!(manager.list_scheduled_windows().len(), 5);
+    }
 
-        // Remove
-        assert!(manager.remove_scheduled_window("night_window"));
+    #[test]
+    fn test_remove_scheduled_window_existing() {
+        let mut manager = SpeedBoostManager::new();
+        manager.add_scheduled_window(ScheduledBoostWindow {
+            id: "w1".to_string(),
+            name: "W1".to_string(),
+            multiplier: 2.0,
+            start_time: "22:00".to_string(),
+            end_time: "06:00".to_string(),
+            days_of_week: vec![],
+            enabled: true,
+        });
+        assert!(manager.remove_scheduled_window("w1"));
         assert!(manager.list_scheduled_windows().is_empty());
     }
 
     #[test]
-    fn test_save_load_config() {
+    fn test_remove_scheduled_window_nonexistent() {
+        let mut manager = SpeedBoostManager::new();
+        assert!(!manager.remove_scheduled_window("nonexistent"));
+    }
+
+    #[test]
+    fn test_set_scheduled_window_enabled() {
+        let mut manager = SpeedBoostManager::new();
+        manager.add_scheduled_window(ScheduledBoostWindow {
+            id: "w1".to_string(),
+            name: "W1".to_string(),
+            multiplier: 2.0,
+            start_time: "22:00".to_string(),
+            end_time: "06:00".to_string(),
+            days_of_week: vec![],
+            enabled: true,
+        });
+        assert!(manager.set_scheduled_window_enabled("w1", false));
+        assert!(!manager.list_scheduled_windows()[0].enabled);
+        assert!(manager.set_scheduled_window_enabled("w1", true));
+        assert!(manager.list_scheduled_windows()[0].enabled);
+    }
+
+    #[test]
+    fn test_set_scheduled_window_enabled_nonexistent() {
+        let mut manager = SpeedBoostManager::new();
+        assert!(!manager.set_scheduled_window_enabled("nonexistent", false));
+    }
+
+    #[test]
+    fn test_list_scheduled_windows_empty() {
         let manager = SpeedBoostManager::new();
-        let temp_path = std::env::temp_dir().join("speed_boost_test.json");
-
-        // Save
-        assert!(manager.save_config(&temp_path).is_ok());
-
-        // Load
-        let loaded = SpeedBoostManager::load_config(&temp_path);
-        assert!(loaded.is_ok());
-
-        let loaded_config = loaded.unwrap();
-        assert_eq!(loaded_config.enabled, manager.config.enabled);
-        assert_eq!(loaded_config.presets.len(), manager.config.presets.len());
-
-        // Cleanup
-        let _ = std::fs::remove_file(&temp_path);
+        assert!(manager.list_scheduled_windows().is_empty());
     }
 
-    #[test]
-    fn test_load_config_not_found() {
-        let result = SpeedBoostManager::load_config(std::path::Path::new("/nonexistent/path.json"));
-        assert!(result.is_err());
-    }
+    // === calculate_window_duration ===
 
     #[test]
-    fn test_active_boost_remaining_secs() {
-        let boost = ActiveBoost {
-            started_at: Utc::now(),
-            expires_at: Utc::now() + chrono::Duration::seconds(300),
-            multiplier: 2.0,
-            original_limit: Some(1_000_000),
-            boosted_limit: Some(2_000_000),
-            source: "manual".to_string(),
-        };
-
-        let remaining = boost.remaining_secs();
-        assert!(remaining > 290 && remaining <= 300);
-    }
-
-    #[test]
-    fn test_active_boost_expired() {
-        let boost = ActiveBoost {
-            started_at: Utc::now() - chrono::Duration::seconds(400),
-            expires_at: Utc::now() - chrono::Duration::seconds(100),
-            multiplier: 2.0,
-            original_limit: Some(1_000_000),
-            boosted_limit: Some(2_000_000),
-            source: "manual".to_string(),
-        };
-
-        assert!(boost.is_expired());
-        assert_eq!(boost.remaining_secs(), 0);
-    }
-
-    #[test]
-    fn test_calculate_window_duration() {
+    fn test_calculate_window_duration_full_hour() {
         let manager = SpeedBoostManager::new();
         let window = ScheduledBoostWindow {
             id: "test".to_string(),
@@ -784,13 +1558,288 @@ mod tests {
             days_of_week: vec![],
             enabled: true,
         };
+        assert_eq!(manager.calculate_window_duration(&window, "22:00"), 3600);
+    }
 
-        // At 22:30, should have 30 minutes remaining
-        let duration = manager.calculate_window_duration(&window, "22:30");
-        assert_eq!(duration, 1800); // 30 minutes in seconds
+    #[test]
+    fn test_calculate_window_duration_half_hour() {
+        let manager = SpeedBoostManager::new();
+        let window = ScheduledBoostWindow {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            multiplier: 2.0,
+            start_time: "22:00".to_string(),
+            end_time: "23:00".to_string(),
+            days_of_week: vec![],
+            enabled: true,
+        };
+        assert_eq!(manager.calculate_window_duration(&window, "22:30"), 1800);
+    }
 
-        // At 22:00, should have 60 minutes remaining
-        let duration = manager.calculate_window_duration(&window, "22:00");
-        assert_eq!(duration, 3600); // 60 minutes in seconds
+    #[test]
+    fn test_calculate_window_duration_at_end() {
+        let manager = SpeedBoostManager::new();
+        let window = ScheduledBoostWindow {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            multiplier: 2.0,
+            start_time: "22:00".to_string(),
+            end_time: "23:00".to_string(),
+            days_of_week: vec![],
+            enabled: true,
+        };
+        assert_eq!(manager.calculate_window_duration(&window, "23:00"), 0);
+    }
+
+    #[test]
+    fn test_calculate_window_duration_past_end() {
+        let manager = SpeedBoostManager::new();
+        let window = ScheduledBoostWindow {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            multiplier: 2.0,
+            start_time: "22:00".to_string(),
+            end_time: "23:00".to_string(),
+            days_of_week: vec![],
+            enabled: true,
+        };
+        assert_eq!(manager.calculate_window_duration(&window, "23:30"), 0);
+    }
+
+    #[test]
+    fn test_calculate_window_duration_invalid_end_format() {
+        let manager = SpeedBoostManager::new();
+        let window = ScheduledBoostWindow {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            multiplier: 2.0,
+            start_time: "22:00".to_string(),
+            end_time: "invalid".to_string(),
+            days_of_week: vec![],
+            enabled: true,
+        };
+        assert_eq!(
+            manager.calculate_window_duration(&window, "22:30"),
+            manager.config().default_duration_secs
+        );
+    }
+
+    #[test]
+    fn test_calculate_window_duration_invalid_current_time() {
+        let manager = SpeedBoostManager::new();
+        let window = ScheduledBoostWindow {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            multiplier: 2.0,
+            start_time: "22:00".to_string(),
+            end_time: "23:00".to_string(),
+            days_of_week: vec![],
+            enabled: true,
+        };
+        assert_eq!(
+            manager.calculate_window_duration(&window, "bad"),
+            manager.config().default_duration_secs
+        );
+    }
+
+    #[test]
+    fn test_calculate_window_duration_clamped_to_max() {
+        let config = SpeedBoostConfig {
+            max_duration_secs: 1800,
+            ..Default::default()
+        };
+        let manager = SpeedBoostManager::with_config(config);
+        let window = ScheduledBoostWindow {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            multiplier: 2.0,
+            start_time: "22:00".to_string(),
+            end_time: "23:30".to_string(),
+            days_of_week: vec![],
+            enabled: true,
+        };
+        assert_eq!(manager.calculate_window_duration(&window, "22:00"), 1800);
+    }
+
+    // === Persistence ===
+
+    #[test]
+    fn test_save_load_config() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("speed_boost.json");
+        let manager = SpeedBoostManager::new();
+        assert!(manager.save_config(&path).is_ok());
+        let loaded = SpeedBoostManager::load_config(&path).unwrap();
+        assert_eq!(loaded.enabled, manager.config().enabled);
+        assert_eq!(loaded.presets.len(), manager.config().presets.len());
+    }
+
+    #[test]
+    fn test_save_config_creates_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("speed_boost.json");
+        let manager = SpeedBoostManager::new();
+        manager.save_config(&path).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_save_config_overwrite() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("speed_boost.json");
+        let manager = SpeedBoostManager::new();
+        manager.save_config(&path).unwrap();
+        let mut config2 = manager.config().clone();
+        config2.enabled = false;
+        let manager2 = SpeedBoostManager::with_config(config2);
+        manager2.save_config(&path).unwrap();
+        let loaded = SpeedBoostManager::load_config(&path).unwrap();
+        assert!(!loaded.enabled);
+    }
+
+    #[test]
+    fn test_load_config_not_found() {
+        let result = SpeedBoostManager::load_config(std::path::Path::new("/nonexistent/path.json"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_config_corrupted_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("speed_boost.json");
+        std::fs::write(&path, "not json").unwrap();
+        let result = SpeedBoostManager::load_config(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_load_config_unicode() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("speed_boost.json");
+        let mut config = SpeedBoostConfig::default();
+        config.presets.insert(
+            "夜间".to_string(),
+            BoostPreset {
+                name: "🚀 加速".to_string(),
+                multiplier: 2.0,
+                duration_secs: 3600,
+                description: "夜间加速下载".to_string(),
+            },
+        );
+        let manager = SpeedBoostManager::with_config(config);
+        manager.save_config(&path).unwrap();
+        let loaded = SpeedBoostManager::load_config(&path).unwrap();
+        let preset = loaded.presets.get("夜间").unwrap();
+        assert_eq!(preset.name, "🚀 加速");
+    }
+
+    // === Complex workflows ===
+
+    #[test]
+    fn test_complete_lifecycle() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_boost(Some(1_000_000), Some(600), Some(2.0));
+        assert!(matches!(result, BoostStartResult::Started(_)));
+        assert_eq!(manager.effective_limit(Some(1_000_000)), Some(2_000_000));
+        let status = manager.status();
+        assert!(status.active_boost.is_some());
+        assert_eq!(status.total_boosts_started, 1);
+        assert!(manager.stop_boost());
+        assert_eq!(manager.effective_limit(Some(1_000_000)), Some(1_000_000));
+    }
+
+    #[test]
+    fn test_preset_lifecycle() {
+        let mut manager = SpeedBoostManager::new();
+        manager.add_preset(
+            "custom",
+            BoostPreset {
+                name: "Custom".to_string(),
+                multiplier: 3.0,
+                duration_secs: 900,
+                description: "Custom boost".to_string(),
+            },
+        );
+        let result = manager.start_preset_boost("custom", Some(1_000_000));
+        assert!(matches!(result, BoostStartResult::Started(_)));
+        assert_eq!(
+            manager.active_boost.as_ref().unwrap().source,
+            "preset:custom"
+        );
+        assert!(manager.remove_preset("custom"));
+        assert!(manager.stop_boost());
+    }
+
+    #[test]
+    fn test_multiple_managers_independent() {
+        let mut m1 = SpeedBoostManager::new();
+        let mut m2 = SpeedBoostManager::new();
+        let _ = m1.start_boost(Some(1_000_000), Some(600), Some(2.0));
+        assert!(m2.active_boost.is_none());
+        assert_eq!(m2.total_started, 0);
+        let _ = m2.start_boost(Some(2_000_000), Some(300), Some(3.0));
+        assert_eq!(m1.total_started, 1);
+        assert_eq!(m2.total_started, 1);
+    }
+
+    #[test]
+    fn test_boost_then_restart_after_stop() {
+        let mut manager = SpeedBoostManager::new();
+        let _ = manager.start_boost(Some(1_000_000), Some(600), Some(2.0));
+        manager.stop_boost();
+        let result = manager.start_boost(Some(1_000_000), Some(600), Some(3.0));
+        assert!(matches!(result, BoostStartResult::Started(_)));
+        assert_eq!(manager.total_started, 2);
+    }
+
+    #[test]
+    fn test_scheduled_window_with_unicode() {
+        let mut manager = SpeedBoostManager::new();
+        manager.add_scheduled_window(ScheduledBoostWindow {
+            id: "夜间窗口".to_string(),
+            name: "🌙 夜间".to_string(),
+            multiplier: 2.0,
+            start_time: "22:00".to_string(),
+            end_time: "06:00".to_string(),
+            days_of_week: vec![1, 2, 3, 4, 5],
+            enabled: true,
+        });
+        assert_eq!(manager.list_scheduled_windows().len(), 1);
+        assert_eq!(manager.list_scheduled_windows()[0].name, "🌙 夜间");
+    }
+
+    #[test]
+    fn test_config_custom_values() {
+        let config = SpeedBoostConfig {
+            enabled: false,
+            default_duration_secs: 300,
+            default_multiplier: 1.5,
+            max_duration_secs: 3600,
+            max_multiplier: 10.0,
+            presets: HashMap::new(),
+            scheduled_windows: Vec::new(),
+        };
+        let manager = SpeedBoostManager::with_config(config);
+        assert!(!manager.config().enabled);
+        assert_eq!(manager.config().default_duration_secs, 300);
+        assert_eq!(manager.config().max_multiplier, 10.0);
+    }
+
+    #[test]
+    fn test_start_boost_with_max_multiplier() {
+        let config = SpeedBoostConfig {
+            max_multiplier: 10.0,
+            ..Default::default()
+        };
+        let mut manager = SpeedBoostManager::with_config(config);
+        let result = manager.start_boost(Some(1_000_000), Some(600), Some(10.0));
+        assert!(matches!(result, BoostStartResult::Started(_)));
+    }
+
+    #[test]
+    fn test_start_boost_negative_multiplier() {
+        let mut manager = SpeedBoostManager::new();
+        let result = manager.start_boost(Some(1_000_000), Some(600), Some(-1.0));
+        assert!(matches!(result, BoostStartResult::InvalidParams(_)));
     }
 }
