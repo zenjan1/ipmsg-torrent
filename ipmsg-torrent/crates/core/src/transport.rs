@@ -28,13 +28,34 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
-/// Check if a multiaddr contains a private/internal IP address
+/// Check if a multiaddr contains a private/internal IP address.
+/// Uses early-exit pattern matching on the string representation for speed.
 fn is_private_addr(addr: &Multiaddr) -> bool {
     let addr_str = addr.to_string();
-    addr_str.contains("/ip4/127.0.0.1/")
-        || addr_str.contains("/ip4/10.")
-        || addr_str.contains("/ip4/192.168.")
-        || (16..=31).any(|i| addr_str.contains(&format!("/ip4/172.{}.", i)))
+    // Fast path: most addresses are public, check common prefixes first
+    if !addr_str.contains("/ip4/") {
+        return false; // IPv6 or other — treat as public for now
+    }
+    // Check loopback
+    if addr_str.contains("/ip4/127.") {
+        return true;
+    }
+    // Check RFC1918 private ranges
+    if addr_str.contains("/ip4/10.") || addr_str.contains("/ip4/192.168.") {
+        return true;
+    }
+    // Check 172.16.0.0/12 (172.16.x - 172.31.x)
+    if let Some(start) = addr_str.find("/ip4/172.") {
+        let after = &addr_str[start + 9..]; // skip "/ip4/172."
+        if let Some(dot_pos) = after.find('.') {
+            if let Ok(second_octet) = after[..dot_pos].parse::<u8>() {
+                if (16..=31).contains(&second_octet) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Combined LibP2P behaviour — all sub-protocols
@@ -355,7 +376,7 @@ impl P2PSwarm {
             .gossipsub
             .mesh_peers(&topic.hash());
         let mesh_count = mesh_peers.count();
-        tracing::info!(
+        tracing::debug!(
             topic = topic_name,
             mesh_peers = mesh_count,
             "Publishing to topic"
@@ -418,7 +439,7 @@ impl P2PSwarm {
     fn on_gossipsub_message(&mut self, msg: &gossipsub::Message) -> Vec<P2PEvent> {
         let mut events = Vec::new();
         let topic = msg.topic.as_str();
-        tracing::info!(
+        tracing::debug!(
             topic = topic,
             data_len = msg.data.len(),
             "Received gossipsub message"
@@ -638,30 +659,9 @@ impl P2PSwarm {
         let addrs: Vec<String> = info.listen_addrs.iter().map(|a| a.to_string()).collect();
         if !addrs.is_empty() {
             // Add only externally reachable addresses to Kademlia routing table
-            // Filter out private/internal addresses (127.0.0.1, 10.x.x.x, 172.16-31.x.x, 192.168.x.x)
+            // Filter out private/internal addresses using the existing helper
             for addr in &info.listen_addrs {
-                let addr_str = addr.to_string();
-                // Skip private/internal addresses
-                if addr_str.contains("/ip4/127.0.0.1/")
-                    || addr_str.contains("/ip4/10.")
-                    || addr_str.contains("/ip4/172.16.")
-                    || addr_str.contains("/ip4/172.17.")
-                    || addr_str.contains("/ip4/172.18.")
-                    || addr_str.contains("/ip4/172.19.")
-                    || addr_str.contains("/ip4/172.20.")
-                    || addr_str.contains("/ip4/172.21.")
-                    || addr_str.contains("/ip4/172.22.")
-                    || addr_str.contains("/ip4/172.23.")
-                    || addr_str.contains("/ip4/172.24.")
-                    || addr_str.contains("/ip4/172.25.")
-                    || addr_str.contains("/ip4/172.26.")
-                    || addr_str.contains("/ip4/172.27.")
-                    || addr_str.contains("/ip4/172.28.")
-                    || addr_str.contains("/ip4/172.29.")
-                    || addr_str.contains("/ip4/172.30.")
-                    || addr_str.contains("/ip4/172.31.")
-                    || addr_str.contains("/ip4/192.168.")
-                {
+                if is_private_addr(addr) {
                     continue;
                 }
                 self.swarm

@@ -493,8 +493,12 @@ impl P2PEngine {
                                     // Deduplicate received messages using Bloom filter
                                     let evt = match &evt {
                                         P2PEvent::MessageReceived(msg) => {
+                                            // Record receive time for latency tracking
+                                            let recv_start = std::time::Instant::now();
+
                                             // Check blocked peers first
                                             if self.is_blocked(&msg.from) {
+                                                self.stats.record_blocked_message();
                                                 continue;
                                             }
                                             // Verify message signature (prevent spoofing)
@@ -508,6 +512,7 @@ impl P2PEngine {
                                                             &msg.from,
                                                             PeerBehavior::InvalidSignature
                                                         );
+                                                        self.stats.record_invalid_rejected();
                                                         continue;
                                                     }
                                                 // If no known key, accept but log for future verification
@@ -523,6 +528,7 @@ impl P2PEngine {
                                                     &msg.from,
                                                     ReputationEvent::DuplicateMessage,
                                                 );
+                                                self.stats.record_duplicate_rejected();
                                                 continue;
                                             }
                                             self.dedup.mark_seen(&msg.id);
@@ -549,6 +555,8 @@ impl P2PEngine {
                                                     ack_bytes,
                                                 );
                                             }
+                                            // Record message processing latency
+                                            self.stats.record_processing_latency(recv_start.elapsed().as_micros() as u64);
                                             evt
                                         }
                                         P2PEvent::FragmentReceived { fragment } => {

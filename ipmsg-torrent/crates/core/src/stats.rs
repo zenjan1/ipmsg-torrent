@@ -34,6 +34,12 @@ pub struct NetworkStats {
     pub invalid_rejected: AtomicU64,
     /// Total messages from blocked peers
     pub blocked_messages: AtomicU64,
+    /// Total message processing latency in microseconds (for avg calculation)
+    pub processing_latency_us: AtomicU64,
+    /// Number of messages processed (for avg latency)
+    pub processing_count: AtomicU64,
+    /// Peak message processing latency in microseconds
+    pub peak_processing_latency_us: AtomicU64,
     /// Start time for uptime calculation
     start_time: Instant,
 }
@@ -56,6 +62,9 @@ impl NetworkStats {
             duplicates_rejected: AtomicU64::new(0),
             invalid_rejected: AtomicU64::new(0),
             blocked_messages: AtomicU64::new(0),
+            processing_latency_us: AtomicU64::new(0),
+            processing_count: AtomicU64::new(0),
+            peak_processing_latency_us: AtomicU64::new(0),
             start_time: Instant::now(),
         }
     }
@@ -112,6 +121,28 @@ impl NetworkStats {
         self.blocked_messages.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record message processing latency (microseconds).
+    /// Updates running total, count, and peak for average/peak calculations.
+    #[inline]
+    pub fn record_processing_latency(&self, latency_us: u64) {
+        self.processing_latency_us
+            .fetch_add(latency_us, Ordering::Relaxed);
+        self.processing_count.fetch_add(1, Ordering::Relaxed);
+        // Update peak if this is the new max (lock-free CAS loop)
+        let mut current_peak = self.peak_processing_latency_us.load(Ordering::Relaxed);
+        while latency_us > current_peak {
+            match self.peak_processing_latency_us.compare_exchange_weak(
+                current_peak,
+                latency_us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(old) => current_peak = old,
+            }
+        }
+    }
+
     /// Get uptime in seconds
     pub fn uptime_seconds(&self) -> u64 {
         self.start_time.elapsed().as_secs()
@@ -163,17 +194,35 @@ impl NetworkStats {
         total as f64 / uptime
     }
 
+    /// Average message processing latency in microseconds
+    pub fn avg_processing_latency_us(&self) -> f64 {
+        let count = self.processing_count.load(Ordering::Relaxed);
+        if count == 0 {
+            return 0.0;
+        }
+        let total = self.processing_latency_us.load(Ordering::Relaxed);
+        total as f64 / count as f64
+    }
+
+    /// Peak message processing latency in microseconds
+    pub fn peak_processing_latency_us(&self) -> u64 {
+        self.peak_processing_latency_us.load(Ordering::Relaxed)
+    }
+
     /// Format stats as human-readable string
     pub fn summary(&self) -> String {
         let msg_rate = format!("{:.2}", self.messages_per_second());
         let bandwidth = format!("{:.2}", self.bytes_per_second());
+        let avg_lat = self.avg_processing_latency_us();
+        let peak_lat = self.peak_processing_latency_us();
         format!(
             "Uptime: {}\n\
              Peers: {} connected ({} total connections)\n\
              Messages: {} sent, {} received ({} msg/s avg)\n\
              Traffic: {} sent, {} received ({} B/s avg)\n\
              Files: {} shared, {} downloaded\n\
-             Rejected: {} duplicates, {} invalid, {} blocked",
+             Rejected: {} duplicates, {} invalid, {} blocked\n\
+             Latency: avg {:.1} µs, peak {} µs",
             self.uptime_string(),
             self.connected_peers(),
             self.total_connections.load(Ordering::Relaxed),
@@ -188,6 +237,8 @@ impl NetworkStats {
             self.duplicates_rejected.load(Ordering::Relaxed),
             self.invalid_rejected.load(Ordering::Relaxed),
             self.blocked_messages.load(Ordering::Relaxed),
+            avg_lat,
+            peak_lat,
         )
     }
 }
@@ -277,5 +328,31 @@ mod tests {
         assert!(summary.contains("Uptime:"));
         assert!(summary.contains("Peers:"));
         assert!(summary.contains("Messages:"));
+    }
+
+    #[test]
+    fn test_processing_latency() {
+        let stats = NetworkStats::new();
+        stats.record_processing_latency(100);
+        stats.record_processing_latency(200);
+        stats.record_processing_latency(50);
+
+        assert_eq!(stats.processing_count.load(Ordering::Relaxed), 3);
+        assert_eq!(stats.processing_latency_us.load(Ordering::Relaxed), 350);
+        assert_eq!(stats.avg_processing_latency_us(), 350.0 / 3.0);
+        assert_eq!(stats.peak_processing_latency_us(), 200);
+    }
+
+    #[test]
+    fn test_processing_latency_peak_update() {
+        let stats = NetworkStats::new();
+        stats.record_processing_latency(500);
+        assert_eq!(stats.peak_processing_latency_us(), 500);
+        // Lower value should not update peak
+        stats.record_processing_latency(100);
+        assert_eq!(stats.peak_processing_latency_us(), 500);
+        // Higher value should update peak
+        stats.record_processing_latency(1000);
+        assert_eq!(stats.peak_processing_latency_us(), 1000);
     }
 }

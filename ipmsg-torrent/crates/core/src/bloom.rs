@@ -1,10 +1,14 @@
 use std::collections::HashSet;
 
-/// Optimized Bloom filter for message deduplication
-/// Inspired by bitchat's OptimizedBloomFilter for efficient gossip protocol
-/// Guarantees no false negatives, rare false positives
+/// Optimized Bloom filter for message deduplication using bitpacked storage.
+/// Inspired by bitchat's OptimizedBloomFilter for efficient gossip protocol.
+/// Guarantees no false negatives, rare false positives.
+/// Uses `Vec<u64>` for 8x memory reduction vs `Vec<bool>`.
 pub struct BloomFilter {
-    bits: Vec<bool>,
+    /// Bitpacked bit array — each u64 holds 64 bits
+    bits: Vec<u64>,
+    /// Number of bits in the logical bit array
+    num_bits: usize,
     hash_seeds: Vec<u64>,
     #[allow(dead_code)]
     capacity: usize,
@@ -32,8 +36,13 @@ impl BloomFilter {
             .map(|i| (i as u64).wrapping_mul(0x517cc1b727220a95))
             .collect();
 
+        let num_bits = m.max(64);
+        // Allocate enough u64 words to cover num_bits
+        let num_words = (num_bits + 63) / 64;
+
         Self {
-            bits: vec![false; m.max(64)],
+            bits: vec![0u64; num_words],
+            num_bits,
             hash_seeds,
             capacity,
             false_positive_rate,
@@ -45,7 +54,7 @@ impl BloomFilter {
 
     /// Insert an item into the filter
     pub fn insert(&mut self, item: &str) {
-        let hash = self.hash_item(item);
+        let hash = Self::hash_item(item);
 
         // Use exact tracking for small sets
         if self.item_count < self.exact_threshold {
@@ -67,10 +76,13 @@ impl BloomFilter {
         self.item_count += 1;
     }
 
+    #[inline]
     fn insert_hashed(&mut self, hash: u64) {
         for &seed in &self.hash_seeds {
-            let idx = self.hash_with_seed(hash, seed) % self.bits.len();
-            self.bits[idx] = true;
+            let bit_idx = Self::hash_with_seed(hash, seed) % self.num_bits;
+            let word_idx = bit_idx / 64;
+            let bit_pos = bit_idx % 64;
+            self.bits[word_idx] |= 1u64 << bit_pos;
         }
     }
 
@@ -78,25 +90,28 @@ impl BloomFilter {
     /// Returns true if possibly present (could be false positive)
     /// Returns false if definitely not present
     pub fn might_contain(&self, item: &str) -> bool {
-        let hash = self.hash_item(item);
+        let hash = Self::hash_item(item);
 
         // Check exact set first (zero false positives for small sets)
         if self.item_count <= self.exact_threshold {
             return self.exact_set.contains(&hash);
         }
 
-        // Check bloom filter
+        // Check bloom filter bits
         for &seed in &self.hash_seeds {
-            let idx = self.hash_with_seed(hash, seed) % self.bits.len();
-            if !self.bits[idx] {
+            let bit_idx = Self::hash_with_seed(hash, seed) % self.num_bits;
+            let word_idx = bit_idx / 64;
+            let bit_pos = bit_idx % 64;
+            if self.bits[word_idx] & (1u64 << bit_pos) == 0 {
                 return false;
             }
         }
         true
     }
 
-    /// Hash an item to a u64
-    fn hash_item(&self, item: &str) -> u64 {
+    /// Hash an item to a u64 (static for better inlining)
+    #[inline]
+    fn hash_item(item: &str) -> u64 {
         // FNV-1a hash (64-bit)
         let mut hash: u64 = 0xcbf29ce484222325;
         for byte in item.bytes() {
@@ -107,7 +122,8 @@ impl BloomFilter {
     }
 
     /// Hash with a seed using mixing
-    fn hash_with_seed(&self, hash: u64, seed: u64) -> usize {
+    #[inline]
+    fn hash_with_seed(hash: u64, seed: u64) -> usize {
         let combined = hash.wrapping_add(seed).wrapping_mul(0x517cc1b727220a95);
         // Final mix
         let mixed = combined ^ (combined >> 33);
@@ -129,8 +145,8 @@ impl BloomFilter {
         if self.item_count == 0 {
             return 0.0;
         }
-        let set_bits = self.bits.iter().filter(|&&b| b).count() as f64;
-        let total_bits = self.bits.len() as f64;
+        let set_bits = self.bits.iter().map(|w| w.count_ones() as usize).sum::<usize>() as f64;
+        let total_bits = self.num_bits as f64;
         if total_bits == 0.0 {
             return 1.0;
         }
@@ -139,17 +155,20 @@ impl BloomFilter {
 
     /// Reset the filter
     pub fn clear(&mut self) {
-        self.bits.fill(false);
+        self.bits.fill(0);
         self.item_count = 0;
         self.exact_set.clear();
     }
 }
 
-/// LRU-backed dedup cache using Bloom filter for fast negative checks
-/// Combines Bloom filter efficiency with exact tracking for recent items
+/// LRU-backed dedup cache using Bloom filter for fast negative checks.
+/// Combines Bloom filter efficiency with exact tracking for recent items.
+///
+/// Optimization: the Bloom filter uses bitpacked `Vec<u64>` storage (8x less memory)
+/// and hash functions are `#[inline]` static methods for better branch prediction.
 pub struct DedupCache {
     bloom: BloomFilter,
-    /// LRU queue for exact tracking
+    /// LRU queue for exact tracking (VecDeque for O(1) push_back/pop_front)
     queue: std::collections::VecDeque<String>,
     /// Set for O(1) lookup
     set: HashSet<String>,
@@ -166,13 +185,17 @@ impl DedupCache {
         }
     }
 
-    /// Check if an item is a duplicate
+    /// Check if an item is a duplicate.
+    /// Fast path: HashSet lookup (O(1)).
+    /// Negative fast path: Bloom filter rejects unseen items without HashSet miss.
+    #[inline]
     pub fn is_duplicate(&mut self, id: &str) -> bool {
+        // Exact check first — most hits land here
         if self.set.contains(id) {
             return true;
         }
 
-        // Fast negative check via bloom
+        // Bloom filter: if it says "no", the item is definitely new
         if !self.bloom.might_contain(id) {
             return false;
         }
@@ -182,6 +205,7 @@ impl DedupCache {
     }
 
     /// Mark an item as seen
+    #[inline]
     pub fn mark_seen(&mut self, id: &str) {
         // Evict oldest if at capacity
         if self.set.len() >= self.max_size
