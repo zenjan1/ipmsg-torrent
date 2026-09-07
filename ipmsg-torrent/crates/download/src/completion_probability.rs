@@ -1254,4 +1254,1234 @@ mod tests {
                 <= summary.tasks_by_probability[1].probability
         );
     }
+
+    // ========== Comprehensive Test Coverage ==========
+
+    // --- ConfidenceLevel serde ---
+    #[test]
+    fn test_confidence_level_serde_roundtrip() {
+        for level in [
+            ConfidenceLevel::Low,
+            ConfidenceLevel::Medium,
+            ConfidenceLevel::High,
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            let deserialized: ConfidenceLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(level, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_confidence_level_serde_values() {
+        assert_eq!(
+            serde_json::to_string(&ConfidenceLevel::Low).unwrap(),
+            "\"Low\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConfidenceLevel::Medium).unwrap(),
+            "\"Medium\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConfidenceLevel::High).unwrap(),
+            "\"High\""
+        );
+    }
+
+    #[test]
+    fn test_confidence_level_traits() {
+        let level = ConfidenceLevel::High;
+        let cloned = level;
+        assert_eq!(level, cloned);
+        assert_eq!(format!("{:?}", level), "High");
+    }
+
+    // --- ProbabilityCategory serde ---
+    #[test]
+    fn test_probability_category_serde_roundtrip() {
+        for cat in [
+            ProbabilityCategory::VeryLow,
+            ProbabilityCategory::Low,
+            ProbabilityCategory::Moderate,
+            ProbabilityCategory::High,
+            ProbabilityCategory::VeryHigh,
+        ] {
+            let json = serde_json::to_string(&cat).unwrap();
+            let deserialized: ProbabilityCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(cat, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_probability_category_serde_values() {
+        assert_eq!(
+            serde_json::to_string(&ProbabilityCategory::VeryLow).unwrap(),
+            "\"VeryLow\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProbabilityCategory::VeryHigh).unwrap(),
+            "\"VeryHigh\""
+        );
+    }
+
+    #[test]
+    fn test_probability_category_traits() {
+        let cat = ProbabilityCategory::High;
+        let cloned = cat;
+        assert_eq!(cat, cloned);
+        assert_eq!(format!("{:?}", cat), "High");
+    }
+
+    #[test]
+    fn test_probability_category_label() {
+        assert_eq!(ProbabilityCategory::VeryLow.label(), "Very Low");
+        assert_eq!(ProbabilityCategory::Low.label(), "Low");
+        assert_eq!(ProbabilityCategory::Moderate.label(), "Moderate");
+        assert_eq!(ProbabilityCategory::High.label(), "High");
+        assert_eq!(ProbabilityCategory::VeryHigh.label(), "Very High");
+    }
+
+    #[test]
+    fn test_probability_category_display() {
+        assert_eq!(ProbabilityCategory::VeryLow.to_string(), "🔴 Very Low");
+        assert_eq!(ProbabilityCategory::VeryHigh.to_string(), "✅ Very High");
+    }
+
+    #[test]
+    fn test_probability_category_boundaries() {
+        assert_eq!(ProbabilityCategory::from_probability(0.0), ProbabilityCategory::VeryLow);
+        assert_eq!(ProbabilityCategory::from_probability(19.99), ProbabilityCategory::VeryLow);
+        assert_eq!(ProbabilityCategory::from_probability(20.0), ProbabilityCategory::Low);
+        assert_eq!(ProbabilityCategory::from_probability(39.99), ProbabilityCategory::Low);
+        assert_eq!(ProbabilityCategory::from_probability(40.0), ProbabilityCategory::Moderate);
+        assert_eq!(ProbabilityCategory::from_probability(59.99), ProbabilityCategory::Moderate);
+        assert_eq!(ProbabilityCategory::from_probability(60.0), ProbabilityCategory::High);
+        assert_eq!(ProbabilityCategory::from_probability(79.99), ProbabilityCategory::High);
+        assert_eq!(ProbabilityCategory::from_probability(80.0), ProbabilityCategory::VeryHigh);
+        assert_eq!(ProbabilityCategory::from_probability(100.0), ProbabilityCategory::VeryHigh);
+        assert_eq!(ProbabilityCategory::from_probability(-10.0), ProbabilityCategory::VeryLow);
+        assert_eq!(ProbabilityCategory::from_probability(150.0), ProbabilityCategory::VeryHigh);
+    }
+
+    // --- TaskProbabilityInput ---
+    #[test]
+    fn test_task_probability_input_new_defaults() {
+        let input = TaskProbabilityInput::new("task-1".to_string(), "http".to_string());
+        assert_eq!(input.task_id, "task-1");
+        assert_eq!(input.protocol, "http");
+        assert!(input.source_domain.is_none());
+        assert_eq!(input.progress, 0.0);
+        assert_eq!(input.retry_count, 0);
+        assert_eq!(input.error_count, 0);
+        assert_eq!(input.stall_count, 0);
+        assert!(!input.is_paused);
+        assert_eq!(input.file_size_bytes, 0);
+    }
+
+    #[test]
+    fn test_task_probability_input_serde_roundtrip() {
+        let mut input = TaskProbabilityInput::new("task-1".to_string(), "torrent".to_string());
+        input.source_domain = Some("example.com".to_string());
+        input.progress = 0.5;
+        input.retry_count = 3;
+        input.error_count = 2;
+        input.stall_count = 1;
+        input.is_paused = true;
+        input.file_size_bytes = 1_000_000_000;
+
+        let json = serde_json::to_string(&input).unwrap();
+        let deserialized: TaskProbabilityInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.task_id, "task-1");
+        assert_eq!(deserialized.protocol, "torrent");
+        assert_eq!(deserialized.source_domain, Some("example.com".to_string()));
+        assert_eq!(deserialized.progress, 0.5);
+        assert_eq!(deserialized.retry_count, 3);
+        assert!(deserialized.is_paused);
+    }
+
+    #[test]
+    fn test_task_probability_input_clone_debug() {
+        let input = make_input("task-1");
+        let cloned = input.clone();
+        assert_eq!(cloned.task_id, "task-1");
+        let debug_str = format!("{:?}", input);
+        assert!(debug_str.contains("task-1"));
+    }
+
+    #[test]
+    fn test_task_probability_input_unicode() {
+        let input = TaskProbabilityInput::new("任务-中文".to_string(), "http".to_string());
+        assert_eq!(input.task_id, "任务-中文");
+    }
+
+    #[test]
+    fn test_task_probability_input_emoji() {
+        let input = TaskProbabilityInput::new("task-🚀".to_string(), "http".to_string());
+        assert_eq!(input.task_id, "task-🚀");
+    }
+
+    // --- FactorScore ---
+    #[test]
+    fn test_factor_score_default() {
+        let factor = FactorScore::default();
+        assert_eq!(factor.score, 0.0);
+        assert_eq!(factor.weight, 0.0);
+        assert!(!factor.has_data);
+    }
+
+    #[test]
+    fn test_factor_score_serde_roundtrip() {
+        let factor = FactorScore {
+            score: 0.75,
+            weight: 0.25,
+            has_data: true,
+        };
+        let json = serde_json::to_string(&factor).unwrap();
+        let deserialized: FactorScore = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.score, 0.75);
+        assert_eq!(deserialized.weight, 0.25);
+        assert!(deserialized.has_data);
+    }
+
+    #[test]
+    fn test_factor_score_clone_debug() {
+        let factor = FactorScore {
+            score: 0.5,
+            weight: 0.2,
+            has_data: true,
+        };
+        let cloned = factor;
+        assert_eq!(cloned.score, 0.5);
+        let debug_str = format!("{:?}", factor);
+        assert!(debug_str.contains("score"));
+    }
+
+    #[test]
+    fn test_factor_score_weighted_score_variations() {
+        let factor1 = FactorScore {
+            score: 1.0,
+            weight: 0.25,
+            has_data: true,
+        };
+        assert_eq!(factor1.weighted_score(), 0.25);
+
+        let factor2 = FactorScore {
+            score: 0.0,
+            weight: 0.25,
+            has_data: true,
+        };
+        assert_eq!(factor2.weighted_score(), 0.0);
+
+        let factor3 = FactorScore {
+            score: 0.5,
+            weight: 0.0,
+            has_data: true,
+        };
+        assert_eq!(factor3.weighted_score(), 0.0);
+    }
+
+    // --- CompletionProbability ---
+    #[test]
+    fn test_completion_probability_serde_roundtrip() {
+        let prob = CompletionProbability {
+            task_id: "task-1".to_string(),
+            probability: 75.5,
+            confidence: ConfidenceLevel::High,
+            category: ProbabilityCategory::High,
+            estimated_at: Utc::now(),
+            factors: ProbabilityFactors::default(),
+            summary: "Test summary".to_string(),
+        };
+        let json = serde_json::to_string(&prob).unwrap();
+        let deserialized: CompletionProbability = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.task_id, "task-1");
+        assert_eq!(deserialized.probability, 75.5);
+    }
+
+    #[test]
+    fn test_completion_probability_clone() {
+        let mut prob = CompletionProbability {
+            task_id: "task-1".to_string(),
+            probability: 50.0,
+            confidence: ConfidenceLevel::Medium,
+            category: ProbabilityCategory::Moderate,
+            estimated_at: Utc::now(),
+            factors: ProbabilityFactors::default(),
+            summary: String::new(),
+        };
+        prob.generate_summary();
+        let cloned = prob.clone();
+        assert_eq!(cloned.task_id, "task-1");
+        assert!(cloned.summary.contains("50.0%"));
+    }
+
+    #[test]
+    fn test_completion_probability_generate_summary() {
+        let mut prob = CompletionProbability {
+            task_id: "task-1".to_string(),
+            probability: 85.5,
+            confidence: ConfidenceLevel::High,
+            category: ProbabilityCategory::Moderate, // Will be overwritten
+            estimated_at: Utc::now(),
+            factors: ProbabilityFactors::default(),
+            summary: String::new(),
+        };
+        prob.generate_summary();
+        assert_eq!(prob.category, ProbabilityCategory::VeryHigh);
+        assert!(prob.summary.contains("85.5%"));
+        assert!(prob.summary.contains("Very High"));
+        assert!(prob.summary.contains("✅"));
+    }
+
+    // --- ProbabilityFactors ---
+    #[test]
+    fn test_probability_factors_default() {
+        let factors = ProbabilityFactors::default();
+        assert_eq!(factors.source_reliability.score, 0.0);
+        assert_eq!(factors.network.score, 0.0);
+        assert_eq!(factors.history.score, 0.0);
+        assert_eq!(factors.task_state.score, 0.0);
+        assert_eq!(factors.disk_space.score, 0.0);
+        assert_eq!(factors.error_frequency.score, 0.0);
+    }
+
+    #[test]
+    fn test_probability_factors_serde_roundtrip() {
+        let factors = ProbabilityFactors {
+            source_reliability: FactorScore { score: 0.8, weight: 0.25, has_data: true },
+            network: FactorScore { score: 0.9, weight: 0.20, has_data: true },
+            history: FactorScore { score: 0.7, weight: 0.15, has_data: true },
+            task_state: FactorScore { score: 0.6, weight: 0.20, has_data: true },
+            disk_space: FactorScore { score: 1.0, weight: 0.10, has_data: true },
+            error_frequency: FactorScore { score: 0.5, weight: 0.10, has_data: true },
+        };
+        let json = serde_json::to_string(&factors).unwrap();
+        let deserialized: ProbabilityFactors = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.source_reliability.score, 0.8);
+        assert_eq!(deserialized.network.score, 0.9);
+    }
+
+    #[test]
+    fn test_probability_factors_clone_debug() {
+        let factors = ProbabilityFactors::default();
+        let cloned = factors.clone();
+        assert_eq!(cloned.source_reliability.score, 0.0);
+        let debug_str = format!("{:?}", factors);
+        assert!(debug_str.contains("source_reliability"));
+    }
+
+    // --- CompletionProbabilityConfig ---
+    #[test]
+    fn test_config_default_values() {
+        let config = CompletionProbabilityConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.weight_reliability, DEFAULT_WEIGHT_RELIABILITY);
+        assert_eq!(config.weight_network, DEFAULT_WEIGHT_NETWORK);
+        assert_eq!(config.weight_history, DEFAULT_WEIGHT_HISTORY);
+        assert_eq!(config.weight_task_state, DEFAULT_WEIGHT_TASK_STATE);
+        assert_eq!(config.weight_disk, DEFAULT_WEIGHT_DISK);
+        assert_eq!(config.weight_error, DEFAULT_WEIGHT_ERROR);
+        assert_eq!(config.min_recommended_probability, 40.0);
+        assert_eq!(config.max_cache_size, 200);
+    }
+
+    #[test]
+    fn test_config_serde_roundtrip() {
+        let config = CompletionProbabilityConfig {
+            enabled: false,
+            weight_reliability: 0.30,
+            weight_network: 0.20,
+            weight_history: 0.15,
+            weight_task_state: 0.15,
+            weight_disk: 0.10,
+            weight_error: 0.10,
+            min_recommended_probability: 50.0,
+            max_cache_size: 100,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: CompletionProbabilityConfig = serde_json::from_str(&json).unwrap();
+        assert!(!deserialized.enabled);
+        assert_eq!(deserialized.weight_reliability, 0.30);
+        assert_eq!(deserialized.max_cache_size, 100);
+    }
+
+    #[test]
+    fn test_config_clone_debug() {
+        let config = CompletionProbabilityConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.weight_reliability, config.weight_reliability);
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("weight_reliability"));
+    }
+
+    #[test]
+    fn test_config_weights_sum() {
+        let config = CompletionProbabilityConfig::default();
+        assert!((config.weights_sum() - 1.0).abs() < 0.001);
+
+        let custom = CompletionProbabilityConfig {
+            weight_reliability: 0.2,
+            weight_network: 0.2,
+            weight_history: 0.2,
+            weight_task_state: 0.2,
+            weight_disk: 0.1,
+            weight_error: 0.1,
+            ..Default::default()
+        };
+        assert!((custom.weights_sum() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_config_weights_valid_boundary() {
+        let config = CompletionProbabilityConfig {
+            weight_reliability: 0.5,
+            weight_network: 0.5,
+            ..Default::default()
+        };
+        assert!(!config.weights_valid());
+
+        let config2 = CompletionProbabilityConfig {
+            weight_reliability: 0.17,
+            weight_network: 0.17,
+            weight_history: 0.16,
+            weight_task_state: 0.17,
+            weight_disk: 0.16,
+            weight_error: 0.17,
+            ..Default::default()
+        };
+        assert!(config2.weights_valid());
+    }
+
+    // --- EstimatorSignals ---
+    #[test]
+    fn test_estimator_signals_default() {
+        let signals = EstimatorSignals::default();
+        assert!(signals.domain_reliability_score.is_none());
+        assert!(signals.network_connected.is_none());
+        assert!(signals.network_quality.is_none());
+        assert!(signals.overall_success_rate.is_none());
+        assert!(signals.protocol_success_rate.is_none());
+        assert!(signals.available_disk_bytes.is_none());
+        assert!(signals.recent_error_count.is_none());
+    }
+
+    #[test]
+    fn test_estimator_signals_serde_roundtrip() {
+        let signals = EstimatorSignals {
+            domain_reliability_score: Some(0.85),
+            network_connected: Some(true),
+            network_quality: Some(0.9),
+            overall_success_rate: Some(0.75),
+            protocol_success_rate: Some(0.80),
+            available_disk_bytes: Some(10_000_000_000),
+            recent_error_count: Some(2),
+        };
+        let json = serde_json::to_string(&signals).unwrap();
+        let deserialized: EstimatorSignals = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.domain_reliability_score, Some(0.85));
+        assert_eq!(deserialized.network_connected, Some(true));
+    }
+
+    #[test]
+    fn test_estimator_signals_clone_debug() {
+        let signals = make_signals();
+        let cloned = signals.clone();
+        assert_eq!(cloned.domain_reliability_score, signals.domain_reliability_score);
+        let debug_str = format!("{:?}", signals);
+        assert!(debug_str.contains("domain_reliability_score"));
+    }
+
+    // --- EstimatorSummary ---
+    #[test]
+    fn test_estimator_summary_serde_roundtrip() {
+        let summary = EstimatorSummary {
+            cached_estimates: 5,
+            average_probability: 65.0,
+            high_probability_count: 2,
+            low_probability_count: 1,
+            moderate_probability_count: 2,
+            tasks_by_probability: vec![],
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: EstimatorSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.cached_estimates, 5);
+        assert_eq!(deserialized.average_probability, 65.0);
+    }
+
+    #[test]
+    fn test_estimator_summary_clone_debug() {
+        let summary = EstimatorSummary {
+            cached_estimates: 0,
+            average_probability: 0.0,
+            high_probability_count: 0,
+            low_probability_count: 0,
+            moderate_probability_count: 0,
+            tasks_by_probability: vec![],
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.cached_estimates, 0);
+        let debug_str = format!("{:?}", summary);
+        assert!(debug_str.contains("cached_estimates"));
+    }
+
+    // --- TaskProbabilityEntry ---
+    #[test]
+    fn test_task_probability_entry_serde_roundtrip() {
+        let entry = TaskProbabilityEntry {
+            task_id: "task-1".to_string(),
+            probability: 75.0,
+            category: ProbabilityCategory::High,
+            confidence: ConfidenceLevel::Medium,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: TaskProbabilityEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.task_id, "task-1");
+        assert_eq!(deserialized.probability, 75.0);
+    }
+
+    #[test]
+    fn test_task_probability_entry_clone_debug() {
+        let entry = TaskProbabilityEntry {
+            task_id: "task-1".to_string(),
+            probability: 50.0,
+            category: ProbabilityCategory::Moderate,
+            confidence: ConfidenceLevel::Low,
+        };
+        let cloned = entry.clone();
+        assert_eq!(cloned.probability, 50.0);
+        let debug_str = format!("{:?}", entry);
+        assert!(debug_str.contains("task-1"));
+    }
+
+    // --- CompletionProbabilityError ---
+    #[test]
+    fn test_error_display() {
+        let io_err = CompletionProbabilityError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file not found",
+        ));
+        assert!(io_err.to_string().contains("I/O error"));
+
+        let json_err = CompletionProbabilityError::Serialize(serde_json::from_str::<String>("invalid").unwrap_err());
+        assert!(json_err.to_string().contains("serialization error"));
+
+        let config_err = CompletionProbabilityError::InvalidConfig("bad config".to_string());
+        assert!(config_err.to_string().contains("invalid configuration"));
+        assert!(config_err.to_string().contains("bad config"));
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let err = CompletionProbabilityError::InvalidConfig("test".to_string());
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("InvalidConfig"));
+    }
+
+    #[test]
+    fn test_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err: CompletionProbabilityError = io_err.into();
+        assert!(err.to_string().contains("denied"));
+    }
+
+    #[test]
+    fn test_error_from_serde() {
+        let serde_err = serde_json::from_str::<String>("not json").unwrap_err();
+        let err: CompletionProbabilityError = serde_err.into();
+        assert!(err.to_string().contains("serialization error"));
+    }
+
+    // --- CompletionProbabilityEstimator ---
+    #[test]
+    fn test_estimator_new_equals_default() {
+        let new = CompletionProbabilityEstimator::new();
+        let default = CompletionProbabilityEstimator::default();
+        assert_eq!(new.config().max_cache_size, default.config().max_cache_size);
+    }
+
+    #[test]
+    fn test_estimator_with_config() {
+        let config = CompletionProbabilityConfig {
+            max_cache_size: 50,
+            ..Default::default()
+        };
+        let estimator = CompletionProbabilityEstimator::with_config(config);
+        assert_eq!(estimator.config().max_cache_size, 50);
+    }
+
+    #[test]
+    fn test_estimator_config_accessor() {
+        let mut estimator = CompletionProbabilityEstimator::new();
+        assert_eq!(estimator.config().max_cache_size, 200);
+
+        let new_config = CompletionProbabilityConfig {
+            max_cache_size: 100,
+            ..Default::default()
+        };
+        estimator.set_config(new_config);
+        assert_eq!(estimator.config().max_cache_size, 100);
+    }
+
+    #[test]
+    fn test_estimator_clone_debug() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let cloned = estimator.clone();
+        assert_eq!(cloned.config().max_cache_size, estimator.config().max_cache_size);
+        let debug_str = format!("{:?}", estimator);
+        assert!(debug_str.contains("config"));
+    }
+
+    // --- Factor computation detailed ---
+    #[test]
+    fn test_compute_reliability_factor_with_data() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let config = CompletionProbabilityConfig::default();
+
+        let signals = EstimatorSignals {
+            domain_reliability_score: Some(0.9),
+            ..Default::default()
+        };
+        let factor = estimator.compute_reliability_factor(&signals, &config);
+        assert_eq!(factor.score, 0.9);
+        assert!(factor.has_data);
+        assert_eq!(factor.weight, DEFAULT_WEIGHT_RELIABILITY);
+    }
+
+    #[test]
+    fn test_compute_reliability_factor_no_data() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let config = CompletionProbabilityConfig::default();
+
+        let signals = EstimatorSignals {
+            domain_reliability_score: None,
+            ..Default::default()
+        };
+        let factor = estimator.compute_reliability_factor(&signals, &config);
+        assert_eq!(factor.score, 0.5); // neutral default
+        assert!(!factor.has_data);
+    }
+
+    #[test]
+    fn test_compute_reliability_factor_clamp() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let config = CompletionProbabilityConfig::default();
+
+        let signals = EstimatorSignals {
+            domain_reliability_score: Some(1.5), // > 1.0
+            ..Default::default()
+        };
+        let factor = estimator.compute_reliability_factor(&signals, &config);
+        assert_eq!(factor.score, 1.0);
+
+        let signals2 = EstimatorSignals {
+            domain_reliability_score: Some(-0.5), // < 0.0
+            ..Default::default()
+        };
+        let factor2 = estimator.compute_reliability_factor(&signals2, &config);
+        assert_eq!(factor2.score, 0.0);
+    }
+
+    #[test]
+    fn test_compute_network_factor_all_branches() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let config = CompletionProbabilityConfig::default();
+
+        // Disconnected
+        let signals1 = EstimatorSignals {
+            network_connected: Some(false),
+            network_quality: Some(0.5),
+            ..Default::default()
+        };
+        let factor1 = estimator.compute_network_factor(&signals1, &config);
+        assert_eq!(factor1.score, 0.0);
+        assert!(factor1.has_data);
+
+        // Connected with quality
+        let signals2 = EstimatorSignals {
+            network_connected: Some(true),
+            network_quality: Some(0.8),
+            ..Default::default()
+        };
+        let factor2 = estimator.compute_network_factor(&signals2, &config);
+        assert_eq!(factor2.score, 0.8);
+        assert!(factor2.has_data);
+
+        // Connected without quality
+        let signals3 = EstimatorSignals {
+            network_connected: Some(true),
+            network_quality: None,
+            ..Default::default()
+        };
+        let factor3 = estimator.compute_network_factor(&signals3, &config);
+        assert_eq!(factor3.score, 0.7);
+        assert!(factor3.has_data);
+
+        // No data
+        let signals4 = EstimatorSignals {
+            network_connected: None,
+            network_quality: None,
+            ..Default::default()
+        };
+        let factor4 = estimator.compute_network_factor(&signals4, &config);
+        assert_eq!(factor4.score, 0.5);
+        assert!(!factor4.has_data);
+    }
+
+    #[test]
+    fn test_compute_history_factor_all_combinations() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let config = CompletionProbabilityConfig::default();
+
+        // Both present
+        let signals1 = EstimatorSignals {
+            overall_success_rate: Some(0.6),
+            protocol_success_rate: Some(0.9),
+            ..Default::default()
+        };
+        let factor1 = estimator.compute_history_factor(&signals1, &config);
+        assert!((factor1.score - 0.78).abs() < 0.01); // 0.6*0.4 + 0.9*0.6
+        assert!(factor1.has_data);
+
+        // Only overall
+        let signals2 = EstimatorSignals {
+            overall_success_rate: Some(0.7),
+            protocol_success_rate: None,
+            ..Default::default()
+        };
+        let factor2 = estimator.compute_history_factor(&signals2, &config);
+        assert_eq!(factor2.score, 0.7);
+        assert!(factor2.has_data);
+
+        // Only protocol
+        let signals3 = EstimatorSignals {
+            overall_success_rate: None,
+            protocol_success_rate: Some(0.8),
+            ..Default::default()
+        };
+        let factor3 = estimator.compute_history_factor(&signals3, &config);
+        assert_eq!(factor3.score, 0.8);
+        assert!(factor3.has_data);
+
+        // Neither
+        let signals4 = EstimatorSignals {
+            overall_success_rate: None,
+            protocol_success_rate: None,
+            ..Default::default()
+        };
+        let factor4 = estimator.compute_history_factor(&signals4, &config);
+        assert_eq!(factor4.score, 0.5);
+        assert!(!factor4.has_data);
+    }
+
+    #[test]
+    fn test_compute_task_state_factor_penalties() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let config = CompletionProbabilityConfig::default();
+
+        // Progress only
+        let mut input1 = make_input("t1");
+        input1.progress = 0.8;
+        let factor1 = estimator.compute_task_state_factor(&input1, &config);
+        assert!((factor1.score - 0.8).abs() < 0.01);
+
+        // With retry penalty
+        let mut input2 = make_input("t2");
+        input2.progress = 0.8;
+        input2.retry_count = 3;
+        let factor2 = estimator.compute_task_state_factor(&input2, &config);
+        assert!(factor2.score < factor1.score);
+
+        // With stall penalty
+        let mut input3 = make_input("t3");
+        input3.progress = 0.8;
+        input3.stall_count = 5;
+        let factor3 = estimator.compute_task_state_factor(&input3, &config);
+        assert!(factor3.score < factor1.score);
+
+        // With pause penalty
+        let mut input4 = make_input("t4");
+        input4.progress = 0.8;
+        input4.is_paused = true;
+        let factor4 = estimator.compute_task_state_factor(&input4, &config);
+        assert!(factor4.score < factor1.score);
+
+        // All penalties
+        let mut input5 = make_input("t5");
+        input5.progress = 0.8;
+        input5.retry_count = 10;
+        input5.stall_count = 10;
+        input5.is_paused = true;
+        let factor5 = estimator.compute_task_state_factor(&input5, &config);
+        assert!(factor5.score < factor2.score);
+        assert!(factor5.score < factor3.score);
+        assert!(factor5.score < factor4.score);
+    }
+
+    #[test]
+    fn test_compute_task_state_factor_clamp() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let config = CompletionProbabilityConfig::default();
+
+        let mut input = make_input("t");
+        input.progress = 0.1;
+        input.retry_count = 100; // Max penalty 0.3
+        input.stall_count = 100; // Max penalty 0.2
+        input.is_paused = true; // Penalty 0.1
+        let factor = estimator.compute_task_state_factor(&input, &config);
+        assert_eq!(factor.score, 0.0); // Clamped to 0
+    }
+
+    #[test]
+    fn test_compute_disk_space_factor_unknown_size() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let config = CompletionProbabilityConfig::default();
+
+        let mut input = make_input("t");
+        input.file_size_bytes = 0; // Unknown
+        let signals = EstimatorSignals {
+            available_disk_bytes: Some(1_000_000),
+            ..Default::default()
+        };
+        let factor = estimator.compute_disk_space_factor(&input, &signals, &config);
+        assert_eq!(factor.score, 0.8);
+        assert!(!factor.has_data);
+    }
+
+    #[test]
+    fn test_compute_disk_space_factor_ratios() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let config = CompletionProbabilityConfig::default();
+
+        let mut input = make_input("t");
+        input.file_size_bytes = 1_000_000;
+
+        // Ratio >= 3.0
+        let signals1 = EstimatorSignals {
+            available_disk_bytes: Some(3_000_000),
+            ..Default::default()
+        };
+        let factor1 = estimator.compute_disk_space_factor(&input, &signals1, &config);
+        assert_eq!(factor1.score, 1.0);
+
+        // Ratio >= 2.0
+        let signals2 = EstimatorSignals {
+            available_disk_bytes: Some(2_000_000),
+            ..Default::default()
+        };
+        let factor2 = estimator.compute_disk_space_factor(&input, &signals2, &config);
+        assert_eq!(factor2.score, 0.95);
+
+        // Ratio >= 1.5
+        let signals3 = EstimatorSignals {
+            available_disk_bytes: Some(1_500_000),
+            ..Default::default()
+        };
+        let factor3 = estimator.compute_disk_space_factor(&input, &signals3, &config);
+        assert_eq!(factor3.score, 0.85);
+
+        // Ratio < 1.5 but >= 1.0
+        let signals4 = EstimatorSignals {
+            available_disk_bytes: Some(1_200_000),
+            ..Default::default()
+        };
+        let factor4 = estimator.compute_disk_space_factor(&input, &signals4, &config);
+        assert_eq!(factor4.score, 0.7);
+
+        // Insufficient
+        let signals5 = EstimatorSignals {
+            available_disk_bytes: Some(500_000),
+            ..Default::default()
+        };
+        let factor5 = estimator.compute_disk_space_factor(&input, &signals5, &config);
+        assert_eq!(factor5.score, 0.0);
+    }
+
+    #[test]
+    fn test_compute_disk_space_factor_no_data() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let config = CompletionProbabilityConfig::default();
+
+        let mut input = make_input("t");
+        input.file_size_bytes = 1_000_000;
+        let signals = EstimatorSignals {
+            available_disk_bytes: None,
+            ..Default::default()
+        };
+        let factor = estimator.compute_disk_space_factor(&input, &signals, &config);
+        assert_eq!(factor.score, 0.5);
+        assert!(!factor.has_data);
+    }
+
+    #[test]
+    fn test_compute_error_factor_variations() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let config = CompletionProbabilityConfig::default();
+
+        // No errors
+        let mut input1 = make_input("t1");
+        input1.error_count = 0;
+        let signals1 = EstimatorSignals {
+            recent_error_count: Some(0),
+            ..Default::default()
+        };
+        let factor1 = estimator.compute_error_factor(&input1, &signals1, &config);
+        assert_eq!(factor1.score, 1.0);
+        assert!(factor1.has_data);
+
+        // Some errors
+        let mut input2 = make_input("t2");
+        input2.error_count = 5;
+        let signals2 = EstimatorSignals {
+            recent_error_count: Some(3),
+            ..Default::default()
+        };
+        let factor2 = estimator.compute_error_factor(&input2, &signals2, &config);
+        assert!(factor2.score < 1.0);
+        assert!(factor2.score > 0.0);
+
+        // Many errors
+        let mut input3 = make_input("t3");
+        input3.error_count = 20;
+        let signals3 = EstimatorSignals {
+            recent_error_count: Some(15),
+            ..Default::default()
+        };
+        let factor3 = estimator.compute_error_factor(&input3, &signals3, &config);
+        assert!(factor3.score < factor2.score);
+
+        // No recent error data
+        let mut input4 = make_input("t4");
+        input4.error_count = 5;
+        let signals4 = EstimatorSignals {
+            recent_error_count: None,
+            ..Default::default()
+        };
+        let factor4 = estimator.compute_error_factor(&input4, &signals4, &config);
+        assert!(factor4.score < 1.0);
+        assert!(factor4.has_data); // Still has data from error_count
+    }
+
+    #[test]
+    fn test_compute_error_factor_clamp() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let config = CompletionProbabilityConfig::default();
+
+        let mut input = make_input("t");
+        input.error_count = 100;
+        let signals = EstimatorSignals {
+            recent_error_count: Some(100),
+            ..Default::default()
+        };
+        let factor = estimator.compute_error_factor(&input, &signals, &config);
+        assert_eq!(factor.score, 0.0); // Clamped
+    }
+
+    // --- Persistence ---
+    #[tokio::test]
+    async fn test_save_load_config_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+
+        let config = CompletionProbabilityConfig {
+            enabled: false,
+            max_cache_size: 100,
+            ..Default::default()
+        };
+        let estimator = CompletionProbabilityEstimator::with_config(config.clone());
+
+        estimator.save_config(&config_path).await.unwrap();
+        assert!(config_path.exists());
+
+        let loaded = CompletionProbabilityEstimator::load_config(&config_path).await.unwrap();
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.max_cache_size, 100);
+    }
+
+    #[tokio::test]
+    async fn test_save_config_creates_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("new_config.json");
+
+        let estimator = CompletionProbabilityEstimator::new();
+        estimator.save_config(&config_path).await.unwrap();
+        assert!(config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_load_config_missing_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("nonexistent.json");
+
+        let result = CompletionProbabilityEstimator::load_config(&config_path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_load_config_invalid_json() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("invalid.json");
+        tokio::fs::write(&config_path, "not valid json").await.unwrap();
+
+        let result = CompletionProbabilityEstimator::load_config(&config_path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_save_config_overwrite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+
+        let estimator1 = CompletionProbabilityEstimator::with_config(CompletionProbabilityConfig {
+            max_cache_size: 50,
+            ..Default::default()
+        });
+        estimator1.save_config(&config_path).await.unwrap();
+
+        let estimator2 = CompletionProbabilityEstimator::with_config(CompletionProbabilityConfig {
+            max_cache_size: 100,
+            ..Default::default()
+        });
+        estimator2.save_config(&config_path).await.unwrap();
+
+        let loaded = CompletionProbabilityEstimator::load_config(&config_path).await.unwrap();
+        assert_eq!(loaded.max_cache_size, 100);
+    }
+
+    // --- Edge cases ---
+    #[test]
+    fn test_unicode_task_id_in_estimate() {
+        let mut estimator = CompletionProbabilityEstimator::new();
+        let input = TaskProbabilityInput::new("任务-中文-🚀".to_string(), "http".to_string());
+        let signals = make_signals();
+
+        let result = estimator.estimate(&input, &signals);
+        assert_eq!(result.task_id, "任务-中文-🚀");
+        assert!(estimator.get_cached("任务-中文-🚀").is_some());
+    }
+
+    #[test]
+    fn test_zero_file_size() {
+        let mut estimator = CompletionProbabilityEstimator::new();
+        let mut input = make_input("task-zero");
+        input.file_size_bytes = 0;
+        let signals = make_signals();
+
+        let result = estimator.estimate(&input, &signals);
+        assert!(result.probability > 0.0);
+    }
+
+    #[test]
+    fn test_very_large_file_size() {
+        let mut estimator = CompletionProbabilityEstimator::new();
+        let mut input = make_input("task-large");
+        input.file_size_bytes = 10_000_000_000_000; // 10 TB
+        let signals = EstimatorSignals {
+            available_disk_bytes: Some(1_000_000_000_000), // 1 TB
+            ..make_signals()
+        };
+
+        let result = estimator.estimate(&input, &signals);
+        assert_eq!(result.factors.disk_space.score, 0.0);
+    }
+
+    #[test]
+    fn test_progress_boundary_values() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let config = CompletionProbabilityConfig::default();
+
+        let mut input = make_input("t");
+        input.progress = -0.5; // Should clamp
+        let factor = estimator.compute_task_state_factor(&input, &config);
+        assert!(factor.score >= 0.0);
+
+        input.progress = 1.5; // Should clamp
+        let factor2 = estimator.compute_task_state_factor(&input, &config);
+        assert!(factor2.score <= 1.0);
+    }
+
+    #[test]
+    fn test_empty_cache_summary() {
+        let estimator = CompletionProbabilityEstimator::new();
+        let summary = estimator.summary();
+        assert_eq!(summary.cached_estimates, 0);
+        assert_eq!(summary.average_probability, 0.0);
+        assert_eq!(summary.high_probability_count, 0);
+        assert_eq!(summary.low_probability_count, 0);
+        assert_eq!(summary.moderate_probability_count, 0);
+        assert!(summary.tasks_by_probability.is_empty());
+    }
+
+    #[test]
+    fn test_summary_category_counts() {
+        let mut estimator = CompletionProbabilityEstimator::new();
+        let signals = make_signals();
+
+        // High probability task
+        let mut input1 = make_input("high");
+        input1.progress = 0.9;
+        input1.file_size_bytes = 1_000_000;
+        estimator.estimate(&input1, &signals);
+
+        // Low probability task
+        let mut input2 = make_input("low");
+        input2.progress = 0.1;
+        input2.retry_count = 20;
+        input2.error_count = 20;
+        input2.file_size_bytes = 1_000_000;
+        let bad_signals = EstimatorSignals {
+            network_connected: Some(false),
+            domain_reliability_score: Some(0.1),
+            ..EstimatorSignals::default()
+        };
+        estimator.estimate(&input2, &bad_signals);
+
+        let summary = estimator.summary();
+        assert!(summary.high_probability_count >= 1);
+        assert!(summary.low_probability_count >= 1);
+    }
+
+    #[test]
+    fn test_format_report_content() {
+        let mut estimator = CompletionProbabilityEstimator::new();
+        let input = make_input("task-report");
+        let signals = make_signals();
+        let result = estimator.estimate(&input, &signals);
+
+        let report = CompletionProbabilityEstimator::format_report(&result);
+        assert!(report.contains("task-report"));
+        assert!(report.contains("Factor Breakdown"));
+        assert!(report.contains("Source Reliability"));
+        assert!(report.contains("Network"));
+        assert!(report.contains("History"));
+        assert!(report.contains("Task State"));
+        assert!(report.contains("Disk Space"));
+        assert!(report.contains("Error Frequency"));
+        assert!(report.contains("Confidence"));
+    }
+
+    #[test]
+    fn test_format_report_with_no_data_factors() {
+        let mut estimator = CompletionProbabilityEstimator::new();
+        let input = make_input("task-no-data");
+        let signals = EstimatorSignals::default();
+        let result = estimator.estimate(&input, &signals);
+
+        let report = CompletionProbabilityEstimator::format_report(&result);
+        assert!(report.contains("⚪")); // No data indicator
+    }
+
+    #[test]
+    fn test_multiple_estimates_independent() {
+        let mut estimator = CompletionProbabilityEstimator::new();
+        let signals = make_signals();
+
+        let mut input1 = make_input("task-1");
+        input1.progress = 0.9;
+        let result1 = estimator.estimate(&input1, &signals);
+
+        let mut input2 = make_input("task-2");
+        input2.progress = 0.1;
+        input2.retry_count = 10;
+        let result2 = estimator.estimate(&input2, &signals);
+
+        assert!(result1.probability > result2.probability);
+        assert_eq!(estimator.cache.len(), 2);
+    }
+
+    #[test]
+    fn test_estimate_overwrites_cache() {
+        let mut estimator = CompletionProbabilityEstimator::new();
+        let signals = make_signals();
+
+        let mut input = make_input("task-1");
+        input.progress = 0.5;
+        let result1 = estimator.estimate(&input, &signals);
+
+        input.progress = 0.9;
+        let result2 = estimator.estimate(&input, &signals);
+
+        assert!(result2.probability > result1.probability);
+        assert_eq!(estimator.cache.len(), 1);
+        assert_eq!(estimator.get_cached("task-1").unwrap().probability, result2.probability);
+    }
+
+    #[test]
+    fn test_remove_cached_nonexistent() {
+        let mut estimator = CompletionProbabilityEstimator::new();
+        assert!(!estimator.remove_cached("nonexistent"));
+    }
+
+    #[test]
+    fn test_cache_eviction_preserves_newest() {
+        let mut estimator = CompletionProbabilityEstimator::new();
+        estimator.config.max_cache_size = 2;
+        let signals = make_signals();
+
+        let input1 = make_input("task-1");
+        estimator.estimate(&input1, &signals);
+
+        let input2 = make_input("task-2");
+        estimator.estimate(&input2, &signals);
+
+        let input3 = make_input("task-3");
+        estimator.estimate(&input3, &signals);
+
+        assert_eq!(estimator.cache.len(), 2);
+        assert!(estimator.get_cached("task-3").is_some());
+    }
+
+    #[test]
+    fn test_confidence_levels_by_data_count() {
+        let mut estimator = CompletionProbabilityEstimator::new();
+
+        // High confidence: 5+ factors with data
+        let mut input = make_input("high-conf");
+        input.file_size_bytes = 1_000_000;
+        let signals = EstimatorSignals {
+            domain_reliability_score: Some(0.8),
+            network_connected: Some(true),
+            network_quality: Some(0.9),
+            overall_success_rate: Some(0.7),
+            protocol_success_rate: Some(0.8),
+            available_disk_bytes: Some(10_000_000),
+            recent_error_count: Some(0),
+        };
+        let result = estimator.estimate(&input, &signals);
+        assert_eq!(result.confidence, ConfidenceLevel::High);
+
+        // Low confidence: <3 factors with data
+        let input2 = make_input("low-conf");
+        let signals2 = EstimatorSignals::default();
+        let result2 = estimator.estimate(&input2, &signals2);
+        assert!(result2.confidence == ConfidenceLevel::Low || result2.confidence == ConfidenceLevel::Medium);
+    }
+
+    #[test]
+    fn test_probability_adjustment_by_confidence() {
+        let mut estimator = CompletionProbabilityEstimator::new();
+
+        // High confidence: less adjustment toward 50%
+        let mut input1 = make_input("high");
+        input1.progress = 0.9;
+        input1.file_size_bytes = 1_000_000;
+        let signals1 = EstimatorSignals {
+            domain_reliability_score: Some(0.9),
+            network_connected: Some(true),
+            network_quality: Some(0.9),
+            overall_success_rate: Some(0.9),
+            protocol_success_rate: Some(0.9),
+            available_disk_bytes: Some(10_000_000),
+            recent_error_count: Some(0),
+        };
+        let result1 = estimator.estimate(&input1, &signals1);
+
+        // Low confidence: more adjustment toward 50%
+        let input2 = make_input("low");
+        let signals2 = EstimatorSignals::default();
+        let result2 = estimator.estimate(&input2, &signals2);
+
+        // High confidence result should be further from 50%
+        let high_distance = (result1.probability - 50.0).abs();
+        let low_distance = (result2.probability - 50.0).abs();
+        assert!(high_distance >= low_distance);
+    }
 }
