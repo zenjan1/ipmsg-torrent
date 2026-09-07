@@ -25,8 +25,17 @@ use libp2p::swarm::ToSwarm;
 use libp2p::{Multiaddr, PeerId, StreamProtocol, Swarm};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
+
+/// Maximum number of consecutive failures before circuit breaker opens.
+const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
+/// Duration the circuit breaker stays open before allowing a retry.
+const CIRCUIT_BREAKER_COOLDOWN: Duration = Duration::from_secs(30);
+/// Maximum number of dial retries attempts with exponential backoff.
+const MAX_DIAL_RETRIES: u32 = 5;
+/// Base delay for exponential backoff on dial retries.
+const DIAL_BACKOFF_BASE: Duration = Duration::from_secs(1);
 
 /// Check if a multiaddr contains a private/internal IP address.
 /// Uses early-exit pattern matching on the string representation for speed.
@@ -56,6 +65,102 @@ fn is_private_addr(addr: &Multiaddr) -> bool {
         }
     }
     false
+}
+
+/// Parse a multiaddr string with retry and logging.
+/// Returns `None` if the address cannot be parsed after `max_retries` attempts.
+fn parse_addr_with_retry(addr_str: &str, context: &str, max_retries: u32) -> Option<Multiaddr> {
+    for attempt in 1..=max_retries {
+        match addr_str.parse::<Multiaddr>() {
+            Ok(addr) => return Some(addr),
+            Err(e) => {
+                if attempt < max_retries {
+                    tracing::warn!(
+                        address = addr_str,
+                        context = context,
+                        attempt = attempt,
+                        max_retries = max_retries,
+                        error = %e,
+                        "Failed to parse multiaddr, retrying"
+                    );
+                } else {
+                    tracing::error!(
+                        address = addr_str,
+                        context = context,
+                        attempts = max_retries,
+                        error = %e,
+                        "Failed to parse multiaddr after all retries, skipping"
+                    );
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Per-peer circuit breaker state.
+#[derive(Debug, Clone)]
+struct CircuitBreakerEntry {
+    /// Number of consecutive failures.
+    consecutive_failures: u32,
+    /// When the circuit was opened (None if closed).
+    opened_at: Option<Instant>,
+}
+
+impl CircuitBreakerEntry {
+    fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+            opened_at: None,
+        }
+    }
+
+    /// Record a failure. Returns `true` if the circuit just opened.
+    fn record_failure(&mut self) -> bool {
+        self.consecutive_failures += 1;
+        if self.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD && self.opened_at.is_none() {
+            self.opened_at = Some(Instant::now());
+            tracing::warn!(
+                failures = self.consecutive_failures,
+                cooldown_secs = CIRCUIT_BREAKER_COOLDOWN.as_secs(),
+                "Circuit breaker opened for peer"
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Record a success, resetting the failure counter.
+    fn record_success(&mut self) {
+        if self.consecutive_failures > 0 {
+            tracing::info!(
+                previous_failures = self.consecutive_failures,
+                "Circuit breaker reset for peer after successful connection"
+            );
+        }
+        self.consecutive_failures = 0;
+        self.opened_at = None;
+    }
+
+    /// Whether the circuit is currently open (tripped).
+    fn is_open(&self) -> bool {
+        if let Some(opened_at) = self.opened_at {
+            if opened_at.elapsed() < CIRCUIT_BREAKER_COOLDOWN {
+                return true;
+            }
+            // Cooldown elapsed — allow a half-open retry
+            false
+        } else {
+            false
+        }
+    }
+
+    /// Reset the circuit breaker manually.
+    fn reset(&mut self) {
+        self.consecutive_failures = 0;
+        self.opened_at = None;
+    }
 }
 
 /// Combined LibP2P behaviour — all sub-protocols
@@ -176,6 +281,8 @@ pub struct P2PSwarm {
         HashMap<String, request_response::ResponseChannel<FileTransferResponse>>,
     /// Store relay node addresses for later relay address construction
     relay_node_addrs: HashMap<PeerId, Vec<Multiaddr>>,
+    /// Circuit breaker state per peer for connection failure tracking
+    circuit_breakers: HashMap<PeerId, CircuitBreakerEntry>,
 }
 
 pub struct SwarmConfig {
@@ -220,8 +327,12 @@ impl P2PSwarm {
 
         std::fs::create_dir_all(data_dir).ok();
         let db_path = data_dir.join("swarm_cache.db");
-        let store = MessageStore::new(&db_path)
-            .unwrap_or_else(|_| panic!("Failed to create swarm message store at {:?}", db_path));
+        let store = MessageStore::new(&db_path).map_err(|e| {
+            P2PError::Transport(format!(
+                "Failed to create swarm message store at {:?}: {}",
+                db_path, e
+            ))
+        })?;
 
         let mut swarm_obj = Self {
             swarm,
@@ -231,16 +342,18 @@ impl P2PSwarm {
             connected_peers: HashSet::new(),
             pending_response_channels: HashMap::new(),
             relay_node_addrs: HashMap::new(),
+            circuit_breakers: HashMap::new(),
         };
 
         // Listen on TCP FIRST (must listen before dialing)
         let tcp_addr = if config.listen_port > 0 {
             format!("/ip4/0.0.0.0/tcp/{}", config.listen_port)
-                .parse()
-                .unwrap()
         } else {
-            "/ip4/0.0.0.0/tcp/0".parse().unwrap()
+            "/ip4/0.0.0.0/tcp/0".to_string()
         };
+        let tcp_addr: Multiaddr = tcp_addr.parse().map_err(|e| {
+            P2PError::Transport(format!("Invalid TCP listen address: {}", e))
+        })?;
         swarm_obj
             .swarm
             .listen_on(tcp_addr)
@@ -249,23 +362,29 @@ impl P2PSwarm {
         // Listen on TCP IPv6
         let tcp6_addr = if config.listen_port > 0 {
             format!("/ip6/::/tcp/{}", config.listen_port)
-                .parse()
-                .unwrap()
         } else {
-            "/ip6/::/tcp/0".parse().unwrap()
+            "/ip6/::/tcp/0".to_string()
         };
-        if let Err(e) = swarm_obj.swarm.listen_on(tcp6_addr) {
-            tracing::warn!("Failed to listen on IPv6 TCP: {:?}", e);
+        match tcp6_addr.parse::<Multiaddr>() {
+            Ok(addr) => {
+                if let Err(e) = swarm_obj.swarm.listen_on(addr) {
+                    tracing::warn!(error = ?e, "Failed to listen on IPv6 TCP (non-fatal)");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, address = tcp6_addr, "Invalid IPv6 TCP address, skipping");
+            }
         }
 
         // Listen on QUIC
         let quic_addr = if config.listen_port > 0 {
             format!("/ip4/0.0.0.0/udp/{}/quic-v1", config.listen_port)
-                .parse()
-                .unwrap()
         } else {
-            "/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap()
+            "/ip4/0.0.0.0/udp/0/quic-v1".to_string()
         };
+        let quic_addr: Multiaddr = quic_addr.parse().map_err(|e| {
+            P2PError::Transport(format!("Invalid QUIC listen address: {}", e))
+        })?;
         swarm_obj
             .swarm
             .listen_on(quic_addr)
@@ -274,55 +393,140 @@ impl P2PSwarm {
         // Listen on QUIC IPv6
         let quic6_addr = if config.listen_port > 0 {
             format!("/ip6/::/udp/{}/quic-v1", config.listen_port)
-                .parse()
-                .unwrap()
         } else {
-            "/ip6/::/udp/0/quic-v1".parse().unwrap()
+            "/ip6/::/udp/0/quic-v1".to_string()
         };
-        if let Err(e) = swarm_obj.swarm.listen_on(quic6_addr) {
-            tracing::warn!("Failed to listen on IPv6 QUIC: {:?}", e);
+        match quic6_addr.parse::<Multiaddr>() {
+            Ok(addr) => {
+                if let Err(e) = swarm_obj.swarm.listen_on(addr) {
+                    tracing::warn!(error = ?e, "Failed to listen on IPv6 QUIC (non-fatal)");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, address = quic6_addr, "Invalid IPv6 QUIC address, skipping");
+            }
+        }
+        // Dial bootstrap nodes with tolerance and statistics
+        let mut bootstrap_success = 0;
+        let mut bootstrap_failed = 0;
+        for addr_str in &config.bootstrap_nodes {
+            // Parse with retry and logging
+            let addr = match parse_addr_with_retry(addr_str, "bootstrap node", 3) {
+                Some(a) => a,
+                None => {
+                    bootstrap_failed += 1;
+                    continue;
+                }
+            };
+
+            // Extract peer ID from address
+            let peer_id = match addr.iter().find_map(|p| match p {
+                libp2p::multiaddr::Protocol::P2p(pid) => Some(pid),
+                _ => None,
+            }) {
+                Some(pid) => pid,
+                None => {
+                    tracing::warn!(
+                        address = %addr,
+                        "Bootstrap node address missing peer ID, skipping"
+                    );
+                    bootstrap_failed += 1;
+                    continue;
+                }
+            };
+
+            // Dial with exponential backoff
+            if let Err(e) = swarm_obj.dial_with_backoff(peer_id, addr.clone()) {
+                tracing::warn!(
+                    %peer_id,
+                    %addr,
+                    error = %e,
+                    "Failed to dial bootstrap node after retries"
+                );
+                bootstrap_failed += 1;
+                continue;
+            }
+
+            swarm_obj
+                .swarm
+                .behaviour_mut()
+                .add_kademlia_peer(peer_id, addr.clone());
+            swarm_obj.connected_peers.insert(peer_id);
+            bootstrap_success += 1;
+            tracing::info!(%peer_id, %addr, "Added bootstrap node");
         }
 
-        // Dial bootstrap nodes
-        for addr_str in &config.bootstrap_nodes {
-            if let Ok(addr) = addr_str.parse::<Multiaddr>()
-                && let Some(peer_id) = addr.iter().find_map(|p| match p {
-                    libp2p::multiaddr::Protocol::P2p(pid) => Some(pid),
-                    _ => None,
-                })
-            {
-                let _ = swarm_obj.swarm.dial(addr.clone());
+        if bootstrap_success > 0 || bootstrap_failed > 0 {
+            tracing::info!(
+                success = bootstrap_success,
+                failed = bootstrap_failed,
+                total = config.bootstrap_nodes.len(),
+                "Bootstrap node connection summary"
+            );
+        }
+
+        // Dial known peers from previous sessions (bootstrap from persistence)
+        let mut known_success = 0;
+        let mut known_failed = 0;
+        for (peer_id_str, addrs) in &config.known_addrs {
+            let peer_id = match peer_id_str.parse::<PeerId>() {
+                Ok(pid) => pid,
+                Err(e) => {
+                    tracing::warn!(
+                        peer_id = %peer_id_str,
+                        error = %e,
+                        "Invalid peer ID in known_addrs, skipping"
+                    );
+                    continue;
+                }
+            };
+
+            let mut public_addrs = Vec::new();
+            for addr_str in addrs {
+                // Parse with retry
+                let addr = match parse_addr_with_retry(addr_str, "known peer", 3) {
+                    Some(a) => a,
+                    None => {
+                        known_failed += 1;
+                        continue;
+                    }
+                };
+
+                // Skip private/internal addresses
+                if is_private_addr(&addr) {
+                    continue;
+                }
+
+                // Dial with backoff
+                if let Err(e) = swarm_obj.dial_with_backoff(peer_id, addr.clone()) {
+                    tracing::warn!(
+                        %peer_id,
+                        %addr,
+                        error = %e,
+                        "Failed to dial known peer after retries"
+                    );
+                    known_failed += 1;
+                    continue;
+                }
+
                 swarm_obj
                     .swarm
                     .behaviour_mut()
                     .add_kademlia_peer(peer_id, addr.clone());
-                swarm_obj.connected_peers.insert(peer_id);
-                tracing::info!(%peer_id, %addr, "Added bootstrap node");
+                public_addrs.push(addr);
+                known_success += 1;
+            }
+            if !public_addrs.is_empty() {
+                tracing::info!(%peer_id, addrs = public_addrs.len(), "Added known peer from store");
             }
         }
 
-        // Dial known peers from previous sessions (bootstrap from persistence)
-        for (peer_id_str, addrs) in &config.known_addrs {
-            if let Ok(peer_id) = peer_id_str.parse::<PeerId>() {
-                let mut public_addrs = Vec::new();
-                for addr_str in addrs {
-                    if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                        // Skip private/internal addresses
-                        if is_private_addr(&addr) {
-                            continue;
-                        }
-                        swarm_obj
-                            .swarm
-                            .behaviour_mut()
-                            .add_kademlia_peer(peer_id, addr.clone());
-                        let _ = swarm_obj.swarm.dial(addr.clone());
-                        public_addrs.push(addr);
-                    }
-                }
-                if !public_addrs.is_empty() {
-                    tracing::info!(%peer_id, addrs = public_addrs.len(), "Added known peer from store");
-                }
-            }
+        if known_success > 0 || known_failed > 0 {
+            tracing::info!(
+                success = known_success,
+                failed = known_failed,
+                "Known peer connection summary"
+            );
         }
 
         // Subscribe to topics
@@ -434,6 +638,86 @@ impl P2PSwarm {
             Ok(query_id) => tracing::debug!(?query_id, "Kademlia bootstrap started"),
             Err(e) => tracing::warn!(%e, "Kademlia bootstrap failed"),
         }
+    }
+
+    /// Dial a peer with exponential backoff and circuit breaker protection
+    pub fn dial_with_backoff(&mut self, peer_id: PeerId, addr: Multiaddr) -> Result<(), P2PError> {
+        // Check circuit breaker state
+        let breaker = self.circuit_breakers.entry(peer_id).or_insert_with(CircuitBreakerEntry::new);
+        
+        if breaker.is_open() {
+            tracing::warn!(
+                %peer_id,
+                %addr,
+                "Circuit breaker is open, refusing to dial"
+            );
+            return Err(P2PError::Transport(format!(
+                "Circuit breaker open for peer {}",
+                peer_id
+            )));
+        }
+
+        // Attempt dial with exponential backoff
+        let mut last_error = None;
+        for attempt in 0..MAX_DIAL_RETRIES {
+            let delay = DIAL_BACKOFF_BASE * 2u32.pow(attempt);
+            
+            tracing::debug!(
+                %peer_id,
+                %addr,
+                attempt = attempt + 1,
+                max_attempts = MAX_DIAL_RETRIES,
+                delay_secs = delay.as_secs(),
+                "Attempting to dial peer"
+            );
+
+            match self.swarm.dial(addr.clone()) {
+                Ok(_) => {
+                    // Record success in circuit breaker
+                    if let Some(breaker) = self.circuit_breakers.get_mut(&peer_id) {
+                        breaker.record_success();
+                    }
+                    tracing::info!(%peer_id, %addr, "Successfully dialed peer");
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        %peer_id,
+                        %addr,
+                        attempt = attempt + 1,
+                        error = %e,
+                        "Dial attempt failed"
+                    );
+                    last_error = Some(e);
+                    
+                    // Don't sleep on the last attempt
+                    if attempt < MAX_DIAL_RETRIES - 1 {
+                        std::thread::sleep(delay);
+                    }
+                }
+            }
+        }
+
+        // All attempts failed, record failure in circuit breaker
+        if let Some(breaker) = self.circuit_breakers.get_mut(&peer_id) {
+            breaker.record_failure();
+        }
+
+        let error_msg = last_error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "Unknown dial error".to_string());
+        
+        tracing::error!(
+            %peer_id,
+            %addr,
+            attempts = MAX_DIAL_RETRIES,
+            "All dial attempts failed"
+        );
+        
+        Err(P2PError::Transport(format!(
+            "Failed to dial peer {} after {} attempts: {}",
+            peer_id, MAX_DIAL_RETRIES, error_msg
+        )))
     }
 
     fn on_gossipsub_message(&mut self, msg: &gossipsub::Message) -> Vec<P2PEvent> {
