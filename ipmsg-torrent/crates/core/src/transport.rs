@@ -997,22 +997,39 @@ impl futures::Stream for P2PSwarm {
 
                             // Store relay node addresses for later relay address construction
                             if let libp2p::core::ConnectedPoint::Dialer { address, .. } = endpoint {
+                                // Ensure address includes peer_id for proper relay address construction
+                                let full_addr = if address.iter().any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_))) {
+                                    address.clone()
+                                } else {
+                                    address.clone().with(libp2p::multiaddr::Protocol::P2p(*peer_id))
+                                };
+                                
                                 tracing::info!(
                                     peer = %peer_id,
-                                    address = %address,
+                                    address = %full_addr,
                                     "📝 Storing relay node address for potential reservation"
                                 );
                                 self.relay_node_addrs
                                     .entry(*peer_id)
                                     .or_default()
-                                    .push(address.clone());
-                            } else if let libp2p::core::ConnectedPoint::Listener { .. } = endpoint {
-                                // For incoming connections, we don't have the remote address directly
-                                // but we can use the connection to request reservation later
+                                    .push(full_addr);
+                            } else if let libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } = endpoint {
+                                // For incoming connections, use the send_back_addr which contains the peer's address
+                                let full_addr = if send_back_addr.iter().any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_))) {
+                                    send_back_addr.clone()
+                                } else {
+                                    send_back_addr.clone().with(libp2p::multiaddr::Protocol::P2p(*peer_id))
+                                };
+                                
                                 tracing::info!(
                                     peer = %peer_id,
-                                    "📝 Incoming connection - will use Identify info for relay"
+                                    address = %full_addr,
+                                    "📝 Storing incoming connection address for potential relay reservation"
                                 );
+                                self.relay_node_addrs
+                                    .entry(*peer_id)
+                                    .or_default()
+                                    .push(full_addr);
                             }
 
                             // Don't add addresses to Kademlia here — wait for Identify
