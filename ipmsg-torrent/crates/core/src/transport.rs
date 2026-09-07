@@ -522,48 +522,65 @@ impl P2PSwarm {
             .any(|p| p.to_string().contains("circuit/relay"));
         tracing::info!(peer = %pid_str, supports_relay, "Peer relay support check");
 
-        // If peer supports relay, trigger reservation
+        // If peer supports relay, trigger reservation using the relay node's address
         if supports_relay {
-            // Use the observed address (how the peer sees us) to build relay address
-            let mut relay_addr = info.observed_addr.clone();
+            let peer_id = info.public_key.to_peer_id();
             
-            // Check if address already contains /p2p/<peer_id>
-            let has_p2p = relay_addr
-                .iter()
-                .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)));
+            // Get the relay node's address from our stored connection addresses
+            if let Some(relay_addrs) = self.relay_node_addrs.get(&peer_id) {
+                if let Some(relay_addr_base) = relay_addrs.first() {
+                    // Build proper relay address: /relay_node_addr/p2p/relay_peer_id/p2p-circuit
+                    let mut relay_addr = relay_addr_base.clone();
+                    
+                    // Check if address already contains /p2p/<peer_id>
+                    let has_p2p = relay_addr
+                        .iter()
+                        .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)));
 
-            if !has_p2p {
-                relay_addr.push(libp2p::multiaddr::Protocol::P2p(info.public_key.to_peer_id()));
-            }
+                    if !has_p2p {
+                        relay_addr.push(libp2p::multiaddr::Protocol::P2p(peer_id));
+                    }
 
-            // Add p2p-circuit protocol
-            relay_addr.push(libp2p::multiaddr::Protocol::P2pCircuit);
+                    // Add p2p-circuit protocol to request reservation
+                    relay_addr.push(libp2p::multiaddr::Protocol::P2pCircuit);
 
-            tracing::info!(
-                peer = %pid_str,
-                relay_addr = %relay_addr,
-                "Attempting relay reservation"
-            );
-
-            match self.swarm.listen_on(relay_addr.clone()) {
-                Ok(id) => {
                     tracing::info!(
                         peer = %pid_str,
-                        listener_id = ?id,
-                        "Relay listen initiated, reservation will be requested"
+                        relay_addr = %relay_addr,
+                        "Attempting relay reservation via relay node address"
                     );
-                    events.push(P2PEvent::Status(format!(
-                        "Relay reservation requested for {}",
-                        &pid_str[..8]
-                    )));
-                }
-                Err(e) => {
+
+                    match self.swarm.listen_on(relay_addr.clone()) {
+                        Ok(id) => {
+                            tracing::info!(
+                                peer = %pid_str,
+                                listener_id = ?id,
+                                "Relay listen initiated, reservation will be requested"
+                            );
+                            events.push(P2PEvent::Status(format!(
+                                "Relay reservation requested for {}",
+                                &pid_str[..8]
+                            )));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                peer = %pid_str,
+                                error = ?e,
+                                "Failed to initiate relay listen"
+                            );
+                        }
+                    }
+                } else {
                     tracing::warn!(
                         peer = %pid_str,
-                        error = ?e,
-                        "Failed to initiate relay listen"
+                        "Peer supports relay but no relay address stored"
                     );
                 }
+            } else {
+                tracing::debug!(
+                    peer = %pid_str,
+                    "Peer supports relay but not in relay_node_addrs (not a relay connection)"
+                );
             }
         }
 
