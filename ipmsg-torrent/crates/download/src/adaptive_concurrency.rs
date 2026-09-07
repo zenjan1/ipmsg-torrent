@@ -1054,4 +1054,1096 @@ mod tests {
         // 40% error rate > 10% threshold -> decrease
         assert!(matches!(decision, ConcurrencyDecision::Decrease { .. }));
     }
+
+    // ========== Phase 255: Comprehensive Test Coverage ==========
+
+    // --- AdaptiveConcurrencyConfig serde ---
+
+    #[test]
+    fn config_serde_roundtrip_all_fields() {
+        let config = AdaptiveConcurrencyConfig {
+            enabled: false,
+            min_connections: 2,
+            max_connections: 32,
+            initial_connections: 8,
+            target_response_ms: 500,
+            high_latency_threshold_ms: 2000,
+            error_rate_threshold: 0.25,
+            sample_window: 20,
+            adjustment_cooldown_secs: 60,
+            increase_factor: 2.0,
+            decrease_factor: 0.5,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: AdaptiveConcurrencyConfig = serde_json::from_str(&json).unwrap();
+        assert!(!loaded.enabled);
+        assert_eq!(loaded.min_connections, 2);
+        assert_eq!(loaded.max_connections, 32);
+        assert_eq!(loaded.initial_connections, 8);
+        assert_eq!(loaded.target_response_ms, 500);
+        assert_eq!(loaded.high_latency_threshold_ms, 2000);
+        assert!((loaded.error_rate_threshold - 0.25).abs() < 1e-10);
+        assert_eq!(loaded.sample_window, 20);
+        assert_eq!(loaded.adjustment_cooldown_secs, 60);
+        assert!((loaded.increase_factor - 2.0).abs() < 1e-10);
+        assert!((loaded.decrease_factor - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn config_serde_extra_fields_ignored() {
+        let json = r#"{"enabled":true,"min_connections":1,"max_connections":16,"initial_connections":4,"target_response_ms":200,"high_latency_threshold_ms":1000,"error_rate_threshold":0.1,"sample_window":10,"adjustment_cooldown_secs":30,"increase_factor":1.5,"decrease_factor":0.7,"unknown_field":"value"}"#;
+        let loaded: AdaptiveConcurrencyConfig = serde_json::from_str(json).unwrap();
+        assert!(loaded.enabled);
+        assert_eq!(loaded.min_connections, 1);
+    }
+
+    #[test]
+    fn config_serde_pretty_json() {
+        let config = AdaptiveConcurrencyConfig::default();
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        let loaded: AdaptiveConcurrencyConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(loaded.min_connections, config.min_connections);
+    }
+
+    #[test]
+    fn config_traits_clone_copy_debug() {
+        let config = AdaptiveConcurrencyConfig::default();
+        let cloned = config.clone();
+        let copied = config; // Copy
+        assert_eq!(cloned.min_connections, config.min_connections);
+        assert_eq!(copied.max_connections, config.max_connections);
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("AdaptiveConcurrencyConfig"));
+    }
+
+    #[test]
+    fn config_clone_independence() {
+        let mut config = AdaptiveConcurrencyConfig::default();
+        let cloned = config.clone();
+        config.enabled = false;
+        assert!(cloned.enabled);
+    }
+
+    // --- ResponseSample ---
+
+    #[test]
+    fn response_sample_throughput_bps_normal() {
+        let sample = ResponseSample {
+            timestamp: Instant::now(),
+            response_time_ms: 100.0,
+            bytes_transferred: 10000,
+            success: true,
+        };
+        // throughput = 10000 * 1000 / 100 = 100000 bytes/sec
+        assert!((sample.throughput_bps() - 100000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn response_sample_throughput_bps_zero_response_time() {
+        let sample = ResponseSample {
+            timestamp: Instant::now(),
+            response_time_ms: 0.0,
+            bytes_transferred: 10000,
+            success: true,
+        };
+        assert_eq!(sample.throughput_bps(), 0.0);
+    }
+
+    #[test]
+    fn response_sample_throughput_bps_zero_bytes() {
+        let sample = ResponseSample {
+            timestamp: Instant::now(),
+            response_time_ms: 100.0,
+            bytes_transferred: 0,
+            success: true,
+        };
+        assert_eq!(sample.throughput_bps(), 0.0);
+    }
+
+    #[test]
+    fn response_sample_clone_debug() {
+        let sample = ResponseSample {
+            timestamp: Instant::now(),
+            response_time_ms: 50.0,
+            bytes_transferred: 5000,
+            success: true,
+        };
+        let cloned = sample.clone();
+        assert!((cloned.response_time_ms - 50.0).abs() < 1e-10);
+        assert_eq!(cloned.bytes_transferred, 5000);
+        let _ = format!("{:?}", sample);
+    }
+
+    // --- AdjustmentDirection ---
+
+    #[test]
+    fn adjustment_direction_serde_all_variants() {
+        for dir in [
+            AdjustmentDirection::None,
+            AdjustmentDirection::Increased,
+            AdjustmentDirection::Decreased,
+        ] {
+            let json = serde_json::to_string(&dir).unwrap();
+            let loaded: AdjustmentDirection = serde_json::from_str(&json).unwrap();
+            assert_eq!(loaded, dir);
+        }
+    }
+
+    #[test]
+    fn adjustment_direction_traits() {
+        let dir = AdjustmentDirection::Increased;
+        let _copied = dir; // Copy
+        let _cloned = dir.clone();
+        let _ = format!("{:?}", dir);
+        assert_ne!(AdjustmentDirection::None, AdjustmentDirection::Increased);
+        assert_ne!(AdjustmentDirection::Increased, AdjustmentDirection::Decreased);
+    }
+
+    // --- ConcurrencyDecision ---
+
+    #[test]
+    fn concurrency_decision_variants() {
+        let hold = ConcurrencyDecision::Hold;
+        let increase = ConcurrencyDecision::Increase {
+            from: 4,
+            to: 6,
+            reason: "fast".to_string(),
+        };
+        let decrease = ConcurrencyDecision::Decrease {
+            from: 8,
+            to: 5,
+            reason: "slow".to_string(),
+        };
+
+        assert_eq!(hold, ConcurrencyDecision::Hold);
+        assert_ne!(hold, increase);
+        assert_ne!(increase, decrease);
+    }
+
+    #[test]
+    fn concurrency_decision_clone_debug() {
+        let decision = ConcurrencyDecision::Increase {
+            from: 4,
+            to: 6,
+            reason: "good perf".to_string(),
+        };
+        let cloned = decision.clone();
+        assert_eq!(cloned, decision);
+        let debug = format!("{:?}", decision);
+        assert!(debug.contains("Increase"));
+        assert!(debug.contains("good perf"));
+    }
+
+    // --- TaskConcurrencySummary ---
+
+    #[test]
+    fn task_summary_serde_roundtrip() {
+        let summary = TaskConcurrencySummary {
+            task_id: "task-1".to_string(),
+            current_connections: 8,
+            avg_response_ms: 150.0,
+            error_rate: 0.05,
+            total_adjustments: 3,
+            last_direction: AdjustmentDirection::Increased,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let loaded: TaskConcurrencySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.task_id, "task-1");
+        assert_eq!(loaded.current_connections, 8);
+        assert!((loaded.avg_response_ms - 150.0).abs() < 1e-10);
+        assert_eq!(loaded.last_direction, AdjustmentDirection::Increased);
+    }
+
+    #[test]
+    fn task_summary_clone_debug() {
+        let summary = TaskConcurrencySummary {
+            task_id: "t1".to_string(),
+            current_connections: 4,
+            avg_response_ms: 100.0,
+            error_rate: 0.0,
+            total_adjustments: 0,
+            last_direction: AdjustmentDirection::None,
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.task_id, summary.task_id);
+        let _ = format!("{:?}", summary);
+    }
+
+    // --- AdaptiveConcurrencySummary ---
+
+    #[test]
+    fn adaptive_summary_serde_roundtrip() {
+        let summary = AdaptiveConcurrencySummary {
+            enabled: true,
+            config: AdaptiveConcurrencyConfig::default(),
+            task_count: 2,
+            tasks: vec![
+                TaskConcurrencySummary {
+                    task_id: "t1".to_string(),
+                    current_connections: 4,
+                    avg_response_ms: 100.0,
+                    error_rate: 0.0,
+                    total_adjustments: 1,
+                    last_direction: AdjustmentDirection::Increased,
+                },
+                TaskConcurrencySummary {
+                    task_id: "t2".to_string(),
+                    current_connections: 2,
+                    avg_response_ms: 500.0,
+                    error_rate: 0.1,
+                    total_adjustments: 2,
+                    last_direction: AdjustmentDirection::Decreased,
+                },
+            ],
+            total_adjustments: 3,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let loaded: AdaptiveConcurrencySummary = serde_json::from_str(&json).unwrap();
+        assert!(loaded.enabled);
+        assert_eq!(loaded.task_count, 2);
+        assert_eq!(loaded.tasks.len(), 2);
+        assert_eq!(loaded.total_adjustments, 3);
+    }
+
+    #[test]
+    fn adaptive_summary_clone_debug() {
+        let summary = AdaptiveConcurrencySummary {
+            enabled: false,
+            config: AdaptiveConcurrencyConfig::default(),
+            task_count: 0,
+            tasks: vec![],
+            total_adjustments: 0,
+        };
+        let cloned = summary.clone();
+        assert!(!cloned.enabled);
+        let _ = format!("{:?}", summary);
+    }
+
+    // --- Manager: domain-specific limits ---
+
+    #[test]
+    fn domain_limit_default_value() {
+        let mgr = AdaptiveConcurrencyManager::new();
+        assert_eq!(mgr.default_domain_limit, 16);
+    }
+
+    #[test]
+    fn domain_limit_set_global() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        mgr.set_domain_limit(8);
+        assert_eq!(mgr.default_domain_limit, 8);
+    }
+
+    #[test]
+    fn domain_specific_limit_set() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.set_domain_specific_limit("cdn.example.com", 4);
+        assert!(mgr.domain_states.contains_key("cdn.example.com"));
+        assert_eq!(mgr.domain_states.get("cdn.example.com").unwrap().max_connections, 4);
+    }
+
+    #[test]
+    fn domain_specific_limit_update_existing() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        mgr.set_domain_specific_limit("cdn.com", 4);
+        mgr.set_domain_specific_limit("cdn.com", 8);
+        assert_eq!(mgr.domain_states.get("cdn.com").unwrap().max_connections, 8);
+    }
+
+    #[test]
+    fn get_connections_for_domain_no_domain_state() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+        // No domain state set, should use default_domain_limit
+        let conn = mgr.get_connections_for_domain("task1", "unknown.com");
+        assert_eq!(conn, 4); // initial_connections=4 < default_domain_limit=16
+    }
+
+    #[test]
+    fn get_connections_for_domain_with_limit() {
+        let config = AdaptiveConcurrencyConfig {
+            min_connections: 1,
+            max_connections: 16,
+            initial_connections: 8,
+            ..make_config()
+        };
+        let mut mgr = AdaptiveConcurrencyManager::with_config(config);
+        mgr.register_task("task1");
+        mgr.set_domain_specific_limit("cdn.com", 3);
+
+        let conn = mgr.get_connections_for_domain("task1", "cdn.com");
+        assert_eq!(conn, 3); // task wants 8, domain limits to 3
+    }
+
+    #[test]
+    fn get_connections_for_domain_respects_min() {
+        let config = AdaptiveConcurrencyConfig {
+            min_connections: 2,
+            max_connections: 16,
+            initial_connections: 4,
+            ..make_config()
+        };
+        let mut mgr = AdaptiveConcurrencyManager::with_config(config);
+        mgr.register_task("task1");
+        // Set domain limit below min_connections
+        mgr.set_domain_specific_limit("restricted.com", 1);
+
+        let conn = mgr.get_connections_for_domain("task1", "restricted.com");
+        assert_eq!(conn, 2); // min_connections takes precedence
+    }
+
+    // --- Active connection tracking ---
+
+    #[test]
+    fn register_active_connection_new_domain() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        mgr.register_active_connection("cdn.com");
+        assert_eq!(
+            mgr.domain_states.get("cdn.com").unwrap().active_connections,
+            1
+        );
+    }
+
+    #[test]
+    fn register_active_connection_increments() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        mgr.register_active_connection("cdn.com");
+        mgr.register_active_connection("cdn.com");
+        mgr.register_active_connection("cdn.com");
+        assert_eq!(
+            mgr.domain_states.get("cdn.com").unwrap().active_connections,
+            3
+        );
+    }
+
+    #[test]
+    fn unregister_active_connection_decrements() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        mgr.register_active_connection("cdn.com");
+        mgr.register_active_connection("cdn.com");
+        mgr.unregister_active_connection("cdn.com");
+        assert_eq!(
+            mgr.domain_states.get("cdn.com").unwrap().active_connections,
+            1
+        );
+    }
+
+    #[test]
+    fn unregister_active_connection_saturating_sub() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        // Unregister without any registered - should not go negative
+        mgr.unregister_active_connection("cdn.com");
+        // Should not panic
+    }
+
+    #[test]
+    fn unregister_active_connection_nonexistent_domain() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        mgr.unregister_active_connection("nonexistent.com"); // no panic
+    }
+
+    // --- register_task_with_domain ---
+
+    #[test]
+    fn register_task_with_domain_sets_domain() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        mgr.register_task_with_domain("task1", "cdn.example.com");
+
+        let state = mgr.states.get("task1").unwrap();
+        assert_eq!(state.domain.as_deref(), Some("cdn.example.com"));
+        assert!(mgr.domain_states.contains_key("cdn.example.com"));
+    }
+
+    #[test]
+    fn register_task_with_domain_idempotent() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        mgr.register_task_with_domain("task1", "cdn.com");
+        mgr.register_task_with_domain("task1", "cdn.com"); // should not panic or duplicate
+        assert_eq!(mgr.states.get("task1").unwrap().current_connections, 4);
+    }
+
+    // --- record_sample_with_bytes ---
+
+    #[test]
+    fn record_sample_with_bytes_updates_bandwidth() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+
+        mgr.record_sample_with_bytes("task1", 100.0, 100000, true);
+        let bw = mgr.get_estimated_bandwidth("task1");
+        assert!(bw.is_some());
+        assert!(bw.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn record_sample_with_bytes_zero_bytes_no_bandwidth() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+
+        mgr.record_sample_with_bytes("task1", 100.0, 0, true);
+        let bw = mgr.get_estimated_bandwidth("task1");
+        assert!(bw.is_none());
+    }
+
+    #[test]
+    fn record_sample_with_bytes_failed_no_bandwidth() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+
+        mgr.record_sample_with_bytes("task1", 100.0, 100000, false);
+        let bw = mgr.get_estimated_bandwidth("task1");
+        assert!(bw.is_none());
+    }
+
+    #[test]
+    fn record_sample_with_bytes_nonexistent_task() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        // Should not panic
+        mgr.record_sample_with_bytes("nonexistent", 100.0, 10000, true);
+    }
+
+    // --- EWMA RTT smoothing ---
+
+    #[test]
+    fn smoothed_rtt_none_initially() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        mgr.register_task("task1");
+        assert!(mgr.get_smoothed_rtt("task1").is_none());
+    }
+
+    #[test]
+    fn smoothed_rtt_first_sample_direct() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+
+        mgr.record_sample("task1", 200.0, true);
+        let rtt = mgr.get_smoothed_rtt("task1").unwrap();
+        assert!((rtt - 200.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn smoothed_rtt_ewma_convergence() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+
+        // First sample: 200ms
+        mgr.record_sample("task1", 200.0, true);
+        // Second sample: 100ms
+        mgr.record_sample("task1", 100.0, true);
+
+        let rtt = mgr.get_smoothed_rtt("task1").unwrap();
+        // EWMA: 0.125 * 100 + 0.875 * 200 = 12.5 + 175 = 187.5
+        assert!((rtt - 187.5).abs() < 1.0);
+    }
+
+    #[test]
+    fn smoothed_rtt_failed_samples_ignored() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+
+        mgr.record_sample("task1", 200.0, true);
+        let rtt_before = mgr.get_smoothed_rtt("task1").unwrap();
+
+        mgr.record_sample("task1", 0.0, false);
+        let rtt_after = mgr.get_smoothed_rtt("task1").unwrap();
+
+        // Failed samples don't update RTT
+        assert!((rtt_before - rtt_after).abs() < 1e-10);
+    }
+
+    #[test]
+    fn smoothed_rtt_unknown_task() {
+        let mgr = AdaptiveConcurrencyManager::new();
+        assert!(mgr.get_smoothed_rtt("unknown").is_none());
+    }
+
+    // --- RTT variance ---
+
+    #[test]
+    fn rtt_variance_initialized_on_first_sample() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+
+        mgr.record_sample("task1", 200.0, true);
+        let state = mgr.states.get("task1").unwrap();
+        // Variance = response_time_ms / 2.0 = 100.0
+        assert!((state.rtt_variance_ms - 100.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn rtt_variance_updates_on_subsequent_samples() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+
+        mgr.record_sample("task1", 200.0, true);
+        mgr.record_sample("task1", 100.0, true);
+
+        let state = mgr.states.get("task1").unwrap();
+        // diff = |200 - 100| = 100
+        // variance = 0.25 * 100 + 0.75 * 100 = 100
+        assert!((state.rtt_variance_ms - 100.0).abs() < 1.0);
+    }
+
+    // --- Min RTT tracking ---
+
+    #[test]
+    fn min_rtt_tracked() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+
+        mgr.record_sample("task1", 200.0, true);
+        mgr.record_sample("task1", 100.0, true);
+        mgr.record_sample("task1", 300.0, true);
+
+        let state = mgr.states.get("task1").unwrap();
+        assert!((state.min_rtt_ms - 100.0).abs() < 1e-10);
+    }
+
+    // --- get_estimated_bandwidth ---
+
+    #[test]
+    fn estimated_bandwidth_none_initially() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        mgr.register_task("task1");
+        assert!(mgr.get_estimated_bandwidth("task1").is_none());
+    }
+
+    #[test]
+    fn estimated_bandwidth_unknown_task() {
+        let mgr = AdaptiveConcurrencyManager::new();
+        assert!(mgr.get_estimated_bandwidth("unknown").is_none());
+    }
+
+    #[test]
+    fn estimated_bandwidth_multiple_samples_ewma() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+
+        // 100000 bytes in 100ms = 1000000 bytes/sec
+        mgr.record_sample_with_bytes("task1", 100.0, 100000, true);
+        let bw1 = mgr.get_estimated_bandwidth("task1").unwrap();
+        assert!((bw1 - 1000000.0).abs() < 1.0);
+
+        // Second sample: same throughput
+        mgr.record_sample_with_bytes("task1", 100.0, 100000, true);
+        let bw2 = mgr.get_estimated_bandwidth("task1").unwrap();
+        // EWMA: 0.9 * 1000000 + 0.1 * 1000000 = 1000000
+        assert!((bw2 - 1000000.0).abs() < 1.0);
+    }
+
+    // --- Consecutive increase/decrease tracking ---
+
+    #[test]
+    fn consecutive_increases_tracked() {
+        let config = AdaptiveConcurrencyConfig {
+            sample_window: 3,
+            adjustment_cooldown_secs: 0,
+            ..make_config()
+        };
+        let mut mgr = AdaptiveConcurrencyManager::with_config(config);
+        mgr.register_task("task1");
+
+        // First increase
+        for _ in 0..3 {
+            mgr.record_sample("task1", 10.0, true);
+        }
+        mgr.evaluate("task1");
+        let state = mgr.states.get("task1").unwrap();
+        assert_eq!(state.consecutive_increases, 1);
+        assert_eq!(state.consecutive_decreases, 0);
+
+        // Second increase
+        for _ in 0..3 {
+            mgr.record_sample("task1", 10.0, true);
+        }
+        mgr.evaluate("task1");
+        let state = mgr.states.get("task1").unwrap();
+        assert_eq!(state.consecutive_increases, 2);
+    }
+
+    #[test]
+    fn consecutive_decreases_tracked() {
+        let config = AdaptiveConcurrencyConfig {
+            sample_window: 3,
+            adjustment_cooldown_secs: 0,
+            ..make_config()
+        };
+        let mut mgr = AdaptiveConcurrencyManager::with_config(config);
+        mgr.register_task("task1");
+
+        for _ in 0..3 {
+            mgr.record_sample("task1", 5000.0, true);
+        }
+        mgr.evaluate("task1");
+        let state = mgr.states.get("task1").unwrap();
+        assert_eq!(state.consecutive_decreases, 1);
+        assert_eq!(state.consecutive_increases, 0);
+    }
+
+    #[test]
+    fn increase_resets_consecutive_decreases() {
+        let config = AdaptiveConcurrencyConfig {
+            sample_window: 3,
+            adjustment_cooldown_secs: 0,
+            ..make_config()
+        };
+        let mut mgr = AdaptiveConcurrencyManager::with_config(config);
+        mgr.register_task("task1");
+
+        // Decrease first
+        for _ in 0..3 {
+            mgr.record_sample("task1", 5000.0, true);
+        }
+        mgr.evaluate("task1");
+
+        // Then increase
+        for _ in 0..3 {
+            mgr.record_sample("task1", 10.0, true);
+        }
+        mgr.evaluate("task1");
+
+        let state = mgr.states.get("task1").unwrap();
+        assert_eq!(state.consecutive_increases, 1);
+        assert_eq!(state.consecutive_decreases, 0);
+    }
+
+    // --- Queueing detection (BBR-style) ---
+
+    #[test]
+    fn queueing_detection_triggers_decrease() {
+        let config = AdaptiveConcurrencyConfig {
+            sample_window: 3,
+            adjustment_cooldown_secs: 0,
+            ..make_config()
+        };
+        let mut mgr = AdaptiveConcurrencyManager::with_config(config);
+        mgr.register_task("task1");
+
+        // First, establish a low min_rtt
+        mgr.record_sample("task1", 50.0, true);
+        mgr.record_sample("task1", 50.0, true);
+        mgr.record_sample("task1", 50.0, true);
+
+        // Now send high-latency samples (RTT >> min_rtt)
+        // smoothed_rtt will be well above 2x min_rtt
+        mgr.record_sample("task1", 500.0, true);
+        mgr.record_sample("task1", 500.0, true);
+        mgr.record_sample("task1", 500.0, true);
+
+        let decision = mgr.evaluate("task1");
+        // Should detect queueing or high latency -> decrease
+        assert!(matches!(decision, ConcurrencyDecision::Decrease { .. }));
+    }
+
+    // --- High variance hold ---
+
+    #[test]
+    fn high_variance_causes_hold() {
+        let config = AdaptiveConcurrencyConfig {
+            sample_window: 3,
+            adjustment_cooldown_secs: 0,
+            ..make_config()
+        };
+        let mut mgr = AdaptiveConcurrencyManager::with_config(config);
+        mgr.register_task("task1");
+
+        // Alternating very different latencies to create high variance
+        mgr.record_sample("task1", 10.0, true);
+        mgr.record_sample("task1", 1000.0, true);
+        mgr.record_sample("task1", 10.0, true);
+        mgr.record_sample("task1", 1000.0, true);
+        mgr.record_sample("task1", 10.0, true);
+        mgr.record_sample("task1", 1000.0, true);
+
+        let decision = mgr.evaluate("task1");
+        // High variance should prevent increase; could be Hold or Decrease
+        assert!(!matches!(decision, ConcurrencyDecision::Increase { .. }));
+    }
+
+    // --- Unicode/emoji ---
+
+    #[test]
+    fn unicode_task_id() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("任务-中文");
+        assert_eq!(mgr.get_connections("任务-中文"), 4);
+
+        for _ in 0..5 {
+            mgr.record_sample("任务-中文", 50.0, true);
+        }
+        let summary = mgr.get_task_summary("任务-中文").unwrap();
+        assert_eq!(summary.task_id, "任务-中文");
+    }
+
+    #[test]
+    fn emoji_task_id() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("🚀-download");
+        assert_eq!(mgr.get_connections("🚀-download"), 4);
+
+        let summary = mgr.get_task_summary("🚀-download").unwrap();
+        assert_eq!(summary.task_id, "🚀-download");
+    }
+
+    // --- Edge cases ---
+
+    #[test]
+    fn zero_latency_samples() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+
+        for _ in 0..5 {
+            mgr.record_sample("task1", 0.0, true);
+        }
+        let decision = mgr.evaluate("task1");
+        // Zero latency is below target -> should try to increase
+        assert!(matches!(decision, ConcurrencyDecision::Increase { .. }));
+    }
+
+    #[test]
+    fn very_large_latency_samples() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+
+        for _ in 0..5 {
+            mgr.record_sample("task1", f64::MAX / 2.0, true);
+        }
+        let decision = mgr.evaluate("task1");
+        assert!(matches!(decision, ConcurrencyDecision::Decrease { .. }));
+    }
+
+    #[test]
+    fn register_task_idempotent() {
+        let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
+        mgr.register_task("task1");
+        mgr.register_task("task1"); // should not overwrite
+        assert_eq!(mgr.get_connections("task1"), 4);
+    }
+
+    #[test]
+    fn unregister_nonexistent_task() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        mgr.unregister_task("nonexistent"); // no panic
+    }
+
+    #[test]
+    fn record_sample_nonexistent_task() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        mgr.record_sample("nonexistent", 100.0, true); // no panic
+    }
+
+    #[test]
+    fn get_connections_unknown_returns_initial() {
+        let config = AdaptiveConcurrencyConfig {
+            initial_connections: 8,
+            ..make_config()
+        };
+        let mgr = AdaptiveConcurrencyManager::with_config(config);
+        assert_eq!(mgr.get_connections("unknown"), 8);
+    }
+
+    // --- Config accessors ---
+
+    #[test]
+    fn get_config_returns_reference() {
+        let mgr = AdaptiveConcurrencyManager::new();
+        let config = mgr.get_config();
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn set_config_updates() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        let new_config = AdaptiveConcurrencyConfig {
+            max_connections: 64,
+            ..AdaptiveConcurrencyConfig::default()
+        };
+        mgr.set_config(new_config);
+        assert_eq!(mgr.get_config().max_connections, 64);
+    }
+
+    // --- load_config error ---
+
+    #[test]
+    fn load_config_corrupted_json() {
+        let result = AdaptiveConcurrencyManager::load_config("{bad json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_config_empty_string() {
+        let result = AdaptiveConcurrencyManager::load_config("");
+        assert!(result.is_err());
+    }
+
+    // --- Complex workflows ---
+
+    #[test]
+    fn workflow_complete_lifecycle() {
+        let config = AdaptiveConcurrencyConfig {
+            sample_window: 3,
+            adjustment_cooldown_secs: 0,
+            ..make_config()
+        };
+        let mut mgr = AdaptiveConcurrencyManager::with_config(config);
+
+        // Register
+        mgr.register_task("task1");
+        assert_eq!(mgr.get_connections("task1"), 4);
+
+        // Record good samples -> increase
+        for _ in 0..3 {
+            mgr.record_sample("task1", 50.0, true);
+        }
+        let d1 = mgr.evaluate("task1");
+        assert!(matches!(d1, ConcurrencyDecision::Increase { .. }));
+        assert_eq!(mgr.get_connections("task1"), 6);
+
+        // Record bad samples -> decrease
+        for _ in 0..3 {
+            mgr.record_sample("task1", 5000.0, true);
+        }
+        let d2 = mgr.evaluate("task1");
+        assert!(matches!(d2, ConcurrencyDecision::Decrease { .. }));
+
+        // Summary
+        let summary = mgr.get_summary();
+        assert_eq!(summary.task_count, 1);
+        assert!(summary.total_adjustments >= 2);
+
+        // Unregister
+        mgr.unregister_task("task1");
+        assert_eq!(mgr.get_summary().task_count, 0);
+    }
+
+    #[test]
+    fn workflow_multi_task_independent() {
+        let config = AdaptiveConcurrencyConfig {
+            sample_window: 3,
+            adjustment_cooldown_secs: 0,
+            ..make_config()
+        };
+        let mut mgr = AdaptiveConcurrencyManager::with_config(config);
+
+        mgr.register_task("fast");
+        mgr.register_task("slow");
+
+        for _ in 0..3 {
+            mgr.record_sample("fast", 10.0, true);
+            mgr.record_sample("slow", 5000.0, true);
+        }
+
+        let results = mgr.evaluate_all();
+        assert_eq!(results.len(), 2);
+
+        let fast = results.iter().find(|(id, _)| id == "fast").unwrap();
+        assert!(matches!(fast.1, ConcurrencyDecision::Increase { .. }));
+
+        let slow = results.iter().find(|(id, _)| id == "slow").unwrap();
+        assert!(matches!(slow.1, ConcurrencyDecision::Decrease { .. }));
+    }
+
+    #[test]
+    fn workflow_domain_tracking_lifecycle() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+
+        mgr.register_task_with_domain("task1", "cdn.com");
+        mgr.register_active_connection("cdn.com");
+        mgr.register_active_connection("cdn.com");
+
+        let state = mgr.domain_states.get("cdn.com").unwrap();
+        assert_eq!(state.active_connections, 2);
+
+        mgr.unregister_active_connection("cdn.com");
+        let state = mgr.domain_states.get("cdn.com").unwrap();
+        assert_eq!(state.active_connections, 1);
+
+        mgr.unregister_task("task1");
+        // Domain state persists after task removal
+        assert!(mgr.domain_states.contains_key("cdn.com"));
+    }
+
+    #[test]
+    fn workflow_many_tasks() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+
+        for i in 0..50 {
+            mgr.register_task(&format!("task-{}", i));
+        }
+
+        assert_eq!(mgr.get_summary().task_count, 50);
+
+        for i in 0..50 {
+            assert_eq!(mgr.get_connections(&format!("task-{}", i)), 4);
+        }
+
+        mgr.clear();
+        assert_eq!(mgr.get_summary().task_count, 0);
+    }
+
+    #[test]
+    fn workflow_clear_resets_all() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        mgr.register_task("t1");
+        mgr.register_task("t2");
+        mgr.register_active_connection("cdn.com");
+
+        mgr.clear();
+        assert_eq!(mgr.get_summary().task_count, 0);
+        // Domain states persist after clear (only states is cleared)
+    }
+
+    #[test]
+    fn evaluate_all_empty() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+        let results = mgr.evaluate_all();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn evaluate_all_only_non_hold() {
+        let config = AdaptiveConcurrencyConfig {
+            sample_window: 3,
+            adjustment_cooldown_secs: 0,
+            ..make_config()
+        };
+        let mut mgr = AdaptiveConcurrencyManager::with_config(config);
+        mgr.register_task("good");
+        mgr.register_task("neutral");
+
+        // Good task -> increase
+        for _ in 0..3 {
+            mgr.record_sample("good", 10.0, true);
+        }
+        // Neutral task: not enough samples -> hold
+
+        let results = mgr.evaluate_all();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "good");
+    }
+
+    // --- ConcurrencyState Clone/Debug ---
+
+    #[test]
+    fn concurrency_state_clone_debug() {
+        let state = ConcurrencyState {
+            current_connections: 4,
+            samples: vec![],
+            last_adjustment: None,
+            last_adjustment_direction: AdjustmentDirection::None,
+            total_adjustments: 0,
+            smoothed_rtt_ms: 0.0,
+            rtt_variance_ms: 0.0,
+            estimated_bandwidth_bps: 0.0,
+            domain: Some("cdn.com".to_string()),
+            min_rtt_ms: f64::MAX,
+            consecutive_increases: 0,
+            consecutive_decreases: 0,
+        };
+        let cloned = state.clone();
+        assert_eq!(cloned.current_connections, state.current_connections);
+        assert_eq!(cloned.domain, state.domain);
+        let _ = format!("{:?}", state);
+    }
+
+    // --- Decision reason strings ---
+
+    #[test]
+    fn increase_reason_contains_performance_info() {
+        let config = AdaptiveConcurrencyConfig {
+            sample_window: 3,
+            adjustment_cooldown_secs: 0,
+            ..make_config()
+        };
+        let mut mgr = AdaptiveConcurrencyManager::with_config(config);
+        mgr.register_task("task1");
+
+        for _ in 0..3 {
+            mgr.record_sample("task1", 10.0, true);
+        }
+        let decision = mgr.evaluate("task1");
+        match decision {
+            ConcurrencyDecision::Increase { reason, .. } => {
+                assert!(reason.contains("Good performance") || reason.contains("scaling up"));
+            }
+            _ => panic!("Expected Increase"),
+        }
+    }
+
+    #[test]
+    fn decrease_reason_on_error_contains_rate_info() {
+        let config = AdaptiveConcurrencyConfig {
+            sample_window: 3,
+            adjustment_cooldown_secs: 0,
+            ..make_config()
+        };
+        let mut mgr = AdaptiveConcurrencyManager::with_config(config);
+        mgr.register_task("task1");
+
+        mgr.record_sample("task1", 100.0, true);
+        mgr.record_sample("task1", 100.0, false);
+        mgr.record_sample("task1", 100.0, false);
+
+        let decision = mgr.evaluate("task1");
+        match decision {
+            ConcurrencyDecision::Decrease { reason, .. } => {
+                assert!(reason.contains("error rate") || reason.contains("Error"));
+            }
+            _ => panic!("Expected Decrease"),
+        }
+    }
+
+    // --- get_connections_for_domain with active connections ---
+
+    #[test]
+    fn get_connections_for_domain_considers_active() {
+        let config = AdaptiveConcurrencyConfig {
+            min_connections: 1,
+            max_connections: 16,
+            initial_connections: 8,
+            ..make_config()
+        };
+        let mut mgr = AdaptiveConcurrencyManager::with_config(config);
+        mgr.register_task("task1");
+        mgr.set_domain_specific_limit("cdn.com", 4);
+
+        // Register 3 active connections
+        mgr.register_active_connection("cdn.com");
+        mgr.register_active_connection("cdn.com");
+        mgr.register_active_connection("cdn.com");
+
+        let conn = mgr.get_connections_for_domain("task1", "cdn.com");
+        // remaining = 4 - 3 = 1, but min_connections = 1
+        assert_eq!(conn, 1);
+    }
+
+    // --- Multiple domains independent ---
+
+    #[test]
+    fn multiple_domains_independent_tracking() {
+        let mut mgr = AdaptiveConcurrencyManager::new();
+
+        mgr.register_active_connection("cdn-a.com");
+        mgr.register_active_connection("cdn-a.com");
+        mgr.register_active_connection("cdn-b.com");
+
+        assert_eq!(
+            mgr.domain_states.get("cdn-a.com").unwrap().active_connections,
+            2
+        );
+        assert_eq!(
+            mgr.domain_states.get("cdn-b.com").unwrap().active_connections,
+            1
+        );
+    }
+
+    // --- Default trait ---
+
+    #[test]
+    fn manager_default_equals_new() {
+        let m1 = AdaptiveConcurrencyManager::default();
+        let m2 = AdaptiveConcurrencyManager::new();
+        assert_eq!(m1.get_summary().task_count, m2.get_summary().task_count);
+        assert_eq!(m1.get_config().min_connections, m2.get_config().min_connections);
+    }
 }
