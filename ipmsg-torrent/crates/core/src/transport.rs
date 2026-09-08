@@ -352,9 +352,9 @@ impl P2PSwarm {
         } else {
             "/ip4/0.0.0.0/tcp/0".to_string()
         };
-        let tcp_addr: Multiaddr = tcp_addr.parse().map_err(|e| {
-            P2PError::Transport(format!("Invalid TCP listen address: {}", e))
-        })?;
+        let tcp_addr: Multiaddr = tcp_addr
+            .parse()
+            .map_err(|e| P2PError::Transport(format!("Invalid TCP listen address: {}", e)))?;
         swarm_obj
             .swarm
             .listen_on(tcp_addr)
@@ -383,9 +383,9 @@ impl P2PSwarm {
         } else {
             "/ip4/0.0.0.0/udp/0/quic-v1".to_string()
         };
-        let quic_addr: Multiaddr = quic_addr.parse().map_err(|e| {
-            P2PError::Transport(format!("Invalid QUIC listen address: {}", e))
-        })?;
+        let quic_addr: Multiaddr = quic_addr
+            .parse()
+            .map_err(|e| P2PError::Transport(format!("Invalid QUIC listen address: {}", e)))?;
         swarm_obj
             .swarm
             .listen_on(quic_addr)
@@ -645,21 +645,33 @@ impl P2PSwarm {
     pub fn dial_with_backoff(&mut self, peer_id: PeerId, addr: Multiaddr) -> Result<(), P2PError> {
         // Evict stale circuit breaker entries if over capacity
         if self.circuit_breakers.len() > crate::MAX_CIRCUIT_BREAKERS {
-            self.circuit_breakers.retain(|_, entry| !entry.is_open() || entry.opened_at.map_or(true, |t| t.elapsed() < Duration::from_secs(300)));
+            self.circuit_breakers.retain(|_, entry| {
+                !entry.is_open()
+                    || entry
+                        .opened_at
+                        .map_or(true, |t| t.elapsed() < Duration::from_secs(300))
+            });
             // If still over capacity after cleanup, remove oldest entries
             if self.circuit_breakers.len() > crate::MAX_CIRCUIT_BREAKERS {
                 let excess = self.circuit_breakers.len() - crate::MAX_CIRCUIT_BREAKERS;
-                let keys: Vec<PeerId> = self.circuit_breakers.keys().take(excess).copied().collect();
+                let keys: Vec<PeerId> =
+                    self.circuit_breakers.keys().take(excess).copied().collect();
                 for key in keys {
                     self.circuit_breakers.remove(&key);
                 }
-                tracing::warn!(evicted = excess, "Circuit breaker capacity reached, evicted stale entries");
+                tracing::warn!(
+                    evicted = excess,
+                    "Circuit breaker capacity reached, evicted stale entries"
+                );
             }
         }
 
         // Check circuit breaker state
-        let breaker = self.circuit_breakers.entry(peer_id).or_insert_with(CircuitBreakerEntry::new);
-        
+        let breaker = self
+            .circuit_breakers
+            .entry(peer_id)
+            .or_insert_with(CircuitBreakerEntry::new);
+
         if breaker.is_open() {
             tracing::warn!(
                 %peer_id,
@@ -676,7 +688,7 @@ impl P2PSwarm {
         let mut last_error = None;
         for attempt in 0..MAX_DIAL_RETRIES {
             let delay = DIAL_BACKOFF_BASE * 2u32.pow(attempt);
-            
+
             tracing::debug!(
                 %peer_id,
                 %addr,
@@ -704,7 +716,7 @@ impl P2PSwarm {
                         "Dial attempt failed"
                     );
                     last_error = Some(e);
-                    
+
                     // Don't sleep on the last attempt
                     if attempt < MAX_DIAL_RETRIES - 1 {
                         std::thread::sleep(delay);
@@ -721,14 +733,14 @@ impl P2PSwarm {
         let error_msg = last_error
             .map(|e| e.to_string())
             .unwrap_or_else(|| "Unknown dial error".to_string());
-        
+
         tracing::error!(
             %peer_id,
             %addr,
             attempts = MAX_DIAL_RETRIES,
             "All dial attempts failed"
         );
-        
+
         Err(P2PError::Transport(format!(
             "Failed to dial peer {} after {} attempts: {}",
             peer_id, MAX_DIAL_RETRIES, error_msg
@@ -1297,12 +1309,17 @@ impl futures::Stream for P2PSwarm {
                             // Store relay node addresses for later relay address construction
                             if let libp2p::core::ConnectedPoint::Dialer { address, .. } = endpoint {
                                 // Ensure address includes peer_id for proper relay address construction
-                                let full_addr = if address.iter().any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_))) {
+                                let full_addr = if address
+                                    .iter()
+                                    .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                                {
                                     address.clone()
                                 } else {
-                                    address.clone().with(libp2p::multiaddr::Protocol::P2p(*peer_id))
+                                    address
+                                        .clone()
+                                        .with(libp2p::multiaddr::Protocol::P2p(*peer_id))
                                 };
-                                
+
                                 tracing::info!(
                                     peer = %peer_id,
                                     address = %full_addr,
@@ -1312,14 +1329,23 @@ impl futures::Stream for P2PSwarm {
                                     .entry(*peer_id)
                                     .or_default()
                                     .push(full_addr);
-                            } else if let libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } = endpoint {
+                            } else if let libp2p::core::ConnectedPoint::Listener {
+                                send_back_addr,
+                                ..
+                            } = endpoint
+                            {
                                 // For incoming connections, use the send_back_addr which contains the peer's address
-                                let full_addr = if send_back_addr.iter().any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_))) {
+                                let full_addr = if send_back_addr
+                                    .iter()
+                                    .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                                {
                                     send_back_addr.clone()
                                 } else {
-                                    send_back_addr.clone().with(libp2p::multiaddr::Protocol::P2p(*peer_id))
+                                    send_back_addr
+                                        .clone()
+                                        .with(libp2p::multiaddr::Protocol::P2p(*peer_id))
                                 };
-                                
+
                                 tracing::info!(
                                     peer = %peer_id,
                                     address = %full_addr,

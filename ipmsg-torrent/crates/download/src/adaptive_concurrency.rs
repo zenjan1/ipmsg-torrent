@@ -1196,7 +1196,10 @@ mod tests {
         let _cloned = dir.clone();
         let _ = format!("{:?}", dir);
         assert_ne!(AdjustmentDirection::None, AdjustmentDirection::Increased);
-        assert_ne!(AdjustmentDirection::Increased, AdjustmentDirection::Decreased);
+        assert_ne!(
+            AdjustmentDirection::Increased,
+            AdjustmentDirection::Decreased
+        );
     }
 
     // --- ConcurrencyDecision ---
@@ -1339,7 +1342,13 @@ mod tests {
         let mut mgr = AdaptiveConcurrencyManager::with_config(make_config());
         mgr.set_domain_specific_limit("cdn.example.com", 4);
         assert!(mgr.domain_states.contains_key("cdn.example.com"));
-        assert_eq!(mgr.domain_states.get("cdn.example.com").unwrap().max_connections, 4);
+        assert_eq!(
+            mgr.domain_states
+                .get("cdn.example.com")
+                .unwrap()
+                .max_connections,
+            4
+        );
     }
 
     #[test]
@@ -2128,11 +2137,17 @@ mod tests {
         mgr.register_active_connection("cdn-b.com");
 
         assert_eq!(
-            mgr.domain_states.get("cdn-a.com").unwrap().active_connections,
+            mgr.domain_states
+                .get("cdn-a.com")
+                .unwrap()
+                .active_connections,
             2
         );
         assert_eq!(
-            mgr.domain_states.get("cdn-b.com").unwrap().active_connections,
+            mgr.domain_states
+                .get("cdn-b.com")
+                .unwrap()
+                .active_connections,
             1
         );
     }
@@ -2144,6 +2159,9 @@ mod tests {
         let m1 = AdaptiveConcurrencyManager::default();
         let m2 = AdaptiveConcurrencyManager::new();
         assert_eq!(m1.get_summary().task_count, m2.get_summary().task_count);
-        assert_eq!(m1.get_config().min_connections, m2.get_config().min_connections);
+        assert_eq!(
+            m1.get_config().min_connections,
+            m2.get_config().min_connections
+        );
     }
 }

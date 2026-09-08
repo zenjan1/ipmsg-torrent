@@ -1180,7 +1180,10 @@ mod tests {
 
     #[test]
     fn test_task_state_debug() {
-        assert_eq!(format!("{:?}", TaskStateForResume::Downloading), "Downloading");
+        assert_eq!(
+            format!("{:?}", TaskStateForResume::Downloading),
+            "Downloading"
+        );
         assert_eq!(format!("{:?}", TaskStateForResume::Paused), "Paused");
         assert_eq!(format!("{:?}", TaskStateForResume::Queued), "Queued");
         assert_eq!(format!("{:?}", TaskStateForResume::Complete), "Complete");
@@ -1193,14 +1196,8 @@ mod tests {
             TaskStateForResume::Downloading,
             TaskStateForResume::Downloading
         );
-        assert_ne!(
-            TaskStateForResume::Downloading,
-            TaskStateForResume::Paused
-        );
-        assert_ne!(
-            TaskStateForResume::Complete,
-            TaskStateForResume::Error
-        );
+        assert_ne!(TaskStateForResume::Downloading, TaskStateForResume::Paused);
+        assert_ne!(TaskStateForResume::Complete, TaskStateForResume::Error);
     }
 
     #[test]
@@ -1241,10 +1238,7 @@ mod tests {
     fn test_task_priority_eq() {
         assert_eq!(TaskPriorityForResume::Low, TaskPriorityForResume::Low);
         assert_ne!(TaskPriorityForResume::Low, TaskPriorityForResume::High);
-        assert_ne!(
-            TaskPriorityForResume::Normal,
-            TaskPriorityForResume::High
-        );
+        assert_ne!(TaskPriorityForResume::Normal, TaskPriorityForResume::High);
     }
 
     #[test]
@@ -1408,9 +1402,11 @@ mod tests {
         let changes = apply_resume_policy(&config, &tasks);
         // All 3 should be resumed (exactly at limit)
         assert_eq!(changes.len(), 3);
-        assert!(changes
-            .iter()
-            .all(|(_, s)| *s == TaskStateForResume::Queued));
+        assert!(
+            changes
+                .iter()
+                .all(|(_, s)| *s == TaskStateForResume::Queued)
+        );
     }
 
     #[test]
@@ -1472,9 +1468,11 @@ mod tests {
         ];
         let changes = apply_resume_policy(&config, &tasks);
         assert_eq!(changes.len(), 3);
-        assert!(changes
-            .iter()
-            .all(|(_, s)| *s == TaskStateForResume::Queued));
+        assert!(
+            changes
+                .iter()
+                .all(|(_, s)| *s == TaskStateForResume::Queued)
+        );
     }
 
     #[test]
@@ -2130,17 +2128,21 @@ mod tests {
         };
         let changes_all = apply_resume_policy(&config_all, &tasks);
         assert_eq!(changes_all.len(), 2);
-        assert!(changes_all
-            .iter()
-            .all(|(_, s)| *s == TaskStateForResume::Queued));
+        assert!(
+            changes_all
+                .iter()
+                .all(|(_, s)| *s == TaskStateForResume::Queued)
+        );
 
         // KeepPaused
         let config_keep = ResumePolicyConfig::default();
         let changes_keep = apply_resume_policy(&config_keep, &tasks);
         assert_eq!(changes_keep.len(), 2);
-        assert!(changes_keep
-            .iter()
-            .all(|(_, s)| *s == TaskStateForResume::Paused));
+        assert!(
+            changes_keep
+                .iter()
+                .all(|(_, s)| *s == TaskStateForResume::Paused)
+        );
 
         // AutoResumeHighPriority
         let config_high = ResumePolicyConfig {

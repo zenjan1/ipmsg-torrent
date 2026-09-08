@@ -1048,11 +1048,19 @@ impl P2PEngine {
         if self.pending_acks.len() >= MAX_PENDING_ACKS {
             // Evict oldest entries to prevent unbounded growth
             let evict_count = MAX_PENDING_ACKS / 4;
-            let keys_to_remove: Vec<String> = self.pending_acks.keys().take(evict_count).cloned().collect();
+            let keys_to_remove: Vec<String> = self
+                .pending_acks
+                .keys()
+                .take(evict_count)
+                .cloned()
+                .collect();
             for key in keys_to_remove {
                 self.pending_acks.remove(&key);
             }
-            tracing::warn!(evicted = evict_count, "Pending ACKs capacity reached, evicted oldest");
+            tracing::warn!(
+                evicted = evict_count,
+                "Pending ACKs capacity reached, evicted oldest"
+            );
         }
         self.pending_acks.insert(
             msg.id.clone(),

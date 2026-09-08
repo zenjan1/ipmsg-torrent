@@ -165,14 +165,16 @@ impl NetworkStats {
     #[inline]
     pub fn record_serialization(&self, time_us: u64) {
         self.serialization_count.fetch_add(1, Ordering::Relaxed);
-        self.serialization_time_us.fetch_add(time_us, Ordering::Relaxed);
+        self.serialization_time_us
+            .fetch_add(time_us, Ordering::Relaxed);
     }
 
     /// Record deserialization operation (for performance monitoring)
     #[inline]
     pub fn record_deserialization(&self, time_us: u64) {
         self.deserialization_count.fetch_add(1, Ordering::Relaxed);
-        self.deserialization_time_us.fetch_add(time_us, Ordering::Relaxed);
+        self.deserialization_time_us
+            .fetch_add(time_us, Ordering::Relaxed);
     }
 
     /// Record gossipsub message propagation

@@ -936,14 +936,20 @@ mod tests {
 
     #[test]
     fn test_wildcard_multiple_stars() {
-        let entry = make_entry("1", AllowlistPattern::Wildcard("http://*.*.com/*.zip".into()));
+        let entry = make_entry(
+            "1",
+            AllowlistPattern::Wildcard("http://*.*.com/*.zip".into()),
+        );
         assert!(entry.matches("http://sub.example.com/file.zip"));
         assert!(!entry.matches("http://sub.example.com/file.exe"));
     }
 
     #[test]
     fn test_wildcard_star_question_combo() {
-        let entry = make_entry("1", AllowlistPattern::Wildcard("http://example.com/?*.?xt".into()));
+        let entry = make_entry(
+            "1",
+            AllowlistPattern::Wildcard("http://example.com/?*.?xt".into()),
+        );
         assert!(entry.matches("http://example.com/abc.txt"));
         assert!(entry.matches("http://example.com/a.xt"));
     }
@@ -962,13 +968,19 @@ mod tests {
 
     #[test]
     fn test_wildcard_trailing_stars() {
-        let entry = make_entry("1", AllowlistPattern::Wildcard("http://example.com/**".into()));
+        let entry = make_entry(
+            "1",
+            AllowlistPattern::Wildcard("http://example.com/**".into()),
+        );
         assert!(entry.matches("http://example.com/anything/at/all"));
     }
 
     #[test]
     fn test_wildcard_no_match_partial() {
-        let entry = make_entry("1", AllowlistPattern::Wildcard("http://example.com/file.zip".into()));
+        let entry = make_entry(
+            "1",
+            AllowlistPattern::Wildcard("http://example.com/file.zip".into()),
+        );
         assert!(!entry.matches("http://example.com/file.zipx"));
     }
 
@@ -983,7 +995,10 @@ mod tests {
 
     #[test]
     fn test_exact_match_query_params() {
-        let entry = make_entry("1", AllowlistPattern::Exact("http://example.com/f?q=1".into()));
+        let entry = make_entry(
+            "1",
+            AllowlistPattern::Exact("http://example.com/f?q=1".into()),
+        );
         assert!(entry.matches("http://example.com/f?q=1"));
         assert!(!entry.matches("http://example.com/f?q=2"));
         assert!(!entry.matches("http://example.com/f"));
@@ -991,7 +1006,10 @@ mod tests {
 
     #[test]
     fn test_exact_match_unicode() {
-        let entry = make_entry("1", AllowlistPattern::Exact("http://例子.com/文件.txt".into()));
+        let entry = make_entry(
+            "1",
+            AllowlistPattern::Exact("http://例子.com/文件.txt".into()),
+        );
         assert!(entry.matches("http://例子.com/文件.txt"));
         assert!(!entry.matches("http://例子.com/other.txt"));
     }
@@ -1093,8 +1111,7 @@ mod tests {
             entries: vec![make_entry("1", AllowlistPattern::Domain("x.com".into()))],
         };
         save_allowlist_config(&config, temp_dir.path()).unwrap();
-        let content =
-            std::fs::read_to_string(temp_dir.path().join("url_allowlist.json")).unwrap();
+        let content = std::fs::read_to_string(temp_dir.path().join("url_allowlist.json")).unwrap();
         // Pretty JSON has newlines and indentation
         assert!(content.contains('\n'));
     }
@@ -1115,10 +1132,7 @@ mod tests {
         let loaded = load_allowlist_config(temp_dir.path()).unwrap();
         assert_eq!(loaded.entries[0].id, "中文-id");
         assert_eq!(loaded.entries[0].name, "信任来源");
-        assert_eq!(
-            loaded.entries[0].reason.as_deref(),
-            Some("官方镜像 🏛️")
-        );
+        assert_eq!(loaded.entries[0].reason.as_deref(), Some("官方镜像 🏛️"));
     }
 
     #[test]
@@ -1157,7 +1171,10 @@ mod tests {
     fn test_check_url_with_port() {
         let config = AllowlistConfig {
             enabled: true,
-            entries: vec![make_entry("1", AllowlistPattern::Domain("example.com".into()))],
+            entries: vec![make_entry(
+                "1",
+                AllowlistPattern::Domain("example.com".into()),
+            )],
         };
         let result = check_url_allowlist("http://example.com:8080/file.txt", &config);
         assert!(result.allowed);
@@ -1168,7 +1185,10 @@ mod tests {
     fn test_check_ftp_url() {
         let config = AllowlistConfig {
             enabled: true,
-            entries: vec![make_entry("1", AllowlistPattern::Domain("files.com".into()))],
+            entries: vec![make_entry(
+                "1",
+                AllowlistPattern::Domain("files.com".into()),
+            )],
         };
         let result = check_url_allowlist("ftp://files.com/pub/file.tar.gz", &config);
         assert!(result.allowed);
@@ -1183,10 +1203,7 @@ mod tests {
                 AllowlistPattern::Wildcard("magnet:*".into()),
             )],
         };
-        let result = check_url_allowlist(
-            "magnet:?xt=urn:btih:abc123&dn=file.txt",
-            &config,
-        );
+        let result = check_url_allowlist("magnet:?xt=urn:btih:abc123&dn=file.txt", &config);
         assert!(result.allowed);
     }
 
@@ -1194,7 +1211,10 @@ mod tests {
     fn test_check_invalid_url_not_allowed() {
         let config = AllowlistConfig {
             enabled: true,
-            entries: vec![make_entry("1", AllowlistPattern::Domain("example.com".into()))],
+            entries: vec![make_entry(
+                "1",
+                AllowlistPattern::Domain("example.com".into()),
+            )],
         };
         let result = check_url_allowlist("not-a-url", &config);
         assert!(!result.allowed);
@@ -1220,7 +1240,12 @@ mod tests {
     #[test]
     fn test_check_many_entries() {
         let entries: Vec<AllowlistEntry> = (0..50)
-            .map(|i| make_entry(&format!("e{}", i), AllowlistPattern::Domain(format!("d{}.com", i))))
+            .map(|i| {
+                make_entry(
+                    &format!("e{}", i),
+                    AllowlistPattern::Domain(format!("d{}.com", i)),
+                )
+            })
             .collect();
         let config = AllowlistConfig {
             enabled: true,
@@ -1339,13 +1364,9 @@ mod tests {
         // Wildcard match
         assert!(check_url_allowlist("http://cdn.fast.com/file.txt", &config).allowed);
         // Regex match
-        assert!(
-            check_url_allowlist("https://api.trusted.com/v2/data", &config).allowed
-        );
+        assert!(check_url_allowlist("https://api.trusted.com/v2/data", &config).allowed);
         // Exact match
-        assert!(
-            check_url_allowlist("http://specific.com/file.zip", &config).allowed
-        );
+        assert!(check_url_allowlist("http://specific.com/file.zip", &config).allowed);
         // No match
         assert!(!check_url_allowlist("http://random.com/file.txt", &config).allowed);
     }
@@ -1354,7 +1375,10 @@ mod tests {
     fn test_workflow_multiple_subdomain_independence() {
         let config = AllowlistConfig {
             enabled: true,
-            entries: vec![make_entry("1", AllowlistPattern::Domain("sub.example.com".into()))],
+            entries: vec![make_entry(
+                "1",
+                AllowlistPattern::Domain("sub.example.com".into()),
+            )],
         };
         // sub.example.com matches
         assert!(check_url_allowlist("http://sub.example.com/f.txt", &config).allowed);
@@ -1429,7 +1453,10 @@ mod tests {
 
     #[test]
     fn test_wildcard_question_mark_single_char() {
-        let entry = make_entry("1", AllowlistPattern::Wildcard("http://example.com/file?.txt".into()));
+        let entry = make_entry(
+            "1",
+            AllowlistPattern::Wildcard("http://example.com/file?.txt".into()),
+        );
         assert!(entry.matches("http://example.com/file1.txt"));
         assert!(entry.matches("http://example.com/file_.txt"));
         assert!(!entry.matches("http://example.com/file.txt"));
