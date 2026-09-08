@@ -228,7 +228,7 @@ pub enum TaskProxyError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::{ProxyConfig, ProxyType};
+    use crate::proxy::{ProxyAuth, ProxyConfig, ProxyType};
     use tempfile::tempdir;
 
     fn create_test_proxy() -> ProxyConfig {
@@ -1040,5 +1040,760 @@ mod tests {
         assert!(formatted.contains("1000 total"));
         assert!(formatted.contains("999 enabled"));
         assert!(formatted.contains("1 disabled"));
+    }
+
+    // ===== Phase 256: Comprehensive Test Coverage =====
+
+    // --- TaskProxyConfig serde ---
+
+    #[tokio::test]
+    async fn test_config_serde_roundtrip_full() {
+        let proxy = create_test_proxy();
+        let config = TaskProxyConfig {
+            task_id: "full-serde".to_string(),
+            proxy,
+            enabled: false,
+            notes: Some("notes here".to_string()),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let de: TaskProxyConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.task_id, "full-serde");
+        assert!(!de.enabled);
+        assert_eq!(de.notes, Some("notes here".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_config_serde_extra_fields_ignored() {
+        let proxy = create_test_proxy();
+        let config = TaskProxyConfig::new("extra-fields".to_string(), proxy);
+        let mut json = serde_json::to_value(&config).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("unknown_field".to_string(), serde_json::json!(42));
+        let de: TaskProxyConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(de.task_id, "extra-fields");
+    }
+
+    #[tokio::test]
+    async fn test_config_serde_pretty() {
+        let proxy = create_test_proxy();
+        let config = TaskProxyConfig::new("pretty".to_string(), proxy);
+        let pretty = serde_json::to_string_pretty(&config).unwrap();
+        let de: TaskProxyConfig = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(de.task_id, "pretty");
+    }
+
+    #[tokio::test]
+    async fn test_config_serde_unicode() {
+        let proxy = create_test_proxy();
+        let config = TaskProxyConfig::with_notes(
+            "中文任务".to_string(),
+            proxy,
+            Some("日本語のノート".to_string()),
+        );
+        let json = serde_json::to_string(&config).unwrap();
+        let de: TaskProxyConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.task_id, "中文任务");
+        assert_eq!(de.notes, Some("日本語のノート".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_config_serde_emoji() {
+        let proxy = create_test_proxy();
+        let config = TaskProxyConfig::with_notes(
+            "🚀task".to_string(),
+            proxy,
+            Some("🔥fast proxy🔥".to_string()),
+        );
+        let json = serde_json::to_string(&config).unwrap();
+        let de: TaskProxyConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.task_id, "🚀task");
+        assert_eq!(de.notes, Some("🔥fast proxy🔥".to_string()));
+    }
+
+    // --- TaskProxyConfig traits ---
+
+    #[tokio::test]
+    async fn test_config_clone_independence() {
+        let proxy = create_test_proxy();
+        let config = TaskProxyConfig::with_notes(
+            "orig".to_string(),
+            proxy,
+            Some("original notes".to_string()),
+        );
+        let mut cloned = config.clone();
+        cloned.task_id = "modified".to_string();
+        cloned.notes = Some("changed".to_string());
+        assert_eq!(config.task_id, "orig");
+        assert_eq!(config.notes, Some("original notes".to_string()));
+    }
+
+    // --- TaskProxySummary serde ---
+
+    #[tokio::test]
+    async fn test_summary_serde_roundtrip() {
+        let summary = TaskProxySummary {
+            total_overrides: 42,
+            enabled_overrides: 30,
+            disabled_overrides: 12,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let de: TaskProxySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.total_overrides, 42);
+        assert_eq!(de.enabled_overrides, 30);
+        assert_eq!(de.disabled_overrides, 12);
+    }
+
+    #[tokio::test]
+    async fn test_summary_serde_extra_fields_ignored() {
+        let summary = TaskProxySummary {
+            total_overrides: 1,
+            enabled_overrides: 1,
+            disabled_overrides: 0,
+        };
+        let mut json = serde_json::to_value(&summary).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .insert("extra".to_string(), serde_json::json!("ignored"));
+        let de: TaskProxySummary = serde_json::from_value(json).unwrap();
+        assert_eq!(de.total_overrides, 1);
+    }
+
+    #[tokio::test]
+    async fn test_summary_clone_independence() {
+        let summary = TaskProxySummary {
+            total_overrides: 5,
+            enabled_overrides: 3,
+            disabled_overrides: 2,
+        };
+        let mut cloned = summary.clone();
+        cloned.total_overrides = 999;
+        assert_eq!(summary.total_overrides, 5);
+    }
+
+    // --- TaskProxyError traits ---
+
+    #[tokio::test]
+    async fn test_error_debug_all_variants() {
+        let e1 = TaskProxyError::TaskNotFound("nf".to_string());
+        let e2 = TaskProxyError::Io("io".to_string());
+        let e3 = TaskProxyError::Serialization("ser".to_string());
+        let e4 = TaskProxyError::Deserialization("de".to_string());
+        let debugs = format!("{:?}\n{:?}\n{:?}\n{:?}", e1, e2, e3, e4);
+        assert!(debugs.contains("TaskNotFound"));
+        assert!(debugs.contains("Io"));
+        assert!(debugs.contains("Serialization"));
+        assert!(debugs.contains("Deserialization"));
+    }
+
+    #[tokio::test]
+    async fn test_error_unicode_message() {
+        let err = TaskProxyError::TaskNotFound("任务不存在".to_string());
+        assert_eq!(err.to_string(), "Task not found: 任务不存在");
+    }
+
+    #[tokio::test]
+    async fn test_error_empty_message() {
+        let err = TaskProxyError::Io("".to_string());
+        assert_eq!(err.to_string(), "I/O error: ");
+    }
+
+    #[tokio::test]
+    async fn test_error_special_chars() {
+        let err = TaskProxyError::Serialization("line1\nline2\ttab\"quote\\backslash".to_string());
+        let display = err.to_string();
+        assert!(display.contains("line1"));
+        assert!(display.contains("quote"));
+    }
+
+    // --- TaskProxyManager: new ---
+
+    #[tokio::test]
+    async fn test_manager_new_empty() {
+        let dir = tempdir().unwrap();
+        let manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        assert_eq!(manager.list_overrides().len(), 0);
+        assert!(manager.get_task_proxy("any").is_none());
+        assert!(manager.get_task_proxy_raw("any").is_none());
+        assert_eq!(manager.get_summary().total_overrides, 0);
+    }
+
+    // --- set_task_proxy ---
+
+    #[tokio::test]
+    async fn test_set_task_proxy_unicode_id() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        let proxy = create_test_proxy();
+        manager
+            .set_task_proxy("中文任务ID".to_string(), proxy, None)
+            .await
+            .unwrap();
+        assert!(manager.get_task_proxy("中文任务ID").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_set_task_proxy_emoji_id() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        let proxy = create_test_proxy();
+        manager
+            .set_task_proxy("🚀🔥".to_string(), proxy, None)
+            .await
+            .unwrap();
+        assert!(manager.get_task_proxy("🚀🔥").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_set_task_proxy_long_id() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        let proxy = create_test_proxy();
+        let long_id = "a".repeat(1000);
+        manager
+            .set_task_proxy(long_id.clone(), proxy, None)
+            .await
+            .unwrap();
+        assert!(manager.get_task_proxy(&long_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_set_task_proxy_many_entries() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        let proxy = create_test_proxy();
+        for i in 0..100 {
+            manager
+                .set_task_proxy(format!("task-{}", i), proxy.clone(), None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(manager.list_overrides().len(), 100);
+        assert_eq!(manager.get_summary().total_overrides, 100);
+    }
+
+    // --- get_task_proxy vs get_task_proxy_raw ---
+
+    #[tokio::test]
+    async fn test_get_proxy_enabled_vs_disabled() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        let proxy = create_test_proxy();
+
+        manager
+            .set_task_proxy("en".to_string(), proxy.clone(), None)
+            .await
+            .unwrap();
+        manager
+            .set_task_proxy("dis".to_string(), proxy, None)
+            .await
+            .unwrap();
+        manager.set_enabled("dis", false).await.unwrap();
+
+        // get_task_proxy only returns enabled
+        assert!(manager.get_task_proxy("en").is_some());
+        assert!(manager.get_task_proxy("dis").is_none());
+
+        // get_task_proxy_raw returns both
+        assert!(manager.get_task_proxy_raw("en").is_some());
+        assert!(manager.get_task_proxy_raw("dis").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_proxy_nonexistent() {
+        let dir = tempdir().unwrap();
+        let manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        assert!(manager.get_task_proxy("nope").is_none());
+        assert!(manager.get_task_proxy_raw("nope").is_none());
+    }
+
+    // --- set_enabled ---
+
+    #[tokio::test]
+    async fn test_set_enabled_toggle() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        let proxy = create_test_proxy();
+        manager
+            .set_task_proxy("tog".to_string(), proxy, None)
+            .await
+            .unwrap();
+
+        // Toggle multiple times
+        for _ in 0..5 {
+            manager.set_enabled("tog", false).await.unwrap();
+            assert!(!manager.get_task_proxy_raw("tog").unwrap().enabled);
+            manager.set_enabled("tog", true).await.unwrap();
+            assert!(manager.get_task_proxy_raw("tog").unwrap().enabled);
+        }
+    }
+
+    // --- set_notes ---
+
+    #[tokio::test]
+    async fn test_set_notes_various() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        let proxy = create_test_proxy();
+        manager
+            .set_task_proxy("notes-test".to_string(), proxy, None)
+            .await
+            .unwrap();
+
+        // Set to Some
+        manager
+            .set_notes("notes-test", Some("first".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.get_task_proxy_raw("notes-test").unwrap().notes,
+            Some("first".to_string())
+        );
+
+        // Overwrite
+        manager
+            .set_notes("notes-test", Some("second".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.get_task_proxy_raw("notes-test").unwrap().notes,
+            Some("second".to_string())
+        );
+
+        // Clear
+        manager.set_notes("notes-test", None).await.unwrap();
+        assert!(
+            manager
+                .get_task_proxy_raw("notes-test")
+                .unwrap()
+                .notes
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_notes_unicode() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        let proxy = create_test_proxy();
+        manager
+            .set_task_proxy("uni-notes".to_string(), proxy, None)
+            .await
+            .unwrap();
+        manager
+            .set_notes("uni-notes", Some("🎉庆祝".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.get_task_proxy_raw("uni-notes").unwrap().notes,
+            Some("🎉庆祝".to_string())
+        );
+    }
+
+    // --- remove_task_proxy ---
+
+    #[tokio::test]
+    async fn test_remove_idempotent() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        let proxy = create_test_proxy();
+        manager
+            .set_task_proxy("rem-idem".to_string(), proxy, None)
+            .await
+            .unwrap();
+        manager.remove_task_proxy("rem-idem").await.unwrap();
+        // Second remove should also succeed
+        manager.remove_task_proxy("rem-idem").await.unwrap();
+        assert!(manager.get_task_proxy_raw("rem-idem").is_none());
+    }
+
+    // --- clear_all ---
+
+    #[tokio::test]
+    async fn test_clear_all_empty_manager() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        manager.clear_all().await.unwrap();
+        assert_eq!(manager.list_overrides().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_clear_all_then_repopulate() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        let proxy = create_test_proxy();
+        for i in 0..10 {
+            manager
+                .set_task_proxy(format!("t{}", i), proxy.clone(), None)
+                .await
+                .unwrap();
+        }
+        manager.clear_all().await.unwrap();
+        assert_eq!(manager.list_overrides().len(), 0);
+
+        // Repopulate
+        for i in 10..20 {
+            manager
+                .set_task_proxy(format!("t{}", i), proxy.clone(), None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(manager.list_overrides().len(), 10);
+    }
+
+    // --- Persistence ---
+
+    #[tokio::test]
+    async fn test_persistence_no_tmp_leftover() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("task_proxy.json");
+        let tmp_path = dir.path().join("task_proxy.json.tmp");
+
+        let mut manager = TaskProxyManager::new(config_path.clone());
+        let proxy = create_test_proxy();
+        manager
+            .set_task_proxy("no-tmp".to_string(), proxy, None)
+            .await
+            .unwrap();
+
+        assert!(config_path.exists());
+        assert!(!tmp_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_persistence_overwrite() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("task_proxy.json");
+
+        let proxy1 = create_test_proxy();
+        let proxy2 = ProxyConfig::new(ProxyType::Http, "overwrite.com".to_string(), 9999);
+
+        {
+            let mut m = TaskProxyManager::new(config_path.clone());
+            m.set_task_proxy("ow-task".to_string(), proxy1, None)
+                .await
+                .unwrap();
+        }
+        {
+            let mut m = TaskProxyManager::new(config_path.clone());
+            m.set_task_proxy("ow-task".to_string(), proxy2, None)
+                .await
+                .unwrap();
+        }
+
+        let loaded = TaskProxyManager::load(config_path).await.unwrap();
+        assert_eq!(
+            loaded.get_task_proxy_raw("ow-task").unwrap().proxy.host,
+            "overwrite.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persistence_unicode_path() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("代理_设置.json");
+
+        let mut manager = TaskProxyManager::new(config_path.clone());
+        let proxy = create_test_proxy();
+        manager
+            .set_task_proxy("unicode-path".to_string(), proxy, None)
+            .await
+            .unwrap();
+
+        assert!(config_path.exists());
+        let loaded = TaskProxyManager::load(config_path).await.unwrap();
+        assert!(loaded.get_task_proxy_raw("unicode-path").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_persistence_pretty_json() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("task_proxy.json");
+
+        let mut manager = TaskProxyManager::new(config_path.clone());
+        let proxy = create_test_proxy();
+        manager
+            .set_task_proxy("pretty-p".to_string(), proxy, Some("notes".to_string()))
+            .await
+            .unwrap();
+
+        let content = tokio::fs::read_to_string(&config_path).await.unwrap();
+        // Pretty JSON should have newlines and indentation
+        assert!(content.contains('\n'));
+        assert!(content.contains("    "));
+    }
+
+    #[tokio::test]
+    async fn test_persistence_roundtrip_all_proxy_types() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("task_proxy.json");
+
+        let proxy_types = vec![
+            ProxyConfig::new(ProxyType::Http, "http.com".to_string(), 80),
+            ProxyConfig::new(ProxyType::Http, "https.com".to_string(), 443),
+            ProxyConfig::new(ProxyType::Socks5, "socks5.com".to_string(), 1080),
+        ];
+
+        {
+            let mut m = TaskProxyManager::new(config_path.clone());
+            for (i, p) in proxy_types.into_iter().enumerate() {
+                m.set_task_proxy(format!("type-{}", i), p, None)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let loaded = TaskProxyManager::load(config_path).await.unwrap();
+        assert_eq!(loaded.list_overrides().len(), 3);
+    }
+
+    // --- format_summary ---
+
+    #[tokio::test]
+    async fn test_format_summary_exact_format() {
+        let summary = TaskProxySummary {
+            total_overrides: 7,
+            enabled_overrides: 5,
+            disabled_overrides: 2,
+        };
+        let formatted = summary.format_summary();
+        assert_eq!(
+            formatted,
+            "Task Proxy Overrides: 7 total (5 enabled, 2 disabled)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_format_summary_unicode_content() {
+        // Summary itself is ASCII format, but verify it works with zero values
+        let summary = TaskProxySummary {
+            total_overrides: 0,
+            enabled_overrides: 0,
+            disabled_overrides: 0,
+        };
+        let formatted = summary.format_summary();
+        assert!(formatted.contains("0 total"));
+    }
+
+    // --- Complex workflow tests ---
+
+    #[tokio::test]
+    async fn test_complete_lifecycle() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("task_proxy.json");
+
+        // Create manager and add proxies
+        let mut manager = TaskProxyManager::new(config_path.clone());
+        let proxy1 = create_test_proxy();
+        let proxy2 = ProxyConfig::new(ProxyType::Http, "backup.com".to_string(), 8080);
+
+        manager
+            .set_task_proxy(
+                "lifecycle-1".to_string(),
+                proxy1,
+                Some("primary".to_string()),
+            )
+            .await
+            .unwrap();
+        manager
+            .set_task_proxy(
+                "lifecycle-2".to_string(),
+                proxy2,
+                Some("backup".to_string()),
+            )
+            .await
+            .unwrap();
+
+        // Verify
+        assert_eq!(manager.list_overrides().len(), 2);
+        assert_eq!(manager.get_summary().enabled_overrides, 2);
+
+        // Disable one
+        manager.set_enabled("lifecycle-1", false).await.unwrap();
+        assert_eq!(manager.get_summary().disabled_overrides, 1);
+        assert!(manager.get_task_proxy("lifecycle-1").is_none());
+        assert!(manager.get_task_proxy("lifecycle-2").is_some());
+
+        // Save and reload
+        drop(manager);
+        let loaded = TaskProxyManager::load(config_path).await.unwrap();
+        assert_eq!(loaded.list_overrides().len(), 2);
+        assert!(!loaded.get_task_proxy_raw("lifecycle-1").unwrap().enabled);
+        assert!(loaded.get_task_proxy_raw("lifecycle-2").unwrap().enabled);
+
+        // Update notes
+        let mut loaded = loaded;
+        loaded
+            .set_notes("lifecycle-1", Some("re-enabled".to_string()))
+            .await
+            .unwrap();
+        loaded.set_enabled("lifecycle-1", true).await.unwrap();
+        assert!(loaded.get_task_proxy("lifecycle-1").is_some());
+
+        // Remove one
+        loaded.remove_task_proxy("lifecycle-2").await.unwrap();
+        assert_eq!(loaded.list_overrides().len(), 1);
+
+        // Clear all
+        loaded.clear_all().await.unwrap();
+        assert_eq!(loaded.list_overrides().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_multi_task_independent_proxies() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+
+        let proxies = vec![
+            ProxyConfig::new(ProxyType::Http, "proxy1.com".to_string(), 80),
+            ProxyConfig::new(ProxyType::Http, "proxy2.com".to_string(), 443),
+            ProxyConfig::new(ProxyType::Socks5, "proxy3.com".to_string(), 1080),
+        ];
+
+        for (i, p) in proxies.into_iter().enumerate() {
+            manager
+                .set_task_proxy(format!("indep-{}", i), p, Some(format!("proxy {}", i)))
+                .await
+                .unwrap();
+        }
+
+        // Verify each has correct proxy
+        for i in 0..3 {
+            let config = manager.get_task_proxy_raw(&format!("indep-{}", i)).unwrap();
+            assert_eq!(config.notes, Some(format!("proxy {}", i)));
+        }
+
+        // Disable middle one
+        manager.set_enabled("indep-1", false).await.unwrap();
+        assert!(manager.get_task_proxy("indep-0").is_some());
+        assert!(manager.get_task_proxy("indep-1").is_none());
+        assert!(manager.get_task_proxy("indep-2").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_save_load_save_load_cycle() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("task_proxy.json");
+        let proxy = create_test_proxy();
+
+        for cycle in 0..3 {
+            let mut m = TaskProxyManager::new(config_path.clone());
+            m.set_task_proxy(
+                format!("cycle-{}", cycle),
+                proxy.clone(),
+                Some(format!("cycle {}", cycle)),
+            )
+            .await
+            .unwrap();
+            drop(m);
+
+            let loaded = TaskProxyManager::load(config_path.clone()).await.unwrap();
+            assert!(
+                loaded
+                    .get_task_proxy_raw(&format!("cycle-{}", cycle))
+                    .is_some()
+            );
+        }
+    }
+
+    // --- Boundary: proxy with credentials ---
+
+    #[tokio::test]
+    async fn test_proxy_with_credentials() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+
+        let proxy = ProxyConfig::with_auth(
+            ProxyType::Http,
+            "auth.proxy.com".to_string(),
+            8080,
+            "user".to_string(),
+            "p@ssw0rd!".to_string(),
+        );
+
+        manager
+            .set_task_proxy("auth-task".to_string(), proxy, None)
+            .await
+            .unwrap();
+
+        // Persist and reload
+        let loaded = TaskProxyManager::load(dir.path().join("tp.json"))
+            .await
+            .unwrap();
+        let config = loaded.get_task_proxy_raw("auth-task").unwrap();
+        assert_eq!(config.proxy.auth.as_ref().unwrap().username, "user");
+        assert_eq!(config.proxy.auth.as_ref().unwrap().password, "p@ssw0rd!");
+    }
+
+    // --- Summary serde with extra fields ---
+
+    #[tokio::test]
+    async fn test_summary_serde_pretty() {
+        let summary = TaskProxySummary {
+            total_overrides: 3,
+            enabled_overrides: 2,
+            disabled_overrides: 1,
+        };
+        let pretty = serde_json::to_string_pretty(&summary).unwrap();
+        let de: TaskProxySummary = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(de.total_overrides, 3);
+    }
+
+    // --- Error std::error::Error trait ---
+
+    #[tokio::test]
+    async fn test_error_is_std_error() {
+        let err: Box<dyn std::error::Error> =
+            Box::new(TaskProxyError::TaskNotFound("x".to_string()));
+        assert!(err.to_string().contains("x"));
+    }
+
+    // --- Config with_notes None vs Some(None) ---
+
+    #[tokio::test]
+    async fn test_with_notes_none_vs_new() {
+        let proxy = create_test_proxy();
+        let c1 = TaskProxyConfig::new("a".to_string(), proxy.clone());
+        let c2 = TaskProxyConfig::with_notes("a".to_string(), proxy, None);
+        assert_eq!(c1.enabled, c2.enabled);
+        assert_eq!(c1.notes, c2.notes);
+        assert_eq!(c1.task_id, c2.task_id);
+    }
+
+    // --- Manager Debug with content ---
+
+    #[tokio::test]
+    async fn test_debug_manager_with_entries() {
+        let dir = tempdir().unwrap();
+        let mut manager = TaskProxyManager::new(dir.path().join("tp.json"));
+        let proxy = create_test_proxy();
+        manager
+            .set_task_proxy("dbg-entry".to_string(), proxy, None)
+            .await
+            .unwrap();
+        let debug = format!("{:?}", manager);
+        assert!(debug.contains("dbg-entry"));
+    }
+
+    // --- Summary serialization in file ---
+
+    #[tokio::test]
+    async fn test_persistence_json_structure() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("task_proxy.json");
+
+        let mut manager = TaskProxyManager::new(config_path.clone());
+        let proxy = create_test_proxy();
+        manager
+            .set_task_proxy("struct".to_string(), proxy, None)
+            .await
+            .unwrap();
+
+        let content = tokio::fs::read_to_string(&config_path).await.unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].get("task_id").is_some());
+        assert!(parsed[0].get("proxy").is_some());
+        assert!(parsed[0].get("enabled").is_some());
     }
 }
