@@ -1463,4 +1463,1428 @@ mod tests {
         // Test that default_bandwidth_weight function returns 1
         assert_eq!(default_bandwidth_weight(), 1);
     }
+
+    // ========== Phase 255: Comprehensive Test Coverage ==========
+
+    // ========== PersistedProtocol serde ==========
+
+    #[test]
+    fn test_persisted_protocol_serde_roundtrip_all_variants() {
+        for p in [
+            PersistedProtocol::Torrent,
+            PersistedProtocol::Ed2k,
+            PersistedProtocol::Xunlei,
+            PersistedProtocol::Magnet,
+            PersistedProtocol::P2P,
+        ] {
+            let json = serde_json::to_string(&p).unwrap();
+            let deserialized: PersistedProtocol = serde_json::from_str(&json).unwrap();
+            assert_eq!(p, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_persisted_protocol_serde_values() {
+        assert_eq!(
+            serde_json::to_string(&PersistedProtocol::Torrent).unwrap(),
+            "\"Torrent\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PersistedProtocol::Ed2k).unwrap(),
+            "\"Ed2k\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PersistedProtocol::Xunlei).unwrap(),
+            "\"Xunlei\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PersistedProtocol::Magnet).unwrap(),
+            "\"Magnet\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PersistedProtocol::P2P).unwrap(),
+            "\"P2P\""
+        );
+    }
+
+    // ========== PersistedProtocol traits ==========
+
+    #[test]
+    fn test_persisted_protocol_clone_copy() {
+        let p = PersistedProtocol::Torrent;
+        let p2 = p; // Copy
+        let p3 = p.clone();
+        assert_eq!(p, p2);
+        assert_eq!(p, p3);
+    }
+
+    #[test]
+    fn test_persisted_protocol_debug() {
+        assert_eq!(format!("{:?}", PersistedProtocol::Torrent), "Torrent");
+        assert_eq!(format!("{:?}", PersistedProtocol::Ed2k), "Ed2k");
+        assert_eq!(format!("{:?}", PersistedProtocol::Xunlei), "Xunlei");
+        assert_eq!(format!("{:?}", PersistedProtocol::Magnet), "Magnet");
+        assert_eq!(format!("{:?}", PersistedProtocol::P2P), "P2P");
+    }
+
+    #[test]
+    fn test_persisted_protocol_eq() {
+        assert_eq!(PersistedProtocol::Torrent, PersistedProtocol::Torrent);
+        assert_ne!(PersistedProtocol::Torrent, PersistedProtocol::Ed2k);
+        assert_ne!(PersistedProtocol::Xunlei, PersistedProtocol::Magnet);
+    }
+
+    // ========== PersistedState serde ==========
+
+    #[test]
+    fn test_persisted_state_serde_roundtrip_all_variants() {
+        for s in [
+            PersistedState::Queued,
+            PersistedState::Downloading,
+            PersistedState::Paused,
+            PersistedState::Complete,
+            PersistedState::Error,
+        ] {
+            let json = serde_json::to_string(&s).unwrap();
+            let deserialized: PersistedState = serde_json::from_str(&json).unwrap();
+            assert_eq!(s, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_persisted_state_serde_values() {
+        assert_eq!(
+            serde_json::to_string(&PersistedState::Queued).unwrap(),
+            "\"Queued\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PersistedState::Downloading).unwrap(),
+            "\"Downloading\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PersistedState::Paused).unwrap(),
+            "\"Paused\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PersistedState::Complete).unwrap(),
+            "\"Complete\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PersistedState::Error).unwrap(),
+            "\"Error\""
+        );
+    }
+
+    // ========== PersistedState traits ==========
+
+    #[test]
+    fn test_persisted_state_clone_copy() {
+        let s = PersistedState::Downloading;
+        let s2 = s; // Copy
+        let s3 = s.clone();
+        assert_eq!(s, s2);
+        assert_eq!(s, s3);
+    }
+
+    #[test]
+    fn test_persisted_state_debug() {
+        assert_eq!(format!("{:?}", PersistedState::Queued), "Queued");
+        assert_eq!(format!("{:?}", PersistedState::Downloading), "Downloading");
+        assert_eq!(format!("{:?}", PersistedState::Paused), "Paused");
+        assert_eq!(format!("{:?}", PersistedState::Complete), "Complete");
+        assert_eq!(format!("{:?}", PersistedState::Error), "Error");
+    }
+
+    #[test]
+    fn test_persisted_state_eq() {
+        assert_eq!(PersistedState::Queued, PersistedState::Queued);
+        assert_ne!(PersistedState::Queued, PersistedState::Downloading);
+        assert_ne!(PersistedState::Complete, PersistedState::Error);
+    }
+
+    // ========== PersistedTask serde ==========
+
+    #[test]
+    fn test_persisted_task_serde_roundtrip() {
+        let task = PersistedTask {
+            id: "test-id".to_string(),
+            name: "test.txt".to_string(),
+            protocol: PersistedProtocol::Torrent,
+            size: 1024,
+            downloaded: 512,
+            state: PersistedState::Downloading,
+            error: None,
+            speed_bps: 100.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: vec!["tag1".to_string()],
+            priority: DownloadPriority::High,
+            schedule: None,
+            bandwidth_weight: 5,
+            queue_position: Some(1),
+            depends_on: vec!["dep1".to_string()],
+            group: Some("group1".to_string()),
+            speed_limit_bps: Some(1024),
+            auto_retry_count: 2,
+            retry_after: None,
+            source_url: Some("http://example.com".to_string()),
+            expected_checksum: None,
+            checksum_algorithm: None,
+            mirror_urls: vec!["http://mirror.com".to_string()],
+            retry_policy: None,
+            sequential_mode: true,
+            notes: Some("note".to_string()),
+            max_download_time_secs: Some(3600),
+            staleness_promotion_count: 1,
+            deadline: None,
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        let deserialized: PersistedTask = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, task.id);
+        assert_eq!(deserialized.name, task.name);
+        assert_eq!(deserialized.size, task.size);
+        assert_eq!(deserialized.bandwidth_weight, task.bandwidth_weight);
+    }
+
+    #[test]
+    fn test_persisted_task_serde_extra_fields_ignored() {
+        let json = r#"{
+            "id": "test",
+            "name": "file.txt",
+            "protocol": "Torrent",
+            "size": 100,
+            "downloaded": 0,
+            "state": "Queued",
+            "error": null,
+            "speed_bps": 0.0,
+            "save_path": "/tmp",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z",
+            "unknown_field": "should be ignored",
+            "another_extra": 42
+        }"#;
+        let task: PersistedTask = serde_json::from_str(json).unwrap();
+        assert_eq!(task.id, "test");
+    }
+
+    #[test]
+    fn test_persisted_task_serde_pretty() {
+        let task = PersistedTask {
+            id: "pretty-test".to_string(),
+            name: "pretty.txt".to_string(),
+            protocol: PersistedProtocol::Ed2k,
+            size: 2048,
+            downloaded: 0,
+            state: PersistedState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/downloads"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            sequential_mode: false,
+            notes: None,
+            max_download_time_secs: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+        let pretty = serde_json::to_string_pretty(&task).unwrap();
+        let deserialized: PersistedTask = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(deserialized.id, task.id);
+        assert!(pretty.contains('\n')); // Pretty format has newlines
+    }
+
+    // ========== PersistedTask traits ==========
+
+    #[test]
+    fn test_persisted_task_clone() {
+        let task = PersistedTask {
+            id: "clone-test".to_string(),
+            name: "clone.txt".to_string(),
+            protocol: PersistedProtocol::Xunlei,
+            size: 500,
+            downloaded: 100,
+            state: PersistedState::Downloading,
+            error: Some("error".to_string()),
+            speed_bps: 50.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: vec!["tag".to_string()],
+            priority: DownloadPriority::Low,
+            schedule: None,
+            bandwidth_weight: 2,
+            queue_position: Some(3),
+            depends_on: vec!["dep".to_string()],
+            group: Some("grp".to_string()),
+            speed_limit_bps: Some(512),
+            auto_retry_count: 1,
+            retry_after: None,
+            source_url: Some("http://src.com".to_string()),
+            expected_checksum: None,
+            checksum_algorithm: None,
+            mirror_urls: vec!["http://m.com".to_string()],
+            retry_policy: None,
+            sequential_mode: true,
+            notes: Some("notes".to_string()),
+            max_download_time_secs: Some(1800),
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+        let cloned = task.clone();
+        assert_eq!(cloned.id, task.id);
+        assert_eq!(cloned.name, task.name);
+        assert_eq!(cloned.size, task.size);
+        assert_eq!(cloned.error, task.error);
+    }
+
+    #[test]
+    fn test_persisted_task_clone_independence() {
+        let mut task = PersistedTask {
+            id: "independence".to_string(),
+            name: "orig.txt".to_string(),
+            protocol: PersistedProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: PersistedState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            sequential_mode: false,
+            notes: None,
+            max_download_time_secs: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+        let cloned = task.clone();
+        task.name = "modified.txt".to_string();
+        task.size = 999;
+        assert_eq!(cloned.name, "orig.txt");
+        assert_eq!(cloned.size, 100);
+    }
+
+    #[test]
+    fn test_persisted_task_debug() {
+        let task = PersistedTask {
+            id: "debug-test".to_string(),
+            name: "debug.txt".to_string(),
+            protocol: PersistedProtocol::Magnet,
+            size: 100,
+            downloaded: 0,
+            state: PersistedState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            sequential_mode: false,
+            notes: None,
+            max_download_time_secs: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+        let debug_str = format!("{:?}", task);
+        assert!(debug_str.contains("PersistedTask"));
+        assert!(debug_str.contains("debug-test"));
+    }
+
+    // ========== TaskQueueError additional tests ==========
+
+    #[test]
+    fn test_task_queue_error_debug() {
+        let e = TaskQueueError::Io("disk full".to_string());
+        let debug = format!("{:?}", e);
+        assert!(debug.contains("Io"));
+
+        let e2 = TaskQueueError::Serialize("invalid".to_string());
+        let debug2 = format!("{:?}", e2);
+        assert!(debug2.contains("Serialize"));
+
+        let e3 = TaskQueueError::Deserialize("corrupt".to_string());
+        let debug3 = format!("{:?}", e3);
+        assert!(debug3.contains("Deserialize"));
+    }
+
+    #[test]
+    fn test_task_queue_error_unicode() {
+        let e = TaskQueueError::Io("权限被拒绝".to_string());
+        assert!(format!("{}", e).contains("权限被拒绝"));
+
+        let e2 = TaskQueueError::Serialize("無効なデータ".to_string());
+        assert!(format!("{}", e2).contains("無効なデータ"));
+
+        let e3 = TaskQueueError::Deserialize("🔥错误🔥".to_string());
+        assert!(format!("{}", e3).contains("🔥错误🔥"));
+    }
+
+    #[test]
+    fn test_task_queue_error_is_error_trait() {
+        let e: Box<dyn std::error::Error> =
+            Box::new(TaskQueueError::Io("permission denied".to_string()));
+        assert!(e.to_string().contains("IO error"));
+    }
+
+    // ========== Boundary value tests ==========
+
+    #[test]
+    fn test_task_with_u64_max_size() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let task = DownloadTask {
+            id: "max-size".to_string(),
+            name: "huge.bin".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: u64::MAX,
+            downloaded: u64::MAX / 2,
+            state: DownloadState::Downloading,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].size, u64::MAX);
+        assert_eq!(loaded[0].downloaded, u64::MAX / 2);
+    }
+
+    #[test]
+    fn test_task_with_zero_size() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let task = DownloadTask {
+            id: "zero-size".to_string(),
+            name: "empty.bin".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 0,
+            downloaded: 0,
+            state: DownloadState::Complete,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].size, 0);
+        assert_eq!(loaded[0].downloaded, 0);
+    }
+
+    #[test]
+    fn test_task_with_max_bandwidth_weight() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let task = DownloadTask {
+            id: "max-weight".to_string(),
+            name: "weighted.txt".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: u8::MAX,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].bandwidth_weight, u8::MAX);
+    }
+
+    #[test]
+    fn test_task_with_many_tags() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let tags: Vec<String> = (0..100).map(|i| format!("tag_{}", i)).collect();
+        let task = DownloadTask {
+            id: "many-tags".to_string(),
+            name: "tagged.txt".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: tags.clone(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].tags.len(), 100);
+        assert_eq!(loaded[0].tags[99], "tag_99");
+    }
+
+    #[test]
+    fn test_task_with_many_dependencies() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let deps: Vec<String> = (0..50).map(|i| format!("dep_{}", i)).collect();
+        let task = DownloadTask {
+            id: "many-deps".to_string(),
+            name: "dependent.txt".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: deps.clone(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].depends_on.len(), 50);
+        assert_eq!(loaded[0].depends_on[49], "dep_49");
+    }
+
+    #[test]
+    fn test_task_with_many_mirror_urls() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let mirrors: Vec<String> = (0..30)
+            .map(|i| format!("http://mirror{}.com/file", i))
+            .collect();
+        let task = DownloadTask {
+            id: "many-mirrors".to_string(),
+            name: "mirrored.txt".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: mirrors.clone(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].mirror_urls.len(), 30);
+    }
+
+    // ========== Unicode edge cases ==========
+
+    #[test]
+    fn test_unicode_task_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let task = DownloadTask {
+            id: "中文任务ID_日本語_한국어_🔥🎉".to_string(),
+            name: "unicode.txt".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].id, "中文任务ID_日本語_한국어_🔥🎉");
+    }
+
+    #[test]
+    fn test_unicode_save_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let task = DownloadTask {
+            id: "unicode-path".to_string(),
+            name: "file.txt".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/下载/中文路径/🔥"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].save_path, PathBuf::from("/下载/中文路径/🔥"));
+    }
+
+    #[test]
+    fn test_unicode_group() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let task = DownloadTask {
+            id: "unicode-group".to_string(),
+            name: "file.txt".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: Some("分组_グループ_그룹🎯".to_string()),
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].group, Some("分组_グループ_그룹🎯".to_string()));
+    }
+
+    // ========== Complex workflow tests ==========
+
+    #[test]
+    fn test_complete_lifecycle() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        // Create tasks in various states
+        let tasks = vec![
+            DownloadTask {
+                id: "lifecycle-1".to_string(),
+                name: "queued.txt".to_string(),
+                protocol: DownloadProtocol::Torrent,
+                size: 1000,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: PathBuf::from("/tmp"),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                tags: vec!["batch1".to_string()],
+                priority: DownloadPriority::Normal,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: Some(1),
+                depends_on: Vec::new(),
+                notes: None,
+                group: Some("test-group".to_string()),
+                speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
+                source_url: Some("http://example.com/1".to_string()),
+                expected_checksum: None,
+                checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
+                mirror_urls: Vec::new(),
+                retry_policy: None,
+                cooldown: None,
+                sequential_mode: false,
+                max_download_time_secs: None,
+                proxy_override: None,
+                staleness_promotion_count: 0,
+                deadline: None,
+            },
+            DownloadTask {
+                id: "lifecycle-2".to_string(),
+                name: "downloading.txt".to_string(),
+                protocol: DownloadProtocol::Ed2k,
+                size: 2000,
+                downloaded: 500,
+                state: DownloadState::Downloading,
+                error: None,
+                speed_bps: 100.0,
+                save_path: PathBuf::from("/tmp"),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                tags: vec!["batch1".to_string(), "active".to_string()],
+                priority: DownloadPriority::High,
+                schedule: None,
+                bandwidth_weight: 5,
+                queue_position: Some(2),
+                depends_on: vec!["lifecycle-1".to_string()],
+                notes: Some("Important download".to_string()),
+                group: Some("test-group".to_string()),
+                speed_limit_bps: Some(1024),
+                auto_retry_count: 1,
+                retry_after: None,
+                source_url: Some("ed2k://...".to_string()),
+                expected_checksum: Some("md5:abc".to_string()),
+                checksum_algorithm: None,
+                active_time_seconds: 60.0,
+                current_session_start: None,
+                mirror_urls: vec!["http://mirror.com".to_string()],
+                retry_policy: None,
+                cooldown: None,
+                sequential_mode: true,
+                max_download_time_secs: Some(3600),
+                proxy_override: None,
+                staleness_promotion_count: 0,
+                deadline: Some(Utc::now()),
+            },
+            DownloadTask {
+                id: "lifecycle-3".to_string(),
+                name: "completed.txt".to_string(),
+                protocol: DownloadProtocol::Xunlei,
+                size: 3000,
+                downloaded: 3000,
+                state: DownloadState::Complete,
+                error: None,
+                speed_bps: 0.0,
+                save_path: PathBuf::from("/tmp"),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                tags: vec!["batch1".to_string(), "done".to_string()],
+                priority: DownloadPriority::Low,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: None,
+                depends_on: Vec::new(),
+                notes: None,
+                group: None,
+                speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
+                source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
+                active_time_seconds: 300.0,
+                current_session_start: None,
+                mirror_urls: Vec::new(),
+                retry_policy: None,
+                cooldown: None,
+                sequential_mode: false,
+                max_download_time_secs: None,
+                proxy_override: None,
+                staleness_promotion_count: 2,
+                deadline: None,
+            },
+        ];
+
+        // Save
+        save_task_queue(&tasks, data_dir).unwrap();
+
+        // Load and verify all fields
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded.len(), 3);
+
+        // Verify first task
+        assert_eq!(loaded[0].id, "lifecycle-1");
+        assert_eq!(loaded[0].state, DownloadState::Queued);
+        assert_eq!(loaded[0].tags, vec!["batch1".to_string()]);
+        assert_eq!(loaded[0].queue_position, Some(1));
+
+        // Verify second task
+        assert_eq!(loaded[1].id, "lifecycle-2");
+        assert_eq!(loaded[1].state, DownloadState::Downloading);
+        assert_eq!(loaded[1].downloaded, 500);
+        assert_eq!(loaded[1].depends_on, vec!["lifecycle-1".to_string()]);
+        assert_eq!(loaded[1].sequential_mode, true);
+        assert_eq!(loaded[1].max_download_time_secs, Some(3600));
+
+        // Verify third task
+        assert_eq!(loaded[2].id, "lifecycle-3");
+        assert_eq!(loaded[2].state, DownloadState::Complete);
+        assert_eq!(loaded[2].staleness_promotion_count, 2);
+    }
+
+    #[test]
+    fn test_save_load_multiple_times() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        // First save
+        let task1 = DownloadTask {
+            id: "multi-save-1".to_string(),
+            name: "first.txt".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+        save_task_queue(&[task1], data_dir).unwrap();
+
+        // Load, modify, save again
+        let mut loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded.len(), 1);
+        loaded[0].downloaded = 50;
+        loaded[0].state = DownloadState::Downloading;
+        save_task_queue(&loaded, data_dir).unwrap();
+
+        // Load again and verify
+        let loaded2 = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded2.len(), 1);
+        assert_eq!(loaded2[0].downloaded, 50);
+        assert_eq!(loaded2[0].state, DownloadState::Downloading);
+    }
+
+    #[test]
+    fn test_all_priorities_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let priorities = vec![
+            DownloadPriority::Low,
+            DownloadPriority::Normal,
+            DownloadPriority::High,
+        ];
+
+        let tasks: Vec<DownloadTask> = priorities
+            .iter()
+            .enumerate()
+            .map(|(i, p)| DownloadTask {
+                id: format!("priority-{}", i),
+                name: format!("file{}.txt", i),
+                protocol: DownloadProtocol::Torrent,
+                size: 100,
+                downloaded: 0,
+                state: DownloadState::Queued,
+                error: None,
+                speed_bps: 0.0,
+                save_path: PathBuf::from("/tmp"),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                tags: Vec::new(),
+                priority: *p,
+                schedule: None,
+                bandwidth_weight: 1,
+                queue_position: None,
+                depends_on: Vec::new(),
+                notes: None,
+                group: None,
+                speed_limit_bps: None,
+                auto_retry_count: 0,
+                retry_after: None,
+                source_url: None,
+                expected_checksum: None,
+                checksum_algorithm: None,
+                active_time_seconds: 0.0,
+                current_session_start: None,
+                mirror_urls: Vec::new(),
+                retry_policy: None,
+                cooldown: None,
+                sequential_mode: false,
+                max_download_time_secs: None,
+                proxy_override: None,
+                staleness_promotion_count: 0,
+                deadline: None,
+            })
+            .collect();
+
+        save_task_queue(&tasks, data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded[0].priority, DownloadPriority::Low);
+        assert_eq!(loaded[1].priority, DownloadPriority::Normal);
+        assert_eq!(loaded[2].priority, DownloadPriority::High);
+    }
+
+    #[test]
+    fn test_long_task_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let long_id = "a".repeat(1000);
+        let task = DownloadTask {
+            id: long_id.clone(),
+            name: "long-id.txt".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: None,
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].id.len(), 1000);
+        assert_eq!(loaded[0].id, long_id);
+    }
+
+    #[test]
+    fn test_special_characters_in_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let task = DownloadTask {
+            id: "special-error".to_string(),
+            name: "file.txt".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: DownloadState::Error,
+            error: Some(
+                "Error: \"connection\" failed\nRetry with \\backslash\\ and /slash/ and 中文"
+                    .to_string(),
+            ),
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert!(loaded[0].error.as_ref().unwrap().contains('"'));
+        assert!(loaded[0].error.as_ref().unwrap().contains('\n'));
+        assert!(loaded[0].error.as_ref().unwrap().contains('\\'));
+        assert!(loaded[0].error.as_ref().unwrap().contains("中文"));
+    }
+
+    #[test]
+    fn test_speed_bps_boundary_values() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let task = DownloadTask {
+            id: "speed-boundary".to_string(),
+            name: "speedy.txt".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 1000,
+            downloaded: 500,
+            state: DownloadState::Downloading,
+            error: None,
+            speed_bps: f64::MAX,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: Some(u64::MAX),
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].speed_bps, f64::MAX);
+        assert_eq!(loaded[0].speed_limit_bps, Some(u64::MAX));
+    }
+
+    #[test]
+    fn test_auto_retry_count_max() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let task = DownloadTask {
+            id: "max-retry".to_string(),
+            name: "retry.txt".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: DownloadState::Error,
+            error: Some("Failed".to_string()),
+            speed_bps: 0.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: u32::MAX,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].auto_retry_count, u32::MAX);
+    }
+
+    #[test]
+    fn test_staleness_promotion_count_max() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let task = DownloadTask {
+            id: "max-staleness".to_string(),
+            name: "stale.txt".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: DownloadState::Downloading,
+            error: None,
+            speed_bps: 100.0,
+            save_path: PathBuf::from("/tmp"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: Vec::new(),
+            priority: DownloadPriority::High,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: Vec::new(),
+            notes: None,
+            group: None,
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: None,
+            expected_checksum: None,
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: Vec::new(),
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: u32::MAX,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].staleness_promotion_count, u32::MAX);
+    }
+
+    #[test]
+    fn test_empty_strings_in_fields() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path();
+
+        let task = DownloadTask {
+            id: "".to_string(),
+            name: "".to_string(),
+            protocol: DownloadProtocol::Torrent,
+            size: 100,
+            downloaded: 0,
+            state: DownloadState::Queued,
+            error: Some("".to_string()),
+            speed_bps: 0.0,
+            save_path: PathBuf::from(""),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            tags: vec!["".to_string()],
+            priority: DownloadPriority::Normal,
+            schedule: None,
+            bandwidth_weight: 1,
+            queue_position: None,
+            depends_on: vec!["".to_string()],
+            notes: Some("".to_string()),
+            group: Some("".to_string()),
+            speed_limit_bps: None,
+            auto_retry_count: 0,
+            retry_after: None,
+            source_url: Some("".to_string()),
+            expected_checksum: Some("".to_string()),
+            checksum_algorithm: None,
+            active_time_seconds: 0.0,
+            current_session_start: None,
+            mirror_urls: vec!["".to_string()],
+            retry_policy: None,
+            cooldown: None,
+            sequential_mode: false,
+            max_download_time_secs: None,
+            proxy_override: None,
+            staleness_promotion_count: 0,
+            deadline: None,
+        };
+
+        save_task_queue(&[task], data_dir).unwrap();
+        let loaded = load_task_queue(data_dir).unwrap();
+        assert_eq!(loaded[0].id, "");
+        assert_eq!(loaded[0].name, "");
+        assert_eq!(loaded[0].error, Some("".to_string()));
+        assert_eq!(loaded[0].tags, vec!["".to_string()]);
+        assert_eq!(loaded[0].notes, Some("".to_string()));
+        assert_eq!(loaded[0].group, Some("".to_string()));
+    }
 }
