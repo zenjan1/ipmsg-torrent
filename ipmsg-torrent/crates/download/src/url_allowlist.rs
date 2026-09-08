@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn test_entry_new_defaults_enabled() {
         let entry = AllowlistEntry::new(
-            "id"to_string(),
+            "id".to_string(),
             "name".to_string(),
             AllowlistPattern::Exact("http://x.com".to_string()),
             None,
